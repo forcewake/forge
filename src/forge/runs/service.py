@@ -546,8 +546,7 @@ class RunService:
         # Mentions must stay OUTSIDE code spans: GitLab never linkifies (or
         # notifies) @usernames inside backticks.
         approver_note = (
-            ", ".join(f"@{name}" for name in approvers)
-            or "none configured — set `FORGE_APPROVERS`"
+            ", ".join(f"@{name}" for name in approvers) or "none configured — set `FORGE_APPROVERS`"
         )
         return (
             f"## Forge plan — run `{run_id[:8]}`\n\n"
