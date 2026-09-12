@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     FORGE_MENTION_PATTERN: str = "@forge"
     LOG_LEVEL: str = "INFO"
 
+    # Webhook payload capture (debug/diagnostics; path relative to CWD)
+    FORGE_CAPTURE_DIR: str | None = None
+
     # MCP server (optional)
     FORGE_MCP_KEY: SecretStr | None = None
 

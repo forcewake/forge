@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Header, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -16,6 +20,33 @@ from forge.orchestrator.orchestrator import Orchestrator
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str, Any]) -> None:
+    """Persist a raw webhook payload for diagnostics (FORGE_CAPTURE_DIR).
+
+    Stores the event header and payload only — never the webhook secret.
+    Failures to capture must never break ingestion.
+    """
+    capture_dir = getattr(settings, "FORGE_CAPTURE_DIR", None)
+    if not capture_dir:
+        return
+    try:
+        path = Path(capture_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        safe_event = event_header.replace("/", "_")
+        name = f"{stamp}-{safe_event}-{uuid4().hex[:6]}.json"
+        record = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "x_gitlab_event": event_header,
+            "payload": payload,
+        }
+        target = path / name
+        target.write_text(json.dumps(record, indent=2, sort_keys=True))
+        logger.info("Captured webhook payload: %s", target)
+    except OSError:
+        logger.warning("Failed to capture webhook payload", exc_info=True)
 
 
 @router.get("/health")
@@ -107,7 +138,13 @@ async def webhook(
     )
 
     event_header = x_gitlab_event or "unknown"
-    payload = await request.json()
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    _capture_webhook_payload(settings, event_header, payload)
 
     # Parse into typed event model
     try:
