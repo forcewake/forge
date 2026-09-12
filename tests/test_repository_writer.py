@@ -81,16 +81,13 @@ async def test_success_returns_exact_sha_and_journals(session_factory, changeset
     assert result.outcome is WriteOutcome.COMMITTED
     assert result.commit_sha == fake.branches[changeset.branch][0]["sha"]
 
-    # Branch created from the pinned start ref; commit applied with actions.
+    # Branch created from the pinned start ref; commit applied without
+    # start_branch (GitLab 18.x 400s 'already exists' when it is present).
     assert [args for _, args in fake.calls_of("create_branch")] == [(42, changeset.branch, "main")]
     (call,) = fake.calls_of("create_commit")
     _, (project_id, branch, actions, message, start_branch) = call
-    assert (project_id, branch, message, start_branch) == (
-        42,
-        changeset.branch,
-        changeset.commit_message,
-        "main",
-    )
+    assert (project_id, branch, message) == (42, changeset.branch, changeset.commit_message)
+    assert start_branch is None
     assert actions == [
         {
             "action": "create",
