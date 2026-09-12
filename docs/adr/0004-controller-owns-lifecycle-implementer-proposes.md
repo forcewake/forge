@@ -63,3 +63,18 @@ and work-in-progress are limited separately
 - **Negative:** more moving parts than a single agent loop — each transition
   needs durable state, and lost notifications need reconciliation; the
   controller is real infrastructure, not glue code.
+
+## Amendment (2026-09-12, during M1 implementation)
+
+The reference graph above names three auxiliary states that the v1
+implementation collapses into `status_reason` on a parent state, to keep
+the enum and migration surface small:
+
+- `proposing_repair` → `proposing` with reason `repair`
+- `blocked_infrastructure` → `blocked` with reason `infrastructure_failure`
+- `cancellation_requested` → `cancelled` (transitions are checked before
+  side effects; an in-flight HTTP call is reconciled per [ADR-0005],
+  not modelled as a separate waiting state)
+
+If finer-grained observability is needed later this is an enum + graph +
+CHECK migration, not a semantic change.

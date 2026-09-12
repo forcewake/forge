@@ -10,7 +10,7 @@ ENV UV_PYTHON=/usr/local/bin/python3.13
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra postgres
 COPY . .
 
 # Stage 2: runtime

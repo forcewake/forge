@@ -41,3 +41,4 @@ htmlcov/
 
 # ruff
 .ruff_cache/
+litellm-config.yaml
