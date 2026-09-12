@@ -45,6 +45,14 @@ class GitLabAPIError(Exception):
         super().__init__(f"GitLab API error {status_code}: {message}")
 
 
+class CommitOutcomeUnknown(Exception):
+    """``create_commit`` timed out and the server-side outcome is unknown (ADR-0005).
+
+    Carries no assumption about whether the commit was created; callers must
+    reconcile (list the branch commits) before retrying — never blind-retry.
+    """
+
+
 class GitLabClient:
     """Async client for the GitLab CE REST API v4."""
 
@@ -73,18 +81,23 @@ class GitLabClient:
         self,
         method: str,
         path: str,
+        *,
+        retry: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
         """Make a request with retry logic.
 
-        Retries on 429/500/502/503 with exponential backoff.
+        Retries on 429/500/502/503 with exponential backoff unless *retry* is
+        ``False`` — non-idempotent writes (e.g. create-commit) must bypass the
+        generic retry so a single HTTP error cannot duplicate side effects.
         Raises immediately on 401/403/404.
         """
-        for attempt in range(_MAX_RETRIES):
+        max_attempts = _MAX_RETRIES if retry else 1
+        for attempt in range(max_attempts):
             try:
                 response = await self._client.request(method, path, **kwargs)
             except httpx.HTTPError as exc:
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < max_attempts - 1:
                     delay = _BACKOFF_BASE * (2**attempt)
                     logger.warning(
                         "HTTP error on %s %s (attempt %d): %s — retrying in %ds",
@@ -109,7 +122,7 @@ class GitLabClient:
                 )
 
             # Retryable status
-            if attempt < _MAX_RETRIES - 1:
+            if attempt < max_attempts - 1:
                 if response.status_code == 429:
                     delay = int(response.headers.get("Retry-After", "5"))
                 else:
@@ -408,6 +421,76 @@ class GitLabClient:
         )
         return resp.json()
 
+    async def get_branch(self, project_id: int, branch_name: str) -> dict[str, Any]:
+        """Fetch a single branch (``GET /projects/:id/repository/branches/:branch``)."""
+        encoded = quote(branch_name, safe="")
+        resp = await self._get(f"/projects/{project_id}/repository/branches/{encoded}")
+        return resp.json()
+
+    async def create_commit(
+        self,
+        project_id: int,
+        branch: str,
+        actions: list[dict[str, Any]],
+        commit_message: str,
+        start_branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a commit via the Commits API.
+
+        ``POST /projects/:id/repository/commits`` with ``branch``,
+        ``commit_message``, ``actions`` (``{action, file_path, content}``) and
+        optional ``start_branch``.
+
+        This call is **never auto-retried** (non-idempotent): a lost response
+        must not duplicate a commit. On ``httpx.TimeoutException`` raises
+        :class:`CommitOutcomeUnknown` — the caller must reconcile (compare the
+        branch commits against *commit_message*) before any retry (ADR-0005).
+        """
+        payload: dict[str, Any] = {
+            "branch": branch,
+            "commit_message": commit_message,
+            "actions": actions,
+        }
+        if start_branch is not None:
+            payload["start_branch"] = start_branch
+        try:
+            resp = await self._request(
+                "POST",
+                f"/projects/{project_id}/repository/commits",
+                retry=False,
+                json=payload,
+            )
+        except httpx.TimeoutException as exc:
+            raise CommitOutcomeUnknown(
+                f"create_commit on branch {branch!r} timed out; outcome unknown"
+            ) from exc
+        return resp.json()
+
+    async def list_commits(self, project_id: int, ref: str) -> list[dict[str, str]]:
+        """List commits on a ref, newest first (``GET /repository/commits``).
+
+        Returns ``{"sha", "short_id", "message"}`` dicts — used for outcome
+        reconciliation after an unknown create_commit (match by message) and
+        for branch-head drift checks.
+        """
+        raw = await self._paginated(
+            f"/projects/{project_id}/repository/commits",
+            params={"ref_name": ref},
+        )
+        return [
+            {
+                "sha": c.get("id", ""),
+                "short_id": c.get("short_id", ""),
+                "message": c.get("message", ""),
+            }
+            for c in raw
+        ]
+
+    async def create_pipeline(self, project_id: int, ref: str) -> dict[str, Any]:
+        """Create a pipeline for a ref (``POST /projects/:id/pipeline``)."""
+        resp = await self._post(f"/projects/{project_id}/pipeline", json={"ref": ref})
+        return resp.json()
+
     async def create_merge_request(
         self,
         project_id: int,
@@ -522,6 +605,7 @@ class GitLabClient:
         project_id: int,
         ref: str | None = None,
         status: str | None = None,
+        sha: str | None = None,
         per_page: int = 20,
     ) -> list[Pipeline]:
         params: dict[str, Any] = {
@@ -533,5 +617,7 @@ class GitLabClient:
             params["ref"] = ref
         if status:
             params["status"] = status
+        if sha:
+            params["sha"] = sha
         raw = await self._paginated(f"/projects/{project_id}/pipelines", params=params)
         return [Pipeline.model_validate(p) for p in raw]

@@ -13,9 +13,11 @@ from forge.database import get_session_factory, init_db, reset_engine
 from forge.flows.loader import FlowLoader
 from forge.flows.runner import FlowRunner
 from forge.flows.state import FlowStateManager
+from forge.gitlab.client import GitLabClient
 from forge.mcp_client.manager import MCPConnectionManager
 from forge.mcp_client.registry import MCPRegistry
 from forge.orchestrator.orchestrator import Orchestrator
+from forge.runs import RunService, execute_run_command, run_reconciler
 from forge.utils.logging import setup_logging
 from forge.utils.redis_client import RedisManager
 from forge.worker.queue import TaskQueue
@@ -106,6 +108,9 @@ async def run_worker(
                     flow_id=task.metadata["flow_id"],
                     step_index=task.metadata["step_index"],
                 )
+            elif task.task_type == "run_command":
+                # M1 durable run loop: /implement and /go notes (RunService).
+                await execute_run_command(settings, forge_config, session_factory, task.metadata)
             else:
                 event = deserialize_event(task)
                 orchestrator = Orchestrator(
@@ -184,6 +189,18 @@ async def main() -> None:
     worker_id = f"worker-{os.getpid()}-{uuid4().hex[:6]}"
     shutdown_event = asyncio.Event()
 
+    # Run reconciler (M1): polls waiting_ci runs for pipeline completion.
+    gitlab = GitLabClient(
+        base_url=settings.GITLAB_URL,
+        token=settings.GITLAB_TOKEN.get_secret_value(),
+    )
+    run_service = RunService(
+        session_factory=session_factory,
+        gitlab=gitlab,
+        settings=settings,
+        config=forge_config,
+    )
+
     # Signal handling
     loop = asyncio.get_running_loop()
 
@@ -198,7 +215,7 @@ async def main() -> None:
             # Windows doesn't support add_signal_handler
             signal.signal(sig, lambda *_: _signal_handler())
 
-    # Run worker, reaper, and heartbeat concurrently
+    # Run worker, reaper, heartbeat, and the run reconciler concurrently
     try:
         await asyncio.gather(
             run_worker(
@@ -212,10 +229,12 @@ async def main() -> None:
                 flow_runner=flow_runner,
                 mcp_manager=mcp_manager,
             ),
+            run_reconciler(run_service, interval_seconds=15, shutdown_event=shutdown_event),
             run_reaper(task_queue, shutdown_event),
             run_heartbeat(worker_id, redis_manager, shutdown_event),
         )
     finally:
+        await gitlab.close()
         await mcp_manager.close_all()
         await redis_manager.close()
         reset_engine()

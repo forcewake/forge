@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     FORGE_MENTION_PATTERN: str = "@forge"
     LOG_LEVEL: str = "INFO"
 
+    # Human gates (ADR-0009): comma-separated GitLab usernames allowed to
+    # approve a plan via `@forge /go <run-id>`. Empty — nobody may approve.
+    FORGE_APPROVERS: str = ""
+
+    # M1 run loop: MR target branch and max seconds a run may wait for CI
+    # before the reconciler parks it as blocked(ci_timeout).
+    FORGE_TARGET_BRANCH: str = "main"
+    FORGE_CI_WAIT_SECONDS: int = 3600
+
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 

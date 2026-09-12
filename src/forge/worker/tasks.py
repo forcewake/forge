@@ -80,6 +80,27 @@ def create_flow_step_task(
     )
 
 
+def create_run_command_task(metadata: dict, note_id: int | str = 0, priority: int = 0) -> Task:
+    """Create a Task for the durable run service (M1 /implement and /go notes).
+
+    ``metadata`` carries the command ("start_run" | "go") plus the project,
+    issue, note text and author needed by :meth:`forge.runs.RunService.run_command`.
+    ``note_id`` gives the task a stable id so re-delivered webhooks map to the
+    same task identity.
+    """
+    project_id = metadata.get("project_id", 0)
+    issue_iid = metadata.get("issue_iid", 0)
+    command = metadata.get("command", "unknown")
+    return Task(
+        task_id=f"run:{command}:{project_id}:{issue_iid}:{note_id}",
+        event_type="run_command",
+        event_data={},
+        priority=priority,
+        task_type="run_command",
+        metadata=metadata,
+    )
+
+
 def _extract_action(event: GitLabEvent) -> str:
     """Extract the action from an event (e.g., 'open', 'update', 'close')."""
     if hasattr(event, "object_attributes"):

@@ -295,6 +295,15 @@ class Orchestrator:
             return
 
         # Check if command maps to a flow
+        # M1 cutover: /implement is served by the durable RunService path
+        # (gateway routes it as a run_command task) — the legacy YAML flow
+        # "issue-to-mr" stays disabled here; other flow commands unchanged.
+        if command == "/implement":
+            logger.info(
+                "Command /implement handled by the durable run service — legacy flow disabled"
+            )
+            return
+
         if self.flow_loader and self.flow_runner:
             flow_def = self.flow_loader.get_by_command(command)
             if flow_def:

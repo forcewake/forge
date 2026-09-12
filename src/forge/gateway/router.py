@@ -13,13 +13,52 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from forge import __version__
+from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
 from forge.gateway.validator import is_bot_event, validate_webhook_token
+from forge.gitlab.events import GitLabEvent, NoteEvent
 from forge.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: Commands served by the durable run service (M1), not the legacy flow engine.
+_RUN_COMMANDS = frozenset({"/implement", "/go"})
+
+
+def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
+    """Detect note events that belong to the durable run loop (M1).
+
+    - ``<mention> /implement`` on an issue → ``start_run``.
+    - ``<mention> /go <run-id>`` on an issue → ``handle_command_note``.
+
+    Respects ``FORGE_MENTION_PATTERN``. Returns the run_command metadata dict,
+    or None when the event should take its legacy path.
+    """
+    if not isinstance(event, NoteEvent) or event.issue is None:
+        # Gate notes are posted on issues; MR notes keep the legacy paths.
+        return None
+
+    mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
+    mention = extract_mention(
+        event.object_attributes.note or "",
+        mention_pattern,
+        extra_commands=_RUN_COMMANDS,
+    )
+    if not mention.is_mention or mention.slash_command not in _RUN_COMMANDS:
+        return None
+
+    common = {
+        "project_id": event.project.id if event.project else 0,
+        "issue_iid": event.issue.iid,
+        "author_username": event.user.username if event.user else "",
+        "author_user_id": event.user.id if event.user else 0,
+    }
+    if mention.slash_command == "/implement":
+        # M1 cutover: /implement takes the durable RunService path, not flows.
+        return {**common, "command": "start_run"}
+    return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
 
 
 def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str, Any]) -> None:
@@ -182,6 +221,45 @@ async def webhook(
             log_extra["iid"] = attrs.iid
 
     logger.info("Webhook event: %s", event.object_kind, extra=log_extra)
+
+    # M1 durable run loop: /implement and /go notes bypass the legacy
+    # orchestrator/flow dispatch entirely (they never need an LLM here).
+    run_command = _match_run_command(event, settings)
+    if run_command is not None:
+        from forge.worker.tasks import create_run_command_task
+
+        queue = getattr(request.app.state, "task_queue", None)
+        note_id = event.object_attributes.id
+        if queue is not None:
+            # Content-stable identity: re-delivered note webhooks collapse.
+            is_dup = await queue.is_duplicate(f"run:{run_command['project_id']}:{note_id}")
+            if is_dup:
+                return {
+                    "status": "accepted",
+                    "event": event.object_kind,
+                    "deduplicated": True,
+                }
+            await queue.submit(create_run_command_task(run_command, note_id=note_id))
+            return {
+                "status": "accepted",
+                "event": event.object_kind,
+                "queued": True,
+                "run_command": True,
+            }
+
+        # No Redis — execute in-process via BackgroundTasks.
+        from forge.runs import execute_run_command
+
+        session_factory = getattr(request.app.state, "session_factory", None)
+        if session_factory is not None:
+            background_tasks.add_task(
+                execute_run_command,
+                settings,
+                request.app.state.forge_config,
+                session_factory,
+                run_command,
+            )
+            return {"status": "accepted", "event": event.object_kind, "run_command": True}
 
     # enqueue to Redis if available
     task_queue = getattr(request.app.state, "task_queue", None)
