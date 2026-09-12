@@ -3,6 +3,11 @@ FROM python:3.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Pin uv to the system interpreter: its path exists identically in the
+# runtime stage, so the built .venv stays valid there (uv's managed
+# CPython does not exist in the runtime image).
+ENV UV_PYTHON=/usr/local/bin/python3.13
+
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev

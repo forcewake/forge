@@ -1,0 +1,19 @@
+# Build context hygiene: never bake local env, caches, or the host venv
+# (a macOS .venv copied into the Linux image breaks the interpreter links)
+.env
+.venv
+venv
+data/
+.git
+.gitignore
+.dockerignore
+.github
+docs/
+tests/
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.DS_Store
+*.db
