@@ -70,6 +70,7 @@ def run_settings(tmp_path, **overrides) -> Settings:
         # Pin the environment explicitly — a developer .env must not leak in.
         REDIS_URL=None,
         FORGE_CAPTURE_DIR=None,
+        FORGE_BOT_TOKEN=None,
         FORGE_BOT_USERNAME="forge-bot",
     )
     values.update(overrides)
@@ -317,15 +318,30 @@ class TestBotAuthorGate:
     never act as a trigger or an approval (live acceptance found forge
     self-approving when it posted with a human admin token)."""
 
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=run_settings(tmp_path))
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
     async def test_bot_authored_go_note_is_ignored(self, app, client):
         resp = await client.post(
             "/webhook",
             json=note_payload(f"@forge /go {'b' * 32}", username="forge-bot"),
             headers=webhook_headers(),
         )
-        assert resp.json().get("run_command") is None
-        (task,) = app.state.task_queue.submit.await_args[0]
-        assert task.task_type == "event"  # legacy path, not a run command
+        assert resp.json() == {"status": "skipped", "reason": "bot-loop"}
+        app.state.task_queue.submit.assert_not_awaited()
 
     async def test_bot_authored_implement_note_is_ignored(self, app, client):
         resp = await client.post(
@@ -333,9 +349,8 @@ class TestBotAuthorGate:
             json=note_payload("@forge /implement", username="forge-bot"),
             headers=webhook_headers(),
         )
-        assert resp.json().get("run_command") is None
-        (task,) = app.state.task_queue.submit.await_args[0]
-        assert task.task_type == "event"
+        assert resp.json() == {"status": "skipped", "reason": "bot-loop"}
+        app.state.task_queue.submit.assert_not_awaited()
 
     def test_forge_token_prefers_bot_identity(self, tmp_path):
         from forge.runs.service import forge_token
