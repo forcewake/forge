@@ -543,8 +543,10 @@ class RunService:
     def _plan_comment(self, run_id: str, plan: str, digest: str) -> str:
         mention = getattr(self._settings, "FORGE_MENTION_PATTERN", "@forge")
         approvers = self._approvers()
+        # Mentions must stay OUTSIDE code spans: GitLab never linkifies (or
+        # notifies) @usernames inside backticks.
         approver_note = (
-            ", ".join(f"`@{name}`" for name in approvers)
+            ", ".join(f"@{name}" for name in approvers)
             or "none configured — set `FORGE_APPROVERS`"
         )
         return (
