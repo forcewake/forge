@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # approve a plan via `@forge /go <run-id>`. Empty — nobody may approve.
     FORGE_APPROVERS: str = ""
 
+    # Dedicated bot identity forge acts with (comments, commits, MRs).
+    # Never let forge speak with a human approver's credentials: its own
+    # comments (which contain /go instructions) would then come back as
+    # approver-authored webhooks and self-approve gates.
+    FORGE_BOT_TOKEN: SecretStr | None = None
+
     # M1 run loop: MR target branch and max seconds a run may wait for CI
     # before the reconciler parks it as blocked(ci_timeout).
     FORGE_TARGET_BRANCH: str = "main"

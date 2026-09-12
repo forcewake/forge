@@ -61,6 +61,18 @@ _CI_ACTIVE_STATUSES = frozenset(
 _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
 
 
+def forge_token(settings: Settings) -> str:
+    """The token forge acts with: the dedicated bot identity when configured.
+
+    Forge must never speak with a human approver's credentials — its own
+    comments (which contain /go instructions) would then come back as
+    approver-authored webhooks and self-approve gates.
+    """
+    if settings.FORGE_BOT_TOKEN is not None:
+        return settings.FORGE_BOT_TOKEN.get_secret_value()
+    return settings.GITLAB_TOKEN.get_secret_value()
+
+
 async def execute_run_command(
     settings: Settings,
     forge_config: ForgeConfig,
@@ -74,7 +86,7 @@ async def execute_run_command(
     """
     async with GitLabClient(
         base_url=settings.GITLAB_URL,
-        token=settings.GITLAB_TOKEN.get_secret_value(),
+        token=forge_token(settings),
     ) as gitlab:
         service = RunService(
             session_factory=session_factory,

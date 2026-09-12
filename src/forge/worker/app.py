@@ -18,6 +18,7 @@ from forge.mcp_client.manager import MCPConnectionManager
 from forge.mcp_client.registry import MCPRegistry
 from forge.orchestrator.orchestrator import Orchestrator
 from forge.runs import RunService, execute_run_command, run_reconciler
+from forge.runs.service import forge_token
 from forge.utils.logging import setup_logging
 from forge.utils.redis_client import RedisManager
 from forge.worker.queue import TaskQueue
@@ -192,7 +193,7 @@ async def main() -> None:
     # Run reconciler (M1): polls waiting_ci runs for pipeline completion.
     gitlab = GitLabClient(
         base_url=settings.GITLAB_URL,
-        token=settings.GITLAB_TOKEN.get_secret_value(),
+        token=forge_token(settings),
     )
     run_service = RunService(
         session_factory=session_factory,

@@ -310,3 +310,37 @@ class TestEndToEnd:
             run = await session.get(FlowRun, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
         assert fake.notes_containing(commit_sha), "evidence comment posted"
+
+
+class TestBotAuthorGate:
+    """Forge's own comments contain /go lines — a bot-authored note must
+    never act as a trigger or an approval (live acceptance found forge
+    self-approving when it posted with a human admin token)."""
+
+    async def test_bot_authored_go_note_is_ignored(self, app, client):
+        resp = await client.post(
+            "/webhook",
+            json=note_payload(f"@forge /go {'b' * 32}", username="forge-bot"),
+            headers=webhook_headers(),
+        )
+        assert resp.json().get("run_command") is None
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "event"  # legacy path, not a run command
+
+    async def test_bot_authored_implement_note_is_ignored(self, app, client):
+        resp = await client.post(
+            "/webhook",
+            json=note_payload("@forge /implement", username="forge-bot"),
+            headers=webhook_headers(),
+        )
+        assert resp.json().get("run_command") is None
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "event"
+
+    def test_forge_token_prefers_bot_identity(self, tmp_path):
+        from forge.runs.service import forge_token
+
+        settings = run_settings(tmp_path)
+        assert forge_token(settings) == "glpat-test"  # fallback: GITLAB_TOKEN
+        settings.FORGE_BOT_TOKEN = SecretStr("glpat-bot")
+        assert forge_token(settings) == "glpat-bot"

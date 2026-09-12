@@ -40,6 +40,12 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         # Gate notes are posted on issues; MR notes keep the legacy paths.
         return None
 
+    bot_username = getattr(settings, "FORGE_BOT_USERNAME", "forge-bot")
+    if event.user and event.user.username == bot_username:
+        # Forge's own comments contain /go lines; a bot-authored note must
+        # never act as a trigger or an approval, whatever the author's role.
+        return None
+
     mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
     mention = extract_mention(
         event.object_attributes.note or "",
