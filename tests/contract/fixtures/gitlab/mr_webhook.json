@@ -1,81 +1,19 @@
 {
-  "object_kind": "merge_request",
-  "event_type": "merge_request",
-  "user": {
-    "id": 11,
-    "name": "Forge User",
-    "username": "forge-user",
-    "email": "forge-user@example.com",
-    "avatar_url": "https://gitlab.example.com/uploads/-/system/user/avatar/11/avatar.png"
-  },
-  "project": {
-    "id": 42,
-    "name": "project",
-    "description": "",
-    "path_with_namespace": "group/project",
-    "path": "project",
-    "namespace_id": 4,
-    "namespace": "group",
-    "visibility_level": 0,
-    "default_branch": "main",
-    "ci_config_path": "",
-    "web_url": "https://gitlab.example.com/group/project",
-    "url": "git@gitlab.example.com:group/project.git",
-    "ssh_url": "git@gitlab.example.com:group/project.git",
-    "http_url": "https://gitlab.example.com/group/project.git",
-    "git_http_url": "https://gitlab.example.com/group/project.git",
-    "git_ssh_url": "git@gitlab.example.com:group/project.git",
-    "home": "",
-    "avatar_url": null
-  },
-  "repository": {
-    "name": "project",
-    "url": "git@gitlab.example.com:group/project.git",
-    "description": "",
-    "homepage": "https://gitlab.example.com/group/project",
-    "git_http_url": "https://gitlab.example.com/group/project.git",
-    "git_ssh_url": "git@gitlab.example.com:group/project.git",
-    "visibility_level": 0
-  },
-  "object_attributes": {
-    "id": 100,
-    "iid": 7,
-    "title": "Add token rotation flow",
-    "description": "Implements automatic credential rotation.\n\nCloses #12",
-    "source_branch": "feature/token-rotation",
-    "target_branch": "main",
-    "state": "opened",
-    "action": "open",
-    "author_id": 11,
-    "assignee_id": null,
-    "draft": false,
-    "url": "https://gitlab.example.com/group/project/-/merge_requests/7",
-    "created_at": "2026-09-01T09:00:00Z",
-    "updated_at": "2026-09-01T09:00:00Z",
-    "last_commit": {
-      "id": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1",
-      "message": "Add token rotation\n",
-      "title": "Add token rotation",
-      "timestamp": "2026-09-01T08:55:00Z",
-      "url": "https://gitlab.example.com/group/project/-/commit/b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1",
-      "author": {
-        "name": "Forge User",
-        "email": "forge-user@example.com"
-      }
+  "changes": {
+    "merge_status": {
+      "current": "checking",
+      "previous": "preparing"
     },
-    "source": {
-      "id": 42,
-      "name": "project",
-      "path_with_namespace": "group/project",
-      "web_url": "https://gitlab.example.com/group/project"
+    "prepared_at": {
+      "current": "2026-09-12 10:00:00 UTC",
+      "previous": null
     },
-    "target": {
-      "id": 42,
-      "name": "project",
-      "path_with_namespace": "group/project",
-      "web_url": "https://gitlab.example.com/group/project"
+    "updated_at": {
+      "current": "2026-09-12 10:00:00 UTC",
+      "previous": "2026-09-12 09:59:59 UTC"
     }
   },
+  "event_type": "merge_request",
   "labels": [
     {
       "id": 3,
@@ -90,10 +28,130 @@
       "group_id": null
     }
   ],
-  "changes": {
-    "updated_at": {
-      "previous": "2026-09-01T08:59:00Z",
-      "current": "2026-09-01T09:00:00Z"
-    }
+  "object_attributes": {
+    "action": "open",
+    "assignee_id": null,
+    "assignee_ids": [],
+    "author_id": 11,
+    "blocking_discussions_resolved": true,
+    "created_at": "2026-09-12 09:59:59 UTC",
+    "description": "Implements automatic credential rotation.\n\nCloses #12",
+    "detailed_merge_status": "checking",
+    "draft": false,
+    "first_contribution": true,
+    "head_pipeline_id": null,
+    "human_time_change": null,
+    "human_time_estimate": null,
+    "human_total_time_spent": null,
+    "id": 100,
+    "iid": 7,
+    "labels": [],
+    "last_commit": {
+      "author": {
+        "email": "forge-user@example.com",
+        "name": "Forge User"
+      },
+      "id": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1",
+      "message": "Add token rotation\n",
+      "timestamp": "2026-09-12T10:00:00+00:00",
+      "title": "Add token rotation",
+      "url": "https://gitlab.example.com/group/project/-/commit/b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1"
+    },
+    "last_edited_at": null,
+    "last_edited_by_id": null,
+    "merge_commit_sha": null,
+    "merge_error": null,
+    "merge_params": {
+      "force_remove_source_branch": null
+    },
+    "merge_status": "checking",
+    "merge_user_id": null,
+    "merge_when_pipeline_succeeds": false,
+    "milestone_id": null,
+    "prepared_at": "2026-09-12 10:00:00 UTC",
+    "reviewer_ids": [],
+    "source": {
+      "avatar_url": null,
+      "ci_config_path": null,
+      "default_branch": "main",
+      "description": "Test project for webhook payload handling",
+      "git_http_url": "https://gitlab.example.com/group/project.git",
+      "git_ssh_url": "git@gitlab.example.com:group/project.git",
+      "homepage": "https://gitlab.example.com/group/project",
+      "http_url": "https://gitlab.example.com/group/project.git",
+      "id": 42,
+      "name": "project",
+      "namespace": "group",
+      "path_with_namespace": "group/project",
+      "ssh_url": "git@gitlab.example.com:group/project.git",
+      "url": "git@gitlab.example.com:group/project.git",
+      "visibility_level": 0,
+      "web_url": "https://gitlab.example.com/group/project"
+    },
+    "source_branch": "feature/token-rotation",
+    "source_project_id": 42,
+    "state": "opened",
+    "state_id": 1,
+    "system": false,
+    "target": {
+      "avatar_url": null,
+      "ci_config_path": null,
+      "default_branch": "main",
+      "description": "Test project for webhook payload handling",
+      "git_http_url": "https://gitlab.example.com/group/project.git",
+      "git_ssh_url": "git@gitlab.example.com:group/project.git",
+      "homepage": "https://gitlab.example.com/group/project",
+      "http_url": "https://gitlab.example.com/group/project.git",
+      "id": 42,
+      "name": "project",
+      "namespace": "group",
+      "path_with_namespace": "group/project",
+      "ssh_url": "git@gitlab.example.com:group/project.git",
+      "url": "git@gitlab.example.com:group/project.git",
+      "visibility_level": 0,
+      "web_url": "https://gitlab.example.com/group/project"
+    },
+    "target_branch": "main",
+    "target_project_id": 42,
+    "time_change": 0,
+    "time_estimate": 0,
+    "title": "Add token rotation flow",
+    "total_time_spent": 0,
+    "updated_at": "2026-09-12 10:00:00 UTC",
+    "updated_by_id": null,
+    "url": "https://gitlab.example.com/group/project/-/merge_requests/7",
+    "work_in_progress": false
+  },
+  "object_kind": "merge_request",
+  "project": {
+    "avatar_url": null,
+    "ci_config_path": null,
+    "default_branch": "main",
+    "description": "Test project for webhook payload handling",
+    "git_http_url": "https://gitlab.example.com/group/project.git",
+    "git_ssh_url": "git@gitlab.example.com:group/project.git",
+    "homepage": "https://gitlab.example.com/group/project",
+    "http_url": "https://gitlab.example.com/group/project.git",
+    "id": 42,
+    "name": "project",
+    "namespace": "group",
+    "path_with_namespace": "group/project",
+    "ssh_url": "git@gitlab.example.com:group/project.git",
+    "url": "git@gitlab.example.com:group/project.git",
+    "visibility_level": 0,
+    "web_url": "https://gitlab.example.com/group/project"
+  },
+  "repository": {
+    "description": "Test project for webhook payload handling",
+    "homepage": "https://gitlab.example.com/group/project",
+    "name": "project",
+    "url": "git@gitlab.example.com:group/project.git"
+  },
+  "user": {
+    "avatar_url": "https://gitlab.example.com/uploads/-/system/user/avatar/11/avatar.png",
+    "email": "[REDACTED]",
+    "id": 11,
+    "name": "Forge User",
+    "username": "forge-user"
   }
 }

@@ -1,7 +1,9 @@
 """Webhook payload contract tests for ``forge.gateway.parser.parse_webhook``.
 
-Fixtures under ``fixtures/gitlab/*_webhook.json`` mirror the DOCUMENTED
-GitLab webhook payload shapes:
+Fixtures under ``fixtures/gitlab/*_webhook.json`` mirror real GitLab
+webhook payload shapes. The push and merge-request fixtures were captured
+from a live GitLab CE 18.9.1 instance (values sanitized to placeholders);
+note and pipeline fixtures mirror the documented shapes:
 
 https://docs.gitlab.com/user/project/integrations/webhook_events/
 - Push events         → X-Gitlab-Event: Push Hook
@@ -61,6 +63,10 @@ async def test_merge_request_webhook_parses(fixtures) -> None:  # type: ignore[n
     assert mr.last_commit is not None
     assert mr.last_commit.id == "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1"
     assert event.labels[0].title == "backend"
+    # Real payloads arrive with an attribute-change batch; merge_status
+    # transitions (preparing → checking) are part of the observed shape.
+    assert event.changes is not None
+    assert "merge_status" in event.changes
 
 
 async def test_note_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
@@ -88,21 +94,28 @@ async def test_push_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped
     """Push Hook payload parses into PushEvent (top-level fields, no
     object_attributes).
 
-    Documented key fields: before/after/ref/checkout_sha, user_username,
-    project_id, commits, total_commits_count.
+    Real captured shape (GitLab CE 18.9.1): flat user_* fields and NO
+    top-level ``user`` object; ``event_name`` instead of ``event_type``;
+    plus ``push_options``/``ref_protected``/``message``.
     """
     payload: dict[str, Any] = load_fixture("push_webhook")
+
+    # Ground the fixture in the real shape: pushes carry no embedded user
+    # object and identify the event via event_name.
+    assert "user" not in payload
+    assert payload["event_name"] == "push"
 
     event = parse_webhook(HEADER_BY_FIXTURE["push_webhook"], payload)
 
     assert event.object_kind == "push"
-    assert event.ref == "refs/heads/feature/token-rotation"
-    assert event.after == "c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0"
+    assert event.ref == "refs/heads/main"
+    assert event.after == "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0a1"
     assert event.user_username == "forge-user"
     assert event.project_id == 42
     assert event.total_commits_count == 1
     assert event.commits is not None and len(event.commits) == 1
-    assert event.commits[0].modified == ["src/config.py"]
+    assert event.commits[0].added == ["docs/example.md"]
+    assert event.commits[0].modified == []
 
 
 async def test_pipeline_webhook_parses(fixtures) -> None:  # type: ignore[no-untyped-def]
