@@ -23,7 +23,7 @@ class TestGetModel:
         config = _make_config({"fast": "ollama/llama3.1:8b"})
         get_model("fast", config, FakeSettings())
         mock_litellm.assert_called_once_with(
-            id="ollama/llama3.1:8b",
+            id="openai/ollama/llama3.1:8b",
             api_base="http://localhost:4000",
             api_key="not-needed-for-proxy",
             temperature=0.1,
@@ -37,7 +37,7 @@ class TestGetModel:
         )
         get_model("code", config, FakeSettings())
         mock_litellm.assert_called_once_with(
-            id="deepseek/coder-v3",
+            id="openai/deepseek/coder-v3",
             api_base="http://localhost:4000",
             api_key="not-needed-for-proxy",
             temperature=0.0,
@@ -49,7 +49,7 @@ class TestGetModel:
         config = _make_config({"strong": {"id": "claude-sonnet"}})
         get_model("strong", config, FakeSettings())
         mock_litellm.assert_called_once_with(
-            id="claude-sonnet",
+            id="openai/claude-sonnet",
             api_base="http://localhost:4000",
             api_key="not-needed-for-proxy",
             temperature=0.1,
@@ -62,7 +62,7 @@ class TestGetModel:
         get_model("unknown-model", config, FakeSettings())
         mock_litellm.assert_called_once()
         call_args = mock_litellm.call_args
-        assert call_args.kwargs["id"] == "unknown-model"
+        assert call_args.kwargs["id"] == "openai/unknown-model"
 
     @patch("forge.llm.provider.LiteLLM")
     def test_api_base_from_settings(self, mock_litellm):
@@ -79,22 +79,22 @@ class TestGetModelForTask:
     def test_review_maps_to_code(self, mock_litellm):
         config = _make_config({"code": "deepseek/coder"})
         get_model_for_task("review", config, FakeSettings())
-        assert mock_litellm.call_args.kwargs["id"] == "deepseek/coder"
+        assert mock_litellm.call_args.kwargs["id"] == "openai/deepseek/coder"
 
     @patch("forge.llm.provider.LiteLLM")
     def test_chat_maps_to_default(self, mock_litellm):
         config = _make_config({"default": "claude-sonnet"})
         get_model_for_task("chat", config, FakeSettings())
-        assert mock_litellm.call_args.kwargs["id"] == "claude-sonnet"
+        assert mock_litellm.call_args.kwargs["id"] == "openai/claude-sonnet"
 
     @patch("forge.llm.provider.LiteLLM")
     def test_pipeline_debug_maps_to_fast(self, mock_litellm):
         config = _make_config({"fast": "llama3"})
         get_model_for_task("pipeline_debug", config, FakeSettings())
-        assert mock_litellm.call_args.kwargs["id"] == "llama3"
+        assert mock_litellm.call_args.kwargs["id"] == "openai/llama3"
 
     @patch("forge.llm.provider.LiteLLM")
     def test_unknown_task_maps_to_default(self, mock_litellm):
         config = _make_config({"default": "fallback-model"})
         get_model_for_task("something_new", config, FakeSettings())
-        assert mock_litellm.call_args.kwargs["id"] == "fallback-model"
+        assert mock_litellm.call_args.kwargs["id"] == "openai/fallback-model"

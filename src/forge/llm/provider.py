@@ -21,7 +21,11 @@ def get_model(alias: str, config: ForgeConfig, settings: Settings) -> LiteLLM:
     """Create an Agno LiteLLM model from a forge.yml alias.
 
     Model entries in forge.yml can be either a plain string (model ID) or a dict
-    with ``id``, ``temperature``, and ``max_tokens`` keys.
+    with ``id``, ``temperature``, and ``max_tokens`` keys. IDs are LiteLLM
+    proxy model names; on the wire they always get the ``openai/`` provider
+    prefix, which the OpenAI-compatible proxy strips before resolving the
+    name — without the prefix the litellm client tries to route the bare
+    alias (or a name like ``ollama/...``) directly at the provider.
     """
     raw = config.models.get(alias, alias)
 
@@ -33,6 +37,9 @@ def get_model(alias: str, config: ForgeConfig, settings: Settings) -> LiteLLM:
         model_id = raw["id"]
         temperature = raw.get("temperature", _DEFAULT_TEMPERATURE)
         max_tokens = raw.get("max_tokens", _DEFAULT_MAX_TOKENS)
+
+    if not model_id.startswith("openai/"):
+        model_id = f"openai/{model_id}"
 
     return LiteLLM(
         id=model_id,
