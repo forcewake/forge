@@ -218,3 +218,17 @@ async def test_no_start_branch_when_branch_pre_exists(session_factory, changeset
     assert result.outcome is WriteOutcome.COMMITTED
     call = fake.calls_of("create_commit")[-1]
     assert call[1][4] is None  # start_branch omitted
+
+
+async def test_no_start_branch_on_fresh_branch(session_factory, changeset):
+    """GitLab CE 18.x Commits API re-creates the branch when start_branch is
+    passed and 400s 'already exists' — start_branch must never be sent,
+    even on the fresh-branch path (ensure_branch owns creation)."""
+    fake = FakeGitLab()
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    result = await writer.apply(RUN_ID, changeset, start_ref="main")
+
+    assert result.outcome is WriteOutcome.COMMITTED
+    call = fake.calls_of("create_commit")[-1]
+    assert call[1][4] is None

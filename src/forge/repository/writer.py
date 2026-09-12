@@ -72,7 +72,7 @@ class ChangesetWriter:
         Returns :class:`WriteResult`; on ``unknown_outcome`` the caller must
         block the run (ADR-0005) — the commit may or may not exist.
         """
-        created = await self._ensure_branch(cs.branch, start_ref)
+        await self._ensure_branch(cs.branch, start_ref)
 
         async with self._session_factory() as session:
             # (b) intent row before dispatch (ADR-0005), correlated by branch.
@@ -88,10 +88,10 @@ class ChangesetWriter:
                 cs.branch,
                 _commit_actions(cs),
                 cs.commit_message,
-                # start_branch is only for implicit branch creation; GitLab
-                # 18.x rejects it with 400 "already exists" once the branch
-                # exists, and _ensure_branch has guaranteed existence here.
-                start_branch=start_ref if created else None,
+                # Never pass start_branch: on GitLab CE 18.x the Commits API
+                # then tries to create the branch again and 400s with
+                # "already exists" — _ensure_branch has already guaranteed
+                # the branch exists.
             )
         except CommitOutcomeUnknown:
             return await self._resolve_unknown(action_id, cs)
