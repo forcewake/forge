@@ -204,3 +204,17 @@ async def test_action_log_intent_written_before_dispatch(session_factory, change
 
     result = await writer.apply(RUN_ID, changeset, start_ref="main")
     assert result.outcome is WriteOutcome.COMMITTED
+
+
+async def test_no_start_branch_when_branch_pre_exists(session_factory, changeset):
+    """GitLab 18.x rejects create_commit with start_branch on an existing
+    branch (400 'already exists') — the writer must omit it there."""
+    fake = FakeGitLab()
+    fake.branches[changeset.branch] = []  # branch pre-exists (crash re-entry)
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    result = await writer.apply(RUN_ID, changeset, start_ref="main")
+
+    assert result.outcome is WriteOutcome.COMMITTED
+    call = fake.calls_of("create_commit")[-1]
+    assert call[1][4] is None  # start_branch omitted

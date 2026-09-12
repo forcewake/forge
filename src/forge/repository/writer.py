@@ -72,7 +72,7 @@ class ChangesetWriter:
         Returns :class:`WriteResult`; on ``unknown_outcome`` the caller must
         block the run (ADR-0005) — the commit may or may not exist.
         """
-        await self._ensure_branch(cs.branch, start_ref)
+        created = await self._ensure_branch(cs.branch, start_ref)
 
         async with self._session_factory() as session:
             # (b) intent row before dispatch (ADR-0005), correlated by branch.
@@ -88,7 +88,10 @@ class ChangesetWriter:
                 cs.branch,
                 _commit_actions(cs),
                 cs.commit_message,
-                start_branch=start_ref,
+                # start_branch is only for implicit branch creation; GitLab
+                # 18.x rejects it with 400 "already exists" once the branch
+                # exists, and _ensure_branch has guaranteed existence here.
+                start_branch=start_ref if created else None,
             )
         except CommitOutcomeUnknown:
             return await self._resolve_unknown(action_id, cs)
@@ -101,15 +104,20 @@ class ChangesetWriter:
         # Exact-SHA correlation: this is the sha all later CI evidence must match.
         return WriteResult(WriteOutcome.COMMITTED, sha)
 
-    async def _ensure_branch(self, branch: str, start_ref: str) -> None:
-        """Create the branch; tolerate 'already exists' (idempotent re-entry)."""
+    async def _ensure_branch(self, branch: str, start_ref: str) -> bool:
+        """Create the branch; tolerate 'already exists' (idempotent re-entry).
+
+        Returns True when this call created the branch, False when it
+        pre-existed (retry after crash).
+        """
         try:
             await self._gitlab.create_branch(self._project_id, branch, start_ref)
+            return True
         except GitLabAPIError as exc:
             if exc.status_code == 400 and "already exists" in exc.message.lower():
                 # Branch pre-exists (retry after crash) — verify it is real.
                 await self._gitlab.get_branch(self._project_id, branch)
-                return
+                return False
             raise
 
     async def _resolve_unknown(self, action_id: int, cs: ChangeSet) -> WriteResult:
