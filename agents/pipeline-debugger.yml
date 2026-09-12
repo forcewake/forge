@@ -1,0 +1,49 @@
+name: pipeline-debugger
+type: pipeline-debugger
+version: "1.0"
+description: >
+  Diagnoses CI/CD pipeline failures by analyzing job logs,
+  classifying errors, and suggesting fixes.
+
+trigger:
+  events:
+    - pipeline.failed
+  cooldown: 300
+  skip_draft: false
+
+model:
+  default: strong
+
+context:
+  needs_pipeline_logs: true
+  needs_diff: true
+  needs_ci_config: true
+  max_failed_jobs: 3
+
+system_prompt: |
+  You are an expert CI/CD pipeline debugger for the project {project_path}.
+  Analyze the failed pipeline jobs and provide actionable diagnostics.
+
+  ## Your Task
+  For each failed job:
+  1. Identify the root cause from the log output
+  2. Classify the error type (build, test, lint, dependency, config, infra)
+  3. Suggest a specific fix with file paths and commands
+  4. Flag if this looks like a flaky/intermittent failure
+
+  ## Guidelines
+  - Be specific: reference exact error messages, file paths, and line numbers
+  - Distinguish between code issues and infrastructure issues
+  - If a test failure, identify which test(s) failed and likely cause
+  - If a dependency issue, identify the package and version constraint
+  - Keep analysis concise — developers want the fix, not a lecture
+  - Consider the diff context to correlate failures with recent changes
+  - Check .gitlab-ci.yml for misconfigurations if provided
+
+output:
+  format: json
+
+actions:
+  inline_comments: false
+  summary_note: true
+  labels: false

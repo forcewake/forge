@@ -1,0 +1,56 @@
+diff --git a/src/utils/helper.py b/src/utils/helper.py
+index abc1234..def5678 100644
+--- a/src/utils/helper.py
++++ b/src/utils/helper.py
+@@ -1,7 +1,8 @@
+ import os
++import sys
+
+
+ def get_path():
+-    return os.getcwd()
++    path = os.getcwd()
++    return path
+
+
+@@ -15,4 +16,3 @@ def format_output(data):
+     result = []
+     for item in data:
+         result.append(str(item))
+-    return "\n".join(result)
+diff --git a/src/new_module.py b/src/new_module.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/src/new_module.py
+@@ -0,0 +1,5 @@
++"""A brand new module."""
++
++
++def hello():
++    return "hello"
+diff --git a/src/obsolete.py b/src/obsolete.py
+deleted file mode 100644
+index 7654321..0000000
+--- a/src/obsolete.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-"""This module is no longer needed."""
+-
+-OLD_CONSTANT = 42
+diff --git a/src/old_name.py b/src/renamed.py
+similarity index 95%
+rename from src/old_name.py
+rename to src/renamed.py
+index aaa1111..bbb2222 100644
+--- a/src/old_name.py
++++ b/src/renamed.py
+@@ -1,4 +1,4 @@
+-"""Old module name."""
++"""Renamed module."""
+
+
+ def do_stuff():
+diff --git a/assets/logo.png b/assets/logo.png
+index ccc3333..ddd4444 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ

@@ -1,0 +1,29 @@
+model_list:
+  # Fast tier — quick, low-cost reasoning. Used for triage, mention parsing,
+  # short chat replies, and any agent step that doesn't need a frontier model.
+  - model_name: fast
+    litellm_params:
+      model: openai/gpt-4.1-mini
+      api_key: os.environ/OPENAI_API_KEY
+      max_tokens: 4096
+
+  # Strong tier — complex reasoning, full code reviews, security triage.
+  - model_name: strong
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4
+      api_key: os.environ/OPENROUTER_API_KEY
+      max_tokens: 8192
+
+  # Code tier — code-focused tasks (diff review, code generation in flows).
+  # Qwen3.5-35B-A3B is a Mixture-of-Experts coder model served via OpenRouter.
+  - model_name: code
+    litellm_params:
+      model: openrouter/qwen/qwen3.5-35b-a3b
+      api_key: os.environ/OPENROUTER_API_KEY
+      max_tokens: 8192
+
+router_settings:
+  num_retries: 2
+
+general_settings:
+  master_key: sk-forge-master-key

@@ -1,0 +1,22 @@
+{
+  "id": 200,
+  "iid": 58,
+  "project_id": 42,
+  "sha": "c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0",
+  "ref": "feature/token-rotation",
+  "status": "failed",
+  "source": "push",
+  "created_at": "2026-09-11T12:00:02Z",
+  "updated_at": "2026-09-11T12:02:05Z",
+  "web_url": "https://gitlab.example.com/group/project/-/pipelines/200",
+  "name": "Pipeline for branch",
+  "duration": 123,
+  "queued_duration": 4,
+  "started_at": "2026-09-11T12:00:06Z",
+  "finished_at": "2026-09-11T12:02:05Z",
+  "detailed_status": {
+    "name": "failed",
+    "label": "failed",
+    "icon": "status_failed"
+  }
+}

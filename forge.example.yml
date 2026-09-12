@@ -1,0 +1,76 @@
+forge:
+  version: "1"
+  bot_username: forge-bot
+  webhook_path: /webhook
+  port: 8420
+
+  models:
+    fast:
+      id: fast
+      temperature: 0.1
+      max_tokens: 4096
+    default:
+      id: strong
+      temperature: 0.1
+      max_tokens: 8192
+    strong:
+      id: strong
+      temperature: 0.1
+      max_tokens: 8192
+    code:
+      id: code
+      temperature: 0.0
+      max_tokens: 8192
+
+  defaults:
+    auto_review: true
+    auto_pipeline_debug: true
+    auto_security_triage: false
+    mention_trigger: "@forge"
+    cooldown_seconds: 120
+    max_diff_lines: 2000
+    skip_draft_mrs: true
+
+  labels:
+    reviewed: "ai-reviewed"
+    needs_changes: "ai-needs-changes"
+    security_critical: "security-critical"
+
+  rate_limits:
+    per_project_per_hour: 30
+    per_user_per_hour: 20
+    global_per_minute: 10
+
+  # Token budgets for LLM context assembly
+  # token_budgets:
+  #   total: 24000
+  #   diff: 12000
+  #   per_file_diff: 4000
+  #   pipeline_logs: 3000
+  #   description: 2000
+  #   previous_reviews: 3000
+
+  # Secret redaction settings.
+  # redaction:
+  #   entropy_threshold: 4.5
+  #   extra_patterns:
+  #     - name: internal_key
+  #       pattern: "INTERNAL-[A-Z]{10,}"
+
+  # External MCP servers whose tools can be exposed to agents.
+  # Each key here is the name referenced from an agent YAML's `mcp_servers:` list.
+  # Schema: forge/mcp_client/registry.py (MCPServerConfig).
+  # mcp_servers:
+  #   context7:
+  #     url: https://mcp.context7.com/mcp
+  #     transport: streamable-http     # streamable-http | sse
+  #     auth_type: bearer              # bearer | header | none
+  #     auth_token_env: CONTEXT7_TOKEN # env var holding the bearer token
+  #     enabled: true
+  #     description: Context7 documentation lookups
+  #   internal-kb:
+  #     url: https://kb.internal/mcp
+  #     transport: streamable-http
+  #     auth_type: header
+  #     headers:
+  #       X-API-Key: ${INTERNAL_KB_KEY} # ${VAR} expansion is supported

@@ -1,0 +1,37 @@
+name: full-review
+version: "1.0"
+description: >
+  Comprehensive review: code review + security triage + summary.
+
+trigger:
+  command: "@forge /full-review"
+  target: merge_request
+
+timeout: 600
+
+steps:
+  - name: code_review
+    agent: code-reviewer
+    output_key: review
+
+  - name: security_scan
+    agent: security-triage
+    output_key: security
+    on_failure: skip
+
+  - name: summary
+    type: action
+    action: post_comment
+    params:
+      body: |
+        ## Full Review Summary
+
+        **Code Review:** {review.severity} — {review.summary}
+        **Security:** {security.summary}
+
+        | Check | Result |
+        |-------|--------|
+        | Code quality | {review.severity} |
+        | Security | {security.risk_level} |
+
+        *Comprehensive review by Forge*

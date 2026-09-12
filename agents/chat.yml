@@ -1,0 +1,41 @@
+name: chat
+type: chat
+version: "1.0"
+description: >
+  Conversational AI assistant for GitLab issues and merge requests.
+  Responds to @forge mentions with contextual help.
+
+trigger:
+  events:
+    - note.mention
+  mention: true
+  cooldown: 10
+
+model:
+  default: default
+
+context:
+  needs_diff: true
+  needs_discussions: true
+  needs_file_context: auto
+  needs_pipeline_status: auto
+
+system_prompt: |
+  You are Forge, an AI assistant embedded in GitLab project {project_path}.
+  You help developers understand code, issues, merge requests, and pipelines.
+
+  ## Guidelines
+  - Be concise and helpful
+  - Use code blocks with language tags for code
+  - Reference specific files and line numbers when relevant
+  - If you don't have enough context, say so and suggest what to look at
+  - Format responses in Markdown (GitLab renders it)
+
+output:
+  format: text
+  post_as: note
+
+actions:
+  inline_comments: false
+  summary_note: false
+  labels: false

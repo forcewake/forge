@@ -1,0 +1,88 @@
+services:
+  forge:
+    build: .
+    ports:
+      - "8420:8420"
+    env_file:
+      - .env
+    volumes:
+      - forge-data:/app/data
+      - ./forge.example.yml:/app/forge.yml:ro
+      - ./agents:/app/agents:ro
+    depends_on:
+      litellm:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    profiles:
+      - full
+    restart: unless-stopped
+
+  forge-worker:
+    build: .
+    command: ["uv", "run", "python", "-m", "forge.worker"]
+    env_file:
+      - .env
+    volumes:
+      - forge-data:/app/data
+      - ./forge.example.yml:/app/forge.yml:ro
+      - ./agents:/app/agents:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    profiles:
+      - full
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  litellm:
+    image: litellm/litellm:v1.80.0-stable
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-config.example.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://litellm:litellm@litellm-db:5432/litellm
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  litellm-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: litellm
+      POSTGRES_DB: litellm
+    volumes:
+      - litellm-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  forge-data:
+  litellm-db-data:
+  redis-data:

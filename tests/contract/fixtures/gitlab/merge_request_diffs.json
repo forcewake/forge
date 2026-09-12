@@ -1,0 +1,22 @@
+[
+  {
+    "diff": "@@ -0,0 +1,5 @@\n+def rotate_token():\n+    \"\"\"Rotate the stored credential.\"\"\"\n+    return True\n",
+    "new_path": "src/auth/rotation.py",
+    "old_path": "src/auth/rotation.py",
+    "a_mode": null,
+    "b_mode": "100644",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false
+  },
+  {
+    "diff": "@@ -12,6 +12,7 @@\n def load_config():\n-    path = \"config.yml\"\n+    path = \"forge.yml\"\n     return path\n",
+    "new_path": "src/config.py",
+    "old_path": "src/config.py",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false
+  }
+]

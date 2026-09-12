@@ -1,0 +1,60 @@
+{
+  "object_kind": "push",
+  "event_type": "push",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0",
+  "ref": "refs/heads/feature/token-rotation",
+  "checkout_sha": "c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0",
+  "user_id": 11,
+  "user_name": "Forge User",
+  "user_username": "forge-user",
+  "user_email": "forge-user@example.com",
+  "user_avatar": "https://gitlab.example.com/uploads/-/system/user/avatar/11/avatar.png",
+  "project_id": 42,
+  "project": {
+    "id": 42,
+    "name": "project",
+    "description": "",
+    "path_with_namespace": "group/project",
+    "path": "project",
+    "namespace_id": 4,
+    "namespace": "group",
+    "visibility_level": 0,
+    "default_branch": "main",
+    "ci_config_path": "",
+    "web_url": "https://gitlab.example.com/group/project",
+    "url": "git@gitlab.example.com:group/project.git",
+    "ssh_url": "git@gitlab.example.com:group/project.git",
+    "http_url": "https://gitlab.example.com/group/project.git",
+    "git_http_url": "https://gitlab.example.com/group/project.git",
+    "git_ssh_url": "git@gitlab.example.com:group/project.git",
+    "home": "",
+    "avatar_url": null
+  },
+  "repository": {
+    "name": "project",
+    "url": "git@gitlab.example.com:group/project.git",
+    "description": "",
+    "homepage": "https://gitlab.example.com/group/project",
+    "git_http_url": "https://gitlab.example.com/group/project.git",
+    "git_ssh_url": "git@gitlab.example.com:group/project.git",
+    "visibility_level": 0
+  },
+  "commits": [
+    {
+      "id": "c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0",
+      "message": "Add token rotation\n",
+      "title": "Add token rotation",
+      "timestamp": "2026-09-11T12:00:00Z",
+      "url": "https://gitlab.example.com/group/project/-/commit/c9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0",
+      "author": {
+        "name": "Forge User",
+        "email": "forge-user@example.com"
+      },
+      "added": ["src/auth/rotation.py"],
+      "modified": ["src/config.py"],
+      "removed": []
+    }
+  ],
+  "total_commits_count": 1
+}

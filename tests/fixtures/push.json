@@ -1,0 +1,80 @@
+{
+  "object_kind": "push",
+  "event_name": "push",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "ref": "refs/heads/feature/auth",
+  "checkout_sha": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "user_id": 1,
+  "user_name": "Alice Dev",
+  "user_username": "alice",
+  "user_email": "alice@example.com",
+  "user_avatar": "https://gitlab.example.com/uploads/-/system/user/avatar/1/avatar.png",
+  "project_id": 42,
+  "user": {
+    "id": 1,
+    "name": "Alice Dev",
+    "username": "alice",
+    "email": "alice@example.com",
+    "avatar_url": "https://gitlab.example.com/uploads/-/system/user/avatar/1/avatar.png"
+  },
+  "project": {
+    "id": 42,
+    "name": "my-project",
+    "path_with_namespace": "mygroup/my-project",
+    "web_url": "https://gitlab.example.com/mygroup/my-project",
+    "default_branch": "main",
+    "namespace": "mygroup"
+  },
+  "repository": {
+    "name": "my-project",
+    "url": "git@gitlab.example.com:mygroup/my-project.git",
+    "homepage": "https://gitlab.example.com/mygroup/my-project",
+    "visibility_level": 20
+  },
+  "commits": [
+    {
+      "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "message": "Initial auth module scaffold",
+      "title": "Initial auth module scaffold",
+      "timestamp": "2026-03-20T10:00:00+00:00",
+      "url": "https://gitlab.example.com/mygroup/my-project/-/commit/a1b2c3d4",
+      "author": {
+        "name": "Alice Dev",
+        "email": "alice@example.com"
+      },
+      "added": ["src/auth/__init__.py", "src/auth/middleware.py"],
+      "modified": [],
+      "removed": []
+    },
+    {
+      "id": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+      "message": "Add JWT token generation and validation",
+      "title": "Add JWT token generation and validation",
+      "timestamp": "2026-03-20T11:00:00+00:00",
+      "url": "https://gitlab.example.com/mygroup/my-project/-/commit/b2c3d4e5",
+      "author": {
+        "name": "Alice Dev",
+        "email": "alice@example.com"
+      },
+      "added": ["src/auth/jwt.py"],
+      "modified": ["src/auth/middleware.py"],
+      "removed": []
+    },
+    {
+      "id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "message": "Add auth tests",
+      "title": "Add auth tests",
+      "timestamp": "2026-03-20T12:00:00+00:00",
+      "url": "https://gitlab.example.com/mygroup/my-project/-/commit/c3d4e5f6",
+      "author": {
+        "name": "Alice Dev",
+        "email": "alice@example.com"
+      },
+      "added": ["tests/test_auth.py"],
+      "modified": [],
+      "removed": []
+    }
+  ],
+  "total_commits_count": 3
+}

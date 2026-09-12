@@ -1,0 +1,47 @@
+{
+  "object_kind": "note",
+  "event_type": "note",
+  "user": {
+    "id": 3,
+    "name": "Bob Reviewer",
+    "username": "bob",
+    "email": "bob@example.com",
+    "avatar_url": "https://gitlab.example.com/uploads/-/system/user/avatar/3/avatar.png"
+  },
+  "project": {
+    "id": 42,
+    "name": "my-project",
+    "path_with_namespace": "mygroup/my-project",
+    "web_url": "https://gitlab.example.com/mygroup/my-project",
+    "default_branch": "main"
+  },
+  "repository": {
+    "name": "my-project",
+    "url": "git@gitlab.example.com:mygroup/my-project.git",
+    "homepage": "https://gitlab.example.com/mygroup/my-project"
+  },
+  "object_attributes": {
+    "id": 501,
+    "note": "@forge explain this issue in detail",
+    "noteable_type": "Issue",
+    "noteable_id": 12,
+    "author_id": 3,
+    "url": "https://gitlab.example.com/mygroup/my-project/-/issues/12#note_501",
+    "discussion_id": "fedcba0987654321fedcba0987654321fedcba09",
+    "created_at": "2026-03-21T15:30:00Z",
+    "updated_at": "2026-03-21T15:30:00Z",
+    "type": "DiscussionNote",
+    "attachment": null,
+    "system": false
+  },
+  "issue": {
+    "id": 12,
+    "iid": 5,
+    "title": "Users cannot reset their password",
+    "state": "opened",
+    "author_id": 1,
+    "assignee_id": 3,
+    "description": "Several users reported they can't reset passwords via the forgot-password flow.",
+    "confidential": false
+  }
+}

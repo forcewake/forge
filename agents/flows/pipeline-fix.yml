@@ -1,0 +1,28 @@
+name: pipeline-fix
+version: "1.0"
+description: >
+  Diagnose pipeline failure and post a detailed report.
+
+trigger:
+  command: "@forge /fix-pipeline"
+  target: merge_request
+
+timeout: 300
+
+steps:
+  - name: diagnose
+    agent: pipeline-debugger
+    output_key: diagnosis
+
+  - name: report
+    type: action
+    action: post_comment
+    params:
+      body: |
+        ## Pipeline Diagnosis
+
+        {diagnosis.summary}
+
+        **Flaky:** {diagnosis.is_flaky}
+
+        *Diagnosed by Forge*
