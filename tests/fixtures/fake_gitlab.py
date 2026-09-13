@@ -50,8 +50,10 @@ class FakeGitLab:
         self.calls.append(("create_branch", (project_id, branch_name, ref)))
         if branch_name in self.branches:
             raise GitLabAPIError(400, f"branch {branch_name} already exists")
-        self.branches[branch_name] = []
-        return {"name": branch_name, "commit": None}
+        # Real GitLab: a branch created from a SHA has that commit as head.
+        seed = next((c for cs in self.branches.values() for c in cs if c["sha"] == ref), None)
+        self.branches[branch_name] = [dict(seed)] if seed else []
+        return {"name": branch_name, "commit": dict(seed) if seed else None}
 
     async def get_branch(self, project_id: int, branch_name: str) -> dict:
         self.calls.append(("get_branch", (project_id, branch_name)))
@@ -76,7 +78,13 @@ class FakeGitLab:
             raise self.raise_on_create_commit
 
         sha = f"sha-{self._id()}"
-        record = {"sha": sha, "short_id": sha, "message": commit_message}
+        head = self.branches.get(branch, [])
+        record = {
+            "sha": sha,
+            "short_id": sha,
+            "message": commit_message,
+            "parent_ids": [head[0]["sha"]] if head else [],
+        }
 
         if self.create_commit_timeout_applies or self.create_commit_timeout_drops:
             # Server-side outcome of the lost response:
@@ -91,13 +99,27 @@ class FakeGitLab:
         self.calls.append(("list_commits", (project_id, ref)))
         commits = self.branches.get(ref, [])
         return [
-            {"sha": c["sha"], "short_id": c["short_id"], "message": c["message"]} for c in commits
+            {
+                "sha": c["sha"],
+                "short_id": c["short_id"],
+                "message": c["message"],
+                "parent_ids": list(c.get("parent_ids", [])),
+            }
+            for c in commits
         ]
 
-    def seed_commit(self, branch: str, sha: str, message: str = "seeded") -> None:
+    def seed_commit(
+        self, branch: str, sha: str, message: str = "seeded", parents: list[str] | None = None
+    ) -> None:
         """Pre-seed a commit on a branch (newest first), as if pushed before."""
         self.branches.setdefault(branch, []).insert(
-            0, {"sha": sha, "short_id": sha, "message": message}
+            0,
+            {
+                "sha": sha,
+                "short_id": sha,
+                "message": message,
+                "parent_ids": list(parents or []),
+            },
         )
 
     # -- repository files / tree ---------------------------------------------

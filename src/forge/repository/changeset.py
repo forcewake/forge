@@ -39,11 +39,17 @@ class Change:
 
 @dataclass(frozen=True)
 class ChangeSet:
-    """A proposed atomic commit: branch, message and the file actions."""
+    """A proposed atomic commit: branch, message and the file actions.
+
+    ``attempt_base_oid`` records the snapshot the proposal was materialized
+    against (which commit a repair extends); trusted proposers set it —
+    like branch and message it is never taken from the model's word alone.
+    """
 
     branch: str
     commit_message: str
     changes: list[Change]
+    attempt_base_oid: str | None = None
 
 
 class MaterializationError(Exception):
@@ -114,6 +120,10 @@ def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
       ``base.replace(old_text, new_text, expected_matches)``.
     - ``delete``: no content; the file must exist in the base snapshot.
 
+    An optional ``attempt_base_oid`` string on the draft is carried through
+    as trusted metadata (the snapshot *git_base* was read at); anything else
+    is dropped.
+
     Raises :class:`MaterializationError` (zero/>expected matches, wrong
     shapes) — the caller decides what that means for the run.
     """
@@ -130,10 +140,18 @@ def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
     if not isinstance(raw_changes, list) or not raw_changes:
         raise MaterializationError("changes must be a non-empty list")
 
+    raw_attempt_base = cs_raw.get("attempt_base_oid")
+    attempt_base_oid = raw_attempt_base if isinstance(raw_attempt_base, str) else None
+
     changes: list[Change] = []
     for raw in raw_changes:
         changes.append(_materialize_change(raw, git_base))
-    return ChangeSet(branch=branch, commit_message=commit_message, changes=changes)
+    return ChangeSet(
+        branch=branch,
+        commit_message=commit_message,
+        changes=changes,
+        attempt_base_oid=attempt_base_oid,
+    )
 
 
 def _materialize_change(raw: Any, git_base: dict[str, str]) -> Change:

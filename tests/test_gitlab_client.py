@@ -199,6 +199,73 @@ async def test_no_retry_on_404(httpx_mock: HTTPXMock, gitlab_client: GitLabClien
     assert exc_info.value.status_code == 404
 
 
+async def test_non_idempotent_posts_disable_retry(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
+):
+    """F06: create_pipeline / create_merge_request / create_issue_note must
+    pass retry=False to _request — a lost response must be reconciled, not
+    replayed (each can duplicate its resource on a retry)."""
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/pipeline",
+        method="POST",
+        json={"id": 77, "status": "pending"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/merge_requests",
+        method="POST",
+        json={
+            "id": 101,
+            "iid": 8,
+            "title": "t",
+            "state": "opened",
+            "source_branch": "feat",
+            "target_branch": "main",
+        },
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/issues/7/notes",
+        method="POST",
+        json={"id": 5, "body": "hi"},
+    )
+
+    original = gitlab_client._request
+    retries: list[bool | None] = []
+
+    async def spying(method: str, path: str, **kwargs):
+        retries.append(kwargs.get("retry"))
+        return await original(method, path, **kwargs)
+
+    gitlab_client._request = spying  # type: ignore[method-assign]
+    async with gitlab_client as client:
+        await client.create_pipeline(42, "factory/7/x")
+        await client.create_merge_request(42, "feat", "main", "t")
+        await client.create_issue_note(42, 7, "hi")
+
+    assert retries == [False, False, False]
+
+
+async def test_non_idempotent_posts_single_attempt_on_503(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
+):
+    """F06: with retry disabled, a 503 fails fast — exactly one POST each."""
+    for url in (
+        f"{BASE}/projects/42/pipeline",
+        f"{BASE}/projects/42/merge_requests",
+        f"{BASE}/projects/42/issues/7/notes",
+    ):
+        httpx_mock.add_response(url=url, method="POST", status_code=503, text="unavailable")
+
+    async with gitlab_client as client:
+        with pytest.raises(GitLabAPIError):
+            await client.create_pipeline(42, "factory/7/x")
+        with pytest.raises(GitLabAPIError):
+            await client.create_merge_request(42, "feat", "main", "t")
+        with pytest.raises(GitLabAPIError):
+            await client.create_issue_note(42, 7, "hi")
+
+    assert len(httpx_mock.get_requests()) == 3
+
+
 async def test_get_file_url_encoding(httpx_mock: HTTPXMock, gitlab_client: GitLabClient):
     httpx_mock.add_response(
         url=f"{BASE}/projects/42/repository/files/src%2Fauth%2Fmiddleware.py?ref=HEAD",

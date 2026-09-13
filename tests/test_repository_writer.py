@@ -18,6 +18,7 @@ from forge.repository import (
     WriteOutcome,
     WriteResult,
 )
+from forge.repository.writer import BranchDriftError
 from tests.fixtures.fake_gitlab import FakeGitLab
 
 RUN_ID = uuid4().hex
@@ -86,7 +87,10 @@ async def test_success_returns_exact_sha_and_journals(session_factory, changeset
     assert [args for _, args in fake.calls_of("create_branch")] == [(42, changeset.branch, "main")]
     (call,) = fake.calls_of("create_commit")
     _, (project_id, branch, actions, message, start_branch) = call
-    assert (project_id, branch, message) == (42, changeset.branch, changeset.commit_message)
+    assert (project_id, branch) == (42, changeset.branch)
+    # Human prefix intact, unique per-apply operation marker appended (F07).
+    assert message.startswith(changeset.commit_message + " ")
+    assert message.endswith(f"(forge-op:{writer.operation_key})")
     assert start_branch is None
     assert actions == [
         {
@@ -147,12 +151,19 @@ async def test_timeout_then_reconcile_finds_single_commit(session_factory, chang
 
 async def test_timeout_with_ambiguous_commits_stays_unknown(session_factory, changeset):
     fake = FakeGitLab()
-    # A previous attempt already landed the same message on the branch.
-    fake.seed_commit(changeset.branch, "sha-older", changeset.commit_message)
+    # Two commits carry THIS attempt's marker with the same parent (the write
+    # executed twice) — neither can be attributed to one SHA.
+    fake.seed_commit(
+        changeset.branch,
+        "sha-twin",
+        f"{changeset.commit_message} (forge-op:fixedkey12345)",
+        parents=["sha-base"],
+    )
+    fake.seed_commit(changeset.branch, "sha-base", "branch head at intent time")
     fake.create_commit_timeout_applies = True
     writer = ChangesetWriter(fake, session_factory, project_id=42)
 
-    result = await writer.apply(RUN_ID, changeset, start_ref="main")
+    result = await writer.apply(RUN_ID, changeset, start_ref="main", operation_key="fixedkey12345")
 
     assert result == WriteResult(WriteOutcome.UNKNOWN, None)
     action = await last_action(session_factory)
@@ -229,3 +240,97 @@ async def test_no_start_branch_on_fresh_branch(session_factory, changeset):
     assert result.outcome is WriteOutcome.COMMITTED
     call = fake.calls_of("create_commit")[-1]
     assert call[1][4] is None
+
+
+async def test_operation_marker_is_unique_per_apply_call(session_factory, changeset):
+    """F07: each apply() stamps a fresh operation key into the commit message
+    so a previous repair cycle's commit can never collide with this one."""
+    fake = FakeGitLab()
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    await writer.apply(RUN_ID, changeset, start_ref="main")
+    first_message = fake.calls_of("create_commit")[-1][1][3]
+    await writer.apply(RUN_ID, changeset, start_ref="main")
+    second_message = fake.calls_of("create_commit")[-1][1][3]
+
+    assert first_message != second_message
+    assert first_message.startswith(changeset.commit_message + " (forge-op:")
+    assert second_message == f"{changeset.commit_message} (forge-op:{writer.operation_key})"
+
+
+async def test_expected_head_mismatch_aborts_before_commit(session_factory, changeset):
+    """F03: the branch moved away from the pinned base — raise BranchDriftError
+    with both OIDs and never dispatch the commit."""
+    fake = FakeGitLab()
+    fake.branches[changeset.branch] = []  # branch pre-exists, then a human pushed
+    fake.seed_commit(changeset.branch, "moved-head-sha", "human push")
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    with pytest.raises(BranchDriftError) as exc_info:
+        await writer.apply(RUN_ID, changeset, start_ref="main", expected_head="pinned-base-sha")
+
+    assert exc_info.value.expected == "pinned-base-sha"
+    assert exc_info.value.actual == "moved-head-sha"
+    assert fake.calls_of("create_commit") == []  # aborted BEFORE dispatch
+
+
+async def test_expected_head_match_commits_and_journals_pinned_head(session_factory, changeset):
+    """F03: a matching expected_head lets the commit through, and the pinned
+    head is recorded in the action_log outcome metadata."""
+    fake = FakeGitLab()
+    fake.branches[changeset.branch] = []
+    fake.seed_commit(changeset.branch, "pinned-base-sha", "base")
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    result = await writer.apply(
+        RUN_ID, changeset, start_ref="main", expected_head="pinned-base-sha"
+    )
+
+    assert result.outcome is WriteOutcome.COMMITTED
+    action = await last_action(session_factory)
+    assert action.remote_result == {
+        "sha": result.commit_sha,
+        "expected_head": "pinned-base-sha",
+    }
+
+
+async def test_reconcile_ignores_previous_cycle_same_message(session_factory, changeset):
+    """F07: a prior repair cycle's commit repeats the human message but carries
+    a different operation marker — only this attempt's commit is attributed."""
+    fake = FakeGitLab()
+    fake.seed_commit(
+        changeset.branch,
+        "sha-prev",
+        f"{changeset.commit_message} (forge-op:prev1cycle12)",
+    )
+    fake.create_commit_timeout_applies = True
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    result = await writer.apply(RUN_ID, changeset, start_ref="main", operation_key="currcycle3456")
+
+    assert result.outcome is WriteOutcome.COMMITTED
+    assert result.commit_sha != "sha-prev"
+    action = await last_action(session_factory)
+    assert action.status == "succeeded"
+    assert action.remote_result == {"sha": result.commit_sha, "reconciled": True}
+
+
+async def test_reconcile_ignores_right_marker_but_wrong_parent(session_factory, changeset):
+    """F07: the exact message (marker included) on a commit whose parent is
+    not the intent-time branch head proves nothing — stay unknown, block."""
+    fake = FakeGitLab()
+    fake.branches[changeset.branch] = []
+    fake.seed_commit(
+        changeset.branch,
+        "orphan-sha",
+        f"{changeset.commit_message} (forge-op:fixedkey12345)",
+        parents=["some-other-base"],
+    )
+    fake.create_commit_timeout_drops = True  # nothing landed for this attempt
+    writer = ChangesetWriter(fake, session_factory, project_id=42)
+
+    result = await writer.apply(RUN_ID, changeset, start_ref="main", operation_key="fixedkey12345")
+
+    assert result == WriteResult(WriteOutcome.UNKNOWN, None)
+    action = await last_action(session_factory)
+    assert action.status == "unknown_outcome"

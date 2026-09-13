@@ -44,6 +44,12 @@ IMPLEMENTER_MAX_FILES = 8
 #: ...each capped at this many characters.
 IMPLEMENTER_MAX_FILE_CHARS = 6000
 
+#: Hard safety cap (chars) for authoritative reads — the complete file texts
+#: materialization runs against. Over this, proposing fails with a
+#: :class:`MaterializationError` instead of silently truncating the base
+#: (a truncated base would drop file tails from materialized updates).
+FORGE_MATERIALIZE_MAX_FILE_CHARS = 400_000
+
 #: Output can carry full file texts — allow more than the default budget.
 IMPLEMENTER_MAX_TOKENS = 8192
 
@@ -86,14 +92,21 @@ class LLMImplementer:
         plan_summary: str = "",
         files_hint: list[str] | None = None,
         repair_context: str = "",
+        attempt_base: str | None = None,
     ) -> ChangeSet:
         """Return a materialized :class:`ChangeSet` for *run*.
+
+        *attempt_base* overrides the run's pinned base as the working
+        snapshot to read (tree, evidence and authoritative contents) — a
+        repair cycle passes the last verified candidate SHA so the repair
+        extends that commit instead of rolling it back. None reads the
+        pinned base as before.
 
         Raises :class:`MaterializationError` when the model's draft cannot be
         applied exactly against the base snapshot, and LLM errors propagate
         from the client.
         """
-        base_sha = run.base_sha or "HEAD"
+        base_sha = attempt_base or run.base_sha or "HEAD"
         paths = await self._tree_paths(run.project_id, base_sha)
         contents = await self._evidence_contents(run.project_id, base_sha, paths, files_hint or [])
         issue = await self._read_issue(run.project_id, run.issue_iid, issue_title)
@@ -125,13 +138,14 @@ class LLMImplementer:
         # Untrusted proposal -> pinned authority + exact-match materialization.
         cs_raw["branch"] = branch
         cs_raw["commit_message"] = commit_message
+        cs_raw["attempt_base_oid"] = base_sha
 
         touched = [
             change.get("path")
             for change in (cs_raw.get("changes") or [])
             if isinstance(change, dict) and isinstance(change.get("path"), str)
         ]
-        git_base = await self._base_contents(run.project_id, base_sha, touched)
+        git_base = await self._authoritative_contents(run.project_id, base_sha, touched)
         return materialize(cs_raw, git_base)
 
     # ------------------------------------------------------------------
@@ -162,20 +176,42 @@ class LLMImplementer:
         selected = _select_evidence_files(paths, files_hint)
         return await self._fetch_contents(project_id, base_sha, selected)
 
-    async def _base_contents(
+    async def _authoritative_contents(
         self,
         project_id: int,
         base_sha: str,
         touched_paths: list[str],
     ) -> dict[str, str]:
-        """Fetch current content of the touched paths at the base snapshot.
+        """Fetch COMPLETE content of the touched paths at the base snapshot.
+
+        Unlike the evidence reads (bounded for the prompt budget), this is
+        the authoritative base the ChangeSet is materialized against, so no
+        truncation, ever — a truncated base would silently drop file tails
+        from materialized updates. A file over the
+        :data:`FORGE_MATERIALIZE_MAX_FILE_CHARS` safety cap raises
+        :class:`MaterializationError` instead.
 
         Paths that do not exist in the snapshot are simply absent from the
         result — materialize treats that as "create is allowed / update or
         delete is impossible".
         """
         unique = list(dict.fromkeys(touched_paths))
-        return await self._fetch_contents(project_id, base_sha, unique)
+        contents: dict[str, str] = {}
+        for path in unique:
+            try:
+                repo_file = await self._gitlab.get_file(project_id, path, ref=base_sha)
+            except Exception:
+                logger.info("File %r not readable at %s — skipped", path, base_sha[:8])
+                continue
+            text = _decode(repo_file.content, repo_file.encoding)
+            if len(text) > FORGE_MATERIALIZE_MAX_FILE_CHARS:
+                raise MaterializationError(
+                    f"file {path!r} is {len(text)} chars at {base_sha[:8]}, over the "
+                    f"materialization cap of {FORGE_MATERIALIZE_MAX_FILE_CHARS} — "
+                    "refusing to materialize against truncated content"
+                )
+            contents[path] = text
+        return contents
 
     async def _fetch_contents(
         self,
@@ -293,6 +329,7 @@ def _decode(raw_content: str, encoding: str | None = None) -> str:
 
 
 __all__ = [
+    "FORGE_MATERIALIZE_MAX_FILE_CHARS",
     "IMPLEMENTER_MAX_INPUT_CHARS",
     "IMPLEMENTER_MAX_FILES",
     "IMPLEMENTER_MAX_FILE_CHARS",

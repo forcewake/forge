@@ -149,8 +149,14 @@ class GitLabClient:
     async def _get(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("GET", path, **kwargs)
 
-    async def _post(self, path: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("POST", path, **kwargs)
+    async def _post(self, path: str, *, retry: bool = True, **kwargs: Any) -> httpx.Response:
+        """POST with explicit retry semantics (``_request``'s generic retry by default).
+
+        Non-idempotent creation endpoints (pipeline, merge request, issue
+        note) pass ``retry=False`` — a lost response must be reconciled
+        downstream, never replayed.
+        """
+        return await self._request("POST", path, retry=retry, **kwargs)
 
     async def _put(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("PUT", path, **kwargs)
@@ -447,8 +453,9 @@ class GitLabClient:
 
         This call is **never auto-retried** (non-idempotent): a lost response
         must not duplicate a commit. On ``httpx.TimeoutException`` raises
-        :class:`CommitOutcomeUnknown` — the caller must reconcile (compare the
-        branch commits against *commit_message*) before any retry (ADR-0005).
+        :class:`CommitOutcomeUnknown` — the caller must reconcile (match the
+        branch commits by the unique operation marker and expected parent)
+        before any retry (ADR-0005).
         """
         payload: dict[str, Any] = {
             "branch": branch,
@@ -470,12 +477,12 @@ class GitLabClient:
             ) from exc
         return resp.json()
 
-    async def list_commits(self, project_id: int, ref: str) -> list[dict[str, str]]:
+    async def list_commits(self, project_id: int, ref: str) -> list[dict[str, Any]]:
         """List commits on a ref, newest first (``GET /repository/commits``).
 
-        Returns ``{"sha", "short_id", "message"}`` dicts — used for outcome
-        reconciliation after an unknown create_commit (match by message) and
-        for branch-head drift checks.
+        Returns ``{"sha", "short_id", "message", "parent_ids"}`` dicts — used
+        for outcome reconciliation after an unknown create_commit (match by
+        operation marker + parent OID) and for branch-head drift checks.
         """
         raw = await self._paginated(
             f"/projects/{project_id}/repository/commits",
@@ -486,6 +493,7 @@ class GitLabClient:
                 "sha": c.get("id", ""),
                 "short_id": c.get("short_id", ""),
                 "message": c.get("message", ""),
+                "parent_ids": list(c.get("parent_ids") or []),
             }
             for c in raw
         ]
@@ -507,7 +515,8 @@ class GitLabClient:
             payload["variables"] = [
                 {"key": str(v["key"]), "value": str(v["value"])} for v in variables
             ]
-        resp = await self._post(f"/projects/{project_id}/pipeline", json=payload)
+        # non-idempotent: a lost response must be reconciled, not retried
+        resp = await self._post(f"/projects/{project_id}/pipeline", json=payload, retry=False)
         return resp.json()
 
     async def create_merge_request(
@@ -532,9 +541,11 @@ class GitLabClient:
             payload["assignee_id"] = assignee_id
         if labels:
             payload["labels"] = ",".join(labels)
+        # non-idempotent: a lost response must be reconciled, not retried
         resp = await self._post(
             f"/projects/{project_id}/merge_requests",
             json=payload,
+            retry=False,
         )
         return resp.json()
 
@@ -564,9 +575,11 @@ class GitLabClient:
         body: str,
     ) -> dict[str, Any]:
         """Post a note/comment on an issue."""
+        # non-idempotent: a lost response must be reconciled, not retried
         resp = await self._post(
             f"/projects/{project_id}/issues/{issue_iid}/notes",
             json={"body": body},
+            retry=False,
         )
         return resp.json()
 

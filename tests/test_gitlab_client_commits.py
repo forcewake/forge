@@ -87,19 +87,30 @@ async def test_create_commit_timeout_raises_commit_outcome_unknown(
     assert len(httpx_mock.get_requests()) == 1
 
 
-async def test_list_commits_returns_sha_and_message(httpx_mock: HTTPXMock):
+async def test_list_commits_returns_sha_message_and_parents(httpx_mock: HTTPXMock):
     httpx_mock.add_response(
         url=f"{BASE}/projects/42/repository/commits?ref_name=factory%2F7%2Fdeadbeef&per_page=100",
         json=[
-            {"id": "sha2", "short_id": "sha2", "message": "second"},
+            {"id": "sha2", "short_id": "sha2", "message": "second", "parent_ids": ["sha1"]},
             {"id": "sha1", "short_id": "sha1", "message": "first"},
         ],
     )
     async with GitLabClient("https://gitlab.test", "t") as client:
         commits = await client.list_commits(42, "factory/7/deadbeef")
 
-    assert commits[0] == {"sha": "sha2", "short_id": "sha2", "message": "second"}
-    assert commits[1]["sha"] == "sha1"
+    # parent_ids feeds the F07 parent check in the writer's reconciliation.
+    assert commits[0] == {
+        "sha": "sha2",
+        "short_id": "sha2",
+        "message": "second",
+        "parent_ids": ["sha1"],
+    }
+    assert commits[1] == {
+        "sha": "sha1",
+        "short_id": "sha1",
+        "message": "first",
+        "parent_ids": [],
+    }
 
 
 async def test_create_pipeline_posts_ref(httpx_mock: HTTPXMock):

@@ -58,9 +58,17 @@ class TestClassifyFailure:
         ]
         assert classify_failure(jobs) == "config"
 
-    def test_no_failed_jobs_defaults_to_code(self):
-        assert classify_failure([job("build", "success")]) == "code"
-        assert classify_failure([]) == "code"
+    def test_empty_evidence_is_unknown(self):
+        """No jobs at all proves nothing about the code — never 'code'."""
+        assert classify_failure([]) == "unknown"
+
+    def test_success_only_evidence_is_unknown(self):
+        assert classify_failure([job("build", "success")]) == "unknown"
+
+    def test_canceled_only_evidence_is_unknown(self):
+        """A cancel killed every job — there is no failure reason to blame."""
+        jobs = [job("build", "canceled"), job("test", "skipped")]
+        assert classify_failure(jobs) == "unknown"
 
 
 class TestEvaluateQualityContract:

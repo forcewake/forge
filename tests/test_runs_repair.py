@@ -14,11 +14,13 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
 from forge.durable import FlowRun, FlowStatus, LLMCall, Outbox
-from forge.factory.implementer import LLMImplementer
+from forge.factory import implementer as implementer_module
+from forge.factory.implementer import IMPLEMENTER_MAX_FILE_CHARS, LLMImplementer
 from forge.factory.llm import LLMError
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.models.base import Base
+from forge.repository.changeset import MaterializationError
 from forge.runs import RunService
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.fixtures.fake_llm import FakeLLM
@@ -196,10 +198,11 @@ class TestHappyPath:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.WAITING_CI.value
         candidate_sha = run.candidate_shas[-1]
-        # Trusted identity overrides whatever branch/message the model chose.
-        assert fake_gitlab.branches[branch_for(ISSUE_IID, run_id)][0]["message"] == (
-            f"forge: implement {ISSUE_IID} (run {run_id[:8]})"
-        )
+        # Trusted identity overrides whatever branch/message the model chose;
+        # the writer appends its unique per-apply operation marker (F07).
+        message = fake_gitlab.branches[branch_for(ISSUE_IID, run_id)][0]["message"]
+        assert message.startswith(f"forge: implement {ISSUE_IID} (run {run_id[:8]}) ")
+        assert "(forge-op:" in message and message.endswith(")")
 
         pipeline_id = seed_pipeline(
             fake_gitlab, branch_for(ISSUE_IID, run_id), candidate_sha, "success"
@@ -383,6 +386,122 @@ class TestRepairLoop:
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("config_failure")
         assert llm.roles() == ["planner", "implementer"]
+
+    async def test_unknown_failure_blocks_without_repair(self, db, fake_gitlab):
+        """Empty evidence (a canceled-only pipeline) is not a code failure:
+        blocked as unknown_failure — never a repair LLM call (F18)."""
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        seed_pipeline(
+            fake_gitlab,
+            branch_for(ISSUE_IID, run_id),
+            first_sha,
+            "failed",
+            jobs=[{"id": 1, "name": "build", "status": "canceled"}],
+        )
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("unknown_failure")
+        assert llm.roles() == ["planner", "implementer"]
+        assert len(run.candidate_shas) == 1
+
+
+def _update_draft(path: str, old_text: str, new_text: str) -> str:
+    return json.dumps(
+        {
+            "branch": "model/chose/this",
+            "commit_message": "model's own message",
+            "changes": [
+                {"path": path, "operation": "update", "old_text": old_text, "new_text": new_text}
+            ],
+        }
+    )
+
+
+class TestImplementerMaterialization:
+    """F01/F02 regressions at the implementer boundary: bounded evidence for
+    the prompt, COMPLETE blobs for materialization, and the attempt_base
+    working ref a repair cycle reads instead of the pinned base."""
+
+    def make_run(self, **overrides) -> FlowRun:
+        values = dict(id="runabc123", project_id=PROJECT_ID, issue_iid=ISSUE_IID, base_sha=BASE_SHA)
+        values.update(overrides)
+        return FlowRun(**values)
+
+    def make_implementer(self, db, fake_gitlab, script):
+        llm = FakeLLM(db, script=script)
+        return llm, LLMImplementer(llm, gitlab=fake_gitlab, settings=make_settings())
+
+    async def test_update_near_start_of_large_file_preserves_tail(self, db, fake_gitlab):
+        # F01: materialization must run against the complete file — an edit
+        # inside the first 6000 chars may not drop the tail beyond them.
+        tail = "".join(f"line {i:04d}\n" for i in range(1000))
+        fake_gitlab.seed_file("src/app.py", "x = 1\n" + tail)
+        llm, implementer = self.make_implementer(
+            db, fake_gitlab, [_update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+        )
+
+        cs = await implementer.propose(self.make_run(), ISSUE_TITLE, files_hint=["src/app.py"])
+
+        assert len(cs.changes[0].content) > 6000
+        assert cs.changes[0].content == "x = 42\n" + tail
+
+    async def test_evidence_prompt_stays_truncated(self, db, fake_gitlab):
+        # The prompt path is unchanged: file evidence is capped at 6000 chars.
+        tail = "".join(f"line {i:04d}\n" for i in range(1000))
+        big = "x = 1\n" + tail
+        fake_gitlab.seed_file("src/app.py", big)
+        llm, implementer = self.make_implementer(
+            db, fake_gitlab, [_update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+        )
+
+        await implementer.propose(self.make_run(), ISSUE_TITLE, files_hint=["src/app.py"])
+
+        prompt = llm.calls_for("implementer")[0]["user"]
+        assert f"--- FILE: src/app.py ---\n{big[:IMPLEMENTER_MAX_FILE_CHARS]}" in prompt
+        assert "line 0999\n" not in prompt
+
+    async def test_oversized_base_file_raises_instead_of_truncating(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        # 206 chars: under the evidence cap, over the materialization cap —
+        # the raise proves the cap, not evidence truncation, fires.
+        monkeypatch.setattr(implementer_module, "FORGE_MATERIALIZE_MAX_FILE_CHARS", 100)
+        fake_gitlab.seed_file("src/app.py", "x = 1\n" + "y" * 200)
+        llm, implementer = self.make_implementer(
+            db, fake_gitlab, [_update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+        )
+
+        with pytest.raises(MaterializationError):
+            await implementer.propose(self.make_run(), ISSUE_TITLE, files_hint=["src/app.py"])
+
+    async def test_attempt_base_reads_tree_and_contents_from_that_ref(self, db, fake_gitlab):
+        candidate_sha = "candidate-sha-9"
+        llm, implementer = self.make_implementer(
+            db, fake_gitlab, [_update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+        )
+
+        cs = await implementer.propose(self.make_run(), ISSUE_TITLE, attempt_base=candidate_sha)
+
+        assert [call[1][2] for call in fake_gitlab.calls_of("get_tree")] == [candidate_sha]
+        file_refs = [call[1][2] for call in fake_gitlab.calls_of("get_file")]
+        assert file_refs and set(file_refs) == {candidate_sha}
+        assert cs.attempt_base_oid == candidate_sha
+
+    async def test_attempt_base_defaults_to_the_pinned_run_base(self, db, fake_gitlab):
+        llm, implementer = self.make_implementer(
+            db, fake_gitlab, [_update_draft("src/app.py", "x = 1\n", "x = 42\n")]
+        )
+
+        cs = await implementer.propose(self.make_run(), ISSUE_TITLE)
+
+        assert [call[1][2] for call in fake_gitlab.calls_of("get_tree")] == [BASE_SHA]
+        assert cs.attempt_base_oid == BASE_SHA
 
 
 class TestQualityContract:

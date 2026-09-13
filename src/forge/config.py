@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +77,12 @@ class Settings(BaseSettings):
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 
-    # MCP server (optional)
+    # MCP server (optional). Fail closed: the MCP app is only mounted when
+    # FORGE_MCP_ENABLED is true AND FORGE_MCP_KEY is set — its tools act with
+    # the privileged GitLab token, so an unauthenticated endpoint is never
+    # exposed. Set FORGE_MCP_ENABLED=false only when the deployment fronts
+    # /mcp with its own authentication.
+    FORGE_MCP_ENABLED: bool = True
     FORGE_MCP_KEY: SecretStr | None = None
 
     # Agno telemetry (disabled for self-hosted)
@@ -136,7 +142,10 @@ class ForgeConfig:
     }
 
     def __init__(self, path: str | Path = "forge.yml") -> None:
-        self._data: dict[str, Any] = dict(self._DEFAULTS)
+        # Deep copy: _DEFAULTS holds nested dicts, and _deep_merge below
+        # mutates them in place — a shallow dict() copy would leak overrides
+        # into the class-level defaults (and thus into every later instance).
+        self._data: dict[str, Any] = copy.deepcopy(self._DEFAULTS)
         config_path = Path(path)
         if config_path.exists():
             with open(config_path) as f:

@@ -19,9 +19,10 @@ ADR-0008 quality contract with failure classification: only *code* failures
 trigger the bounded repair loop (``evaluating_ci → proposing → … →
 waiting_ci``, at most ``FORGE_MAX_COMMIT_CYCLES - 1`` repairs) — and never
 on harness runs, which make no forge-side LLM calls after the gate.
-Infrastructure and config failures block the run instead of burning model
-calls. Every model call lands in the ``llm_calls`` ledger (ADR-0013) and the
-run accumulates evidence (plan, review, pipeline) in ``flow_runs.evidence``.
+Infrastructure, config and unknown-evidence failures block the run instead
+of burning model calls. Every model call lands in the ``llm_calls`` ledger
+(ADR-0013) and the run accumulates evidence (plan, review, pipeline) in
+``flow_runs.evidence``.
 
 Durability rules (ADR-0005): every transition goes through
 :class:`forge.durable.Controller` (which journals an outbox row atomically)
@@ -537,6 +538,12 @@ class RunService:
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             plan_summary, files_hint = self._plan_evidence(run)
+            cycle = run.commit_cycle or 1
+            # F02 (review): repairs build on the last VERIFIED candidate, not
+            # the original approved base — otherwise cycle 2 cannot see
+            # cycle 1's files and its update would roll work back. The
+            # source base stays frozen for full-result review.
+            attempt_base = (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
 
         issue_title = await self._read_issue_title(project_id, run)
         try:
@@ -546,6 +553,7 @@ class RunService:
                 plan_summary=plan_summary,
                 files_hint=files_hint,
                 repair_context=repair_context,
+                attempt_base=attempt_base,
             )
         except MaterializationError as exc:
             # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
@@ -573,10 +581,18 @@ class RunService:
 
         await self._transition(run_id, FlowStatus.COMMITTING)
 
-        # committing: journaled, reconcilable write (ADR-0005).
+        # committing: journaled, reconcilable write (ADR-0005). The factory
+        # branch is cut from the FROZEN attempt base (review F03) — never
+        # from the live target branch — and the expected head is checked
+        # before the commit (BranchDriftError on drift).
         writer = self._writer_class(self._gitlab, self._session_factory, project_id)
         try:
-            result = await writer.apply(run_id, changeset, start_ref=self._target_branch())
+            result = await writer.apply(
+                run_id,
+                changeset,
+                start_ref=attempt_base,
+                expected_head=attempt_base,
+            )
         except GitLabAPIError as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
             return
@@ -889,6 +905,13 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "external_change")
             return
 
+        # Durable CI deadline (ADR-0005): whatever CI reports — silence, an
+        # API failure, or a pipeline stuck forever in an active state — a run
+        # past its deadline is parked as blocked(ci_timeout).
+        if deadline is not None and as_aware_utc(now) > as_aware_utc(deadline):
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
+            return
+
         try:
             pipelines = await self._gitlab.list_pipelines(project_id, sha=candidate_sha)
         except GitLabAPIError:
@@ -897,8 +920,6 @@ class RunService:
 
         if not pipelines:
             # Missing pipeline is silence from CI — never success (ADR-0007).
-            if deadline is not None and as_aware_utc(now) > as_aware_utc(deadline):
-                await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
             return
 
         pipeline = pipelines[0]
@@ -953,7 +974,8 @@ class RunService:
             return
 
         # failed / canceled / skipped — negative verdict: classify BEFORE
-        # deciding (ADR-0008), and never repair on infra/config.
+        # deciding (ADR-0008), and never repair on infra/config/unknown
+        # ("unknown" = empty evidence: no failed job blames the code).
         failure_class = classify_failure(jobs)
         if failure_class != "code":
             failed = _failed_job_names(jobs)

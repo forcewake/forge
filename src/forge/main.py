@@ -112,13 +112,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(router)
 
-    # Mount MCP server at /mcp
-    mcp_server = create_mcp_server(settings)
-    mcp_app = mcp_server.streamable_http_app()
-    if settings.FORGE_MCP_KEY:
+    # Mount MCP server at /mcp — fail closed: only with an auth key, since
+    # its tools act with the privileged GitLab token. FORGE_MCP_ENABLED=false
+    # opts out for deployments that front /mcp with their own auth.
+    if settings.FORGE_MCP_ENABLED and settings.FORGE_MCP_KEY:
+        mcp_server = create_mcp_server(settings)
+        mcp_app = mcp_server.streamable_http_app()
         mcp_app = MCPAuthMiddleware(mcp_app, settings.FORGE_MCP_KEY.get_secret_value())
-    application.mount("/mcp", mcp_app)
-    application.state.mcp_server = mcp_server
+        application.mount("/mcp", mcp_app)
+        application.state.mcp_server = mcp_server
+    else:
+        logger.warning("MCP server disabled: FORGE_MCP_KEY not configured")
 
     return application
 

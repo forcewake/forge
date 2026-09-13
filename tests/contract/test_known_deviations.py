@@ -28,6 +28,12 @@ Deviations documented here:
    (``POST /projects/:id/merge_requests``) a retry can duplicate the
    resource: if the first attempt succeeded server-side but the response
    was lost, the retry creates a second merge request.
+
+   FIXED (F06): the creation endpoints (``create_commit``,
+   ``create_merge_request``, ``create_pipeline``, ``create_issue_note``)
+   now opt out of the generic retry via ``retry=False``;
+   ``test_create_merge_request_is_not_retried_on_503`` below has been
+   un-xfail'd accordingly and is a regular contract test.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from forge.gitlab.client import GitLabClient
+from forge.gitlab.client import GitLabAPIError, GitLabClient
 
 from .conftest import BASE, load_fixture
 
@@ -127,15 +133,6 @@ async def test_raw_diff_uses_documented_unidiff_param(
     assert request.url.params.get("unidiff") == "true"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "upstream codeward/gitlab/client.py _request() retries every method "
-        "(incl. non-idempotent POST) on 500/502/503 via _RETRYABLE_STATUSES/"
-        "_MAX_RETRIES; create_merge_request must NOT be auto-retried because "
-        "the first attempt may have succeeded server-side (duplicate MR risk)"
-    ),
-)
 async def test_create_merge_request_is_not_retried_on_503(
     httpx_mock: HTTPXMock, gitlab_client: GitLabClient
 ) -> None:
@@ -143,31 +140,26 @@ async def test_create_merge_request_is_not_retried_on_503(
 
     create_merge_request is non-idempotent: if the first attempt reached the
     server and GitLab only failed to answer, a retry creates a SECOND merge
-    request. The documented-safe behavior is to fail fast on 5xx for
-    creation endpoints instead of replaying the POST.
+    request. It therefore opts out of the generic retry (``retry=False``,
+    F06) and fails fast on 5xx instead of replaying the POST.
+
+    Was an xfail spec while the client retried every method; un-xfail'd now
+    that create_merge_request passes ``retry=False``.
     """
     httpx_mock.add_response(
         url=f"{BASE}/projects/42/merge_requests",
         method="POST",
         status_code=503,
     )
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests",
-        method="POST",
-        status_code=201,
-        json=load_fixture("merge_request"),
-        is_optional=True,
-    )
 
     async with gitlab_client as client:
-        created = await client.create_merge_request(
-            42,
-            source_branch="feature/token-rotation",
-            target_branch="main",
-            title="Add token rotation flow",
-        )
+        with pytest.raises(GitLabAPIError):
+            await client.create_merge_request(
+                42,
+                source_branch="feature/token-rotation",
+                target_branch="main",
+                title="Add token rotation flow",
+            )
 
-    # Either the 201 arrived (single request) or the client raised — but
-    # there must never be a second POST on the wire.
+    # The 503 failed fast: there must never be a second POST on the wire.
     assert len(httpx_mock.get_requests()) == 1
-    assert created["iid"] == 7

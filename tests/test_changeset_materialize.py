@@ -214,6 +214,53 @@ class TestMaterializeDeleteAndShape:
         assert cs.branch == "evil/../branch"  # trusted callers pin/validate this
 
 
+class TestMaterializeOverCompleteBase:
+    def test_update_near_start_preserves_tail_beyond_evidence_truncation(self):
+        """F01: materialize must run against the COMPLETE base text — an
+        update near the start of a >6000-char file keeps the tail intact."""
+        tail = "".join(f"line {i:04d}\n" for i in range(1000))
+        cs = materialize(
+            {
+                "branch": "b",
+                "commit_message": "m",
+                "changes": [
+                    {
+                        "path": "src/big.py",
+                        "operation": "update",
+                        "old_text": "x = 1\n",
+                        "new_text": "x = 42\n",
+                    }
+                ],
+            },
+            {"src/big.py": "x = 1\n" + tail},
+        )
+        assert len(cs.changes[0].content) > 6000
+        assert cs.changes[0].content == "x = 42\n" + tail
+
+
+class TestAttemptBaseOid:
+    def _draft(self, **extra) -> dict:
+        draft = {
+            "branch": "b",
+            "commit_message": "m",
+            "changes": [{"path": "forge-demo/new.md", "operation": "create", "content": "# hi"}],
+        }
+        draft.update(extra)
+        return draft
+
+    def test_attempt_base_oid_carried_through(self):
+        cs = materialize(self._draft(attempt_base_oid="sha-candidate-9"), base())
+        assert cs.attempt_base_oid == "sha-candidate-9"
+
+    def test_attempt_base_oid_absent_defaults_to_none(self):
+        cs = materialize(self._draft(), base())
+        assert cs.attempt_base_oid is None
+
+    def test_attempt_base_oid_non_string_is_dropped(self):
+        cs = materialize(self._draft(attempt_base_oid=123), base())
+        assert cs.attempt_base_oid is None
+
+
 class TestValidateWithGitBase:
     def _cs(self, *changes: Change) -> ChangeSet:
         return ChangeSet(branch="b", commit_message="m", changes=list(changes))

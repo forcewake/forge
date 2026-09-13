@@ -59,7 +59,13 @@ class FakeWriter:
     def reset(cls) -> None:
         cls.instances = []
 
-    async def apply(self, flow_run_id: str, cs, start_ref: str = "main") -> WriteResult:
+    async def apply(
+        self,
+        flow_run_id: str,
+        cs,
+        start_ref: str = "main",
+        expected_head: str | None = None,
+    ) -> WriteResult:
         self.calls.append(
             {
                 "flow_run_id": flow_run_id,
@@ -67,6 +73,7 @@ class FakeWriter:
                 "message": cs.commit_message,
                 "changes": cs.changes,
                 "start_ref": start_ref,
+                "expected_head": expected_head,
             }
         )
         if self.outcome is WriteOutcome.UNKNOWN:
@@ -223,13 +230,14 @@ class TestGate:
         assert run.mr_iid is not None
         assert run.candidate_shas == ["fake-sha-1"]
 
-        # The journaled commit used the stub branch, message and start ref.
+        # The journaled commit used the stub branch, message and the
+        # FROZEN base as start ref (review F03) — never the live target.
         assert len(FakeWriter.instances) == 1
         (call,) = FakeWriter.instances[0].calls
         assert call["flow_run_id"] == run_id
         assert call["branch"] == factory_branch(ISSUE_IID, run_id)
         assert call["message"] == f"forge: implement {ISSUE_IID} (run {run_id[:8]})"
-        assert call["start_ref"] == "main"
+        assert call["start_ref"] == run.base_sha
 
         # The Draft MR follows GitLab draft convention and carries evidence.
         (mr,) = fake_gitlab.merge_requests.values()
@@ -292,8 +300,10 @@ class TestAdvanceFailures:
         run_id = await start_issue_run(service)
 
         class UnknownWriter(FakeWriter):
-            async def apply(self, flow_run_id, cs, start_ref="main") -> WriteResult:
-                await super().apply(flow_run_id, cs, start_ref)
+            async def apply(
+                self, flow_run_id, cs, start_ref="main", expected_head=None
+            ) -> WriteResult:
+                await super().apply(flow_run_id, cs, start_ref, expected_head)
                 return WriteResult(WriteOutcome.UNKNOWN, None)
 
         service._writer_class = UnknownWriter

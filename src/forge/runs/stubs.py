@@ -77,6 +77,7 @@ class StubImplementer:
         plan_summary: str = "",
         files_hint: list[str] | None = None,
         repair_context: str = "",
+        attempt_base: str | None = None,
     ) -> ChangeSet:
         short_id = short_run_id(run.id)
         path = f"forge-demo/run-{short_id}.md"

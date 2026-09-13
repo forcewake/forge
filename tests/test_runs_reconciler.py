@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
 from forge.durable import Controller, FlowRun, FlowStatus, Outbox
+from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.runs import RunService, run_reconciler
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
@@ -95,6 +96,28 @@ async def make_waiting_ci_run(db, fake_gitlab: FakeGitLab | None = None) -> str:
 async def get_run(db, run_id: str) -> FlowRun:
     async with db() as session:
         return await session.get(FlowRun, run_id)
+
+
+async def entered_waiting_ci_at(db, run_id: str):
+    """The durable waiting_ci outbox timestamp — the CI deadline anchor."""
+    async with db() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Outbox).where(Outbox.flow_run_id == run_id).order_by(Outbox.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return next(r.created_at for r in rows if r.payload["to"] == "waiting_ci")
+
+
+def past_deadline(entered_at):
+    """A reconciler ``now`` one second beyond the FORGE_CI_WAIT_SECONDS deadline."""
+    import datetime as dt
+
+    return entered_at + dt.timedelta(seconds=make_settings().FORGE_CI_WAIT_SECONDS + 1)
 
 
 def branch_for(run_id: str) -> str:
@@ -183,6 +206,12 @@ class TestEvaluateWaitingCi:
         fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
         pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id)))["id"]
         fake_gitlab.set_pipeline_status(pipeline_id, "failed", SHA)
+        # A script_failure makes this an honest code failure — empty evidence
+        # would classify as unknown and block before the budget is consulted.
+        fake_gitlab.set_pipeline_jobs(
+            pipeline_id,
+            [{"id": 1, "name": "pytest", "status": "failed", "failure_reason": "script_failure"}],
+        )
 
         await service.evaluate_waiting_ci()
 
@@ -217,24 +246,44 @@ class TestEvaluateWaitingCi:
         run_id = await make_waiting_ci_run(db, fake_gitlab)
         fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
 
-        # Durable deadline: waiting_ci outbox timestamp + FORGE_CI_WAIT_SECONDS.
-        async with db() as session:
-            rows = (
-                (
-                    await session.execute(
-                        select(Outbox).where(Outbox.flow_run_id == run_id).order_by(Outbox.id)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        entered_waiting_ci = next(r.created_at for r in rows if r.payload["to"] == "waiting_ci")
+        entered = await entered_waiting_ci_at(db, run_id)
+        await service.evaluate_waiting_ci(now=past_deadline(entered))
 
-        import datetime as dt
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason == "ci_timeout"
 
-        late = entered_waiting_ci + dt.timedelta(seconds=make_settings().FORGE_CI_WAIT_SECONDS + 1)
-        await service.evaluate_waiting_ci(now=late)
+    async def test_running_pipeline_blocks_after_deadline(self, service, fake_gitlab, db):
+        """F17: a pipeline stuck in an active state past the deadline times
+        out instead of keeping the run waiting forever."""
+        run_id = await make_waiting_ci_run(db, fake_gitlab)
+        fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
+        pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id)))["id"]
+        fake_gitlab.set_pipeline_status(pipeline_id, "running", SHA)
 
+        entered = await entered_waiting_ci_at(db, run_id)
+        await service.evaluate_waiting_ci(now=past_deadline(entered))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason == "ci_timeout"
+
+    async def test_pipeline_read_errors_block_after_deadline(self, service, fake_gitlab, db):
+        """F17: repeated pipeline API failures past the deadline time out
+        instead of waiting forever behind a broken GitLab read."""
+        run_id = await make_waiting_ci_run(db, fake_gitlab)
+        fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
+
+        async def failing_pipelines(*args, **kwargs):
+            raise GitLabAPIError(500, "gitlab down")
+
+        fake_gitlab.list_pipelines = failing_pipelines
+
+        entered = await entered_waiting_ci_at(db, run_id)
+        await service.evaluate_waiting_ci()  # before the deadline: keep waiting
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+        await service.evaluate_waiting_ci(now=past_deadline(entered))
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason == "ci_timeout"
