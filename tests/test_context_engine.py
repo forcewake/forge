@@ -99,7 +99,7 @@ async def test_build_mr_context(httpx_mock, engine):
         json=MR_JSON,
     )
     httpx_mock.add_response(
-        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/diffs",
+        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/raw_diffs",
         text=RAW_DIFF,
     )
     httpx_mock.add_response(
@@ -137,7 +137,7 @@ async def test_build_mr_context_redacts_secrets(httpx_mock, engine):
         json=MR_JSON,
     )
     httpx_mock.add_response(
-        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/diffs",
+        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/raw_diffs",
         text=diff_with_secret,
     )
     httpx_mock.add_response(
@@ -162,7 +162,7 @@ async def test_build_mr_context_respects_budget(httpx_mock, engine):
         json=MR_JSON,
     )
     httpx_mock.add_response(
-        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/diffs",
+        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/raw_diffs",
         text=large_diff,
     )
     httpx_mock.add_response(
@@ -183,7 +183,7 @@ async def test_build_note_context_mr(httpx_mock, engine):
         json=MR_JSON,
     )
     httpx_mock.add_response(
-        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/diffs",
+        url="https://gitlab.example.com/api/v4/projects/42/merge_requests/1/raw_diffs",
         text=RAW_DIFF,
     )
     httpx_mock.add_response(

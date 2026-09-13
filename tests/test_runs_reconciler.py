@@ -122,14 +122,18 @@ def past_deadline(entered_at):
     return entered_at + dt.timedelta(seconds=make_settings().FORGE_CI_WAIT_SECONDS + 1)
 
 
-def branch_for(run_id: str) -> str:
-    return factory_branch(ISSUE_IID, run_id)
+def branch_for(run_id: str, issue_iid: int = ISSUE_IID) -> str:
+    return factory_branch(issue_iid, run_id)
 
 
-async def seed_success_pipeline(fake_gitlab: FakeGitLab, run_id: str) -> int:
+async def seed_success_pipeline(
+    fake_gitlab: FakeGitLab, run_id: str, *, issue_iid: int = ISSUE_IID
+) -> int:
     """Head of the bot branch equals the candidate; CI succeeded for that sha."""
-    fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
-    pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id)))["id"]
+    fake_gitlab.seed_commit(branch_for(run_id, issue_iid), SHA, "forge: implement 7")
+    pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id, issue_iid)))[
+        "id"
+    ]
     fake_gitlab.set_pipeline_status(pipeline_id, "success", SHA)
     return pipeline_id
 
@@ -306,7 +310,7 @@ class TestEvaluateWaitingCi:
         # A second, healthy run in waiting_ci on a DIFFERENT issue — the F12
         # invariant allows only one ACTIVE run per (project, issue).
         other = await make_waiting_ci_run(db, issue_iid=ISSUE_IID + 1)
-        await seed_success_pipeline(fake_gitlab, other)
+        await seed_success_pipeline(fake_gitlab, other, issue_iid=ISSUE_IID + 1)
 
         # Corrupt the first run's project so its reads explode mid-tick.
         async with db() as session:
@@ -315,17 +319,18 @@ class TestEvaluateWaitingCi:
             run.issue_iid = None
             await session.commit()
 
-        # Force a hard failure for the broken run by monkeypatching list_commits
-        # to raise only for the corrupted branch.
-        original = fake_gitlab.list_commits
+        # Force a hard failure for the broken run by monkeypatching
+        # get_branch_head to raise only for the corrupted branch (F28: the
+        # drift check reads the branch head, not the commit history).
+        original = fake_gitlab.get_branch_head
         broken_branch = factory_branch(None, run_id)
 
-        async def exploding(project_id, ref):
-            if ref == broken_branch:
+        async def exploding(project_id, branch):
+            if branch == broken_branch:
                 raise RuntimeError("boom")
-            return await original(project_id, ref)
+            return await original(project_id, branch)
 
-        fake_gitlab.list_commits = exploding
+        fake_gitlab.get_branch_head = exploding
 
         await service.evaluate_waiting_ci()  # must not raise
 

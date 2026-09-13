@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from forge import __version__
 from forge.agents.registry import AgentRegistry
 from forge.config import Settings, get_forge_config
-from forge.database import get_session_factory, init_db, reset_engine
+from forge.database import dispose_engine, get_session_factory, init_db
 from forge.flows.loader import FlowLoader
 from forge.flows.state import FlowStateManager
 from forge.gateway.router import router
@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
         await app.state.mcp_manager.close_all()
     if app.state.redis_manager is not None:
         await app.state.redis_manager.close()
-    reset_engine()
+    await dispose_engine()  # F26: close pooled connections, not just the cache
     logger.info("Forge shutting down")
 
 

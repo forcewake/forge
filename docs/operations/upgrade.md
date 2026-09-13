@@ -53,3 +53,23 @@ python -m forge.doctor
 - Within a minor (0.1.x): schema additive-only; downgrade = restore backup.
 - Across minors: read the [CHANGELOG](../../CHANGELOG.md) — the durable
   state machine may gain states; never run mixed versions of app and worker.
+
+## Schema compatibility gate (F26)
+
+The final migration of every release writes the expected version into the
+single-row `schema_version` table. On startup, `init_db` checks it:
+
+- **Fresh (empty) database** → tables are created and the marker written
+  (unchanged dev bootstrap).
+- **Existing forge database with a missing or different marker** → the app
+  (and worker) refuse to start:
+
+  ```
+  RuntimeError: Database schema is not compatible with this forge version:
+  expected schema_version=1, found None. Run the migrations before starting
+  (alembic upgrade head, or `python -m forge.migrate`) — see
+  docs/operations/upgrade.md.
+  ```
+
+  This is deliberate: `create_all` is a bootstrap, never an upgrade. Run
+  step 3 of the ordering section above, then start the services.

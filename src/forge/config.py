@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 
+    # Management read API (F30): when set, GET /runs and GET /runs/{id}
+    # require `Authorization: Bearer <FORGE_API_READ_TOKEN>`. None (default)
+    # leaves them open — dev only; set a token for anything network-exposed.
+    # The legacy /flows/{id} endpoint was removed entirely (it leaked Redis
+    # flow state without auth); /runs is the single durable read model.
+    FORGE_API_READ_TOKEN: SecretStr | None = None
+
     # MCP server (optional). Fail closed: the MCP app is only mounted when
     # FORGE_MCP_ENABLED is true AND FORGE_MCP_KEY is set — its tools act with
     # the privileged GitLab token, so an unauthenticated endpoint is never

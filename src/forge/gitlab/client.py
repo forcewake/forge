@@ -169,11 +169,21 @@ class GitLabClient:
         path: str,
         params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch all pages of a paginated GitLab API endpoint."""
+        """Fetch all pages of a paginated GitLab API endpoint.
+
+        Hard cap: ``_MAX_PAGES`` (50) pages of 100 items each. When the last
+        fetched page still carries an ``X-Next-Page`` header, the result is
+        TRUNCATED at the cap: a warning ("pagination limit reached — evidence
+        may be incomplete") is logged and the partial list is returned as-is.
+        There is no completeness flag on the return value (F27: honesty via
+        the log, no API break) — do not call ``_paginated`` when completeness
+        is load-bearing.
+        """
         params = dict(params or {})
         params.setdefault("per_page", 100)
 
         results: list[dict[str, Any]] = []
+        total_count: str | None = None
 
         for _ in range(_MAX_PAGES):
             response = await self._get(path, params=params)
@@ -183,10 +193,20 @@ class GitLabClient:
             else:
                 results.append(data)
 
+            total_count = response.headers.get("x-total-count", "").strip() or None
             next_page = response.headers.get("x-next-page", "").strip()
             if not next_page:
                 break
             params["page"] = int(next_page)
+        else:
+            # Loop exhausted while the last page still advertised a next one.
+            logger.warning(
+                "pagination limit reached — evidence may be incomplete "
+                "(%s: stopped after %d pages, x-total-count=%s)",
+                path,
+                _MAX_PAGES,
+                total_count,
+            )
 
         return results
 
@@ -199,10 +219,26 @@ class GitLabClient:
         return [Diff.model_validate(d) for d in raw]
 
     async def get_merge_request_raw_diff(self, project_id: int, mr_iid: int) -> str:
-        resp = await self._get(
-            f"/projects/{project_id}/merge_requests/{mr_iid}/diffs",
-            headers={"Accept": "text/plain"},
-        )
+        """Return the raw unified diff text of a merge request (F27).
+
+        Uses the documented raw endpoint
+        ``GET /projects/:id/merge_requests/:iid/raw_diffs`` (text/plain,
+        gitlab-org/gitlab !178813). On 404 — older CE instances without the
+        endpoint — falls back to the JSON ``/diffs`` endpoint with the
+        undocumented ``Accept: text/plain`` header some versions honour.
+
+        The return type stays ``str``: reviewer/MCP callers embed the text in
+        prompts directly.
+        """
+        try:
+            resp = await self._get(f"/projects/{project_id}/merge_requests/{mr_iid}/raw_diffs")
+        except GitLabAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            resp = await self._get(
+                f"/projects/{project_id}/merge_requests/{mr_iid}/diffs",
+                headers={"Accept": "text/plain"},
+            )
         return resp.text
 
     async def get_merge_request_versions(self, project_id: int, mr_iid: int) -> list[MRVersion]:
@@ -437,6 +473,20 @@ class GitLabClient:
         resp = await self._get(f"/projects/{project_id}/repository/branches/{encoded}")
         return resp.json()
 
+    async def get_branch_head(self, project_id: int, branch_name: str) -> str:
+        """Return the head commit SHA of *branch_name* — one GET, no history (F28).
+
+        Head/drift checks must never paginate the commit history
+        (``list_commits``); this reads the branch object and extracts
+        ``commit.id``. Raises :class:`GitLabAPIError` (404) when the branch
+        (or its head commit) does not exist.
+        """
+        data = await self.get_branch(project_id, branch_name)
+        head = str((data.get("commit") or {}).get("id") or "")
+        if not head:
+            raise GitLabAPIError(404, f"branch {branch_name!r} has no head commit")
+        return head
+
     async def create_commit(
         self,
         project_id: int,
@@ -482,7 +532,8 @@ class GitLabClient:
 
         Returns ``{"sha", "short_id", "message", "parent_ids"}`` dicts — used
         for outcome reconciliation after an unknown create_commit (match by
-        operation marker + parent OID) and for branch-head drift checks.
+        operation marker + parent OID). NOTE (F28): this PAGINATES the whole
+        history — head/drift checks must use :meth:`get_branch_head` instead.
         """
         raw = await self._paginated(
             f"/projects/{project_id}/repository/commits",

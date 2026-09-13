@@ -554,3 +554,93 @@ async def test_list_pipelines(httpx_mock: HTTPXMock, gitlab_client: GitLabClient
     assert len(pipelines) == 1
     assert pipelines[0].id == 500
     assert pipelines[0].status == "success"
+
+
+async def test_get_branch_head_returns_head_commit(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
+):
+    """F28: get_branch_head reads the branch object, not commit history."""
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/branches/main",
+        json={"name": "main", "commit": {"id": "abc123def", "short_id": "abc123d"}},
+    )
+
+    async with gitlab_client as client:
+        head = await client.get_branch_head(42, "main")
+
+    assert head == "abc123def"
+    request = httpx_mock.get_requests()[0]
+    assert str(request.url) == f"{BASE}/projects/42/repository/branches/main"
+
+
+async def test_get_branch_head_missing_branch_raises_404(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
+):
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/branches/feature%2Fgone",
+        status_code=404,
+        text="404 Branch Not Found",
+    )
+
+    async with gitlab_client as client:
+        with pytest.raises(GitLabAPIError) as exc_info:
+            await client.get_branch_head(42, "feature/gone")
+
+    assert exc_info.value.status_code == 404
+    assert len(httpx_mock.get_requests()) == 1  # one GET, never a history scan
+
+
+async def test_pagination_warns_when_page_cap_reached(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient, monkeypatch: pytest.MonkeyPatch, caplog
+):
+    """F27 honesty fix: when the last fetched page still advertises
+    X-Next-Page, the truncation is logged — evidence must not silently end
+    at the 50-page cap. _MAX_PAGES is lowered here to keep the test small."""
+    import logging
+
+    import forge.gitlab.client as client_module
+
+    monkeypatch.setattr(client_module, "_MAX_PAGES", 2)
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main",
+        json=[{"id": "a", "short_id": "a", "message": "1"}],
+        headers={"x-next-page": "2", "x-total-count": "300"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main&page=2",
+        json=[{"id": "b", "short_id": "b", "message": "2"}],
+        headers={"x-next-page": "3"},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="forge.gitlab.client"):
+        async with gitlab_client as client:
+            commits = await client.list_commits(42, "main")
+
+    assert [c["sha"] for c in commits] == ["a", "b"]  # partial list returned as-is
+    assert any(
+        "pagination limit reached" in r.message and "evidence may be incomplete" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_pagination_no_warning_when_last_page_reached(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient, caplog
+):
+    import logging
+
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main",
+        json=[{"id": "a", "short_id": "a", "message": "1"}],
+        headers={"x-next-page": "2"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/projects/42/repository/commits?per_page=100&ref_name=main&page=2",
+        json=[{"id": "b", "short_id": "b", "message": "2"}],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="forge.gitlab.client"):
+        async with gitlab_client as client:
+            commits = await client.list_commits(42, "main")
+
+    assert [c["sha"] for c in commits] == ["a", "b"]
+    assert not any("pagination limit reached" in r.message for r in caplog.records)

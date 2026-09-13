@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from forge.agents.registry import AgentRegistry
 from forge.config import Settings, get_forge_config
-from forge.database import get_session_factory, init_db, reset_engine
+from forge.database import dispose_engine, get_session_factory, init_db
 from forge.flows.loader import FlowLoader
 from forge.flows.runner import FlowRunner
 from forge.flows.state import FlowStateManager
@@ -304,7 +304,7 @@ async def main() -> None:
         await gitlab.close()
         await mcp_manager.close_all()
         await redis_manager.close()
-        reset_engine()
+        await dispose_engine()  # F26: await engine disposal on shutdown
         logger.info("Worker %s exited cleanly", worker_id)
 
 

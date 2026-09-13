@@ -1024,10 +1024,10 @@ class RunService:
             if run is not None and sha in list(run.candidate_shas or []):
                 return None  # repair cycle — this commit is accounted for
         try:
-            commits = await self._gitlab.list_commits(project_id, branch)
+            head = await self._gitlab.get_branch_head(project_id, branch)
         except GitLabAPIError:
             return None  # cannot verify — let the drift-guarded apply decide
-        return sha if commits and commits[0]["sha"] == sha else None
+        return sha if head == sha else None
 
     async def _journaled_draft_mr(self, run_id: str, project_id: int, branch: str) -> int | None:
         """The Draft MR a crashed attempt already created, if it still exists (ADR-0017 §3)."""
@@ -1159,12 +1159,13 @@ class RunService:
 
         # Verdict invalidation (ADR-0006/0008): a human push on the bot branch
         # invalidates any pipeline verdict — block, never overwrite.
+        # F28: a single branch-head read, not a paginated commit history.
         try:
-            commits = await self._gitlab.list_commits(project_id, branch)
+            head = await self._gitlab.get_branch_head(project_id, branch)
         except GitLabAPIError:
             logger.exception("Drift check read failed for run %s — keeping it waiting", run_id[:8])
             return
-        if commits and commits[0]["sha"] != candidate_sha:
+        if head != candidate_sha:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "external_change")
             return
 
@@ -1334,7 +1335,7 @@ class RunService:
         # while the review is in flight.
         branch = factory_branch(issue_iid, run_id)
         try:
-            commits = await self._gitlab.list_commits(project_id, branch)
+            head = await self._gitlab.get_branch_head(project_id, branch)
         except GitLabAPIError as exc:
             await self._to_terminal(
                 run_id,
@@ -1342,7 +1343,7 @@ class RunService:
                 f"candidate_drift_after_review: branch head read failed: {exc}",
             )
             return
-        if commits and commits[0]["sha"] != candidate_sha:
+        if head != candidate_sha:
             await self._to_terminal(
                 run_id,
                 FlowStatus.BLOCKED,
@@ -1444,13 +1445,16 @@ class RunService:
         if issue_iid is not None:
             branch = factory_branch(issue_iid, run_id)
             try:
-                commits = await self._gitlab.list_commits(project_id, branch)
+                # F28: the branch object carries the head commit (incl. the
+                # message) — no paginated commit-history read here either.
+                branch_data = await self._gitlab.get_branch(project_id, branch)
             except GitLabAPIError:
-                commits = []
-            if commits:
+                branch_data = {}
+            head = branch_data.get("commit") or {}
+            if head.get("id"):
                 sections.append(
-                    f"Previous commit on {branch}: {commits[0]['message']} "
-                    f"({commits[0]['sha'][:8]})"
+                    f"Previous commit on {branch}: {head.get('message', '')} "
+                    f"({str(head['id'])[:8]})"
                 )
 
         failed = [job for job in jobs if job.status == "failed"][:REPAIR_MAX_FAILED_JOBS]
@@ -2053,13 +2057,16 @@ class RunService:
         )
 
     async def _read_base_sha(self, project_id: int) -> str:
-        """Record the pinned base (head of the target branch) at planning time."""
+        """Record the pinned base (head of the target branch) at planning time.
+
+        F28: reads the branch object (single GET) — head checks must not
+        paginate the commit history.
+        """
         try:
-            commits = await self._gitlab.list_commits(project_id, self._target_branch())
+            return await self._gitlab.get_branch_head(project_id, self._target_branch())
         except GitLabAPIError:
             logger.warning("Could not read base head for project %d", project_id, exc_info=True)
             return ""
-        return commits[0]["sha"] if commits else ""
 
     async def _read_issue_title(self, project_id: int, run_or_iid) -> str:
         """Fetch the issue title; fall back to a neutral label on read failure."""

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
+from sqlalchemy import func, select
 
 from forge import __version__
+from forge.durable.models import FlowRun, StepRun
 from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
@@ -256,6 +259,45 @@ async def health(request: Request) -> dict[str, Any]:
     return result
 
 
+async def _gather_metrics(request: Request) -> dict[str, Any]:
+    """Collect queue/worker stats (Redis-backed) and run counts (DB-backed).
+
+    Redis and the database are optional at read time: without either, the
+    corresponding numbers degrade to zero/empty rather than failing the
+    endpoint (the JSON /metrics keeps its historical 503-without-Redis
+    contract; the Prometheus exposition never fails — F30).
+    """
+    redis_manager = getattr(request.app.state, "redis_manager", None)
+    task_queue = getattr(request.app.state, "task_queue", None)
+
+    snapshot: dict[str, Any] = {
+        "queue_depth": 0,
+        "dlq_depth": 0,
+        "workers_active": 0,
+        "tasks_processed_1h": 0,
+        "tasks_failed_1h": 0,
+        "runs_by_status": {},
+    }
+
+    if redis_manager is not None and task_queue is not None:
+        worker_keys = await redis_manager.scan_keys("forge:worker:*")
+        snapshot["queue_depth"] = await task_queue.depth()
+        snapshot["dlq_depth"] = await task_queue.dlq_depth()
+        snapshot["workers_active"] = len(worker_keys)
+        snapshot["tasks_processed_1h"] = await redis_manager.get_stat("processed", hours=1)
+        snapshot["tasks_failed_1h"] = await redis_manager.get_stat("failed", hours=1)
+
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is not None:
+        async with session_factory() as session:
+            rows = await session.execute(
+                select(FlowRun.status, func.count()).group_by(FlowRun.status)
+            )
+            snapshot["runs_by_status"] = {status: count for status, count in rows.all()}
+
+    return snapshot
+
+
 @router.get("/metrics")
 async def metrics(request: Request) -> JSONResponse:
     """Processing metrics. Requires Redis."""
@@ -268,16 +310,58 @@ async def metrics(request: Request) -> JSONResponse:
             content={"error": "Redis not configured — metrics unavailable"},
         )
 
-    worker_keys = await redis_manager.scan_keys("forge:worker:*")
+    snapshot = await _gather_metrics(request)
 
     return JSONResponse(
         content={
-            "queue_depth": await task_queue.depth(),
-            "dlq_depth": await task_queue.dlq_depth(),
-            "workers_active": len(worker_keys),
-            "tasks_processed_1h": await redis_manager.get_stat("processed", hours=1),
-            "tasks_failed_1h": await redis_manager.get_stat("failed", hours=1),
+            "queue_depth": snapshot["queue_depth"],
+            "dlq_depth": snapshot["dlq_depth"],
+            "workers_active": snapshot["workers_active"],
+            "tasks_processed_1h": snapshot["tasks_processed_1h"],
+            "tasks_failed_1h": snapshot["tasks_failed_1h"],
         }
+    )
+
+
+@router.get("/metrics.prometheus")
+async def metrics_prometheus(request: Request) -> Response:
+    """Prometheus exposition of the processing metrics (F30).
+
+    Same stat keys as the JSON /metrics, plus the durable-run gauge
+    ``forge_runs_by_status``. Served as text/plain (Prometheus format
+    version 4.0.4); never 5xx — missing backends report zero.
+    """
+    snapshot = await _gather_metrics(request)
+
+    lines = [
+        "# HELP forge_queue_depth Tasks waiting in the Redis queue.",
+        "# TYPE forge_queue_depth gauge",
+        f"forge_queue_depth {snapshot['queue_depth']}",
+        "# HELP forge_dlq_depth Tasks parked in the dead-letter queue.",
+        "# TYPE forge_dlq_depth gauge",
+        f"forge_dlq_depth {snapshot['dlq_depth']}",
+        "# HELP forge_workers_active Workers with a live heartbeat key.",
+        "# TYPE forge_workers_active gauge",
+        f"forge_workers_active {snapshot['workers_active']}",
+    ]
+    for status in sorted(snapshot["runs_by_status"]):
+        count = snapshot["runs_by_status"][status]
+        lines += [
+            "# HELP forge_runs_by_status Durable flow runs by lifecycle status.",
+            "# TYPE forge_runs_by_status gauge",
+            f'forge_runs_by_status{{status="{status}"}} {count}',
+        ]
+    lines += [
+        "# HELP forge_tasks_processed_total Tasks processed (last hour window).",
+        "# TYPE forge_tasks_processed_total counter",
+        f"forge_tasks_processed_total {snapshot['tasks_processed_1h']}",
+        "# HELP forge_tasks_failed_total Tasks failed (last hour window).",
+        "# TYPE forge_tasks_failed_total counter",
+        f"forge_tasks_failed_total {snapshot['tasks_failed_1h']}",
+    ]
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type="text/plain; version=4.0.4; charset=utf-8",
     )
 
 
@@ -409,41 +493,132 @@ async def list_mcp_tools(request: Request) -> list[dict[str, Any]]:
     return result
 
 
-@router.get("/flows/{flow_id}")
-async def get_flow_status(flow_id: str, request: Request) -> JSONResponse:
-    """Get the current status of a flow instance."""
-    flow_state_mgr = getattr(request.app.state, "flow_state_mgr", None)
-    if flow_state_mgr is None:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Flows require Redis — not configured"},
+def _require_api_read_auth(request: Request) -> None:
+    """Bearer-token gate for the management read API (F30).
+
+    When ``FORGE_API_READ_TOKEN`` is set, GET /runs* require
+    ``Authorization: Bearer <token>`` (constant-time compare). When unset —
+    dev default — the routes are open. The legacy unauthenticated
+    ``/flows/{id}`` endpoint (raw Redis flow state) was removed entirely.
+    """
+    settings = request.app.state.settings
+    token = getattr(settings, "FORGE_API_READ_TOKEN", None)
+    if token is None:
+        return
+    expected = token.get_secret_value()
+    header = request.headers.get("authorization", "")
+    supplied = header[len("Bearer ") :].strip() if header.startswith("Bearer ") else ""
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API read token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    flow = await flow_state_mgr.get(flow_id)
-    if flow is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"Flow {flow_id} not found"},
+
+def _run_summary(run: FlowRun) -> dict[str, Any]:
+    """Compact read-model projection of a durable flow run (F30)."""
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "issue_iid": run.issue_iid,
+        "mr_iid": run.mr_iid,
+        "status": run.status,
+        "status_reason": run.status_reason,
+        "commit_cycle": run.commit_cycle,
+        "cancel_requested": run.cancel_requested,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+    }
+
+
+#: run.evidence keys kept in the read model, nested per section. Everything
+#: else (plan.files_hint, review.findings, harness.handle, ...) is bulky
+#: internal context and is dropped from the API (F30).
+_EVIDENCE_SUMMARY_FIELDS: dict[str, tuple[str, ...]] = {
+    "plan": ("digest", "summary"),
+    "pipeline": ("id", "url", "status", "sha"),
+    "review": ("verdict", "sha", "summary"),
+    "harness": ("pipeline_id", "job_id", "branch"),
+}
+
+
+def _evidence_summary(evidence: dict | None) -> dict[str, Any]:
+    """Latest evidence summary — small proof fields only, never the payload."""
+    if not evidence:
+        return {}
+    summary: dict[str, Any] = {}
+    if evidence.get("backend"):
+        summary["backend"] = evidence["backend"]
+    for section, fields in _EVIDENCE_SUMMARY_FIELDS.items():
+        values = evidence.get(section)
+        if not isinstance(values, dict):
+            continue
+        picked = {key: values[key] for key in fields if values.get(key) is not None}
+        if picked:
+            summary[section] = picked
+    return summary
+
+
+@router.get("/runs", dependencies=[Depends(_require_api_read_auth)])
+async def list_runs(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """List durable flow runs, newest first (F30 read model)."""
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun)
+                    .order_by(FlowRun.created_at.desc(), FlowRun.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return {"runs": [_run_summary(run) for run in runs]}
+
+
+@router.get("/runs/{run_id}", dependencies=[Depends(_require_api_read_auth)])
+async def get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """One durable run: detail, steps and the evidence summary (F30)."""
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        steps = (
+            (
+                await session.execute(
+                    select(StepRun).where(StepRun.flow_run_id == run_id).order_by(StepRun.id)
+                )
+            )
+            .scalars()
+            .all()
         )
 
-    # Look up flow definition for total steps count
-    flow_loader = getattr(request.app.state, "flow_loader", None)
-    total_steps = 0
-    if flow_loader:
-        flow_def = flow_loader.get(flow.flow_name)
-        if flow_def:
-            total_steps = len(flow_def.steps)
-
-    return JSONResponse(
-        content={
-            "id": flow.id,
-            "name": flow.flow_name,
-            "status": flow.status,
-            "current_step": flow.current_step,
-            "total_steps": total_steps,
-            "started_at": flow.started_at,
-            "updated_at": flow.updated_at,
-            "state": flow.state,
-            "error": flow.error,
+    detail = _run_summary(run)
+    detail["evidence"] = _evidence_summary(run.evidence)
+    detail["steps"] = [
+        {
+            "id": step.id,
+            "step_name": step.step_name,
+            "status": step.status,
+            "attempt": step.attempt,
+            "started_at": step.started_at.isoformat() if step.started_at else None,
+            "finished_at": step.finished_at.isoformat() if step.finished_at else None,
         }
-    )
+        for step in steps
+    ]
+    return detail

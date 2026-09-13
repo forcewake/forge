@@ -65,8 +65,24 @@ class FakeGitLab:
         if branch_name not in self.branches:
             raise GitLabAPIError(404, "branch not found")
         commits = self.branches[branch_name]
-        head = {"id": commits[0]["sha"], "short_id": commits[0]["short_id"]} if commits else None
+        head = (
+            {
+                "id": commits[0]["sha"],
+                "short_id": commits[0]["short_id"],
+                "message": commits[0].get("message", ""),
+            }
+            if commits
+            else None
+        )
         return {"name": branch_name, "commit": head}
+
+    async def get_branch_head(self, project_id: int, branch_name: str) -> str:
+        """Head commit SHA — one lookup, never a paginated history (F28)."""
+        self.calls.append(("get_branch_head", (project_id, branch_name)))
+        commits = self.branches.get(branch_name)
+        if not commits:
+            raise GitLabAPIError(404, "branch not found")
+        return commits[0]["sha"]
 
     async def create_commit(
         self,

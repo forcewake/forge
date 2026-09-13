@@ -9,16 +9,15 @@ simply un-xfail'd and becomes a regular contract test.
 
 Deviations documented here:
 
-1. Raw/unified MR diffs are fetched from
+1. FIXED (F27): raw/unified MR diffs were fetched from
    ``GET /projects/:id/merge_requests/:iid/diffs`` with an undocumented
    ``Accept: text/plain`` request header (upstream
    ``codeward/gitlab/client.py``, ``get_merge_request_raw_diff``). The
-   documented alternatives are:
-   - ``GET /projects/:id/merge_requests/:iid/raw_diffs`` — returns the raw
-     unified diff (gitlab-org/gitlab MR !178813).
-   - ``GET /projects/:id/merge_requests/:iid/diffs?unidiff=true`` — returns
-     diff files whose ``diff`` fields are full unified diffs
-     (parameter introduced in GitLab 16.5).
+   client now uses the documented
+   ``GET /projects/:id/merge_requests/:iid/raw_diffs`` endpoint
+   (gitlab-org/gitlab MR !178813); the legacy header path survives ONLY as
+   the 404 fallback for older CE instances — pinned as a regular contract
+   test below.
    https://docs.gitlab.com/api/merge_requests/#get-merge-request-diff-files
 
 2. The shared request helper retries EVERY method on 500/502/503 (and 429)
@@ -43,13 +42,7 @@ from pytest_httpx import HTTPXMock
 
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 
-from .conftest import BASE, load_fixture
-
-UPSTREAM_RAW_DIFF_REF = (
-    "upstream codeward/gitlab/client.py get_merge_request_raw_diff() calls "
-    "GET /projects/:id/merge_requests/:iid/diffs with an undocumented "
-    "'Accept: text/plain' header"
-)
+from .conftest import BASE
 
 UNIFIED_DIFF_TEXT = (
     "diff --git a/src/auth/rotation.py b/src/auth/rotation.py\n"
@@ -62,34 +55,20 @@ UNIFIED_DIFF_TEXT = (
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        f"{UPSTREAM_RAW_DIFF_REF}; documented alternative is "
-        "GET /projects/:id/merge_requests/:iid/raw_diffs "
-        "(gitlab-org/gitlab !178813), https://docs.gitlab.com/api/merge_requests/"
-    ),
-)
 async def test_raw_diff_uses_documented_raw_diffs_endpoint(
     httpx_mock: HTTPXMock, gitlab_client: GitLabClient
 ) -> None:
-    """get_merge_request_raw_diff must use the documented raw_diffs endpoint.
+    """get_merge_request_raw_diff uses the documented raw_diffs endpoint (F27).
 
-    The documented endpoint for raw unified diff text is
-    ``GET /projects/:id/merge_requests/:iid/raw_diffs``, which serves the
-    same payload as appending ``.diff`` to a merge request URL. The client
-    must not send ``Accept: text/plain`` on the JSON ``/diffs`` endpoint.
+    Was a strict-xfail spec while the client called /diffs with the
+    undocumented ``Accept: text/plain`` header; un-xfail'd now that the
+    documented endpoint
+    (``GET /projects/:id/merge_requests/:iid/raw_diffs``, gitlab-org/gitlab
+    !178813) is the primary path.
     """
-    # The client currently calls /diffs; register it so no retry storm starts.
-    httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/diffs",
-        text="[]",
-    )
-    # The documented raw-diff endpoint the client SHOULD call.
     httpx_mock.add_response(
         url=f"{BASE}/projects/42/merge_requests/7/raw_diffs",
         text=UNIFIED_DIFF_TEXT,
-        is_optional=True,
     )
 
     async with gitlab_client as client:
@@ -102,35 +81,56 @@ async def test_raw_diff_uses_documented_raw_diffs_endpoint(
     assert request.headers.get("accept") != "text/plain"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        f"{UPSTREAM_RAW_DIFF_REF}; documented alternative is "
-        "GET /projects/:id/merge_requests/:iid/diffs?unidiff=true "
-        "(unidiff parameter, GitLab 16.5+), "
-        "https://docs.gitlab.com/api/merge_requests/#get-merge-request-diff-files"
-    ),
-)
-async def test_raw_diff_uses_documented_unidiff_param(
+async def test_raw_diff_falls_back_to_diffs_when_raw_diffs_404s(
     httpx_mock: HTTPXMock, gitlab_client: GitLabClient
 ) -> None:
-    """A raw-diff request to /diffs must pass the documented unidiff=true.
+    """Older CE without raw_diffs (404) falls back to the legacy /diffs path.
 
-    ``unidiff=true`` makes the documented diffs endpoint return diff files
-    whose ``diff`` fields are full unified diffs instead of abbreviated
-    hunks. The client currently sends no ``unidiff`` parameter at all.
+    The fallback keeps the pre-F27 behavior — ``GET .../diffs`` with the
+    undocumented ``Accept: text/plain`` header — so instances older than
+    gitlab-org/gitlab !178813 keep working. A non-404 failure must NOT fall
+    back (the error propagates).
     """
     httpx_mock.add_response(
+        url=f"{BASE}/projects/42/merge_requests/7/raw_diffs",
+        status_code=404,
+    )
+    httpx_mock.add_response(
         url=f"{BASE}/projects/42/merge_requests/7/diffs",
-        json=load_fixture("merge_request_diffs"),
+        text=UNIFIED_DIFF_TEXT,
     )
 
     async with gitlab_client as client:
-        await client.get_merge_request_raw_diff(42, 7)
+        raw = await client.get_merge_request_raw_diff(42, 7)
 
-    request = httpx_mock.get_requests()[-1]
-    assert str(request.url) == f"{BASE}/projects/42/merge_requests/7/diffs"
-    assert request.url.params.get("unidiff") == "true"
+    assert raw == UNIFIED_DIFF_TEXT
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert str(requests[0].url) == f"{BASE}/projects/42/merge_requests/7/raw_diffs"
+    assert str(requests[1].url) == f"{BASE}/projects/42/merge_requests/7/diffs"
+    assert requests[1].headers.get("accept") == "text/plain"  # legacy deviation, fallback only
+
+
+async def test_raw_diff_non_404_error_does_not_fall_back(
+    httpx_mock: HTTPXMock, gitlab_client: GitLabClient
+) -> None:
+    """A 500 on raw_diffs propagates — the fallback is only for missing endpoints."""
+    # A 500 is retryable: one registered response per attempt.
+    for _ in range(3):
+        httpx_mock.add_response(
+            url=f"{BASE}/projects/42/merge_requests/7/raw_diffs",
+            status_code=500,
+        )
+
+    async with gitlab_client as client:
+        with pytest.raises(GitLabAPIError) as excinfo:
+            await client.get_merge_request_raw_diff(42, 7)
+
+    assert excinfo.value.status_code == 500
+    # Every retry stays on raw_diffs — /diffs is never contacted but on 404.
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 3
+    assert all(r.url.path.endswith("raw_diffs") for r in requests)
 
 
 async def test_create_merge_request_is_not_retried_on_503(

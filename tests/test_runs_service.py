@@ -392,3 +392,16 @@ class TestControllerGraphConsistency:
             "ready_for_human",
         ]
         assert (await get_run(db, run_id)).status == FlowStatus.READY_FOR_HUMAN.value
+
+
+async def test_head_checks_use_branch_endpoint_not_commit_history(service, fake_gitlab, db):
+    """F28: reading the target-branch head must NOT paginate commit history.
+
+    _read_base_sha pins the base at planning time; after the F28 switch it
+    is a single branch-object read (get_branch_head), never list_commits.
+    """
+    base = await service._read_base_sha(PROJECT_ID)
+
+    assert base == "base-sha-1"
+    assert fake_gitlab.calls_of("list_commits") == []
+    assert fake_gitlab.calls_of("get_branch_head")

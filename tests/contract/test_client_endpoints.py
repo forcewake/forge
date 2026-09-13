@@ -105,16 +105,15 @@ async def test_get_merge_request_diffs_paginates(
 async def test_get_merge_request_raw_diff(
     httpx_mock: HTTPXMock, gitlab_client: GitLabClient
 ) -> None:
-    """Contract note: current client fetches the raw diff from
-    GET /projects/:id/merge_requests/:mr_iid/diffs with an undocumented
-    ``Accept: text/plain`` request header.
+    """Raw unified diff text comes from the documented raw_diffs endpoint (F27).
 
-    This test records the actual request the client makes; the documented
-    ways to obtain unified diff text (raw_diffs endpoint / unidiff=true) are
-    pinned as strict-xfail specs in test_known_deviations.py.
+    ``GET /projects/:id/merge_requests/:iid/raw_diffs`` serves the same
+    payload as appending ``.diff`` to a merge request URL. The legacy
+    ``Accept: text/plain`` deviation on the JSON ``/diffs`` endpoint only
+    survives as the 404 fallback (older CE), pinned in test_known_deviations.py.
     """
     httpx_mock.add_response(
-        url=f"{BASE}/projects/42/merge_requests/7/diffs",
+        url=f"{BASE}/projects/42/merge_requests/7/raw_diffs",
         text=UNIFIED_DIFF_TEXT,
     )
 
@@ -123,9 +122,10 @@ async def test_get_merge_request_raw_diff(
 
     request = httpx_mock.get_requests()[0]
     assert request.method == "GET"
-    assert str(request.url) == f"{BASE}/projects/42/merge_requests/7/diffs"
-    assert request.headers["accept"] == "text/plain"  # undocumented deviation
+    assert str(request.url) == f"{BASE}/projects/42/merge_requests/7/raw_diffs"
     assert raw.startswith("diff --git a/src/auth/rotation.py")
+    # Only ONE request: the raw endpoint answered, no fallback was touched.
+    assert len(httpx_mock.get_requests()) == 1
 
 
 async def test_list_discussions(httpx_mock: HTTPXMock, gitlab_client: GitLabClient) -> None:
