@@ -84,3 +84,44 @@ Backend selection is tighten-only (ADR-0011): once a project runs with a
 harness backend, switching back to `builtin` is a deliberate operational
 decision, because repair loops and budgets behave differently (builtin runs
 repair with bounded LLM cycles; harness runs block instead).
+
+## Monitoring and triage
+
+**Primary window — the job trace.** The harness runs claude with
+`--output-format stream-json --verbose` redirected into
+`/tmp/claude-events.jsonl`, and the job prints the last 3 KB of that stream
+before reporting `FORGE_RESULT`. Every tool call, API error and retry lands
+in the GitLab job log while the job runs — no SSH needed. A healthy run
+shows a steady stream of assistant/tool events; a stalled stream with
+`api_error ... retryAttempt N` lines means network/provider trouble.
+
+**Timeouts (two layers).** GitLab kills the job at the template `timeout`
+(30m, first line of defence per ADR-0015 §6). Forge independently blocks the
+run `harness_timeout` (infrastructure) after `FORGE_HARNESS_TIMEOUT_SECONDS`
+from the journaled start time — the reconciler enforces it without the job.
+
+**When a run blocks with `harness_*`:**
+1. Open the pipeline of the factory branch → `forge-agent` job → read the
+   `--- agent events (tail) ---` block: it names the failure class
+   (`api_error`+retries = provider/network; permission/system errors = setup).
+2. Verify independently: the run reason distinguishes `harness_no_changes`
+   (head unchanged), `harness_sha_mismatch` (reported head ≠ real head) and
+   `harness_result_missing` (no FORGE_RESULT line) — forge never trusts the
+   harness's own success claim.
+
+**Runner-host triage (unraid/self-hosted, read-only):**
+
+```bash
+ssh <runner-host> 'docker ps --format "{{.Names}}\t{{.Status}}" | grep -i project-<id>'
+docker exec <build-container> ps aux            # claude process alive? CPU time growing?
+docker stats --no-stream <build-container>      # 0% CPU + no log growth = waiting on network
+docker exec <build-container> sh -c 'ls -la /root/.claude/projects/-builds-*/; tail -c 4000 /root/.claude/projects/-builds-*/*.jsonl'
+# the session jsonl is the authoritative agent transcript (api_error, retryAttempt, tool events)
+```
+
+**Known network pattern:** long streaming requests to z.ai from home
+networks can die with `ECONNRESET` after minutes (short requests are fine).
+claude retries up to 10 times; forge's run-level timeout caps the total.
+Mitigations: smaller briefs, `API_TIMEOUT_MS` tuned down (300000 cuts dead
+streams earlier), or route the harness through a local LiteLLM proxy
+(Anthropic-compatible `/v1/messages`) for proxy-side retries and logs.

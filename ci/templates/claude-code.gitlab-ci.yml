@@ -30,7 +30,7 @@ forge-agent:
     - if: '$FORGE_RUN_ID'
   variables:
     ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
-    API_TIMEOUT_MS: "600000"
+    API_TIMEOUT_MS: "300000"
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     # GitLab docker executors run containers as root; claude refuses
     # --dangerously-skip-permissions for root unless told it is sandboxed.
@@ -44,15 +44,22 @@ forge-agent:
     # The task brief: approved plan, written to an ephemeral file (ADR-0012:
     # context passes through GitLab CI variables, not forge-side state).
     - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
-    # Headless harness run. A nonzero exit does not abort the audit trail:
-    # we still report the branch state so forge can verify.
+    # Headless harness run. stream-json pipes every agent event (tool calls,
+    # retries, API errors) into the job trace — live progress in the GitLab
+    # UI instead of SSH archaeology. A nonzero exit does not abort the audit
+    # trail: we still report the branch state so forge can verify.
     - >-
       claude -p "Implement the task described in /tmp/brief.md for issue
       #$FORGE_ISSUE_IID. Work in the current repository. Commit your changes
       with message: forge: implement issue $FORGE_ISSUE_IID (run
       ${FORGE_RUN_ID:0:8}). Do not push." --model "$ANTHROPIC_MODEL"
-      --dangerously-skip-permissions
+      --dangerously-skip-permissions --output-format stream-json --verbose
+      > /tmp/claude-events.jsonl 2>&1
       || echo "claude exited nonzero — verifying branch state anyway"
+    # Tail of the agent event stream lands in the trace: the last events show
+    # what the harness was doing when it stopped (tool call, API error,
+    # retry loop) — the ECONNRESET/timeout class is visible immediately.
+    - 'echo "--- agent events (tail) ---"; tail -c 3000 /tmp/claude-events.jsonl || true; echo "--- end ---"'
     # The harness may or may not have committed. Stage everything and commit
     # ONLY if there are staged changes; never amend or rewrite history.
     - git add -A
