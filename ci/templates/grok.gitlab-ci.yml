@@ -30,7 +30,22 @@ forge-agent:
   rules:
     - if: '$FORGE_RUN_ID'
   before_script:
-    - npm install -g @xai-official/grok
+    # The wrapper declares its platform binary (@xai-official/grok-linux-x64)
+    # as an optionalDependency: when the registry flakes, npm silently skips
+    # it and the CLI hangs forever at startup (silent futex wait, zero
+    # output). Install both explicitly, with retries, and fail loudly if the
+    # binary is missing.
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit @xai-official/grok && break
+        echo "npm install of grok failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+    - GROK_VER="$(grok --version | awk '{print $2}')"
+    - |
+      npm install -g --no-fund --no-audit "@xai-official/grok-linux-x64@${GROK_VER}" \
+        || npm install -g --no-fund --no-audit @xai-official/grok-linux-x64
+    - test -d /usr/local/lib/node_modules/@xai-official/grok-linux-x64
     - grok --version
     - mkdir -p ~/.grok
     - 'printf "%s" "$FORGE_GROK_AUTH" > ~/.grok/auth.json && chmod 600 ~/.grok/auth.json'
