@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-13
+
+### Added — durable step runtime is now the execution path (ADR-0017)
+
+- **Transactional ingress**: `/implement` and `/go` are answered 202 only
+  after the webhook identity and the first scheduled step are committed in
+  one Postgres transaction. Redis is a wake-up accelerator, not the
+  authority; a crash between receive and execution can no longer lose a
+  command (F08).
+- **Atomic step ownership**: due steps are claimed with `FOR UPDATE SKIP
+  LOCKED` + conditional-UPDATE ownership (portable across PG/SQLite),
+  holding a per-step lease (owner, 120s expiry, monotonic fence token)
+  renewed by heartbeat. Zombie workers lose the fenced CAS; completion by
+  a stale owner is rejected (F09/F10).
+- **Full-state recovery**: crash at any transition or after any external
+  effect converges — journaled commits and Draft MRs are adopted on resume,
+  stuck proposing legs are re-driven, missing READY evidence notes are
+  re-posted once (F11). Proven by the new failure-injection suite: two
+  real worker processes on live Postgres, hard-kill at six checkpoints,
+  cancel-vs-publish race, and 10-way concurrent `/implement` — 8/8
+  scenarios, exact effect counting (tests/test_failure_injection.py).
+- **DB invariants**: one nonterminal run per (project, issue) via partial
+  unique index; one gate per (run, generation) (F12).
+
+### Added — approvals and policy (ADR-0018)
+
+- **Immutable RunSpec** frozen at plan acceptance (subject, source base,
+  plan/task digests, extended policy digest, backend config, budgets) — a
+  settings change mid-run cannot silently alter an approved execution;
+  `/go` validates the spec digest (F14).
+- **Pending decision with deadline**: the gate is created at plan
+  publication (`FORGE_DECISION_TTL_SECONDS`, default 7 days) and consumed
+  at `/go`; expired or spec-drifted decisions are invalid (F15).
+- **Admission before spend**: `/implement` from a non-approver is blocked
+  before any LLM call; bot-in-approvers is a config contradiction (F16).
+- **Cancel-as-revoke**: cancel withdraws scheduled steps, stands down an
+  in-flight proposal, and marks late harness results superseded (F13).
+- **Verification profile**: empty required-jobs is an explicit warning
+  (never a silent pass); branch head re-checked after review — drift
+  blocks `candidate_drift_after_review` (F19).
+
+### Migration
+
+- Alembic 005 (step runtime columns + invariants) and 006 (run_specs,
+  gate digests, cancel_requested). Migrate before starting the new app/
+  worker (see docs/operations/upgrade.md).
+
 ## [0.1.1] - 2026-09-13
 
 ### Fixed — Stage A safety hotfix (external review, docs/reviews/2026-09-13-v0.1.0/)
