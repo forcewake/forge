@@ -13,12 +13,16 @@ WORKDIR /app
 RUN mkdir -p /app/data /app/.cache/uv
 
 # Dependencies first: this layer only invalidates when the lockfile changes.
+# The postgres extra ships asyncpg — the production database profile (F25).
 COPY pyproject.toml uv.lock README.md ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --extra postgres
 
-# Application source
+# Application source + runtime assets (agent definitions, flows, migrations)
 COPY src /app/src
-RUN uv sync --frozen --no-dev \
+COPY agents /app/agents
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+RUN uv sync --frozen --no-dev --extra postgres \
     && useradd -u 1000 -m forge \
     && chown -R forge:forge /app/data /app/.cache
 

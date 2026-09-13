@@ -93,6 +93,20 @@ class Settings(BaseSettings):
     # Agno telemetry (disabled for self-hosted)
     AGNO_TELEMETRY: bool = False
 
+    # --- GitHub source adapter (ADR-0019 first slice) -----------------------
+    # Fail closed: the GitHub webhook ingress is only mounted when enabled AND
+    # the webhook secret is set — an unsigned delivery is never accepted.
+    FORGE_GITHUB_ENABLED: bool = False
+    FORGE_GITHUB_API_URL: str = "https://api.github.com"
+    # GitHub App identity (ADR-0019 §3: the private key stays server-side —
+    # never in a harness job, never in repo config).
+    FORGE_GITHUB_APP_ID: str = ""
+    FORGE_GITHUB_PRIVATE_KEY: SecretStr | None = None
+    FORGE_GITHUB_INSTALLATION_ID: str = ""
+    # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
+    # ingress disabled (503), matching the fail-closed MCP pattern above.
+    FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None
+
 
 class ForgeConfig:
     """Optional YAML-based configuration loaded from forge.yml.

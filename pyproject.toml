@@ -19,6 +19,10 @@ dependencies = [
     "redis==7.4.0",
     "litellm<=1.82.0",
     "mcp==1.26.0",
+    # GitHub App auth (ADR-0019 slice): JWT minting + RS256 signing.
+    # pyjwt already arrives transitively (agno/litellm), so this direct
+    # dependency is trivially safe — forge.integrations.github imports it.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [dependency-groups]
@@ -34,6 +38,8 @@ dev = [
 [project.optional-dependencies]
 postgres = ["asyncpg==0.31.0"]
 mysql = ["aiomysql==0.3.2"]
+# GitHub source adapter (ADR-0019): RS256 JWT signing needs the crypto extra.
+github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
 
 [build-system]
 requires = ["hatchling"]
