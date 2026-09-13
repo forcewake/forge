@@ -123,6 +123,37 @@ class TestGatewayRouting:
         assert task.metadata["command"] == "go"
         assert run_id in task.metadata["note_text"]
 
+    async def test_bare_implement_note_without_mention_is_routed(self, app, client):
+        """A bare /implement (no @mention) must reach the run loop, not the
+        legacy path — extract_mention only parses mentions, and the legacy
+        path silently ignores issue notes (observed live on the lab)."""
+        resp = await client.post(
+            "/webhook", json=note_payload("/implement"), headers=webhook_headers()
+        )
+
+        assert resp.json()["run_command"] is True
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "run_command"
+        assert task.metadata["command"] == "start_run"
+
+    async def test_bare_go_note_without_mention_is_routed(self, app, client):
+        run_id = "b" * 32
+        resp = await client.post(
+            "/webhook", json=note_payload(f"/go {run_id}"), headers=webhook_headers()
+        )
+
+        assert resp.json()["run_command"] is True
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.metadata["command"] == "go"
+
+    async def test_bare_unknown_command_keeps_legacy_path(self, app, client):
+        resp = await client.post(
+            "/webhook", json=note_payload("/explain something"), headers=webhook_headers()
+        )
+        assert resp.json().get("run_command") is None
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "event"
+
     async def test_duplicate_implement_note_is_deduplicated(self, app, client):
         app.state.task_queue.is_duplicate = AsyncMock(return_value=True)
         resp = await client.post(

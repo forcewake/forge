@@ -47,12 +47,20 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         return None
 
     mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
-    mention = extract_mention(
-        event.object_attributes.note or "",
-        mention_pattern,
-        extra_commands=_RUN_COMMANDS,
-    )
-    if not mention.is_mention or mention.slash_command not in _RUN_COMMANDS:
+    note_text = (event.object_attributes.note or "").strip()
+    mention = extract_mention(note_text, mention_pattern, extra_commands=_RUN_COMMANDS)
+
+    slash_command: str | None = None
+    if mention.is_mention and mention.slash_command in _RUN_COMMANDS:
+        slash_command = mention.slash_command
+    else:
+        # Bare commands are equally valid: extract_mention only parses
+        # @mentions, so requiring one here silently rerouted "/implement"
+        # notes into the legacy path, where nothing handles them.
+        first_token = note_text.split(None, 1)[0] if note_text else ""
+        if first_token in _RUN_COMMANDS:
+            slash_command = first_token
+    if slash_command is None:
         return None
 
     common = {
@@ -61,7 +69,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         "author_username": event.user.username if event.user else "",
         "author_user_id": event.user.id if event.user else 0,
     }
-    if mention.slash_command == "/implement":
+    if slash_command == "/implement":
         # M1 cutover: /implement takes the durable RunService path, not flows.
         return {**common, "command": "start_run"}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
