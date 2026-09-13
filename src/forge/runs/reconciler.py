@@ -22,11 +22,17 @@ async def run_reconciler(
     interval_seconds: float = 15,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Reconcile ``waiting_ci`` and ``waiting_harness`` runs until shutdown."""
+    """Reconcile waiting_ci, waiting_harness and crashed evidence notes until shutdown."""
     shutdown_event = shutdown_event or asyncio.Event()
     logger.info("Run reconciler started (interval=%ss)", interval_seconds)
     while not shutdown_event.is_set():
-        for evaluate in (service.evaluate_waiting_ci, service.evaluate_waiting_harness):
+        for evaluate in (
+            service.evaluate_waiting_ci,
+            service.evaluate_waiting_harness,
+            # ADR-0017 §5: re-post the evidence note for runs that reached
+            # ready_for_human before their worker died mid-announcement.
+            service.evaluate_ready_evidence,
+        ):
             try:
                 await evaluate()
             except Exception:

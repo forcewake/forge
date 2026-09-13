@@ -39,6 +39,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -50,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.config import ForgeConfig, Settings
 from forge.durable import (
     TRANSITION_EVENT_TYPE,
+    ActionLog,
     Controller,
     FlowRun,
     FlowStatus,
@@ -95,6 +97,13 @@ GATE_TTL_SECONDS = 3600
 
 #: ADR-0018 §1 (F14): schema version of the RunSpec document written here.
 RUN_SPEC_SCHEMA_VERSION = 1
+
+#: ADR-0017 §3: pre-CI states a crashed worker leaves a run in after the gate
+#: was consumed. A re-delivered or re-claimed ``/go`` command step does not
+#: ignore these — it re-drives the advance leg (the recovery driver).
+_RESUMABLE_ADVANCE_STATUSES = frozenset(
+    {"proposing", "validating", "committing", "ensuring_draft_mr"}
+)
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
@@ -528,6 +537,7 @@ class RunService:
             return
         run_id = match.group(1).lower()
         now = now or datetime.now(timezone.utc)
+        resuming = False
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -538,63 +548,85 @@ class RunService:
             if run.issue_iid != issue_iid:
                 logger.info("/go for run %s posted on a different issue — ignoring", run_id[:8])
                 return
-            if run.status != FlowStatus.WAITING_APPROVAL.value:
+            if run.status in _RESUMABLE_ADVANCE_STATUSES:
+                # ADR-0017 §3: the gate is consumed and a crashed worker left
+                # the run mid-advance; the re-claimed command step is the
+                # recovery driver. The leg below looks for the
+                # already-existing effects before creating new ones.
+                resuming = True
+            elif run.status != FlowStatus.WAITING_APPROVAL.value:
                 # Already advanced (or terminal) — duplicate /go delivery.
                 logger.info(
                     "/go for run %s in status %s — ignoring duplicate", run_id[:8], run.status
                 )
                 return
 
-            # ADR-0009: authority comes from trusted configuration, not authorship.
-            if author_username not in self._approvers():
-                logger.info(
-                    "/go from @%s who is not in FORGE_APPROVERS — ignoring", author_username
-                )
-                return
-
-            gate = (
-                (
-                    await session.execute(
-                        select(GateApproval)
-                        .where(GateApproval.flow_run_id == run.id)
-                        .order_by(GateApproval.id.desc())
+            if not resuming:
+                # ADR-0009: authority comes from trusted configuration, not authorship.
+                if author_username not in self._approvers():
+                    logger.info(
+                        "/go from @%s who is not in FORGE_APPROVERS — ignoring", author_username
                     )
-                )
-                .scalars()
-                .first()
-            )
-            if gate is None:
-                # F15 (ADR-0018 §2): decisions are created at plan publication —
-                # a /go without a pending decision has nothing to consume.
-                logger.info("No pending decision for run %s — ignoring /go", run_id[:8])
-                return
-            if not is_valid(
-                gate,
-                now,
-                plan_digest=run.plan_digest or "",
-                base_sha=run.base_sha or "",
-                policy_digest=self._policy_digest(),
-                spec_digest=run.spec_digest,
-            ):
-                logger.info("Decision for run %s is expired/invalid — ignoring /go", run_id[:8])
-                return
-            # The decision was opened anonymously at plan publication; record
-            # who consumed it.
-            gate.approver_user_id = author_user_id
-            try:
-                await consume_approval(session, gate.id, now)
-            except GateAlreadyConsumed:
-                logger.info("Gate for run %s already consumed — ignoring", run_id[:8])
-                return
+                    return
 
-            await controller.transition(
-                run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
+                gate = (
+                    (
+                        await session.execute(
+                            select(GateApproval)
+                            .where(GateApproval.flow_run_id == run.id)
+                            .order_by(GateApproval.id.desc())
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if gate is None:
+                    # F15 (ADR-0018 §2): decisions are created at plan publication —
+                    # a /go without a pending decision has nothing to consume.
+                    logger.info("No pending decision for run %s — ignoring /go", run_id[:8])
+                    return
+                if not is_valid(
+                    gate,
+                    now,
+                    plan_digest=run.plan_digest or "",
+                    base_sha=run.base_sha or "",
+                    policy_digest=self._policy_digest(),
+                    spec_digest=run.spec_digest,
+                ):
+                    logger.info("Decision for run %s is expired/invalid — ignoring /go", run_id[:8])
+                    return
+                # The decision was opened anonymously at plan publication; record
+                # who consumed it.
+                gate.approver_user_id = author_user_id
+                try:
+                    await consume_approval(session, gate.id, now)
+                except GateAlreadyConsumed:
+                    logger.info("Gate for run %s already consumed — ignoring", run_id[:8])
+                    return
+
+                await controller.transition(
+                    run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
+                )
+                # ADR-0015: the backend frozen at run start decides the advance leg.
+                backend_name = (
+                    str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+                )
+                await session.commit()
+
+        if resuming:
+            backend_name = str((run.evidence or {}).get("backend") or "").strip() or (
+                self._backend_name()
             )
-            # ADR-0015: the backend frozen at run start decides the advance leg.
-            backend_name = (
-                str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+            logger.info(
+                "Run %s found %s after a worker crash — resuming the advance leg",
+                run_id[:8],
+                run.status,
             )
-            await session.commit()
+            if is_harness_backend(backend_name):
+                await self._advance_harness(project_id, run_id)
+            else:
+                await self._advance_proposal(project_id, run_id)
+            return
 
         logger.info("Gate for run %s consumed by @%s — advancing", run_id[:8], author_username)
         if is_harness_backend(backend_name):
@@ -649,7 +681,11 @@ class RunService:
         """Run one propose → validate → commit → MR cycle (initial or repair).
 
         The caller has already moved the run to ``proposing`` (post-gate or
-        repair re-entry) and bumped ``commit_cycle`` for repairs.
+        repair re-entry) and bumped ``commit_cycle`` for repairs. A crash
+        resume may enter mid-leg instead (the run already sat in
+        ``validating``/``committing``/``ensuring_draft_mr``): stages already
+        left behind are not re-entered — the walk continues from where the
+        durable state says it is (ADR-0017 §3).
         """
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
@@ -660,6 +696,8 @@ class RunService:
             # cycle 1's files and its update would roll work back. The
             # source base stays frozen for full-result review.
             attempt_base = (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
+            entry_status = run.status
+        mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
 
         issue_title = await self._read_issue_title(project_id, run)
         try:
@@ -682,7 +720,8 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
             return
 
-        await self._transition(run_id, FlowStatus.VALIDATING)
+        if not mid_leg:
+            await self._transition(run_id, FlowStatus.VALIDATING)
 
         # validating: trusted ADR-0001 validation; violations block the run.
         git_base = await self._fetch_git_base(
@@ -695,7 +734,8 @@ class RunService:
             )
             return
 
-        await self._transition(run_id, FlowStatus.COMMITTING)
+        if not mid_leg:
+            await self._transition(run_id, FlowStatus.COMMITTING)
 
         # committing: journaled, reconcilable write (ADR-0005). The factory
         # branch is cut from the FROZEN attempt base (review F03) — never
@@ -711,23 +751,35 @@ class RunService:
                 run_id[:8],
             )
             return
-        try:
-            result = await writer.apply(
-                run_id,
-                changeset,
-                start_ref=attempt_base,
-                expected_head=attempt_base,
+        # ADR-0017 §3: look for the already-existing effect before creating a
+        # new one — a crashed attempt may have landed the commit after the
+        # journal recorded it but before the run state caught up.
+        commit_sha = await self._committed_candidate(run_id, project_id, changeset.branch)
+        if commit_sha is not None:
+            logger.info(
+                "Run %s adopting committed candidate %s — no second commit",
+                run_id[:8],
+                commit_sha[:8],
             )
-        except GitLabAPIError as exc:
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
-            return
-        if result.outcome is WriteOutcome.UNKNOWN:
-            # Unknown outcome: block the run, never blind-retry (ADR-0005).
-            await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
-            return
-        commit_sha = result.commit_sha
+        else:
+            try:
+                result = await writer.apply(
+                    run_id,
+                    changeset,
+                    start_ref=attempt_base,
+                    expected_head=attempt_base,
+                )
+            except GitLabAPIError as exc:
+                await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
+                return
+            if result.outcome is WriteOutcome.UNKNOWN:
+                # Unknown outcome: block the run, never blind-retry (ADR-0005).
+                await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
+                return
+            commit_sha = result.commit_sha
 
-        await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
+        if entry_status != FlowStatus.ENSURING_DRAFT_MR.value:
+            await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
 
         # ensuring_draft_mr: Draft MR before CI (ADR-0007). On a repair the MR
         # already exists — update it instead of creating a second one.
@@ -735,6 +787,11 @@ class RunService:
             run = await session.get(FlowRun, run_id)
             mr_iid = run.mr_iid
             cycle = run.commit_cycle or 1
+        if mr_iid is None:
+            # ADR-0017 §3: a crashed attempt may have created the Draft MR
+            # already (its intent/outcome is journaled) — adopt it, never
+            # create a second MR for the run.
+            mr_iid = await self._journaled_draft_mr(run_id, project_id, changeset.branch)
         try:
             if mr_iid is not None:
                 await self._update_draft_mr(
@@ -919,6 +976,75 @@ class RunService:
             {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
         )
         return int(mr["iid"])
+
+    async def _committed_candidate(self, run_id: str, project_id: int, branch: str) -> str | None:
+        """The candidate a crashed attempt already committed on *branch* (ADR-0017 §3).
+
+        The journaled ``commit`` action is the durable record of the write: a
+        succeeded row carries the sha even when the process died before the
+        run state caught up. The sha is adopted only when it is NOT yet
+        accounted for in ``candidate_shas`` (otherwise this is a repair cycle,
+        which must write a NEW candidate) and is still the live branch head
+        (otherwise the branch drifted and the guarded apply must decide).
+        """
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "commit",
+                            ActionLog.correlation_id == branch,
+                            ActionLog.status == "succeeded",
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            sha = str(((row.remote_result or {}).get("sha") if row is not None else "") or "")
+            if not sha:
+                return None
+            run = await session.get(FlowRun, run_id)
+            if run is not None and sha in list(run.candidate_shas or []):
+                return None  # repair cycle — this commit is accounted for
+        try:
+            commits = await self._gitlab.list_commits(project_id, branch)
+        except GitLabAPIError:
+            return None  # cannot verify — let the drift-guarded apply decide
+        return sha if commits and commits[0]["sha"] == sha else None
+
+    async def _journaled_draft_mr(self, run_id: str, project_id: int, branch: str) -> int | None:
+        """The Draft MR a crashed attempt already created, if it still exists (ADR-0017 §3)."""
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "create_merge_request",
+                            ActionLog.correlation_id == branch,
+                            ActionLog.status == "succeeded",
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        raw = (row.remote_result or {}).get("mr_iid") if row is not None else None
+        if raw is None:
+            return None
+        try:
+            await self._gitlab.get_merge_request(project_id, int(raw))
+        except GitLabAPIError:
+            return None  # the journaled MR is gone — create a fresh one
+        return int(raw)
 
     async def _update_draft_mr(
         self,
@@ -1491,6 +1617,81 @@ class RunService:
             run_id[:8],
             sha[:8],
         )
+
+    async def evaluate_ready_evidence(self) -> None:
+        """Recover runs already READY whose evidence note never got posted.
+
+        Crash window (ADR-0017 §5): the ``ready_for_human`` transition
+        committed but the process died before the journaled evidence note even
+        started — no ``post_evidence_note`` action row exists. A note whose
+        posting DID begin has a journal row and is left alone: its outcome is
+        the journal's to answer, never a blind re-post (ADR-0005).
+        """
+        async with self._session_factory() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(FlowRun.status == FlowStatus.READY_FOR_HUMAN.value)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            journaled = set(
+                (
+                    await session.execute(
+                        select(ActionLog.flow_run_id).where(
+                            ActionLog.action_kind == "post_evidence_note"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run in runs:
+            if run.id in journaled:
+                continue
+            try:
+                await self._post_missing_evidence_note(run.id)
+            except Exception:
+                # One broken run must not stall the recovery pass.
+                logger.exception("Evidence-note recovery failed for run %s", run.id[:8])
+
+    async def _post_missing_evidence_note(self, run_id: str) -> None:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            sha = (run.candidate_shas or [""])[-1]
+            plan_digest = run.plan_digest or ""
+            mr_iid = run.mr_iid
+            project_id = run.project_id
+            issue_iid = run.issue_iid
+            pipeline_evidence = dict((run.evidence or {}).get("pipeline") or {})
+            review = dict((run.evidence or {}).get("review") or {})
+        if not sha:
+            logger.warning(
+                "Ready run %s has no candidate sha — cannot recover evidence", run_id[:8]
+            )
+            return
+        pipeline = SimpleNamespace(
+            id=pipeline_evidence.get("id"),
+            status=str(pipeline_evidence.get("status") or "unknown"),
+            web_url=pipeline_evidence.get("url"),
+        )
+        mr_url = await self._read_mr_url(project_id, mr_iid)
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            self._evidence_comment(
+                mr_url,
+                sha,
+                pipeline,
+                plan_digest,
+                review_summary=str(review.get("summary") or "") or None,
+            ),
+            run_id,
+            "post_evidence_note",
+        )
+        logger.warning("Run %s: recovered the evidence note after a crash", run_id[:8])
 
     # ------------------------------------------------------------------
     # Helpers
