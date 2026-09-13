@@ -85,6 +85,13 @@ harness backend, switching back to `builtin` is a deliberate operational
 decision, because repair loops and budgets behave differently (builtin runs
 repair with bounded LLM cycles; harness runs block instead).
 
+## Available harness templates
+
+| Template | Harness | Provider protocol | Notes |
+|---|---|---|---|
+| `ci/templates/opencode.gitlab-ci.yml` | opencode | OpenAI-compatible (`/chat/completions`) | validated live on GLM via z.ai coding endpoint; tool loops complete in tens of seconds |
+| `ci/templates/claude-code.gitlab-ci.yml` | claude code | Anthropic-compatible (`/v1/messages`) | validated for short prompts; long streaming turns can hit connection resets on some networks — stream-json events land in the trace for diagnosis |
+
 ## Monitoring and triage
 
 **Primary window — the job trace, live.** The harness runs claude with

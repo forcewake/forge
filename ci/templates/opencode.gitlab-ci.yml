@@ -1,0 +1,85 @@
+# forge implementer harness — opencode (ADR-0015)
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/opencode.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block.
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   ZAI_API_KEY        provider API key for the coding endpoint
+#   FORGE_BOT_TOKEN    bot PAT with write access to the factory branch
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Result contract (ADR-0015 §3): the job commits and pushes to the factory
+# branch it was started on, then prints a machine-readable last line:
+#   FORGE_RESULT:{"head": "<sha>", "summary": "..."}
+# forge verifies the branch head independently and never trusts this claim.
+
+forge-agent:
+  image: node:22-bookworm
+  timeout: 30m
+  rules:
+    - if: '$FORGE_RUN_ID'
+  before_script:
+    - curl -fsSL https://opencode.ai/install | bash
+    - export PATH="$HOME/.opencode/bin:$PATH"
+    - opencode --version
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_TOKEN}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+    # Global opencode config: OpenAI-compatible provider pointed at the
+    # coding endpoint; the key is read from the CI variable at load time
+    # ({env:...} expansion) and never written into the repo. __MODEL__ is
+    # substituted from the FORGE_HARNESS_MODEL pipeline variable.
+    - |
+      mkdir -p ~/.config/opencode
+      cat > ~/.config/opencode/opencode.json <<'EOF'
+      {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+          "zai": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Z.AI Coding Plan",
+            "options": {
+              "baseURL": "https://api.z.ai/api/coding/paas/v4",
+              "apiKey": "{env:ZAI_API_KEY}"
+            },
+            "models": {
+              "__MODEL__": { "name": "forge harness model" }
+            }
+          }
+        },
+        "model": "zai/__MODEL__"
+      }
+      EOF
+      sed -i "s/__MODEL__/${FORGE_HARNESS_MODEL}/g" ~/.config/opencode/opencode.json
+  script:
+    # The task brief: approved plan, written to an ephemeral file (ADR-0012:
+    # context passes through GitLab CI variables, not forge-side state).
+    - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
+    # Headless harness run. opencode streams its own progress to the trace.
+    # A nonzero exit does not abort the audit trail: we still report the
+    # branch state so forge can verify.
+    - |
+      opencode run "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push."
+    # The harness may or may not have committed. Stage everything and commit
+    # ONLY if there are staged changes; never amend or rewrite history.
+    - git add -A
+    - |
+      if ! git diff --cached --quiet; then
+        git commit -m "forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8})"
+      fi
+    # Push the factory branch. With no changes this is a harmless no-op
+    # ("Everything up-to-date") — forge detects the unchanged head and
+    # classifies it as harness_no_changes.
+    - git push origin "HEAD:${CI_COMMIT_REF_NAME}"
+    # Machine-readable result. head == base sha ⇒ no changes were made;
+    # anything else must match the real branch head or forge rejects it.
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"done\"}\n" "$(git rev-parse HEAD)"'
