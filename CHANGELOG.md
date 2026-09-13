@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-13
+
+### Fixed — Stage A safety hotfix (external review, docs/reviews/2026-09-13-v0.1.0/)
+
+- **F01 (P0):** ChangeSet materialization no longer operates on truncated
+  blobs — updates to large files cannot silently drop their tail;
+  oversized files refuse instead of truncating.
+- **F02:** repair cycles build on the last verified candidate
+  (`attempt_base`), not the original approved base.
+- **F03 (P0):** factory branches are cut from the frozen attempt base with
+  an expected-head check (`BranchDriftError`) before committing.
+- **F06 (P0):** pipeline / merge-request / note POSTs no longer auto-retry
+  (non-idempotent: lost responses are reconciled, not repeated).
+- **F07:** unknown commit outcomes resolve by operation marker + parent
+  OID; a previous cycle's commit can never be misattributed.
+- **F17:** the durable CI deadline fires even for a permanently running
+  pipeline or a failing API.
+- **F18:** empty / canceled-only CI evidence classifies as `unknown` and
+  never triggers an LLM repair.
+- **F24:** `ForgeConfig` deep-copies nested defaults (no cross-instance
+  mutation).
+- **F05 (P0):** the MCP server is fail-closed — not mounted without
+  `FORGE_MCP_KEY`; explicit `FORGE_MCP_ENABLED` opt-out.
+
 ## [0.1.0] - 2026-09-13
 
 First tagged milestone: the durable factory loop, live-accepted end-to-end
