@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-13
+
+### Added — proposal-only harnesses and the trusted publisher (ADR-0016)
+
+- **No write credentials in the execution lane**: harness jobs check out the
+  frozen attempt base (detached), run the driver with push disabled by
+  construction (`git remote set-url --push origin FORBIDDEN`), and upload
+  their result as CI artifacts. `FORGE_BOT_READ_TOKEN` (read-only) replaces
+  the write token in the lane; `forge doctor` fails when a write token is
+  exposed to it (F04/F21).
+- **CandidateBundle**: the runner produces a `git diff --binary` artifact
+  plus meta (attempt base, driver, model, exit classification, usage); the
+  backend parses it with a strict no-fuzz unified-diff applier against
+  authoritative base blobs — binaries, renames and oversize files are
+  rejected explicitly (F20).
+- **Trusted publisher** (src/forge/runs/publisher.py): grant check (cancel/
+  spec digest/fence) → policy validation → single journaled write with
+  expected_head. Builtin proposals route through the same validation.
+  Nonzero driver exits are never adopted; no-op repairs block as
+  `repair_no_effect` (F20).
+- **Usage receipts** (F22): harness usage lands in `llm_calls` with
+  driver/model/completeness (exact | aggregate | unknown — never
+  fabricated); migration 007.
+
+### Changed
+
+- All three harness templates (Claude Code, opencode, Grok) reworked to the
+  candidate contract; live-verified end-to-end on the lab: red smoke on the
+  seeded bug → bounded repair → review → ready_for_human, with usage
+  receipts recorded per attempt.
+
 ## [0.2.0] - 2026-09-13
 
 ### Added — durable step runtime is now the execution path (ADR-0017)
