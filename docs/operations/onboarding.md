@@ -17,9 +17,11 @@ Confirm before touching CI:
 
 ## 2. Bot identity and permissions
 
-- Bot user (e.g. `forge`) with a project-scoped PAT (`FORGE_BOT_TOKEN`,
-  `api` scope, 90-day expiry recommended — see
-  [token-rotation.md](token-rotation.md)).
+- Bot user (e.g. `forge`) with a project-scoped PAT — in forge's env only
+  (`FORGE_BOT_TOKEN`, `api` scope, 90-day expiry recommended — see
+  [token-rotation.md](token-rotation.md)). The harness lane never receives
+  it: optionally give the lane a READ-ONLY project PAT
+  (`FORGE_BOT_READ_TOKEN`, ADR-0016).
 - Target branch (`main`) protected: **Maintainers may merge; nobody pushes**.
   The bot works exclusively on `factory/<issue-iid>/<run-id>` branches.
 - Bot is NOT given merge rights on the target branch — that is the enforced
@@ -36,7 +38,7 @@ If forge runs on a LAN address, the GitLab admin setting
 
 | Variable | Notes |
 |----------|-------|
-| `FORGE_BOT_TOKEN` | masked; bot PAT, write to `factory/*` branches |
+| `FORGE_BOT_READ_TOKEN` | optional; masked; READ-ONLY PAT (repo read). Never put a write token in the lane (ADR-0016) — the trusted publisher is the only writer |
 | harness credential | `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`, or `ZAI_API_KEY`, or `FORGE_GROK_AUTH` — exactly the backend chosen below |
 | `FORGE_HARNESS_HTTPS_PROXY` | optional; only when the runner network throttles AI streams |
 

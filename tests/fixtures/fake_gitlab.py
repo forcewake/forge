@@ -24,6 +24,7 @@ class FakeGitLab:
         self.pipeline_jobs: dict[int, list[dict]] = {}  # pipeline id -> job dicts
         self.pipeline_variables: list[dict] = []  # journal of create_pipeline variables
         self.job_logs: dict[int, str] = {}  # job id -> raw log text
+        self.job_artifacts: dict[int, dict[str, bytes]] = {}  # job id -> path -> bytes
         self.notes: list[dict] = []  # issue notes
         self.mr_notes: list[dict] = []  # merge-request notes
         self.issues: dict[int, dict] = {}
@@ -50,8 +51,12 @@ class FakeGitLab:
         self.calls.append(("create_branch", (project_id, branch_name, ref)))
         if branch_name in self.branches:
             raise GitLabAPIError(400, f"branch {branch_name} already exists")
-        # Real GitLab: a branch created from a SHA has that commit as head.
-        seed = next((c for cs in self.branches.values() for c in cs if c["sha"] == ref), None)
+        # Real GitLab resolves *ref* to a commit: a branch name → that
+        # branch's head; a SHA → the commit with that sha.
+        if self.branches.get(ref):
+            seed = self.branches[ref][0]
+        else:
+            seed = next((c for cs in self.branches.values() for c in cs if c["sha"] == ref), None)
         self.branches[branch_name] = [dict(seed)] if seed else []
         return {"name": branch_name, "commit": dict(seed) if seed else None}
 
@@ -235,6 +240,23 @@ class FakeGitLab:
 
     def set_job_log(self, job_id: int, log: str) -> None:
         self.job_logs[job_id] = log
+
+    # -- job artifacts (ADR-0016 candidate bundle) ----------------------------
+
+    def seed_job_artifact(self, job_id: int, path: str, content: str | bytes) -> None:
+        """Seed a single artifact file for a job (archive-path keyed)."""
+        self.job_artifacts.setdefault(job_id, {})[path] = (
+            content.encode("utf-8") if isinstance(content, str) else content
+        )
+
+    async def get_job_artifacts_file(
+        self, project_id: int, job_id: int, artifact_path: str
+    ) -> bytes:
+        self.calls.append(("get_job_artifacts_file", (project_id, job_id, artifact_path)))
+        artifact = self.job_artifacts.get(job_id, {}).get(artifact_path)
+        if artifact is None:
+            raise GitLabAPIError(404, f"artifact {artifact_path} not found")
+        return artifact
 
     # -- merge requests -------------------------------------------------------
 

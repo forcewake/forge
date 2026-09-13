@@ -57,6 +57,7 @@ from forge.durable import (
     FlowStatus,
     GateApproval,
     GateAlreadyConsumed,
+    LLMCall,
     Outbox,
     RunSpec,
     StepRun,
@@ -86,6 +87,7 @@ from forge.runs.backends import (
     is_harness_backend,
 )
 from forge.runs.ci_contract import classify_failure
+from forge.runs.publisher import publish_candidate
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import VerificationProfile
 from forge.runs.verification import evaluate as evaluate_verification
@@ -1551,38 +1553,91 @@ class RunService:
         project_id: int,
         outcome: HarnessOutcome,
     ) -> None:
-        """Verified harness head → committing → Draft MR → waiting_ci.
+        """Well-formed candidate bundle → publish → Draft MR → waiting_ci.
 
-        The verified branch head SHA becomes the candidate (appended to
-        ``candidate_shas``) — forge makes **no** commit of its own; the
-        harness's commits are already on the branch (ADR-0015). From
-        ``waiting_ci`` the existing quality-contract → review → evidence
-        flow takes over, unchanged.
+        The bundle goes through the trusted publisher (ADR-0016 §2): grant,
+        spec digest and fence checks, strict materialization against the
+        authoritative attempt-base blobs, policy validation, then ONE
+        journaled commit via the ChangesetWriter pinned to the attempt base
+        — forge's write is the only write, ever. From ``waiting_ci`` the
+        existing quality-contract → review → evidence flow takes over,
+        unchanged.
         """
-        sha = outcome.commit_sha or ""
-        # F13 (ADR-0018 §4): a verified candidate for a cancelled run is
-        # superseded — recorded as evidence only; it can never become a
-        # commit/MR because the publication grant is gone. The run stays
-        # cancelled even if the harness could not be stopped.
+        bundle = outcome.bundle
+        # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
+        # recorded as evidence only; it can never become a commit/MR because
+        # the publication grant is gone. The run stays cancelled even if the
+        # harness could not be stopped.
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
         if revoked:
             await self._merge_run_evidence(
-                run_id, {"superseded": {"reason": "cancelled", "sha": sha}}
+                run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled",
+                        "attempt_base": bundle.attempt_base_oid,
+                    }
+                },
             )
             logger.info(
-                "Run %s cancelled — verified harness change %s recorded as superseded",
+                "Run %s cancelled — harness candidate on %s recorded as superseded",
                 run_id[:8],
-                sha[:8],
+                bundle.attempt_base_oid[:8],
             )
             return
+
         await self._transition(
-            run_id, FlowStatus.COMMITTING, reason=f"harness change verified {sha[:8]}"
+            run_id,
+            FlowStatus.COMMITTING,
+            reason=f"publishing harness candidate on {bundle.attempt_base_oid[:8]}",
         )
+
+        # Stage-B fence reused via a callable (ADR-0017): the publication is
+        # abandoned unless the run is still the COMMITTING run we just made
+        # it — a cancel or a state move between transition and write fences
+        # the publisher out.
+        async def _fence_valid() -> bool:
+            async with self._session_factory() as session:
+                run = await session.get(FlowRun, run_id)
+                if run is None:
+                    return False
+                if run.cancel_requested or run.status == FlowStatus.CANCELLED.value:
+                    return False
+                return run.status == FlowStatus.COMMITTING.value
+
+        writer = self._writer_class(self._gitlab, self._session_factory, project_id)
+        result = await publish_candidate(
+            gitlab=self._gitlab,
+            session_factory=self._session_factory,
+            writer=writer,
+            run=run,
+            bundle=bundle,
+            fence_check=_fence_valid,
+        )
+        if not result.ok:
+            if result.unknown_outcome:
+                # The commit MAY exist: block as failed, never blind-retry.
+                await self._to_terminal(run_id, FlowStatus.FAILED, result.reason)
+            else:
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, f"candidate_rejected: {result.reason}"
+                )
+            return
+        sha = result.commit_sha or ""
         await self._merge_run_evidence(
-            run_id, {"harness_change": {"sha": sha, "summary": outcome.summary}}
+            run_id,
+            {
+                "harness_change": {"sha": sha, "summary": outcome.summary},
+                "published_candidate": {
+                    "sha": sha,
+                    "attempt_base": bundle.attempt_base_oid,
+                    "entries": len(bundle.entries),
+                },
+            },
         )
+        await self._record_harness_usage(run_id, bundle)
         await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
 
         async with self._session_factory() as session:
@@ -1613,10 +1668,40 @@ class RunService:
             await session.commit()
 
         logger.info(
-            "Run %s adopted verified harness change %s — waiting for CI",
+            "Run %s published harness candidate %s — waiting for CI",
             run_id[:8],
             sha[:8],
         )
+
+    async def _record_harness_usage(self, run_id: str, bundle) -> None:
+        """F22 lite: one ``llm_calls`` row per published harness candidate.
+
+        The receipt comes from the parsed event stream (candidate.meta.json);
+        unknown counts stay NULL — never zero, never fabricated.
+        """
+        usage = bundle.usage
+        async with self._session_factory() as session:
+            session.add(
+                LLMCall(
+                    flow_run_id=run_id,
+                    role="implementer",
+                    provider="ci_harness",
+                    model=(
+                        usage.model
+                        if usage is not None and usage.model
+                        else str(
+                            getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "unknown"
+                        )
+                    ),
+                    status="ok",
+                    input_tokens=usage.input_tokens if usage is not None else None,
+                    output_tokens=usage.output_tokens if usage is not None else None,
+                    cached_tokens=usage.cached_input_tokens if usage is not None else None,
+                    driver=usage.driver if usage is not None else None,
+                    completeness=usage.completeness if usage is not None else "unknown",
+                )
+            )
+            await session.commit()
 
     async def evaluate_ready_evidence(self) -> None:
         """Recover runs already READY whose evidence note never got posted.

@@ -1,9 +1,10 @@
-"""Tests for the ADR-0015 implementer backends over FakeGitLab.
+"""Tests for the ADR-0015/0016 implementer backends over FakeGitLab.
 
-CITharnessBackend: pipeline trigger with run variables, job polling, and the
-SHA verification trust boundary (change_ready only for a verified branch
-head). BuiltinBackend: the propose→validate→materialize→commit path behind
-the same protocol. build_backend: settings-driven construction.
+CITharnessBackend: pipeline trigger with run variables (including the frozen
+FORGE_ATTEMPT_BASE), job polling, and the candidate-artifact trust boundary
+(change_candidate only for a well-formed downloaded bundle; the publisher
+owns publication). BuiltinBackend: the propose→publisher path behind the
+same protocol. build_backend: settings-driven construction.
 """
 
 import json
@@ -25,6 +26,7 @@ from forge.runs.backends import (
     is_harness_backend,
 )
 from forge.runs.stubs import StubImplementer
+from tests.fixtures.candidate import create_diff, seed_candidate
 from tests.fixtures.fake_gitlab import FakeGitLab
 
 PROJECT_ID = 42
@@ -119,6 +121,7 @@ class TestStart:
 
         assert data["branch"] == branch
         assert data["base_sha"] == BASE_SHA
+        assert data["attempt_base"] == BASE_SHA  # cycle 1: the approved base
         assert data["harness"] == "claude-code"
         assert branch in fake_gitlab.branches  # ensure_branch ran
         (pipeline,) = fake_gitlab.pipelines
@@ -134,6 +137,7 @@ class TestStart:
             "FORGE_ISSUE_TITLE": "Add a widget",
             "FORGE_PLAN": "PLAN TEXT",
             "FORGE_HARNESS_MODEL": "glm-5.3-flash[1m]",
+            "FORGE_ATTEMPT_BASE": BASE_SHA,  # ADR-0016 §4: frozen attempt base
         }
 
 
@@ -148,47 +152,49 @@ class TestPoll:
         assert outcome.status == "running"
         assert not outcome.ok
 
-    async def test_verified_head_becomes_change_ready(self, fake_gitlab, db):
-        backend = make_backend(fake_gitlab, db)
-        handle, run, branch = await started(fake_gitlab, backend)
-        pipeline_id = json.loads(handle)["pipeline_id"]
-        seed_job(
-            fake_gitlab,
-            pipeline_id,
-            status="success",
-            log=f'claude output...\nFORGE_RESULT:{{"head": "{HARNESS_SHA}", "summary": "done"}}\n',
-        )
-        fake_gitlab.seed_commit(branch, HARNESS_SHA, "forge: implement 7")
-
-        outcome = await backend.poll(run, handle)
-
-        assert outcome.ok
-        assert outcome.commit_sha == HARNESS_SHA  # the real branch head
-        assert outcome.summary == "done"
-
-    async def test_success_without_branch_change_is_harness_no_changes(self, fake_gitlab, db):
-        backend = make_backend(fake_gitlab, db)
-        handle, run, branch = await started(fake_gitlab, backend)
-        pipeline_id = json.loads(handle)["pipeline_id"]
-        seed_job(
-            fake_gitlab,
-            pipeline_id,
-            status="success",
-            log=f'FORGE_RESULT:{{"head": "{BASE_SHA}", "summary": "no change"}}\n',
-        )
-        fake_gitlab.seed_commit(branch, BASE_SHA, "head unchanged")
-
-        outcome = await backend.poll(run, handle)
-
-        assert outcome.status == "failed"
-        assert outcome.failure_kind == "code"
-        assert outcome.reason == "harness_no_changes"
-
-    async def test_success_on_empty_branch_is_harness_no_changes(self, fake_gitlab, db):
+    async def test_success_with_candidate_artifacts_is_change_candidate(self, fake_gitlab, db):
         backend = make_backend(fake_gitlab, db)
         handle, run, _branch = await started(fake_gitlab, backend)
         pipeline_id = json.loads(handle)["pipeline_id"]
-        seed_job(fake_gitlab, pipeline_id, status="success", log="nothing here")
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        usage = {"input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5}
+        seed_candidate(
+            fake_gitlab,
+            555,
+            attempt_base=BASE_SHA,
+            diff=create_diff("forge-demo/x.md", "hello\n"),
+            usage=usage,
+        )
+
+        outcome = await backend.poll(run, handle)
+
+        assert outcome.status == "change_candidate"
+        assert outcome.ok
+        bundle = outcome.bundle
+        assert bundle.attempt_base_oid == BASE_SHA
+        assert [entry.path for entry in bundle.entries] == ["forge-demo/x.md"]
+        assert bundle.entries[0].new_content == "hello\n"
+        assert bundle.usage.input_tokens == 11
+        assert bundle.usage.completeness == "aggregate"
+
+    async def test_success_without_artifacts_is_rejected(self, fake_gitlab, db):
+        backend = make_backend(fake_gitlab, db)
+        handle, run, _branch = await started(fake_gitlab, backend)
+        pipeline_id = json.loads(handle)["pipeline_id"]
+        seed_job(fake_gitlab, pipeline_id, status="success", log="no artifacts at all")
+
+        outcome = await backend.poll(run, handle)
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "code"
+        assert outcome.reason == "harness_artifact_missing"
+
+    async def test_empty_diff_is_harness_no_changes(self, fake_gitlab, db):
+        backend = make_backend(fake_gitlab, db)
+        handle, run, _branch = await started(fake_gitlab, backend)
+        pipeline_id = json.loads(handle)["pipeline_id"]
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(fake_gitlab, 555, attempt_base=BASE_SHA, diff="")
 
         outcome = await backend.poll(run, handle)
 
@@ -196,36 +202,97 @@ class TestPoll:
         assert outcome.failure_kind == "code"
         assert outcome.reason == "harness_no_changes"
 
-    async def test_reported_sha_mismatch_is_rejected(self, fake_gitlab, db):
+    async def test_empty_diff_on_repair_is_repair_no_effect(self, fake_gitlab, db):
         backend = make_backend(fake_gitlab, db)
-        handle, run, branch = await started(fake_gitlab, backend)
+        run = make_run()
+        run.commit_cycle = 2
+        run.candidate_shas = ["candidate-9"]
+        handle, run, _branch = await started(fake_gitlab, backend, run=run)
         pipeline_id = json.loads(handle)["pipeline_id"]
-        seed_job(
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(fake_gitlab, 555, attempt_base="candidate-9", diff="")
+
+        outcome = await backend.poll(run, handle)
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "code"
+        assert outcome.reason == "repair_no_effect"
+
+    async def test_repair_attempt_base_is_last_candidate(self, fake_gitlab, db):
+        backend = make_backend(fake_gitlab, db)
+        run = make_run()
+        run.commit_cycle = 2
+        run.candidate_shas = ["candidate-9"]
+        handle, run, _branch = await started(fake_gitlab, backend, run=run)
+        assert json.loads(handle)["attempt_base"] == "candidate-9"
+
+        pipeline_id = json.loads(handle)["pipeline_id"]
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(
             fake_gitlab,
-            pipeline_id,
-            status="success",
-            log='FORGE_RESULT:{"head": "claimed-sha", "summary": "done"}\n',
+            555,
+            attempt_base="candidate-9",
+            diff=create_diff("forge-demo/y.md", "repair\n"),
         )
-        fake_gitlab.seed_commit(branch, HARNESS_SHA, "real head differs")
 
         outcome = await backend.poll(run, handle)
+        assert outcome.status == "change_candidate"
 
-        assert outcome.status == "failed"
-        assert outcome.failure_kind == "code"
-        assert "harness_sha_mismatch" in outcome.reason
-
-    async def test_success_without_result_line_is_rejected(self, fake_gitlab, db):
+    async def test_artifact_base_mismatch_is_rejected(self, fake_gitlab, db):
         backend = make_backend(fake_gitlab, db)
-        handle, run, branch = await started(fake_gitlab, backend)
+        handle, run, _branch = await started(fake_gitlab, backend)
         pipeline_id = json.loads(handle)["pipeline_id"]
-        seed_job(fake_gitlab, pipeline_id, status="success", log="no marker at all")
-        fake_gitlab.seed_commit(branch, HARNESS_SHA, "forge: implement 7")
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(fake_gitlab, 555, attempt_base="some-other-base", diff="")
 
         outcome = await backend.poll(run, handle)
 
         assert outcome.status == "failed"
         assert outcome.failure_kind == "code"
-        assert outcome.reason == "harness_result_missing"
+        assert "harness_attempt_base_mismatch" in outcome.reason
+
+    async def test_binary_diff_is_rejected_as_invalid_candidate(self, fake_gitlab, db):
+        backend = make_backend(fake_gitlab, db)
+        handle, run, _branch = await started(fake_gitlab, backend)
+        pipeline_id = json.loads(handle)["pipeline_id"]
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(
+            fake_gitlab,
+            555,
+            attempt_base=BASE_SHA,
+            diff=(
+                "diff --git a/img.png b/img.png\n"
+                "index 123..456 100644\n"
+                "GIT binary patch\n"
+                "literal 10\n"
+            ),
+        )
+
+        outcome = await backend.poll(run, handle)
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "code"
+        assert "harness_candidate_invalid" in outcome.reason
+        assert "binary_not_supported" in outcome.reason
+
+    async def test_failed_driver_exit_is_never_adopted(self, fake_gitlab, db):
+        backend = make_backend(fake_gitlab, db)
+        handle, run, _branch = await started(fake_gitlab, backend)
+        pipeline_id = json.loads(handle)["pipeline_id"]
+        seed_job(fake_gitlab, pipeline_id, status="success")
+        seed_candidate(
+            fake_gitlab,
+            555,
+            attempt_base=BASE_SHA,
+            diff=create_diff("forge-demo/z.md", "partial\n"),
+            exit="failed",
+        )
+
+        outcome = await backend.poll(run, handle)
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "code"
+        assert "harness_driver_failed" in outcome.reason
 
     async def test_runner_system_failure_is_infrastructure(self, fake_gitlab, db):
         backend = make_backend(fake_gitlab, db)

@@ -5,7 +5,7 @@ database, so rotation never touches run state.
 
 | Secret | Where it lives | Rotation |
 |--------|----------------|----------|
-| Bot PAT (`FORGE_BOT_TOKEN`) | GitLab user `forge` → Access Tokens; project CI variables; forge env | 90 days recommended (current lab token expires 2026-10-31) |
+| Bot PAT (`FORGE_BOT_TOKEN` in forge env; optional read-only `FORGE_BOT_READ_TOKEN` in project CI variables) | GitLab user `forge` → Access Tokens; forge env; (read-only variant) project CI variables | 90 days recommended (current lab token expires 2026-10-31) |
 | Webhook secret (`GITLAB_WEBHOOK_SECRET`) | GitLab project webhook + forge env | 180 days, or immediately on suspicion |
 | Model API key (`ZAI_API_KEY`/`ANTHROPIC_AUTH_TOKEN`) | Provider console; LiteLLM config; project CI variables | Provider-driven; immediately on leak |
 | Operator/admin token | Your secrets store; never in forge | Your policy |
@@ -17,8 +17,9 @@ propagation step:
 
 1. Create the new PAT for the bot user (same scopes, same user — run
    identity and gate audit rows must stay stable).
-2. Update it in the project CI variables (`FORGE_BOT_TOKEN`) and in forge's
-   env (`FORGE_BOT_TOKEN`).
+2. Update it in forge's env (`FORGE_BOT_TOKEN`); if the project uses the
+   optional read-only lane token, update `FORGE_BOT_READ_TOKEN` in the
+   project CI variables. The lane must never hold a write token (ADR-0016).
 3. Recreate `forge-app` and `forge-worker` (in-flight runs are durable:
    `waiting_harness`/`waiting_ci` runs are resumed by the reconciler; runs
    in worker-held states simply resume processing after restart).

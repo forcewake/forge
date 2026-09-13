@@ -338,7 +338,10 @@ class LLMCall(Base):
     """Usage ledger row for a single model call, failures included (ADR-0013).
 
     Token counters are nullable because unknown usage must be recorded as
-    unknown, never as zero.
+    unknown, never as zero. For harness-candidate receipts (ADR-0016 §4,
+    F22 lite) ``driver`` carries the harness driver id and ``completeness``
+    says how trustworthy the counters are ("exact" | "aggregate" |
+    "unknown"); both are NULL for forge-side LLM calls.
     """
 
     __tablename__ = "llm_calls"
@@ -355,6 +358,8 @@ class LLMCall(Base):
     cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    driver: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    completeness: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

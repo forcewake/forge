@@ -1,23 +1,25 @@
-"""Pluggable implementer backends (ADR-0015).
+"""Pluggable implementer backends (ADR-0015/0016).
 
 The implementer step of a run is pluggable; the controller owns the lifecycle
 unchanged (ADR-0004). Two backends:
 
 - ``BuiltinBackend`` — today's LLM → ChangeSet → Commits API path (ADR-0001).
-  ``RunService`` keeps driving this path synchronously for builtin runs; this
-  adapter exposes the same propose→validate→materialize→commit flow behind
-  the backend protocol.
+  The produced ChangeSet is wrapped as a :class:`CandidateBundle` and routed
+  through the trusted publisher (ADR-0016 §2) so every backend crosses the
+  same validation → publication boundary.
 - ``CITharnessBackend`` — delegates implementation to a coding harness
-  (``claude-code``) executing as a job in the *target project's* CI
-  (never on forge infrastructure, ADR-0002/0015). The job is triggered as a
-  pipeline on the factory branch; forge polls it and adopts the result only
-  after verification against the real branch head — the harness's own
-  success claim is never trusted.
+  executing as a job in the *target project's* CI (never on forge
+  infrastructure, ADR-0002/0015). The job runs proposal-only (ADR-0016): it
+  checks out the frozen attempt base (``FORGE_ATTEMPT_BASE``), receives NO
+  write credential, and uploads ``.forge/candidate.diff`` +
+  ``.forge/candidate.meta.json`` as CI artifacts. Forge downloads the
+  artifacts and turns the diff into a :class:`CandidateBundle` — the
+  harness's own success claim is never trusted.
 
-Trust boundary (ADR-0015): the verified branch head SHA — read back from
-GitLab, equal to the harness's reported head and different from the base —
-is the only thing that may become a candidate commit. Harness-level failures
-(auth, quota, runner, timeout) classify as ``infrastructure``, never ``code``.
+Trust boundary (ADR-0016): the only things that may become a commit are the
+bytes of the downloaded candidate diff, validated and written by the trusted
+publisher. Harness-level failures (auth, quota, runner, timeout) classify as
+``infrastructure``, never ``code``.
 """
 
 from __future__ import annotations
@@ -34,8 +36,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.durable import FlowRun, as_aware_utc
 from forge.durable.identity import factory_branch
 from forge.gitlab.client import GitLabAPIError, GitLabClient
-from forge.repository import ChangesetWriter, WriteOutcome, validate_changeset
+from forge.repository.writer import ChangesetWriter
+from forge.runs.candidate import (
+    CandidateError,
+    HarnessUsage,
+    attempt_base_for,
+    bundle_from_changeset,
+    parse_unified_diff,
+)
 from forge.runs.ci_contract import classify_failure
+from forge.runs.publisher import publish_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +60,18 @@ HARNESS_NAME = "claude-code"
 #: (``ci/templates/claude-code.gitlab-ci.yml``).
 HARNESS_JOB_NAME = "forge-agent"
 
-#: Machine-readable result line the harness job prints last.
+#: Machine-readable result line the harness job prints (legacy v0.2 contract,
+#: kept in the templates for migration visibility only — the v0.3 backend
+#: polls the candidate ARTIFACTS, never the trace line).
 FORGE_RESULT_MARKER = "FORGE_RESULT:"
+
+#: Machine-readable candidate line the proposal-only job prints (v0.3
+#: contract); the authoritative payload travels as CI artifacts.
+FORGE_CANDIDATE_MARKER = "FORGE_CANDIDATE:"
+
+#: Artifact archive paths the proposal-only job uploads (ADR-0016 §1).
+CANDIDATE_DIFF_PATH = ".forge/candidate.diff"
+CANDIDATE_META_PATH = ".forge/candidate.meta.json"
 
 #: Upper bound on the job-trace tail scanned for the result line.
 LOG_TAIL_CHARS = 8000
@@ -91,14 +111,19 @@ class HarnessOutcome:
 
     Exactly one of the constructors is meaningful per instance:
 
-    - :meth:`change_ready` — the backend verified a real change; adopt it.
+    - :meth:`change_candidate` — the backend downloaded a well-formed
+      candidate bundle; the trusted publisher decides whether it becomes a
+      commit (ADR-0016).
+    - :meth:`change_ready` — legacy shape (a verified commit sha, builtin
+      path).
     - :meth:`running` — keep waiting (durable deadline decides the rest).
     - :meth:`failed` — terminal for the harness leg; *failure_kind* says
       whether the code or the environment failed.
     """
 
-    status: Literal["change_ready", "running", "failed"]
+    status: Literal["change_ready", "change_candidate", "running", "failed"]
     commit_sha: str | None = None
+    bundle: Any | None = None  # CandidateBundle | None (typed loosely: no cycle)
     summary: str = ""
     failure_kind: HarnessFailureKind | None = None
     reason: str = ""
@@ -106,6 +131,10 @@ class HarnessOutcome:
     @classmethod
     def change_ready(cls, commit_sha: str, summary: str = "") -> HarnessOutcome:
         return cls(status="change_ready", commit_sha=commit_sha, summary=summary)
+
+    @classmethod
+    def change_candidate(cls, bundle: Any, summary: str = "") -> HarnessOutcome:
+        return cls(status="change_candidate", bundle=bundle, summary=summary)
 
     @classmethod
     def running(cls) -> HarnessOutcome:
@@ -117,7 +146,7 @@ class HarnessOutcome:
 
     @property
     def ok(self) -> bool:
-        return self.status == "change_ready"
+        return self.status in ("change_ready", "change_candidate")
 
 
 class ImplementerBackend(Protocol):
@@ -164,6 +193,10 @@ async def fetch_git_base(
     return git_base
 
 
+class _ArtifactMissing(Exception):
+    """The candidate artifacts are absent/unreadable (404 or malformed)."""
+
+
 def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
     """Read plan summary + files_hint out of the run's evidence blob."""
     plan = (run.evidence or {}).get("plan") or {}
@@ -172,34 +205,19 @@ def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
     return summary, hints
 
 
-def _parse_forge_result(log: str) -> dict[str, Any] | None:
-    """Extract the last ``FORGE_RESULT:{...}`` JSON object from a job trace."""
-    for line in reversed(log.splitlines()):
-        idx = line.find(FORGE_RESULT_MARKER)
-        if idx == -1:
-            continue
-        raw = line[idx + len(FORGE_RESULT_MARKER) :].strip()
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
 # ----------------------------------------------------------------------
 # Builtin backend (ADR-0001 path behind the protocol)
 # ----------------------------------------------------------------------
 
 
 class BuiltinBackend:
-    """The ``builtin`` backend: LLM → ChangeSet → Commits API (ADR-0001).
+    """The ``builtin`` backend: LLM → ChangeSet → publisher (ADR-0001/0016).
 
-    Wraps the same propose → validate → materialize → commit path
-    ``RunService`` drives synchronously for builtin runs, expressed in the
-    start/poll protocol. ``start`` runs the whole path; ``poll`` reports the
-    journaled result.
+    Wraps the propose path ``RunService`` drives synchronously for builtin
+    runs. Since ADR-0016 the produced ChangeSet is wrapped as a
+    :class:`CandidateBundle` and published through the SAME trusted boundary
+    as harness candidates (grant, spec digest, policy validation, journaled
+    write pinned to the attempt base).
     """
 
     def __init__(
@@ -225,22 +243,19 @@ class BuiltinBackend:
             plan_summary=plan_summary,
             files_hint=files_hint,
         )
-        git_base = await fetch_git_base(
-            self._gitlab,
-            run.project_id,
-            [change.path for change in changeset.changes],
-            run.base_sha,
-        )
-        violations = validate_changeset(changeset, git_base)
-        if violations:
-            return json.dumps({"error": "changeset_invalid: " + "; ".join(violations)})
-
+        attempt_base = attempt_base_for(run)
+        bundle = bundle_from_changeset(changeset, attempt_base_oid=attempt_base)
         writer = self._writer_class(self._gitlab, self._session_factory, run.project_id)
-        result = await writer.apply(
-            run.id, changeset, start_ref=getattr(self._settings, "FORGE_TARGET_BRANCH", "main")
+        result = await publish_candidate(
+            gitlab=self._gitlab,
+            session_factory=self._session_factory,
+            writer=writer,
+            run=run,
+            bundle=bundle,
+            commit_message=changeset.commit_message,
         )
-        if result.outcome is WriteOutcome.UNKNOWN or not result.commit_sha:
-            return json.dumps({"error": "commit_unknown_outcome"})
+        if not result.ok:
+            return json.dumps({"error": result.reason})
         return json.dumps({"commit_sha": result.commit_sha, "branch": changeset.branch})
 
     async def poll(self, run: FlowRun, handle: str) -> HarnessOutcome:
@@ -259,15 +274,18 @@ class CITharnessBackend:
     """Delegates implementation to a harness job in the target project's CI.
 
     ``start`` ensures the factory branch exists (reusing the writer's
-    branch logic), triggers a pipeline on it with the task brief as
-    pipeline variables, and journals pipeline + job ids into the handle.
+    branch logic), triggers a pipeline on it with the task brief and the
+    FROZEN attempt base (``FORGE_ATTEMPT_BASE``, ADR-0016 §4) as pipeline
+    variables, and journals pipeline + job ids into the handle.
 
     ``poll`` maps the job status onto a :class:`HarnessOutcome`:
 
     - active job → ``running`` (until the run-level durable deadline);
-    - success → verify against the **real branch head** (never the claim):
-      head must differ from the base and equal the job's reported
-      ``FORGE_RESULT`` head;
+    - success → download the candidate artifacts, parse the diff into a
+      :class:`CandidateBundle` and return ``change_candidate`` — the trusted
+      publisher then decides (ADR-0016). The lane cannot push, so there is
+      no branch head to verify; the diff base and the attempt base ARE the
+      verification surface;
     - failed → classify (auth/quota/runner patterns and ``failure_reason``
       mean infrastructure; otherwise code).
     """
@@ -293,12 +311,17 @@ class CITharnessBackend:
         await self._writer.ensure_branch(branch, start_ref)
 
         model = str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "")
+        attempt_base = attempt_base_for(run)
         variables = [
             {"key": "FORGE_RUN_ID", "value": run.id},
             {"key": "FORGE_ISSUE_IID", "value": str(run.issue_iid or 0)},
             {"key": "FORGE_ISSUE_TITLE", "value": issue_title},
             {"key": "FORGE_PLAN", "value": plan},
             {"key": "FORGE_HARNESS_MODEL", "value": model},
+            # ADR-0016 §4: the lane works on the FROZEN attempt base —
+            # cycle 1 builds on the approved source base, a repair on the
+            # last verified candidate. No write credential is needed.
+            {"key": "FORGE_ATTEMPT_BASE", "value": attempt_base},
         ]
         pipeline = await self._gitlab.create_pipeline(run.project_id, branch, variables=variables)
         pipeline_id = int(pipeline.get("id"))
@@ -311,15 +334,17 @@ class CITharnessBackend:
                 "job_id": job_id,
                 "branch": branch,
                 "base_sha": run.base_sha or "",
+                "attempt_base": attempt_base,
                 "started_at": datetime.now(timezone.utc).isoformat(),
             }
         )
         logger.info(
-            "Harness %s started for run %s (pipeline %d, job %s)",
+            "Harness %s started for run %s (pipeline %d, job %s, base %s)",
             self._harness,
             run.id[:8],
             pipeline_id,
             job_id,
+            attempt_base[:8],
         )
         return handle
 
@@ -346,8 +371,6 @@ class CITharnessBackend:
         data = json.loads(handle)
         project_id = run.project_id
         pipeline_id = int(data["pipeline_id"])
-        branch = str(data["branch"])
-        base_sha = str(data.get("base_sha") or run.base_sha or "")
         now = now or datetime.now(timezone.utc)
 
         job = await self._find_job(project_id, pipeline_id, data)
@@ -360,7 +383,7 @@ class CITharnessBackend:
             return self._deadline_outcome(data, now)
 
         if (job.status or "").lower() == "success":
-            return await self._verify(project_id, job, branch, base_sha)
+            return await self._collect_candidate(project_id, job, run)
 
         if (job.status or "").lower() in {"canceled", "cancelled", "skipped"}:
             # External cancellation is not the code's fault (ADR-0015).
@@ -405,40 +428,88 @@ class CITharnessBackend:
                 return HarnessOutcome.failed("infrastructure", "harness_timeout")
         return HarnessOutcome.running()
 
-    async def _verify(
-        self,
-        project_id: int,
-        job,
-        branch: str,
-        base_sha: str,
-    ) -> HarnessOutcome:
-        """Adopt the harness result only after SHA verification (ADR-0015)."""
-        try:
-            branch_info = await self._gitlab.get_branch(project_id, branch)
-        except GitLabAPIError as exc:
-            if exc.status_code == 404:
-                return HarnessOutcome.failed("code", "harness_no_changes")
-            raise
-        head = str(((branch_info.get("commit") or {}).get("id")) or "")
-        if not head or head == base_sha:
-            return HarnessOutcome.failed("code", "harness_no_changes")
+    async def _collect_candidate(self, project_id: int, job, run: FlowRun) -> HarnessOutcome:
+        """Download the candidate artifacts and build the bundle (ADR-0016).
+
+        The attempt base compared against the artifact's meta is computed
+        from the TRUSTED run state (never from the artifact alone); the
+        publisher re-checks it at the write boundary.
+        """
+        attempt_base = attempt_base_for(run)
 
         try:
-            log = await self._gitlab.get_job_log(project_id, job.id, tail=LOG_TAIL_CHARS)
-        except GitLabAPIError:
-            log = ""
-        reported = _parse_forge_result(log)
-        if reported is None:
-            return HarnessOutcome.failed("code", "harness_result_missing")
-
-        reported_head = str(reported.get("head") or "")
-        if reported_head != head:
+            meta = await self._download_meta(project_id, job.id)
+        except _ArtifactMissing:
+            return HarnessOutcome.failed("code", "harness_artifact_missing")
+        reported_base = str(meta.get("attempt_base") or "")
+        if reported_base != attempt_base:
             return HarnessOutcome.failed(
                 "code",
-                f"harness_sha_mismatch: reported {reported_head[:8] or '<none>'}, "
-                f"actual branch head {head[:8]}",
+                "harness_attempt_base_mismatch: artifact base "
+                f"{reported_base[:8] or '<none>'}, expected {attempt_base[:8] or '<none>'}",
             )
-        return HarnessOutcome.change_ready(head, str(reported.get("summary") or ""))
+
+        driver_exit = str(meta.get("exit") or "completed").strip() or "completed"
+        usage = HarnessUsage.from_meta(
+            meta.get("usage"),
+            driver=str(meta.get("driver") or self._harness),
+            model=str(meta.get("model") or ""),
+        )
+
+        try:
+            diff_bytes = await self._gitlab.get_job_artifacts_file(
+                project_id, job.id, CANDIDATE_DIFF_PATH
+            )
+        except GitLabAPIError as exc:
+            if exc.status_code == 404:
+                return HarnessOutcome.failed("code", "harness_artifact_missing")
+            raise
+        diff_text = diff_bytes.decode("utf-8", errors="replace")
+
+        try:
+            bundle = parse_unified_diff(
+                diff_text,
+                attempt_base_oid=attempt_base,
+                driver_exit=driver_exit,
+                usage=usage,
+            )
+        except CandidateError as exc:
+            return HarnessOutcome.failed(
+                "code", f"harness_candidate_invalid: {exc.reason}: {exc}"
+            )
+
+        if driver_exit != "completed":
+            # The driver itself reported failure: never adopt a possibly
+            # partial working tree, whatever it managed to change.
+            detail = " with no changes" if bundle.is_empty else ""
+            return HarnessOutcome.failed(
+                "code", f"harness_driver_failed (exit={driver_exit}{detail})"
+            )
+        if bundle.is_empty:
+            # F20: a repair that changes nothing is "no effect", not a
+            # no-op adoption; cycle 1 with an empty diff is plain no-change.
+            if (run.commit_cycle or 1) > 1:
+                return HarnessOutcome.failed("code", "repair_no_effect")
+            return HarnessOutcome.failed("code", "harness_no_changes")
+        return HarnessOutcome.change_candidate(bundle, summary=str(meta.get("summary") or ""))
+
+    async def _download_meta(self, project_id: int, job_id: int) -> dict[str, Any]:
+        """Fetch + parse ``candidate.meta.json``; raises ``_ArtifactMissing``."""
+        try:
+            raw = await self._gitlab.get_job_artifacts_file(
+                project_id, job_id, CANDIDATE_META_PATH
+            )
+        except GitLabAPIError as exc:
+            if exc.status_code == 404:
+                raise _ArtifactMissing() from exc
+            raise
+        try:
+            meta = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _ArtifactMissing() from exc
+        if not isinstance(meta, dict):
+            raise _ArtifactMissing()
+        return meta
 
     async def _classify_failure(
         self,

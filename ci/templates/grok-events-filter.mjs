@@ -3,12 +3,54 @@
 // lines for the GitLab job trace. Text/thinking deltas are concatenated
 // and flushed as sentences; tool calls print their title; usage prints a
 // one-line token summary. Mirrors claude-events-filter.mjs.
+//
+// F22 lite (ADR-0016 §4): [grok:usage] events are aggregated and written
+// to .forge/usage.json (path overridable via FORGE_USAGE_FILE) plus a final
+// FORGE_USAGE:{json} trace line, so the job can embed the receipt into
+// candidate.meta.json. Counts are sums of per-turn receipts ->
+// completeness "aggregate"; with no usage events nothing is written and
+// the receipt stays unknown (never zero). Cached tokens are kept as their
+// own field, never folded into the input count.
 import { createInterface } from "node:readline";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 const rl = createInterface({ input: process.stdin });
 
 let textBuf = "";
 let thinkBuf = "";
+const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, turns: 0 };
+
+function addUsage(u) {
+  for (const key of ["input_tokens", "cached_input_tokens", "output_tokens"]) {
+    const value = u?.[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      usage[key] += value;
+    }
+  }
+  usage.turns += 1;
+}
+
+function writeUsageReceipt() {
+  if (usage.turns === 0) return; // unknown stays unknown — never zero
+  const receipt = {
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    completeness: "aggregate",
+    source: "grok:usage",
+  };
+  const line = `FORGE_USAGE:${JSON.stringify(receipt)}`;
+  console.log(line);
+  try {
+    const file = process.env.FORGE_USAGE_FILE || ".forge/usage.json";
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(receipt));
+  } catch {
+    // The receipt is best-effort; never break the trace pipeline on a
+    // filesystem error.
+  }
+}
 
 function wrap(prefix, s, cap) {
   const words = s.split(/\s+/);
@@ -68,6 +110,7 @@ rl.on("line", (line) => {
     if (title) console.log(`[grok:tool]  ${title}`);
   } else if (kind === "usage") {
     const u = update.usage ?? update;
+    addUsage(u);
     console.log(
       `[grok:usage] in=${u.input_tokens} out=${u.output_tokens} cache=${u.cache_read_input_tokens ?? 0}`,
     );
@@ -89,4 +132,5 @@ function compactText(content) {
 rl.on("close", () => {
   flushText();
   flushThink();
+  writeUsageReceipt();
 });

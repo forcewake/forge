@@ -17,12 +17,12 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
 from forge.durable import FlowRun, FlowStatus, StepRun
-from forge.durable.identity import factory_branch
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
 from forge.runs import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
 from forge.worker.steps import claim_due_steps
+from tests.fixtures.candidate import create_diff, seed_candidate
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
 
@@ -30,7 +30,6 @@ PROJECT_ID = 42
 ISSUE_IID = 7
 ISSUE_TITLE = "Add a widget"
 ISSUE_DESC = "Widgets make the app better."
-HARNESS_SHA = "harness-sha-1"
 
 
 def make_settings(**overrides) -> Settings:
@@ -178,15 +177,18 @@ class TestPublicationGrant:
         await service.handle_cancel_note(PROJECT_ID, f"@forge /cancel {run_id}", "alice", ISSUE_IID)
 
         # The harness finished anyway; the reconciler polls the (already
-        # cancelled) run and verifies the change.
+        # cancelled) run and finds a well-formed candidate bundle.
         pipeline_id = int((await get_run(db, run_id)).evidence["harness"]["pipeline_id"])
-        branch = factory_branch(ISSUE_IID, run_id)
         fake_gitlab.set_pipeline_jobs(
             pipeline_id,
             [{"id": 555, "name": "forge-agent", "status": "success"}],
         )
-        fake_gitlab.set_job_log(555, f'FORGE_RESULT:{{"head": "{HARNESS_SHA}", "summary": "done"}}')
-        fake_gitlab.seed_commit(branch, HARNESS_SHA, "forge: implement 7")
+        seed_candidate(
+            fake_gitlab,
+            555,
+            attempt_base="base-sha-1",
+            diff=create_diff("forge-demo/x.md", "hello\n"),
+        )
 
         await service._evaluate_harness_one(run_id, datetime.now(timezone.utc))
 
@@ -194,7 +196,10 @@ class TestPublicationGrant:
         assert run.status == FlowStatus.CANCELLED.value  # stays cancelled
         assert run.candidate_shas in (None, [])  # never adopted
         assert fake_gitlab.merge_requests == {}  # no Draft MR either
-        assert run.evidence["superseded"] == {"reason": "cancelled", "sha": HARNESS_SHA}
+        assert run.evidence["superseded"] == {
+            "reason": "cancelled",
+            "attempt_base": "base-sha-1",
+        }
 
     async def test_evaluate_waiting_harness_skips_cancelled_runs(self, db, fake_gitlab):
         """The reconciler loop itself never polls terminal runs."""

@@ -161,17 +161,34 @@ async def check_project(settings: Settings, project_id: int) -> list[CheckResult
 
             variables = (await gitlab._get(f"/projects/{project_id}/variables")).json()
             names = {v.get("key") for v in variables}
-            missing = [key for key in ("FORGE_BOT_TOKEN",) if key not in names]
+            # ADR-0016: the proposal-only lane must NOT carry a write token
+            # (the trusted publisher is the only writer). The read-only fetch
+            # token is optional — the runner's own credential suffices.
+            forbidden = sorted(names & {"FORGE_BOT_TOKEN"})
             harness_vars = sorted(
                 names
-                & {"FORGE_BOT_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ZAI_API_KEY", "FORGE_GROK_AUTH"}
+                & {
+                    "FORGE_BOT_READ_TOKEN",
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ZAI_API_KEY",
+                    "FORGE_GROK_AUTH",
+                }
             )
+            if forbidden:
+                detail = (
+                    "write token in the untrusted lane: "
+                    f"{', '.join(forbidden)} — remove it (ADR-0016)"
+                )
+            elif "FORGE_BOT_READ_TOKEN" not in names:
+                detail = "no FORGE_BOT_READ_TOKEN — the lane fetches with the runner credential"
+            else:
+                detail = ""
             results.append(
                 _result(
                     "project.ci_variables",
-                    not missing,
+                    not forbidden,
                     f"present: {', '.join(harness_vars) or 'none'}",
-                    f"missing: {', '.join(missing)}",
+                    detail,
                 )
             )
 

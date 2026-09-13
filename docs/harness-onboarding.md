@@ -31,11 +31,13 @@ stay in GitLab (ADR-0015 §4):
 | --- | --- |
 | `ANTHROPIC_AUTH_TOKEN` | API key the harness uses (never forge's own key) |
 | `ANTHROPIC_BASE_URL` | Harness API endpoint (self-hosted gateway/proxy) |
-| `FORGE_BOT_TOKEN` | Bot PAT with write access to the factory branch (`factory/<issue-iid>/<run-id>`) — scope it to this project only |
+| `FORGE_BOT_READ_TOKEN` | OPTIONAL read-only PAT (repo read only). The proposal-only lane (ADR-0016) must NEVER receive a write token — the trusted publisher is the only writer. When unset, the lane fetches with the runner credential; push is disabled by construction (`git remote set-url --push origin FORBIDDEN`). |
 
 Forge itself only sends non-secret run variables with the pipeline trigger:
 `FORGE_RUN_ID`, `FORGE_ISSUE_IID`, `FORGE_ISSUE_TITLE`, `FORGE_PLAN`,
-`FORGE_HARNESS_MODEL`.
+`FORGE_HARNESS_MODEL` and `FORGE_ATTEMPT_BASE` — the frozen attempt base the
+lane works on (cycle 1: the approved source base; a repair: the last
+verified candidate, ADR-0016 §4).
 
 Optional: `FORGE_HARNESS_HTTPS_PROXY` — an HTTP proxy for the harness's
 provider traffic only (git/npm stay direct via `NO_PROXY`). Some runner
@@ -50,7 +52,8 @@ lab: identical headless prompt, 226 s direct vs 2 s via proxy).
 - **No privileged mode, no Docker socket**, no access to production secrets,
   no broad internal network access.
 - Outbound network to the harness API endpoint (`ANTHROPIC_BASE_URL`), the
-  npm registry (harness install) and the GitLab origin (push).
+  npm registry (harness install) and the GitLab origin (fetch; the lane
+  never pushes — ADR-0016).
 - Job wall-clock is bounded by `timeout: 30m` in the template
   (GitLab `maximum_timeout`); forge additionally enforces its own durable
   run-level deadline, `FORGE_HARNESS_TIMEOUT_SECONDS` (default 1800s), so a
@@ -65,18 +68,33 @@ lab: identical headless prompt, 226 s direct vs 2 s via proxy).
    `factory/<issue-iid>/<run-id>` exists and triggers a pipeline on it with
    the run variables above. The run parks durably in `waiting_harness`
    (worker-free; the reconciler polls).
-3. `forge-agent` runs claude headless against the brief, commits to the
-   factory branch, pushes, and prints
-   `FORGE_RESULT:{"head": "<sha>", "summary": "..."}` as its last line.
-4. forge **verifies independently**: the branch head must have advanced from
-   the base snapshot and must equal the reported head. Verified, it becomes
-   the candidate commit — a Draft MR is created/updated and the run moves to
-   `waiting_ci` for the normal quality contract → readonly review →
-   ready-for-human evidence flow. The harness's own claim is never trusted.
-5. Failures: unchanged branch head → `harness_no_changes`; reported vs.
-   actual head mismatch → `harness_sha_mismatch`; runner/auth/quota/timeout
-   → infrastructure (`harness_timeout`, …); everything blocks the run for a
-   human — harness runs never enter the LLM repair loop in v1.
+3. `forge-agent` checks out the frozen attempt base (`FORGE_ATTEMPT_BASE`,
+   detached), runs the harness headless against the brief — the lane cannot
+   commit-and-push (no write credential, push URL disabled) — and uploads
+   the working-tree delta as CI artifacts: `.forge/candidate.diff`
+   (`git diff --binary --full-index` vs the base) plus
+   `.forge/candidate.meta.json` (attempt base, driver, model, exit,
+   usage receipt). Its last trace line is
+   `FORGE_CANDIDATE:{...}`; the legacy `FORGE_RESULT` line remains during
+   the v0.2 → v0.3 migration and carries the attempt base, not a branch.
+4. forge **publishes through the trusted publisher** (ADR-0016): the diff
+   base is checked against the run's frozen attempt base, the publication
+   grant / spec digest / fence are re-checked, the manifest is materialized
+   against the authoritative base blobs (strict patch application, no
+   fuzz), the resulting ChangeSet is validated against the write policy,
+   and only then ONE journaled commit is written via the Changeset API —
+   pinned to the attempt base. A Draft MR is created/updated and the run
+   moves to `waiting_ci` for the normal quality contract → readonly review
+   → ready-for-human evidence flow. The harness's own claim is never
+   trusted.
+5. Failures: empty diff on cycle 1 → `harness_no_changes`; empty diff on a
+   repair → `repair_no_effect`; artifact base mismatch →
+   `harness_attempt_base_mismatch`; missing/unreadable artifacts →
+   `harness_artifact_missing`; binary diffs / non-applicable patches →
+   `harness_candidate_invalid`; policy rejections → `candidate_rejected`;
+   runner/auth/quota/timeout → infrastructure (`harness_timeout`, …) —
+   everything blocks the run for a human; harness runs never enter the LLM
+   repair loop in v1.
 
 ## 5. Forge-side configuration
 
@@ -120,9 +138,11 @@ from the journaled start time — the reconciler enforces it without the job.
    `--- agent events (tail) ---` block: it names the failure class
    (`api_error`+retries = provider/network; permission/system errors = setup).
 2. Verify independently: the run reason distinguishes `harness_no_changes`
-   (head unchanged), `harness_sha_mismatch` (reported head ≠ real head) and
-   `harness_result_missing` (no FORGE_RESULT line) — forge never trusts the
-   harness's own success claim.
+   / `repair_no_effect` (empty candidate diff), `harness_attempt_base_mismatch`
+   (artifact base ≠ frozen attempt base), `harness_artifact_missing`,
+   `harness_candidate_invalid` (binary diff / patch does not apply) and
+   `candidate_rejected` (write-policy violation) — forge never trusts the
+   harness's own success claim; the publisher is the only writer.
 
 **Runner-host triage (unraid/self-hosted, read-only):**
 
