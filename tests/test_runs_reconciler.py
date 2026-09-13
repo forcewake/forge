@@ -12,7 +12,7 @@ from forge.config import Settings
 from forge.durable import Controller, FlowRun, FlowStatus, Outbox
 from forge.models.base import Base
 from forge.runs import RunService, run_reconciler
-from forge.runs.stubs import factory_branch
+from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
 from tests.fixtures.fake_gitlab import FakeGitLab
 
 PROJECT_ID = 42
@@ -57,6 +57,9 @@ def service(db, fake_gitlab):
         session_factory=db,
         gitlab=fake_gitlab,
         settings=make_settings(),
+        planner=StubPlanner(),
+        implementer=StubImplementer(),
+        reviewer=StubReviewer(),
     )
 
 
@@ -123,13 +126,13 @@ class TestEvaluateWaitingCi:
         assert "success" in note["body"]
         assert "dig" in note["body"]  # plan digest
 
-    async def test_stub_review_recorded_in_reviewing_reason(self, service, fake_gitlab, db):
+    async def test_review_verdict_recorded_in_reviewing_reason(self, service, fake_gitlab, db):
         run_id = await make_waiting_ci_run(db, fake_gitlab)
         await seed_success_pipeline(fake_gitlab, run_id)
 
         await service.evaluate_waiting_ci()
 
-        # The stub review skip is visible in the durable transition history.
+        # The readonly review leg is visible in the durable transition history.
         async with db() as session:
             rows = (
                 (
@@ -141,7 +144,7 @@ class TestEvaluateWaitingCi:
                 .all()
             )
         reviewing = next(r for r in rows if r.payload["to"] == "reviewing")
-        assert "review skipped" in reviewing.payload["reason"]
+        assert "readonly review" in reviewing.payload["reason"]
 
     async def test_reviewing_transition_happens_before_ready(self, service, fake_gitlab, db):
         run_id = await make_waiting_ci_run(db, fake_gitlab)
@@ -166,7 +169,16 @@ class TestEvaluateWaitingCi:
             < targets.index("ready_for_human")
         )
 
-    async def test_failed_pipeline_fails_the_run(self, service, fake_gitlab, db):
+    async def test_failed_pipeline_blocks_when_repair_budget_spent(self, db, fake_gitlab):
+        """Code failure with no repair budget left parks the run (ADR-0004/0008)."""
+        service = RunService(
+            session_factory=db,
+            gitlab=fake_gitlab,
+            settings=make_settings(FORGE_MAX_COMMIT_CYCLES=1),
+            planner=StubPlanner(),
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
+        )
         run_id = await make_waiting_ci_run(db, fake_gitlab)
         fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
         pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id)))["id"]
@@ -175,8 +187,8 @@ class TestEvaluateWaitingCi:
         await service.evaluate_waiting_ci()
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
-        assert run.status_reason.startswith("ci_failed")
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("commit_cycles_exhausted")
 
     async def test_branch_head_drift_blocks_external_change(self, service, fake_gitlab, db):
         """A human push on the bot branch invalidates the verdict (ADR-0006)."""

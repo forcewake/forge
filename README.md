@@ -26,8 +26,12 @@ permissions — not by prompt instructions. See
 
 ## Status
 
-forge is at the **M0 baseline**. The reactive bot core has been imported from
-Codeward (pinned at commit `fd63ec8`) and rebranded:
+forge is at the **M2 baseline**: the M0 reactive bot core (imported from
+Codeward, pinned at commit `fd63ec8`) plus a live-accepted durable run loop
+whose planner/implementer/reviewer are now real LLM agents behind the same
+seams — still pre-production, honestly listed below.
+
+Reactive bot core (as imported and rebranded):
 
 - **Code review** — inline comments, severity ratings, incremental reviews on
   push with automatic resolution of addressed threads
@@ -38,21 +42,34 @@ Codeward (pinned at commit `fd63ec8`) and rebranded:
   from external MCP servers
 - **Model routing** — route to any provider through the LiteLLM proxy
 
-**Not implemented yet.** The durable factory controller — issue → planning →
-human gate → implementation → CI loop → Draft MR → readonly review → ready for
-human — is designed but not built. The design is recorded in the
+**Implemented: the durable run loop.** An authorized issue runs
+`@forge /implement` → plan → human `/go` gate → LLM implementation → atomic
+commit via the Commits API → Draft MR → CI watched by a reconciler → readonly
+LLM review → `ready_for_human` with evidence bound to the exact candidate SHA
+([ADR-0004](docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md),
+[ADR-0007](docs/adr/0007-draft-mr-before-required-ci.md)). The loop is
+durable (crash-safe transitions, journaled external writes, unknown-outcome
+blocking per [ADR-0005](docs/adr/0005-durable-execution-and-unknown-outcome.md)),
+enforces the ADR-0008 quality contract — pipeline success plus every required
+job succeeded, failures classified so only *code* failures trigger the
+bounded repair loop (`FORGE_MAX_COMMIT_CYCLES`) — and records every model
+call in the usage ledger ([ADR-0013](docs/adr/0013-budgets-and-usage-ledger-in-core.md)).
+The factory agents call the model through a thin LiteLLM HTTP client
+([ADR-0014](docs/adr/0014-llm-http-client-over-agno.md)); Agno stays on the
+reactive path only.
+
+**Still pre-production.** Not yet done: per-project quality-contract
+onboarding/`doctor` verification, budget enforcement beyond the commit-cycle
+cap (reserve/reconcile), redaction at every agent boundary, drift policies
+beyond block, and production hardening of the live-accepted slice. The
 [architecture decision records](docs/adr/0000-record-architecture-decisions.md)
-(Commits API write backend, durable state machine, quality contracts, human
-gates, budgets, and more).
+record what is decided; the gap between ADRs and running code is where work
+remains.
 
-The upstream multi-agent YAML flows (including `/implement`, issue → MR) are
-**not** part of forge's working functionality: the upstream flow engine has
-known defects. forge will replace it with a typed, durable controller rather
-than repair the YAML flow engine (see
-[ADR-0004](docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md)).
-
-In short: the reactive agents above work as imported; the factory loop exists
-today as architecture, not as running code.
+The upstream multi-agent YAML flows (including the old `/implement`,
+issue → MR) are **not** part of forge's working functionality: the upstream
+flow engine has known defects and has been replaced by the typed, durable
+controller above ([ADR-0004](docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md)).
 
 ## Quick start
 

@@ -247,6 +247,14 @@ class TestEndToEnd:
 
     async def test_issue_note_to_gate_to_mr_to_ready(self, app, client, monkeypatch):
         """issue /implement → gate /go → waiting_ci → reconciler → ready_for_human."""
+        from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
+
+        # Keep the gateway's default-agent construction offline: stub agents.
+        monkeypatch.setattr(
+            "forge.runs.service.build_default_agents",
+            lambda *args, **kwargs: (StubPlanner(), StubImplementer(), StubReviewer()),
+        )
+
         fake = FakeGitLab()
         fake.seed_issue(ISSUE_IID, "Add a widget", "Make widgets real.")
         fake.seed_commit("main", "base-sha-1", "initial")
@@ -295,15 +303,18 @@ class TestEndToEnd:
         assert mr["title"] == "Draft: Add a widget"
 
         # 4. CI succeeds for the exact candidate sha → reconciler finishes it.
-        from forge.runs.stubs import factory_branch
-
         branch = factory_branch(ISSUE_IID, run_id)
         assert fake.branches[branch][0]["sha"] == commit_sha  # exact-SHA correlation
         pipeline_id = (await fake.create_pipeline(PROJECT_ID, branch))["id"]
         fake.set_pipeline_status(pipeline_id, "success", commit_sha)
 
         service = RunService(
-            session_factory=session_factory, gitlab=fake, settings=app.state.settings
+            session_factory=session_factory,
+            gitlab=fake,
+            settings=app.state.settings,
+            planner=StubPlanner(),
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
         )
         await service.evaluate_waiting_ci()
 

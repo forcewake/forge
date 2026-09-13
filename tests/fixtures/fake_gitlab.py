@@ -1,31 +1,40 @@
-"""Shared in-memory GitLab fake for the M1 run-loop tests.
+"""Shared in-memory GitLab fake for the run-loop tests.
 
 No network, no live services: every method mirrors the real
 :class:`forge.gitlab.client.GitLabClient` semantics the run loop relies on,
 including the non-idempotent create_commit behaviour (a timeout *after* the
-server executed the commit).
+server executed the commit) and base64-encoded repository files.
 """
 
 from __future__ import annotations
 
+import base64
+
 from forge.gitlab.client import CommitOutcomeUnknown, GitLabAPIError
-from forge.gitlab.schemas import Issue, MergeRequest, Pipeline
+from forge.gitlab.schemas import Issue, Job, MergeRequest, Note, Pipeline, RepositoryFile, TreeEntry
 
 
 class FakeGitLab:
-    """In-memory GitLab covering the M1 read/write surface."""
+    """In-memory GitLab covering the run-loop read/write surface."""
 
     def __init__(self) -> None:
         self.branches: dict[str, list[dict]] = {}  # branch -> commits (newest first)
         self.merge_requests: dict[int, dict] = {}
         self.pipelines: list[dict] = []
-        self.notes: list[dict] = []
+        self.pipeline_jobs: dict[int, list[dict]] = {}  # pipeline id -> job dicts
+        self.job_logs: dict[int, str] = {}  # job id -> raw log text
+        self.notes: list[dict] = []  # issue notes
+        self.mr_notes: list[dict] = []  # merge-request notes
         self.issues: dict[int, dict] = {}
+        self.files: dict[str, str] = {}  # path -> text content (all refs)
+        self.mr_updates: list[dict] = []  # journal of update_merge_request calls
         self.calls: list[tuple[str, tuple]] = []
         # Knobs for failure injection:
         self.create_commit_timeout_drops: bool = False  # timeout, commit not applied
         self.create_commit_timeout_applies: bool = False  # timeout, commit applied
         self.raise_on_create_commit: GitLabAPIError | None = None
+        # Knob for compare_commits: None -> empty diff; dict -> returned as-is.
+        self.compare_result: dict | None = None
         self._next_id = 1
 
     # -- ids ---------------------------------------------------------------
@@ -88,6 +97,57 @@ class FakeGitLab:
             0, {"sha": sha, "short_id": sha, "message": message}
         )
 
+    # -- repository files / tree ---------------------------------------------
+
+    def seed_file(self, path: str, content: str) -> None:
+        """Seed a file in the (ref-independent) repository snapshot."""
+        self.files[path] = content
+
+    async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
+        self.calls.append(("get_file", (project_id, file_path, ref)))
+        if file_path not in self.files:
+            raise GitLabAPIError(404, f"file {file_path} not found")
+        content = self.files[file_path]
+        return RepositoryFile.model_validate(
+            {
+                "file_name": file_path.rsplit("/", 1)[-1],
+                "file_path": file_path,
+                "size": len(content.encode("utf-8")),
+                "encoding": "base64",
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "ref": ref,
+            }
+        )
+
+    async def get_tree(
+        self,
+        project_id: int,
+        path: str = "",
+        ref: str = "HEAD",
+        recursive: bool = False,
+    ) -> list[TreeEntry]:
+        self.calls.append(("get_tree", (project_id, path, ref, recursive)))
+        entries = []
+        for file_path in sorted(self.files):
+            if path and not file_path.startswith(path):
+                continue
+            entries.append(
+                TreeEntry.model_validate(
+                    {
+                        "name": file_path.rsplit("/", 1)[-1],
+                        "type": "blob",
+                        "path": file_path,
+                    }
+                )
+            )
+        return entries
+
+    async def compare_commits(self, project_id: int, from_sha: str, to_sha: str) -> dict:
+        self.calls.append(("compare_commits", (project_id, from_sha, to_sha)))
+        if self.compare_result is not None:
+            return self.compare_result
+        return {"diffs": []}
+
     # -- pipelines -----------------------------------------------------------
 
     async def list_pipelines(
@@ -122,6 +182,21 @@ class FakeGitLab:
                 if sha is not None:
                     p["sha"] = sha
 
+    async def list_pipeline_jobs(self, project_id: int, pipeline_id: int) -> list[Job]:
+        self.calls.append(("list_pipeline_jobs", (project_id, pipeline_id)))
+        return [Job.model_validate(job) for job in self.pipeline_jobs.get(pipeline_id, [])]
+
+    def set_pipeline_jobs(self, pipeline_id: int, jobs: list[dict]) -> None:
+        """Seed jobs for a pipeline (dicts shaped like the GitLab Job schema)."""
+        self.pipeline_jobs[pipeline_id] = jobs
+
+    async def get_job_log(self, project_id: int, job_id: int) -> str:
+        self.calls.append(("get_job_log", (project_id, job_id)))
+        return self.job_logs.get(job_id, "")
+
+    def set_job_log(self, job_id: int, log: str) -> None:
+        self.job_logs[job_id] = log
+
     # -- merge requests -------------------------------------------------------
 
     async def create_merge_request(
@@ -152,11 +227,36 @@ class FakeGitLab:
         self.merge_requests[iid] = mr
         return dict(mr)
 
+    async def update_merge_request(
+        self,
+        project_id: int,
+        mr_iid: int,
+        description: str | None = None,
+        title: str | None = None,
+    ) -> dict:
+        self.calls.append(("update_merge_request", (project_id, mr_iid)))
+        if mr_iid not in self.merge_requests:
+            raise GitLabAPIError(404, "mr not found")
+        if description is not None:
+            self.merge_requests[mr_iid]["description"] = description
+        if title is not None:
+            self.merge_requests[mr_iid]["title"] = title
+        self.mr_updates.append({"mr_iid": mr_iid, "description": description, "title": title})
+        return dict(self.merge_requests[mr_iid])
+
     async def get_merge_request(self, project_id: int, mr_iid: int) -> MergeRequest:
         self.calls.append(("get_merge_request", (project_id, mr_iid)))
         if mr_iid not in self.merge_requests:
             raise GitLabAPIError(404, "mr not found")
         return MergeRequest.model_validate(self.merge_requests[mr_iid])
+
+    async def create_mr_note(self, project_id: int, mr_iid: int, body: str) -> Note:
+        self.calls.append(("create_mr_note", (project_id, mr_iid, body)))
+        if mr_iid not in self.merge_requests:
+            raise GitLabAPIError(404, "mr not found")
+        note_id = self._id()
+        self.mr_notes.append({"id": note_id, "mr_iid": mr_iid, "body": body})
+        return Note.model_validate({"id": note_id, "body": body})
 
     # -- issues / notes --------------------------------------------------------
 
@@ -195,6 +295,9 @@ class FakeGitLab:
 
     def notes_containing(self, fragment: str) -> list[dict]:
         return [n for n in self.notes if fragment in n["body"]]
+
+    def mr_notes_containing(self, fragment: str) -> list[dict]:
+        return [n for n in self.mr_notes if fragment in n["body"]]
 
 
 class FakeGitLabClientFactory:

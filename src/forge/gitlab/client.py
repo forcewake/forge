@@ -519,6 +519,25 @@ class GitLabClient:
         )
         return resp.json()
 
+    async def update_merge_request(
+        self,
+        project_id: int,
+        mr_iid: int,
+        description: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing merge request (``PUT /projects/:id/merge_requests/:iid``)."""
+        payload: dict[str, Any] = {}
+        if description is not None:
+            payload["description"] = description
+        if title is not None:
+            payload["title"] = title
+        resp = await self._put(
+            f"/projects/{project_id}/merge_requests/{mr_iid}",
+            json=payload,
+        )
+        return resp.json()
+
     async def create_issue_note(
         self,
         project_id: int,

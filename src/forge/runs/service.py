@@ -1,4 +1,4 @@
-"""RunService — the durable M1 advance loop (ADR-0004).
+"""RunService — the durable M2 advance loop (ADR-0004).
 
 Owns the whole run lifecycle: ``@forge /implement`` on an issue creates a
 durable FlowRun and walks it ``accepted → preflight → planning →
@@ -6,6 +6,16 @@ waiting_approval``; an approver's ``@forge /go <run-id>`` consumes the human
 gate and advances ``proposing → validating → committing → ensuring_draft_mr →
 waiting_ci``. The :mod:`forge.runs.reconciler` then drives ``waiting_ci → … →
 ready_for_human`` by polling pipelines.
+
+Since M2-1 the planner/implementer/reviewer behind these steps are real LLM
+agents (ADR-0014), constructor-injected with the LLM-driven defaults; tests
+inject stubs/fakes. CI verdicts go through the ADR-0008 quality contract with
+failure classification: only *code* failures trigger the bounded repair loop
+(``evaluating_ci → proposing → … → waiting_ci``, at most
+``FORGE_MAX_COMMIT_CYCLES - 1`` repairs); infrastructure and config failures
+block the run instead of burning model calls. Every model call lands in the
+``llm_calls`` ledger (ADR-0013) and the run accumulates evidence (plan,
+review, pipeline) in ``flow_runs.evidence``.
 
 Durability rules (ADR-0005): every transition goes through
 :class:`forge.durable.Controller` (which journals an outbox row atomically)
@@ -17,6 +27,7 @@ run — the service never blind-retries a write.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
@@ -43,9 +54,19 @@ from forge.durable import (
     is_valid,
     record_approval,
 )
+from forge.factory.implementer import LLMImplementer
+from forge.factory.llm import LLMClient, LLMError, LLMResponseError
+from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
+from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
-from forge.repository import ChangesetWriter, WriteOutcome, validate_changeset
-from forge.runs.stubs import StubImplementer, StubPlanner, factory_branch, plan_digest_of
+from forge.repository import (
+    ChangesetWriter,
+    MaterializationError,
+    WriteOutcome,
+    validate_changeset,
+)
+from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
+from forge.runs.stubs import factory_branch, plan_digest_of
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +81,11 @@ _CI_ACTIVE_STATUSES = frozenset(
 #: ``/go <run-id>`` — full 32-hex run id as posted in the plan comment.
 _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
 
+#: Repair-loop log budgets (ADR-0013: bounded repair context).
+REPAIR_LOG_PER_JOB_CHARS = 4000
+REPAIR_CONTEXT_MAX_CHARS = 12000
+REPAIR_MAX_FAILED_JOBS = 3
+
 
 def forge_token(settings: Settings) -> str:
     """The token forge acts with: the dedicated bot identity when configured.
@@ -71,6 +97,20 @@ def forge_token(settings: Settings) -> str:
     if settings.FORGE_BOT_TOKEN is not None:
         return settings.FORGE_BOT_TOKEN.get_secret_value()
     return settings.GITLAB_TOKEN.get_secret_value()
+
+
+def build_default_agents(
+    settings: Settings,
+    gitlab: GitLabClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[LLMPlanner, LLMImplementer, LLMReviewer]:
+    """Construct the real LLM-driven factory agents over one shared client."""
+    llm = LLMClient(settings=settings, session_factory=session_factory)
+    return (
+        LLMPlanner(llm, settings=settings),
+        LLMImplementer(llm, gitlab=gitlab, settings=settings),
+        LLMReviewer(llm, gitlab=gitlab, settings=settings),
+    )
 
 
 async def execute_run_command(
@@ -98,7 +138,7 @@ async def execute_run_command(
 
 
 class RunService:
-    """Coordinates stub agents, the controller and GitLab for one run at a time."""
+    """Coordinates the factory agents, the controller and GitLab for one run."""
 
     def __init__(
         self,
@@ -107,12 +147,25 @@ class RunService:
         settings: Settings,
         config: ForgeConfig | None = None,
         writer_class: type[ChangesetWriter] = ChangesetWriter,
+        planner: Any | None = None,
+        implementer: Any | None = None,
+        reviewer: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._gitlab = gitlab
         self._settings = settings
         self._config = config or ForgeConfig()
         self._writer_class = writer_class
+        if planner is None or implementer is None or reviewer is None:
+            default_planner, default_implementer, default_reviewer = build_default_agents(
+                settings, gitlab, session_factory
+            )
+            planner = planner if planner is not None else default_planner
+            implementer = implementer if implementer is not None else default_implementer
+            reviewer = reviewer if reviewer is not None else default_reviewer
+        self._planner = planner
+        self._implementer = implementer
+        self._reviewer = reviewer
 
     # ------------------------------------------------------------------
     # Entry points (called from gateway router / worker / reconciler)
@@ -135,7 +188,11 @@ class RunService:
             await controller.transition(run_id, FlowStatus.PREFLIGHT)
             await session.commit()
 
-        plan = StubPlanner().plan(issue_title, issue_description)
+        try:
+            plan = await self._planner.plan(issue_title, issue_description, flow_run_id=run_id)
+        except (LLMError, LLMResponseError) as exc:
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
+            raise
         digest = plan_digest_of(plan)
 
         async with self._session_factory() as session:
@@ -144,6 +201,16 @@ class RunService:
             run = await session.get(FlowRun, run_id)
             run.plan_digest = digest
             run.base_sha = await self._read_base_sha(project_id)
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "plan": {
+                        "digest": digest,
+                        "summary": self._plan_summary(plan),
+                        "files_hint": self._plan_files_hint(),
+                    }
+                },
+            )
             await session.commit()
 
         await self._post_journaled_note(
@@ -257,7 +324,7 @@ class RunService:
             await session.commit()
 
         logger.info("Gate for run %s consumed by @%s — advancing", run_id[:8], author_username)
-        await self._advance_after_gate(project_id, run_id)
+        await self._advance_proposal(project_id, run_id)
 
     async def run_command(self, metadata: dict[str, Any]) -> None:
         """Dispatch a ``run_command`` task produced by the gateway router."""
@@ -285,22 +352,53 @@ class RunService:
             logger.warning("Unknown run command %r — ignoring", command)
 
     # ------------------------------------------------------------------
-    # Post-gate pipeline: propose → validate → commit → draft MR → waiting_ci
+    # Proposal pipeline: propose → validate → commit → draft MR → waiting_ci
     # ------------------------------------------------------------------
 
-    async def _advance_after_gate(self, project_id: int, run_id: str) -> None:
-        # proposing: stub implementer proposes the ChangeSet (no LLM in M1).
+    async def _advance_proposal(
+        self,
+        project_id: int,
+        run_id: str,
+        *,
+        repair_context: str = "",
+        repair_reason: str | None = None,
+    ) -> None:
+        """Run one propose → validate → commit → MR cycle (initial or repair).
+
+        The caller has already moved the run to ``proposing`` (post-gate or
+        repair re-entry) and bumped ``commit_cycle`` for repairs.
+        """
         async with self._session_factory() as session:
-            controller = Controller(session)
             run = await session.get(FlowRun, run_id)
-            changeset = StubImplementer().propose(
-                run, await self._read_issue_title(project_id, run)
+            plan_summary, files_hint = self._plan_evidence(run)
+
+        issue_title = await self._read_issue_title(project_id, run)
+        try:
+            changeset = await self._implementer.propose(
+                run,
+                issue_title,
+                plan_summary=plan_summary,
+                files_hint=files_hint,
+                repair_context=repair_context,
             )
-            await controller.transition(run_id, FlowStatus.VALIDATING)
-            await session.commit()
+        except MaterializationError as exc:
+            # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
+            # a blocked run, not a guess.
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"changeset_invalid: materialization: {exc}"
+            )
+            return
+        except (LLMError, LLMResponseError) as exc:
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
+            return
+
+        await self._transition(run_id, FlowStatus.VALIDATING)
 
         # validating: trusted ADR-0001 validation; violations block the run.
-        violations = validate_changeset(changeset)
+        git_base = await self._fetch_git_base(
+            project_id, [change.path for change in changeset.changes], run.base_sha
+        )
+        violations = validate_changeset(changeset, git_base)
         if violations:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
@@ -324,9 +422,25 @@ class RunService:
 
         await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
 
-        # ensuring_draft_mr: Draft MR before CI (ADR-0007).
+        # ensuring_draft_mr: Draft MR before CI (ADR-0007). On a repair the MR
+        # already exists — update it instead of creating a second one.
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            mr_iid = run.mr_iid
+            cycle = run.commit_cycle or 1
         try:
-            mr_iid = await self._create_draft_mr(project_id, run_id, changeset, commit_sha)
+            if mr_iid is not None:
+                await self._update_draft_mr(
+                    project_id,
+                    run_id,
+                    mr_iid,
+                    changeset,
+                    commit_sha,
+                    cycle,
+                    repair_reason=repair_reason,
+                )
+            else:
+                mr_iid = await self._create_draft_mr(project_id, run_id, changeset, commit_sha)
         except GitLabAPIError as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"mr_failed: {exc}")
             return
@@ -345,7 +459,9 @@ class RunService:
             run.candidate_shas = list(run.candidate_shas or []) + [commit_sha]
             await session.commit()
 
-        logger.info("Run %s committed %s — waiting for CI", run_id[:8], commit_sha[:8])
+        logger.info(
+            "Run %s committed %s (cycle %d) — waiting for CI", run_id[:8], commit_sha[:8], cycle
+        )
 
     async def _create_draft_mr(
         self,
@@ -367,12 +483,7 @@ class RunService:
             plan_digest = run.plan_digest or ""
             issue_iid = run.issue_iid
         issue_title = await self._read_issue_title(project_id, issue_iid)
-        description = (
-            f"Draft implementation by forge run `{run_id[:8]}` for #{issue_iid}.\n\n"
-            f"- **Plan digest:** `{plan_digest}`\n"
-            f"- **Candidate commit:** `{commit_sha}`\n\n"
-            "*Merging is a human decision — forge never merges (ADR-0003).*"
-        )
+        description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha)
         try:
             mr = await self._gitlab.create_merge_request(
                 project_id,
@@ -394,6 +505,62 @@ class RunService:
             {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
         )
         return int(mr["iid"])
+
+    async def _update_draft_mr(
+        self,
+        project_id: int,
+        run_id: str,
+        mr_iid: int,
+        changeset,  # ChangeSet
+        commit_sha: str | None,
+        cycle: int,
+        *,
+        repair_reason: str | None = None,
+    ) -> None:
+        """Point the existing Draft MR at the repair commit, journaling writes."""
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "update_merge_request", correlation_id=changeset.branch
+            )
+            await session.commit()
+
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            plan_digest = run.plan_digest or ""
+            issue_iid = run.issue_iid
+        description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha, cycle)
+        try:
+            await self._gitlab.update_merge_request(project_id, mr_iid, description=description)
+        except httpx.HTTPError:
+            await self._complete_action(action_id, "unknown_outcome")
+            raise
+        except GitLabAPIError as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"mr_iid": mr_iid})
+
+        if repair_reason:
+            await self._post_journaled_mr_note(
+                project_id,
+                mr_iid,
+                f"**Repair cycle {cycle}:** {repair_reason}\n\n"
+                f"New candidate commit: `{commit_sha}`.\n\n"
+                "*This is an automated message.*",
+                run_id,
+            )
+
+    @staticmethod
+    def _mr_description(
+        run_id: str, plan_digest: str, issue_iid: int | None, commit_sha: str | None, cycle: int = 1
+    ) -> str:
+        cycle_note = "" if cycle <= 1 else f"\n- **Commit cycle:** {cycle} (repair)\n"
+        return (
+            f"Draft implementation by forge run `{run_id[:8]}` for #{issue_iid}.\n\n"
+            f"- **Plan digest:** `{plan_digest}`\n"
+            f"- **Candidate commit:** `{commit_sha}`{cycle_note}\n"
+            "*Merging is a human decision — forge never merges (ADR-0003).*"
+        )
 
     # ------------------------------------------------------------------
     # Reconciler tick: waiting_ci → evaluating_ci → … (poll-based, ADR-0005)
@@ -427,6 +594,7 @@ class RunService:
             candidate_shas = list(run.candidate_shas or [])
             mr_iid = run.mr_iid
             plan_digest = run.plan_digest or ""
+            base_sha = run.base_sha or ""
             deadline = await self._waiting_ci_deadline(session, run_id)
 
         candidate_sha = candidate_shas[-1] if candidate_shas else None
@@ -463,37 +631,223 @@ class RunService:
         if pipeline.status in _CI_ACTIVE_STATUSES:
             return  # keep waiting — the next tick re-checks
 
-        if pipeline.status == "success":
-            await self._transition(
-                run_id, FlowStatus.EVALUATING_CI, reason=f"pipeline {pipeline.id} success"
-            )
-            # Stub readonly review: skipped in M1 — recorded in status_reason.
-            await self._transition(
-                run_id, FlowStatus.REVIEWING, reason="readonly review skipped (M1 stub)"
-            )
-            await self._transition(
-                run_id,
-                FlowStatus.READY_FOR_HUMAN,
-                reason="checks passed; merge is a human decision",
-            )
-            mr_url = await self._read_mr_url(project_id, mr_iid)
-            await self._post_journaled_note(
-                project_id,
-                issue_iid,
-                self._evidence_comment(mr_url, candidate_sha, pipeline, plan_digest),
-                run_id,
-                "post_evidence_note",
-            )
-            logger.info("Run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
-            return
-
-        # failed / canceled / skipped — CI verdict is negative.
         await self._transition(
             run_id, FlowStatus.EVALUATING_CI, reason=f"pipeline {pipeline.id} {pipeline.status}"
         )
-        await self._to_terminal(
-            run_id, FlowStatus.FAILED, f"ci_failed: pipeline {pipeline.id} status={pipeline.status}"
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "pipeline": {
+                    "id": pipeline.id,
+                    "url": pipeline.web_url,
+                    "status": pipeline.status,
+                    "sha": candidate_sha,
+                }
+            },
         )
+
+        try:
+            jobs = await self._gitlab.list_pipeline_jobs(project_id, pipeline.id)
+        except GitLabAPIError:
+            logger.warning(
+                "Job read failed for pipeline %s (run %s) — contract on empty job list",
+                pipeline.id,
+                run_id[:8],
+                exc_info=True,
+            )
+            jobs = []
+
+        if pipeline.status == "success":
+            ok, contract_reason = evaluate_quality_contract(pipeline, jobs, self._required_jobs())
+            if not ok:
+                # ADR-0008: a green icon without the required jobs is not done.
+                # No LLM repair — this is CI configuration, not code.
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, f"quality_contract: {contract_reason}"
+                )
+                return
+            await self._review_and_ready(
+                run_id,
+                project_id=project_id,
+                issue_iid=issue_iid,
+                mr_iid=mr_iid,
+                candidate_sha=candidate_sha,
+                base_sha=base_sha,
+                pipeline=pipeline,
+                plan_digest=plan_digest,
+            )
+            return
+
+        # failed / canceled / skipped — negative verdict: classify BEFORE
+        # deciding (ADR-0008), and never repair on infra/config.
+        failure_class = classify_failure(jobs)
+        if failure_class != "code":
+            failed = _failed_job_names(jobs)
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"{failure_class}_failure: pipeline {pipeline.id} {pipeline.status}"
+                + (f"; failed jobs: {failed}" if failed else ""),
+            )
+            return
+
+        cycle = await self._read_commit_cycle(run_id)
+        max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
+        if cycle >= max_cycles:
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"commit_cycles_exhausted: {cycle} of {max_cycles} commit cycles used"
+                + (f"; failed jobs: {_failed_job_names(jobs)}" if jobs else ""),
+            )
+            return
+
+        await self._begin_repair(run_id, project_id, cycle, jobs)
+
+    async def _review_and_ready(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_iid: int | None,
+        mr_iid: int | None,
+        candidate_sha: str,
+        base_sha: str,
+        pipeline,
+        plan_digest: str,
+    ) -> None:
+        """checks passed → reviewing → ready_for_human (ADR-0008 review leg)."""
+        await self._transition(run_id, FlowStatus.REVIEWING, reason="readonly review of candidate")
+
+        plan_summary, _ = await self._read_plan_evidence(run_id)
+        try:
+            review = await self._reviewer.review(
+                project_id=project_id,
+                issue_title=await self._read_issue_title(project_id, issue_iid),
+                plan_summary=plan_summary,
+                base_sha=base_sha,
+                candidate_sha=candidate_sha,
+                flow_run_id=run_id,
+            )
+        except (LLMError, LLMResponseError, GitLabAPIError) as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+            return
+
+        verdict = str(getattr(review, "verdict", ""))
+        summary = str(getattr(review, "summary", ""))
+        findings = [_finding_dict(raw) for raw in (getattr(review, "findings", ()) or ())]
+        review_evidence = {
+            "review": {
+                "verdict": verdict,
+                "sha": candidate_sha,  # ADR-0008: the review approves THIS sha
+                "summary": summary,
+                "findings": findings,
+            }
+        }
+        await self._merge_run_evidence(run_id, review_evidence)
+
+        # Self-check: the recorded review must be bound to the candidate sha.
+        stored = await self._read_review_evidence(run_id)
+        if stored is None or stored.get("sha") != candidate_sha:
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                "review_sha_mismatch: review is not bound to the candidate sha (ADR-0008)",
+            )
+            return
+
+        reason = (
+            "checks passed; review raised concerns — merge is a human decision"
+            if verdict == "concerns"
+            else "checks passed; merge is a human decision"
+        )
+        await self._transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
+
+        if findings or verdict == "concerns":
+            await self._post_journaled_mr_note(
+                project_id, mr_iid, _review_mr_comment(verdict, summary, findings), run_id
+            )
+
+        mr_url = await self._read_mr_url(project_id, mr_iid)
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            self._evidence_comment(
+                mr_url, candidate_sha, pipeline, plan_digest, review_summary=summary
+            ),
+            run_id,
+            "post_evidence_note",
+        )
+        logger.info("Run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
+
+    async def _begin_repair(
+        self,
+        run_id: str,
+        project_id: int,
+        cycle: int,
+        jobs,
+    ) -> None:
+        """evaluating_ci → proposing (repair): bump the cycle, re-propose.
+
+        The reason carries the failed job names; the bounded log context is
+        handed to the implementer as repair context (ADR-0004/0008).
+        """
+        repair_context = await self._build_repair_context(project_id, run_id, jobs)
+        failed = _failed_job_names(jobs)
+        next_cycle = cycle + 1
+        repair_reason = "code failure" + (f" in jobs: {failed}" if failed else "")
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await session.get(FlowRun, run_id)
+            run.commit_cycle = next_cycle
+            await controller.transition(
+                run_id,
+                FlowStatus.PROPOSING,
+                reason=f"repair cycle {next_cycle}: {repair_reason}",
+            )
+            await session.commit()
+
+        logger.info(
+            "Run %s enters repair cycle %d — re-proposing with CI logs", run_id[:8], next_cycle
+        )
+        await self._advance_proposal(
+            project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
+        )
+
+    async def _build_repair_context(
+        self,
+        project_id: int,
+        run_id: str,
+        jobs,
+    ) -> str:
+        """Bounded repair context: previous commit summary + failed-job logs.
+
+        Per failed job the log is tail-truncated to ``REPAIR_LOG_PER_JOB_CHARS``
+        and the whole context to ``REPAIR_CONTEXT_MAX_CHARS`` (ADR-0013).
+        """
+        sections: list[str] = []
+        issue_iid = await self._read_issue_iid(run_id)
+        if issue_iid is not None:
+            branch = factory_branch(issue_iid, run_id)
+            try:
+                commits = await self._gitlab.list_commits(project_id, branch)
+            except GitLabAPIError:
+                commits = []
+            if commits:
+                sections.append(
+                    f"Previous commit on {branch}: {commits[0]['message']} "
+                    f"({commits[0]['sha'][:8]})"
+                )
+
+        failed = [job for job in jobs if job.status == "failed"][:REPAIR_MAX_FAILED_JOBS]
+        for job in failed:
+            try:
+                log = await self._gitlab.get_job_log(project_id, job.id)
+            except GitLabAPIError:
+                log = "(log unavailable)"
+            sections.append(f"--- failed job: {job.name} ---\n{log[-REPAIR_LOG_PER_JOB_CHARS:]}")
+        return "\n\n".join(sections)[-REPAIR_CONTEXT_MAX_CHARS:]
 
     async def _waiting_ci_deadline(self, session: AsyncSession, run_id: str) -> datetime | None:
         """Durable CI deadline: waiting_ci outbox timestamp + FORGE_CI_WAIT_SECONDS.
@@ -530,6 +884,11 @@ class RunService:
         raw = getattr(self._settings, "FORGE_APPROVERS", "") or ""
         return [name.strip() for name in raw.split(",") if name.strip()]
 
+    def _required_jobs(self) -> list[str]:
+        """The ADR-0008 quality contract (comma-separated FORGE_REQUIRED_JOBS)."""
+        raw = getattr(self._settings, "FORGE_REQUIRED_JOBS", "") or ""
+        return [name.strip() for name in raw.split(",") if name.strip()]
+
     def _target_branch(self) -> str:
         return getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main"
 
@@ -539,6 +898,86 @@ class RunService:
         return hashlib.sha256(
             (getattr(self._settings, "FORGE_APPROVERS", "") or "").encode("utf-8")
         ).hexdigest()
+
+    def _plan_summary(self, plan: str) -> str:
+        """The evidence plan summary (delegate when the planner provides one)."""
+        summarizer = getattr(self._planner, "plan_summary", None)
+        if callable(summarizer):
+            try:
+                return str(summarizer(plan))
+            except Exception:  # pragma: no cover — defensive
+                pass
+        return plan[:PLAN_SUMMARY_CHARS]
+
+    def _plan_files_hint(self) -> list[str]:
+        getter = getattr(self._planner, "files_hint", None)
+        if callable(getter):
+            try:
+                return [str(hint) for hint in (getter() or [])]
+            except Exception:  # pragma: no cover — defensive
+                return []
+        return []
+
+    @staticmethod
+    def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
+        """Read plan summary + files_hint back out of the run's evidence."""
+        plan = (run.evidence or {}).get("plan") or {}
+        summary = str(plan.get("summary") or "")
+        hints = [str(hint) for hint in (plan.get("files_hint") or [])]
+        return summary, hints
+
+    async def _read_plan_evidence(self, run_id: str) -> tuple[str, list[str]]:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            return self._plan_evidence(run)
+
+    async def _merge_run_evidence(self, run_id: str, patch: dict) -> None:
+        """Incrementally fold *patch* into flow_runs.evidence (ADR-0008)."""
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            run.evidence = _merge_evidence(run.evidence, patch)
+            await session.commit()
+
+    async def _read_review_evidence(self, run_id: str) -> dict | None:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            review = (run.evidence or {}).get("review")
+            return dict(review) if isinstance(review, dict) else None
+
+    async def _read_commit_cycle(self, run_id: str) -> int:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            return run.commit_cycle or 1
+
+    async def _read_issue_iid(self, run_id: str) -> int | None:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            return run.issue_iid
+
+    async def _fetch_git_base(
+        self,
+        project_id: int,
+        paths: list[str],
+        base_sha: str | None,
+    ) -> dict[str, str]:
+        """Fetch base content for the update/delete paths at the base snapshot.
+
+        This is the trusted layer's own read (ADR-0001/0006): validation is
+        checked against the pinned snapshot, not against the proposer's claim.
+        Missing files are absent from the result.
+        """
+        ref = base_sha or "HEAD"
+        git_base: dict[str, str] = {}
+        for path in dict.fromkeys(paths):
+            try:
+                repo_file = await self._gitlab.get_file(project_id, path, ref=ref)
+            except GitLabAPIError:
+                continue  # not in the snapshot — validate_changeset reports it
+            content = repo_file.content
+            if (repo_file.encoding or "") == "base64":
+                content = base64.b64decode(content).decode("utf-8", errors="replace")
+            git_base[path] = content
+        return git_base
 
     def _plan_comment(self, run_id: str, plan: str, digest: str) -> str:
         mention = getattr(self._settings, "FORGE_MENTION_PATTERN", "@forge")
@@ -558,13 +997,24 @@ class RunService:
             "*This is an automated message.*"
         )
 
-    def _evidence_comment(self, mr_url: str, sha: str, pipeline, plan_digest: str) -> str:
+    def _evidence_comment(
+        self,
+        mr_url: str,
+        sha: str,
+        pipeline,
+        plan_digest: str,
+        review_summary: str | None = None,
+    ) -> str:
         pipeline_url = pipeline.web_url or "(pipeline url unavailable)"
+        review_line = ""
+        if review_summary:
+            review_line = f"- **Review:** {review_summary}\n"
         return (
             "## Forge run ready for human review\n\n"
             f"- **Merge request:** {mr_url}\n"
             f"- **Candidate commit:** `{sha}`\n"
             f"- **Pipeline:** `{pipeline.status}` — {pipeline_url}\n"
+            f"{review_line}"
             f"- **Plan digest:** `{plan_digest}`\n\n"
             "All checks passed for this exact SHA. Merging is a human decision.\n\n"
             "*This is an automated message.*"
@@ -623,6 +1073,28 @@ class RunService:
             raise
         await self._complete_action(action_id, "succeeded", {"note_id": note.get("id")})
 
+    async def _post_journaled_mr_note(
+        self, project_id: int, mr_iid: int | None, body: str, run_id: str
+    ) -> None:
+        """Post a Draft-MR note with intent/outcome journaling (ADR-0005)."""
+        if mr_iid is None:
+            return
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "post_mr_note", correlation_id=f"mr-{mr_iid}"
+            )
+            await session.commit()
+        try:
+            note = await self._gitlab.create_mr_note(project_id, mr_iid, body)
+        except httpx.HTTPError as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        except GitLabAPIError as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"note_id": getattr(note, "id", None)})
+
     async def _complete_action(self, action_id: int, status: str, remote_result=None) -> None:
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -637,5 +1109,51 @@ class RunService:
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
         """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
-        await self._transition(run_id, status, reason=reason)
+        await self._transition(run_id, status, reason=reason[:200])
         logger.warning("Run %s -> %s: %s", run_id[:8], status.value, reason)
+
+
+def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
+    """Shallow-merge *patch* into the run's evidence blob."""
+    merged = dict(evidence or {})
+    merged.update(patch)
+    return merged
+
+
+def _failed_job_names(jobs) -> str:
+    return ", ".join(sorted({job.name for job in jobs if job.status == "failed"}))
+
+
+def _finding_dict(raw: Any) -> dict:
+    """Normalize one review finding (attribute or mapping) to a plain dict."""
+    if isinstance(raw, dict):
+        return {
+            "severity": str(raw.get("severity", "info")),
+            "file": str(raw.get("file", "")),
+            "note": str(raw.get("note", "")),
+        }
+    return {
+        "severity": str(getattr(raw, "severity", "info")),
+        "file": str(getattr(raw, "file", "")),
+        "note": str(getattr(raw, "note", "")),
+    }
+
+
+def _review_mr_comment(verdict: str, summary: str, findings: list[dict]) -> str:
+    """The bot comment the reviewer's result earns on the Draft MR."""
+    lines = [
+        "## Forge readonly review",
+        "",
+        f"**Verdict:** {verdict}",
+        "",
+        summary,
+    ]
+    if findings:
+        lines.append("")
+        lines.append("**Findings:**")
+        lines.extend(
+            f"- `{f['file']}` ({f['severity']}): {f['note']}" for f in findings if f.get("note")
+        )
+    lines.append("")
+    lines.append("*This is an automated message.*")
+    return "\n".join(lines)

@@ -33,6 +33,7 @@ from forge.durable.gates import (
     is_valid,
     record_approval,
 )
+from forge.durable.identity import factory_branch, plan_digest_of, short_run_id
 from forge.durable.inbox import (
     build_source_event_id,
     ingest_event,
@@ -76,9 +77,12 @@ __all__ = [
     "as_aware_utc",
     "build_source_event_id",
     "consume_approval",
+    "factory_branch",
     "ingest_event",
     "is_valid",
     "mark_processed",
     "mark_rejected",
+    "plan_digest_of",
     "record_approval",
+    "short_run_id",
 ]

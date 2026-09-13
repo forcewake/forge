@@ -13,7 +13,13 @@ from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import WriteOutcome, WriteResult
 from forge.runs import RunService
-from forge.runs.stubs import StubImplementer, StubPlanner, factory_branch, plan_digest_of
+from forge.runs.stubs import (
+    StubImplementer,
+    StubPlanner,
+    StubReviewer,
+    factory_branch,
+    plan_digest_of,
+)
 from tests.fixtures.fake_gitlab import FakeGitLab
 
 PROJECT_ID = 42
@@ -69,6 +75,21 @@ class FakeWriter:
         return WriteResult(WriteOutcome.COMMITTED, "fake-sha-1")
 
 
+def make_service(db, fake_gitlab, **overrides) -> RunService:
+    """RunService with deterministic stub agents (no LLM anywhere)."""
+    values = dict(
+        session_factory=db,
+        gitlab=fake_gitlab,
+        settings=make_settings(),
+        writer_class=FakeWriter,
+        planner=StubPlanner(),
+        implementer=StubImplementer(),
+        reviewer=StubReviewer(),
+    )
+    values.update(overrides)
+    return RunService(**values)
+
+
 @pytest.fixture()
 async def db():
     engine = create_async_engine(
@@ -93,12 +114,7 @@ def fake_gitlab() -> FakeGitLab:
 @pytest.fixture()
 def service(db, fake_gitlab):
     FakeWriter.reset()
-    return RunService(
-        session_factory=db,
-        gitlab=fake_gitlab,
-        settings=make_settings(),
-        writer_class=FakeWriter,
-    )
+    return make_service(db, fake_gitlab)
 
 
 async def get_run(db, run_id: str) -> FlowRun:
@@ -145,8 +161,16 @@ class TestStartRun:
     async def test_plan_digest_is_sha256_of_plan(self, service, db):
         run_id = await start_issue_run(service)
         run = await get_run(db, run_id)
-        expected = plan_digest_of(StubPlanner().plan(ISSUE_TITLE, ISSUE_DESC))
+        expected = plan_digest_of(await StubPlanner().plan(ISSUE_TITLE, ISSUE_DESC))
         assert run.plan_digest == expected
+
+    async def test_plan_evidence_stored(self, service, db):
+        """The plan summary is folded into the run's evidence (ADR-0008)."""
+        run_id = await start_issue_run(service)
+        run = await get_run(db, run_id)
+        plan_evidence = (run.evidence or {}).get("plan") or {}
+        assert plan_evidence["digest"] == run.plan_digest
+        assert "Implementation plan" in plan_evidence["summary"]
 
     async def test_transitions_journaled_in_outbox(self, service, db):
         run_id = await start_issue_run(service)
@@ -244,14 +268,11 @@ class TestAdvanceFailures:
     async def test_changeset_violations_block_the_run(self, db, fake_gitlab, monkeypatch):
         import forge.runs.service as service_module
 
-        monkeypatch.setattr(service_module, "validate_changeset", lambda cs: ["forbidden path"])
-        FakeWriter.reset()
-        service = RunService(
-            session_factory=db,
-            gitlab=fake_gitlab,
-            settings=make_settings(),
-            writer_class=FakeWriter,
+        monkeypatch.setattr(
+            service_module, "validate_changeset", lambda cs, git_base=None: ["forbidden path"]
         )
+        FakeWriter.reset()
+        service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
         await service.handle_command_note(
             PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
@@ -266,12 +287,7 @@ class TestAdvanceFailures:
 
     async def test_unknown_commit_outcome_fails_run_without_retry(self, db, fake_gitlab):
         FakeWriter.reset()
-        service = RunService(
-            session_factory=db,
-            gitlab=fake_gitlab,
-            settings=make_settings(),
-            writer_class=FakeWriter,
-        )
+        service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
 
         class UnknownWriter(FakeWriter):
@@ -291,12 +307,7 @@ class TestAdvanceFailures:
 
     async def test_commit_api_error_fails_run(self, db, fake_gitlab):
         FakeWriter.reset()
-        service = RunService(
-            session_factory=db,
-            gitlab=fake_gitlab,
-            settings=make_settings(),
-            writer_class=FakeWriter,
-        )
+        service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
 
         class ErrorWriter(FakeWriter):
@@ -315,17 +326,12 @@ class TestAdvanceFailures:
 class TestStubContract:
     async def test_stub_changeset_shape(self, db, fake_gitlab):
         """The stub proposes exactly one CREATE on the run-owned branch."""
-        service = RunService(
-            session_factory=db,
-            gitlab=fake_gitlab,
-            settings=make_settings(),
-            writer_class=FakeWriter,
-        )
+        service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
 
         async with db() as session:
             run = await session.get(FlowRun, run_id)
-            cs = StubImplementer().propose(run, ISSUE_TITLE)
+            cs = await StubImplementer().propose(run, ISSUE_TITLE)
 
         short = run_id[:8]
         assert cs.branch == f"factory/{ISSUE_IID}/{short}"

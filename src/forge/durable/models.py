@@ -99,6 +99,12 @@ class FlowRun(Base):
     candidate_shas: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     plan_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Incremental ADR-0008 evidence: plan digest/summary, review verdict+sha,
+    #: pipeline id/url/status — written as the run accumulates proof.
+    evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+    #: ADR-0004 commit-cycle budget counter: 1 = initial candidate; each
+    #: bounded code repair increments it (max = FORGE_MAX_COMMIT_CYCLES).
+    commit_cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

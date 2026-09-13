@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     FORGE_TARGET_BRANCH: str = "main"
     FORGE_CI_WAIT_SECONDS: int = 3600
 
+    # ADR-0008 quality contract: comma-separated CI job names that must exist
+    # AND succeed for a run to reach ready_for_human. Skipped/manual/missing
+    # required jobs fail the contract even when the pipeline icon is green.
+    # Empty — a successful pipeline status is enough.
+    FORGE_REQUIRED_JOBS: str = ""
+
+    # ADR-0004 budget semantics: max commit cycles per run — the initial
+    # candidate plus (N - 1) code-repair commits. Infrastructure/config
+    # failures never consume a cycle (they block instead of repairing).
+    FORGE_MAX_COMMIT_CYCLES: int = 3
+
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 

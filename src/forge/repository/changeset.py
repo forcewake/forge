@@ -1,9 +1,11 @@
 """ChangeSet: the trusted write contract between proposers and GitLab (ADR-0001).
 
-A proposer (stub in M1, an implementer agent later) emits a typed ChangeSet;
-:func:`validate_changeset` is the trusted validation layer that checks it
-before anything reaches the Commits API. Authority is never derived from the
-proposal — paths, project and branch are constrained by trusted policy here.
+A proposer (LLM implementer agent) emits a strict-JSON ChangeSet draft;
+:func:`materialize` turns it into a typed ChangeSet against the actual base
+content, and :func:`validate_changeset` is the trusted validation layer that
+checks it before anything reaches the Commits API. Authority is never derived
+from the proposal — paths, project and branch are constrained by trusted
+policy here.
 
 All limits and denylists are module-level constants so tests (and future
 policy configuration) can monkeypatch them.
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class Operation(StrEnum):
@@ -25,8 +28,9 @@ class Operation(StrEnum):
 
 @dataclass(frozen=True)
 class Change:
-    """One file action. ``content`` is required for create, optional for
-    update (full replacement text), forbidden for delete."""
+    """One file action. For ``create`` ``content`` is the full file text; for
+    ``update`` it is the materialized replacement (base with ``old_text``
+    swapped for ``new_text``); ``delete`` carries no content."""
 
     path: str
     operation: Operation
@@ -40,6 +44,15 @@ class ChangeSet:
     branch: str
     commit_message: str
     changes: list[Change]
+
+
+class MaterializationError(Exception):
+    """A raw ChangeSet draft cannot be materialized against the base content.
+
+    Raised on zero or ambiguous ``old_text`` matches, on a missing
+    base file for update/delete, or on a create without content — ADR-0001
+    forbids fuzzy matching, ever.
+    """
 
 
 # --- Trusted validation policy (module-level so tests can monkeypatch) ------
@@ -74,6 +87,12 @@ MAX_CHANGES = 20
 #: Maximum UTF-8 size of a single change's content (256 KiB).
 MAX_CHANGE_BYTES = 256 * 1024
 
+#: Default exact-match count an ``update``'s ``old_text`` must have in the
+#: base content (ADR-0001: ambiguous operations are rejected).
+DEFAULT_EXPECTED_MATCHES = 1
+
+_OPERATION_ALIASES: dict[str, Operation] = {op.value: op for op in Operation}
+
 
 def is_lockfile(path: str) -> bool:
     """Return True when *path* looks like a dependency lockfile."""
@@ -81,13 +100,101 @@ def is_lockfile(path: str) -> bool:
     return name in DENIED_LOCKFILE_NAMES or name.endswith(LOCKFILE_SUFFIX)
 
 
-def validate_changeset(cs: ChangeSet) -> list[str]:
-    """Validate *cs* against the M1 write policy and return all violations.
+def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
+    """Materialize a raw (untrusted, usually LLM-emitted) ChangeSet dict.
 
-    An empty list means the ChangeSet may be materialized and committed.
-    Every violation is a human-readable string; validation never raises for
-    proposal content (it reports instead), only trusted callers decide what a
-    violation means for the run.
+    *git_base* maps path -> current file content at the run's base snapshot,
+    fetched by the caller (ADR-0006: the base the gate approved). ADR-0001
+    rules, with no fuzzy matching ever:
+
+    - ``create``: full ``content`` required; the file must not exist in the
+      base snapshot.
+    - ``update``: ``old_text`` must occur exactly ``expected_matches`` times
+      (default 1) in the base content; the materialized content is
+      ``base.replace(old_text, new_text, expected_matches)``.
+    - ``delete``: no content; the file must exist in the base snapshot.
+
+    Raises :class:`MaterializationError` (zero/>expected matches, wrong
+    shapes) — the caller decides what that means for the run.
+    """
+    if not isinstance(cs_raw, dict):
+        raise MaterializationError("changeset draft must be a JSON object")
+
+    branch = cs_raw.get("branch")
+    commit_message = cs_raw.get("commit_message")
+    if not isinstance(branch, str) or not branch.strip():
+        raise MaterializationError("branch is required")
+    if not isinstance(commit_message, str) or not commit_message.strip():
+        raise MaterializationError("commit_message is required")
+    raw_changes = cs_raw.get("changes")
+    if not isinstance(raw_changes, list) or not raw_changes:
+        raise MaterializationError("changes must be a non-empty list")
+
+    changes: list[Change] = []
+    for raw in raw_changes:
+        changes.append(_materialize_change(raw, git_base))
+    return ChangeSet(branch=branch, commit_message=commit_message, changes=changes)
+
+
+def _materialize_change(raw: Any, git_base: dict[str, str]) -> Change:
+    if not isinstance(raw, dict):
+        raise MaterializationError("each change must be a JSON object")
+
+    path = raw.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise MaterializationError("change path is required")
+
+    operation_raw = raw.get("operation")
+    operation = _OPERATION_ALIASES.get(operation_raw) if isinstance(operation_raw, str) else None
+    if operation is None:
+        raise MaterializationError(f"change {path!r}: unknown operation {operation_raw!r}")
+
+    base_content = git_base.get(path)
+
+    if operation is Operation.CREATE:
+        content = raw.get("content")
+        if not isinstance(content, str):
+            raise MaterializationError(f"change {path!r}: create requires content")
+        if base_content is not None:
+            raise MaterializationError(f"change {path!r}: create but file already exists in base")
+        return Change(path=path, operation=operation, content=content)
+
+    if operation is Operation.UPDATE:
+        old_text = raw.get("old_text")
+        new_text = raw.get("new_text")
+        expected = raw.get("expected_matches", DEFAULT_EXPECTED_MATCHES)
+        if not isinstance(old_text, str) or not isinstance(new_text, str):
+            raise MaterializationError(f"change {path!r}: update requires old_text and new_text")
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+            raise MaterializationError(f"change {path!r}: expected_matches must be a positive int")
+        if base_content is None:
+            raise MaterializationError(f"change {path!r}: update but file is not in base snapshot")
+        matches = base_content.count(old_text)
+        if matches != expected:
+            raise MaterializationError(
+                f"change {path!r}: old_text matches {matches} time(s), "
+                f"expected exactly {expected} — refusing fuzzy apply"
+            )
+        materialized = base_content.replace(old_text, new_text, expected)
+        return Change(path=path, operation=operation, content=materialized)
+
+    # Operation.DELETE
+    if base_content is None:
+        raise MaterializationError(f"change {path!r}: delete but file is not in base snapshot")
+    return Change(path=path, operation=operation, content=None)
+
+
+def validate_changeset(cs: ChangeSet, git_base: dict[str, str] | None = None) -> list[str]:
+    """Validate *cs* against the write policy and return all violations.
+
+    An empty list means the ChangeSet may be committed. Every violation is a
+    human-readable string; validation never raises for proposal content (it
+    reports instead), only trusted callers decide what a violation means for
+    the run.
+
+    When *git_base* (path -> base content at the approved snapshot) is given,
+    ADR-0001 existence rules are enforced on top of the path policy: an
+    ``update``/``delete`` must address a file that exists in the snapshot.
     """
     violations: list[str] = []
 
@@ -130,5 +237,9 @@ def validate_changeset(cs: ChangeSet) -> list[str]:
 
         if change.content is not None and len(change.content.encode("utf-8")) > MAX_CHANGE_BYTES:
             violations.append(f"{where}: content exceeds {MAX_CHANGE_BYTES} bytes")
+
+        if git_base is not None and change.operation in (Operation.UPDATE, Operation.DELETE):
+            if change.path not in git_base:
+                violations.append(f"{where}: file does not exist in the approved base snapshot")
 
     return violations
