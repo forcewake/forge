@@ -40,6 +40,9 @@ forge-agent:
     - npm install -g @anthropic-ai/claude-code
     - git config user.name "forge"
     - git config user.email "forge@users.noreply.gitlab.com"
+    # Push credentials on origin (same pattern as GitLab Duo external agents):
+    # the job pushes with the bot token configured as a project CI variable.
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_TOKEN}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
   script:
     # Live visibility: the compacted agent-event stream (tool calls,
     # thinking, API errors, retries, final result) flows into the job trace
@@ -53,12 +56,17 @@ forge-agent:
     # we still report the branch state so forge can verify (pipefail keeps
     # claude's exit code through the tee/filter pipeline).
     - set -o pipefail
+    # Permission posture mirrors GitLab Duo external agents: file edits are
+    # auto-accepted (acceptEdits), shell is scoped to git only, and the run
+    # loads no external settings (prompt-injection surface reduction).
+    # In -p mode un-allowed tools are auto-denied, never prompted.
     - >-
       claude -p "Implement the task described in /tmp/brief.md for issue
       #$FORGE_ISSUE_IID. Work in the current repository. Commit your changes
       with message: forge: implement issue $FORGE_ISSUE_IID (run
       ${FORGE_RUN_ID:0:8}). Do not push." --model "$ANTHROPIC_MODEL"
-      --dangerously-skip-permissions --output-format stream-json --verbose 2>&1
+      --allowedTools "Bash(git:*)" --permission-mode acceptEdits
+      --setting-sources '' --output-format stream-json --verbose 2>&1
       | tee /tmp/claude-events.jsonl
       | node /tmp/filter.mjs
       || echo "claude exited nonzero — verifying branch state anyway"
@@ -72,10 +80,7 @@ forge-agent:
     # Push the factory branch. With no changes this is a harmless no-op
     # ("Everything up-to-date") — forge detects the unchanged head and
     # classifies it as harness_no_changes.
-    - >-
-      git push
-      "https://forge:${FORGE_BOT_TOKEN}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"
-      "HEAD:${CI_COMMIT_REF_NAME}"
+    - git push origin "HEAD:${CI_COMMIT_REF_NAME}"
     # Machine-readable result. head == base sha ⇒ no changes were made;
     # anything else must match the real branch head or forge rejects it.
     - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"done\"}\n" "$(git rev-parse HEAD)"'
