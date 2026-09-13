@@ -60,6 +60,7 @@ from forge.durable import (
     is_valid,
     record_approval,
 )
+from forge.durable.controller import TERMINAL_STATUSES
 from forge.factory.implementer import LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
@@ -92,6 +93,7 @@ _CI_ACTIVE_STATUSES = frozenset(
 
 #: ``/go <run-id>`` — full 32-hex run id as posted in the plan comment.
 _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
+_CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-fA-F]{32})\b)?", re.IGNORECASE)
 
 #: Repair-loop log budgets (ADR-0013: bounded repair context).
 REPAIR_LOG_PER_JOB_CHARS = 4000
@@ -192,6 +194,27 @@ class RunService:
         author_username: str,
     ) -> str:
         """``@forge /implement``: create the run and park it at the human gate."""
+        # One active run per (project, issue): a second /implement while a run
+        # is still alive would fork branches and Draft MRs for the same task.
+        # Re-delivered webhooks are already collapsed by the gateway dedup —
+        # this guard covers two distinct comments (observed live in M3).
+        active = await self._find_active_run(project_id, issue_iid)
+        if active is not None:
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                self._active_run_comment(active),
+                active.id,
+                "duplicate_implement",
+            )
+            logger.info(
+                "/implement on issue !%s ignored — run %s is already %s",
+                issue_iid,
+                active.id[:8],
+                active.status,
+            )
+            return active.id
+
         run_id = uuid4().hex
 
         async with self._session_factory() as session:
@@ -249,6 +272,94 @@ class RunService:
             author_username,
         )
         return run_id
+
+    async def _find_active_run(self, project_id: int, issue_iid: int) -> FlowRun | None:
+        """The latest non-terminal run for the issue, or None."""
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        async with self._session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(FlowRun)
+                        .where(
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_iid,
+                            FlowRun.status.notin_(terminal),
+                        )
+                        .order_by(FlowRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if run is None:
+                return None
+            session.expunge(run)
+            return run
+
+    @staticmethod
+    def _active_run_comment(run: FlowRun) -> str:
+        return (
+            "## Forge — a run is already active on this issue\n\n"
+            f"Run `{run.id}` is **{run.status}** — a new `/implement` would fork the "
+            "branch and Draft MR.\n\n"
+            f"- Approve it: `@forge /go {run.id}`\n"
+            f"- Cancel it first: `@forge /cancel {run.id}`"
+        )
+
+    async def handle_cancel_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        issue_iid: int | None,
+    ) -> None:
+        """``@forge /cancel [run-id]``: approver-authorized cancellation (M3).
+
+        Without an explicit run id the latest ACTIVE run for the issue is
+        cancelled. Authority mirrors the /go gate: FORGE_APPROVERS only.
+        Terminal runs are reported in the log, never touched.
+        """
+        match = _CANCEL_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info(
+                "/cancel from @%s who is not in FORGE_APPROVERS — ignoring", author_username
+            )
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            if requested:
+                run = await session.get(FlowRun, requested)
+                if run is None or run.project_id != project_id or run.issue_iid != issue_iid:
+                    logger.info("/cancel references unknown run %s — ignoring", requested[:8])
+                    return
+            else:
+                run = await self._find_active_run(project_id, issue_iid)
+                if run is None:
+                    logger.info("/cancel on issue !%s — no active run", issue_iid)
+                    return
+            run_id = run.id
+            status = run.status
+
+        if status in {s.value for s in TERMINAL_STATUSES}:
+            logger.info("/cancel for terminal run %s (%s) — ignoring", run_id[:8], status)
+            return
+
+        await self._transition(
+            run_id, FlowStatus.CANCELLED, reason=f"cancelled by @{author_username}"
+        )
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            f"Run `{run_id[:8]}` **cancelled** by @{author_username}.",
+            run_id,
+            "cancel_note",
+        )
+        logger.info("Run %s cancelled by @%s", run_id[:8], author_username)
 
     async def handle_command_note(
         self,
@@ -369,6 +480,13 @@ class RunService:
                 metadata.get("author_username", ""),
                 metadata.get("issue_iid"),
                 author_user_id=int(metadata.get("author_user_id") or 0),
+            )
+        elif command == "cancel":
+            await self.handle_cancel_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("issue_iid"),
             )
         else:
             logger.warning("Unknown run command %r — ignoring", command)

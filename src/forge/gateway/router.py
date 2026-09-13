@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 #: Commands served by the durable run service (M1), not the legacy flow engine.
-_RUN_COMMANDS = frozenset({"/implement", "/go"})
+_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel"})
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
@@ -72,6 +72,8 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     if slash_command == "/implement":
         # M1 cutover: /implement takes the durable RunService path, not flows.
         return {**common, "command": "start_run"}
+    if slash_command == "/cancel":
+        return {**common, "command": "cancel", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
 
 

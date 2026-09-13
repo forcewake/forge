@@ -146,6 +146,15 @@ class TestGatewayRouting:
         (task,) = app.state.task_queue.submit.await_args[0]
         assert task.metadata["command"] == "go"
 
+    async def test_bare_cancel_note_without_mention_is_routed(self, app, client):
+        resp = await client.post(
+            "/webhook", json=note_payload("/cancel"), headers=webhook_headers()
+        )
+
+        assert resp.json()["run_command"] is True
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.metadata["command"] == "cancel"
+
     async def test_bare_unknown_command_keeps_legacy_path(self, app, client):
         resp = await client.post(
             "/webhook", json=note_payload("/explain something"), headers=webhook_headers()
@@ -354,6 +363,64 @@ class TestEndToEnd:
             run = await session.get(FlowRun, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
         assert fake.notes_containing(commit_sha), "evidence comment posted"
+
+    async def test_duplicate_implement_refused_then_cancel(self, app, client, monkeypatch):
+        """A second /implement while a run is active must not fork the task:
+        forge replies with the active run instead (M3 Drill C finding). The
+        active run can then be cancelled with /cancel."""
+        from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
+
+        monkeypatch.setattr(
+            "forge.runs.service.build_default_agents",
+            lambda *args, **kwargs: (StubPlanner(), StubImplementer(), StubReviewer()),
+        )
+
+        fake = FakeGitLab()
+        fake.seed_issue(ISSUE_IID, "Add a widget", "Make widgets real.")
+        fake.seed_commit("main", "base-sha-1", "initial")
+        monkeypatch.setattr("forge.runs.service.GitLabClient", FakeGitLabClientFactory(shared=fake))
+
+        resp = await client.post(
+            "/webhook", json=note_payload("/implement"), headers=webhook_headers()
+        )
+        assert resp.status_code == 202
+
+        session_factory = app.state.session_factory
+        async with session_factory() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 1
+        run_id = runs[0].id
+
+        # Second /implement (a distinct note, so gateway dedup does not fire).
+        resp = await client.post(
+            "/webhook", json=note_payload("/implement"), headers=webhook_headers()
+        )
+        assert resp.status_code == 202
+        async with session_factory() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 1, "no second run may be created"
+        assert fake.notes_containing("already active on this issue")
+        assert fake.notes_containing(f"/cancel {run_id}")
+
+        # Approver /cancel (bare) stops the active run.
+        resp = await client.post(
+            "/webhook", json=note_payload("/cancel", username="alice"), headers=webhook_headers()
+        )
+        assert resp.status_code == 202
+        async with session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert "cancelled by @alice" in (run.status_reason or "")
+        assert fake.notes_containing("by @alice"), "cancellation note posted"
+
+        # Non-approver /cancel on a terminal run changes nothing.
+        resp = await client.post(
+            "/webhook", json=note_payload("/cancel", username="mallory"), headers=webhook_headers()
+        )
+        assert resp.status_code == 202
+        async with session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
 
 
 class TestBotAuthorGate:
