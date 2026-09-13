@@ -487,18 +487,34 @@ class RunService:
             "Run %s committed %s (cycle %d) — waiting for CI", run_id[:8], commit_sha[:8], cycle
         )
 
-    async def _advance_harness(self, project_id: int, run_id: str) -> None:
+    async def _advance_harness(
+        self,
+        project_id: int,
+        run_id: str,
+        *,
+        repair_context: str = "",
+        repair_reason: str | None = None,
+    ) -> None:
         """ci_harness leg (ADR-0015): start the harness job, park the run.
 
         ``proposing`` = backend.start (ensures the factory branch, triggers
         the harness pipeline with the task brief as pipeline variables) →
         ``waiting_harness`` with the durable handle in the run's evidence.
         The reconciler (``evaluate_waiting_harness``) polls from here — the
-        wait is worker-free, like ``waiting_ci``.
+        wait is worker-free, like ``waiting_ci``. A repair delegation appends
+        the bounded CI-failure context to the brief so the harness fixes its
+        own candidate.
         """
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             plan_summary, _ = self._plan_evidence(run)
+
+        brief = plan_summary
+        if repair_context:
+            brief = (
+                f"{plan_summary}\n\n## Repair context — previous candidate failed CI"
+                f" ({repair_reason or 'code failure'})\n\n{repair_context}"
+            )
 
         issue_title = await self._read_issue_title(project_id, run)
         try:
@@ -516,7 +532,7 @@ class RunService:
             await session.commit()
 
         try:
-            handle = await backend.start(run, issue_title, "", plan_summary)
+            handle = await backend.start(run, issue_title, "", brief)
         except (GitLabAPIError, httpx.HTTPError) as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
@@ -807,15 +823,6 @@ class RunService:
 
         cycle = await self._read_commit_cycle(run_id)
         max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
-        if is_harness_backend(backend_name):
-            # ADR-0015 (v1): harness runs make no forge-side LLM calls, so a
-            # code failure cannot be repaired by the builtin path either.
-            await self._to_terminal(
-                run_id,
-                FlowStatus.BLOCKED,
-                "commit_cycles_exhausted: repair requires builtin backend",
-            )
-            return
         if cycle >= max_cycles:
             await self._to_terminal(
                 run_id,
@@ -825,7 +832,9 @@ class RunService:
             )
             return
 
-        await self._begin_repair(run_id, project_id, cycle, jobs)
+        await self._begin_repair(
+            run_id, project_id, cycle, jobs, harness=is_harness_backend(backend_name)
+        )
 
     async def _review_and_ready(
         self,
@@ -909,11 +918,15 @@ class RunService:
         project_id: int,
         cycle: int,
         jobs,
+        *,
+        harness: bool = False,
     ) -> None:
         """evaluating_ci → proposing (repair): bump the cycle, re-propose.
 
-        The reason carries the failed job names; the bounded log context is
-        handed to the implementer as repair context (ADR-0004/0008).
+        Builtin runs re-enter the LLM implementer; harness runs re-trigger
+        the harness pipeline with the same bounded repair context appended
+        to the brief (ADR-0015). The reason carries the failed job names
+        (ADR-0004/0008).
         """
         repair_context = await self._build_repair_context(project_id, run_id, jobs)
         failed = _failed_job_names(jobs)
@@ -934,9 +947,14 @@ class RunService:
         logger.info(
             "Run %s enters repair cycle %d — re-proposing with CI logs", run_id[:8], next_cycle
         )
-        await self._advance_proposal(
-            project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
-        )
+        if harness:
+            await self._advance_harness(
+                project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
+            )
+        else:
+            await self._advance_proposal(
+                project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
+            )
 
     async def _build_repair_context(
         self,
@@ -1093,10 +1111,11 @@ class RunService:
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             mr_iid = run.mr_iid
+            cycle = run.commit_cycle or 1
         branch = factory_branch(run.issue_iid, run_id)
         try:
             if mr_iid is not None:
-                await self._update_draft_mr(project_id, run_id, mr_iid, branch, sha)
+                await self._update_draft_mr(project_id, run_id, mr_iid, branch, sha, cycle)
             else:
                 mr_iid = await self._create_draft_mr(project_id, run_id, branch, sha)
         except GitLabAPIError as exc:

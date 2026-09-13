@@ -1,8 +1,9 @@
-"""M2-2: RunService end-to-end with the ci_harness backend (ADR-0015).
+"""M2-2/M2-3: RunService end-to-end with the ci_harness backend (ADR-0015).
 
 /go triggers the harness pipeline → durable waiting_harness; the reconciler
 polls, verifies the branch head and adopts it (Draft MR → waiting_ci →
-ready_for_human). Harness failures block — never the builtin repair loop.
+ready_for_human). A failed HARNESS JOB blocks; a CI code failure with budget
+left re-delegates to the harness with the repair context in the brief.
 Builtin runs are covered by test_runs_service.py / test_runs_repair.py and
 must stay untouched.
 """
@@ -288,18 +289,25 @@ class TestHarnessReconciler:
 
 
 class TestHarnessRepairInterplay:
-    async def test_ci_code_failure_never_enters_builtin_repair(self, service, fake_gitlab, db):
-        """A harness run failing CI blocks — no builtin LLM repair (ADR-0015 v1)."""
+    async def _adopt_candidate(self, service, fake_gitlab, db) -> tuple[str, int, str]:
+        """Drive a harness run to waiting_ci with a verified candidate."""
         run_id, pipeline_id, branch = await start_and_go(service, db, fake_gitlab)
         seed_forge_agent_job(
             fake_gitlab, pipeline_id, status="success", log=result_log(HARNESS_SHA)
         )
         fake_gitlab.seed_commit(branch, HARNESS_SHA, "forge: implement 7")
         await service.evaluate_waiting_harness()
-        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        return run_id, pipeline_id, branch
 
-        # The verification pipeline fails with a plain code failure — with
-        # budget left (cycle 1 < 3) a builtin run would enter the repair loop.
+    async def test_ci_code_failure_repairs_via_new_harness_pipeline(
+        self, service, fake_gitlab, db
+    ):
+        """CI code failure with budget left re-delegates to the harness with
+        the repair context in the brief (ADR-0015) — not a builtin repair."""
+        run_id, _pipeline_id, branch = await self._adopt_candidate(service, fake_gitlab, db)
+
         failed_pipeline = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
         fake_gitlab.set_pipeline_status(failed_pipeline, "failed", HARNESS_SHA)
         fake_gitlab.set_pipeline_jobs(
@@ -313,9 +321,60 @@ class TestHarnessRepairInterplay:
                 }
             ],
         )
+        fake_gitlab.set_job_log(999, "AssertionError: 2 + 2 != 5\nE   assert 4 == 5")
 
         await service.evaluate_waiting_ci()
 
         run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        assert run.commit_cycle == 2
+
+        # A SECOND harness pipeline was started on the same branch (after the
+        # original harness pipeline and the failed verification pipeline), and
+        # its brief (FORGE_PLAN) carries the bounded CI failure context.
+        assert len(fake_gitlab.pipelines) == 3
+        repair_pipeline = fake_gitlab.pipelines[-1]
+        assert repair_pipeline["ref"] == branch
+        by_key = {v["key"]: v["value"] for v in repair_pipeline["variables"]}
+        assert "Repair context" in by_key["FORGE_PLAN"]
+        assert "AssertionError" in by_key["FORGE_PLAN"]
+
+        # The repair delegation is journaled like the first start.
+        async with db() as session:
+            actions = (await session.execute(select(ActionLog))).scalars().all()
+        starts = [a for a in actions if a.action_kind == "harness_start"]
+        assert len(starts) == 2
+        assert starts[-1].correlation_id == f"pipeline-{repair_pipeline['id']}"
+
+    async def test_repair_budget_exhaustion_blocks(self, service, fake_gitlab, db):
+        """After FORGE_MAX_COMMIT_CYCLES repair attempts the run blocks."""
+        settings = make_settings(FORGE_MAX_COMMIT_CYCLES=2)
+        svc = make_service(db, fake_gitlab, settings=settings)
+        run_id, _pipeline_id, branch = await self._adopt_candidate(svc, fake_gitlab, db)
+
+        for _ in range(settings.FORGE_MAX_COMMIT_CYCLES):
+            failed_pipeline = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
+            fake_gitlab.set_pipeline_status(failed_pipeline, "failed", HARNESS_SHA)
+            fake_gitlab.set_pipeline_jobs(
+                failed_pipeline,
+                [
+                    {
+                        "id": 999,
+                        "name": "tests",
+                        "status": "failed",
+                        "failure_reason": "script_failure",
+                    }
+                ],
+            )
+            # Repair cycles park the run in waiting_harness — release them.
+            repair_pipeline_id = int((await get_run(db, run_id)).evidence["harness"]["pipeline_id"])
+            seed_forge_agent_job(
+                fake_gitlab, repair_pipeline_id, status="success", log=result_log(HARNESS_SHA)
+            )
+            fake_gitlab.seed_commit(branch, HARNESS_SHA, "forge: implement 7 (repair)")
+            await svc.evaluate_waiting_harness()
+            await svc.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value
-        assert run.status_reason == "commit_cycles_exhausted: repair requires builtin backend"
+        assert run.status_reason.startswith("commit_cycles_exhausted")
