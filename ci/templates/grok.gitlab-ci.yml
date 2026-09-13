@@ -69,7 +69,7 @@ forge-agent:
     # .forge/ is a control directory: local-only, never staged, never
     # committed (ADR-0016 §1 step 5).
     - mkdir -p .forge
-    - echo ".forge/" >> .git/info/exclude
+    - mkdir -p .git/info && echo ".forge/" >> .git/info/exclude
     # Check out the FROZEN attempt base (detached). The pipeline ref is the
     # factory branch, whose head IS the attempt base in the proposal-only
     # model — nothing else ever pushes to it.
