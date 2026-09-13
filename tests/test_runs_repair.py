@@ -35,6 +35,7 @@ def make_settings(**overrides) -> Settings:
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
+        FORGE_IMPLEMENTER_BACKEND="builtin",
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_MAX_COMMIT_CYCLES=3,

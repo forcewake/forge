@@ -393,7 +393,7 @@ class TestBuildBackend:
 
     def test_builtin_with_implementer_builds_builtin_backend(self, fake_gitlab, db):
         backend = build_backend(
-            make_settings(),
+            make_settings(FORGE_IMPLEMENTER_BACKEND="builtin"),
             gitlab=fake_gitlab,
             session_factory=db,
             implementer=StubImplementer(),

@@ -32,6 +32,10 @@ forge-agent:
     ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
     API_TIMEOUT_MS: "600000"
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    # GitLab docker executors run containers as root; claude refuses
+    # --dangerously-skip-permissions for root unless told it is sandboxed.
+    # The ephemeral CI container IS the execution profile (ADR-0002).
+    IS_SANDBOX: "1"
   before_script:
     - npm install -g @anthropic-ai/claude-code
     - git config user.name "forge"

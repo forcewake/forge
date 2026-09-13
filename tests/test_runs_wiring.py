@@ -64,6 +64,7 @@ def run_settings(tmp_path, **overrides) -> Settings:
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN=SecretStr("glpat-test"),
         GITLAB_WEBHOOK_SECRET=SecretStr(TEST_SECRET),
+        FORGE_IMPLEMENTER_BACKEND="builtin",
         FORGE_APPROVERS="alice",
         DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/forge.db",
         LITELLM_URL="http://litellm:4000",
