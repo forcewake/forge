@@ -1,0 +1,911 @@
+{
+  "repository": "forcewake/forge",
+  "commit": "6115523818bc363e4d671a991722eaad4e288d12",
+  "reviewed_at": "2026-09-13",
+  "scope": "Read-only source review, inspected upstream CI, and three reduced offline reproductions; not a full local checkout test or live penetration test.",
+  "priority_semantics": {
+    "P0": "Устранить/отключить опасный путь до неограниченной записи и сетевого production deployment.",
+    "P1": "Обязательный функциональный/надёжностный контракт до production или соответствующего нового пути.",
+    "P2": "Следующий слой качества/масштабирования либо запланированное расширение."
+  },
+  "findings": [
+    {
+      "id": "F01",
+      "priority": "P0",
+      "title": "Материализация update обрезает файл до 6 000 символов",
+      "evidence_level": "static_source_and_executed_reduced_reproduction",
+      "files": [
+        "src/forge/factory/implementer.py",
+        "src/forge/repository/changeset.py"
+      ],
+      "observed": "_base_contents вызывает _fetch_contents с теми же ограничениями, что и evidence: 8 файлов и 6 000 символов на файл. materialize заменяет текст в этом усечённом base. Следующий validate_changeset проверяет существование пути и размеры, но не сохранность полного blob.",
+      "impact": "Небольшая корректная правка в начале длинного файла может удалить его хвост. В сокращённом воспроизведении 9 031 символ превратился в 6 000, ошибок валидации не было.",
+      "proposed_fix": "Развести EvidenceReader и AuthoritativeBlobReader. Последний возвращает полные bytes, encoding/mode, blob OID и completeness. Материализовать только полные blobs; превышение допустимого размера — отказ, а не усечение. Привязать ChangeSet к исходным hashes.",
+      "acceptance_tests": [
+        "Update в начале файла 9KB сохраняет весь хвост байт-в-байт.",
+        "Изменение 12 разрешённых файлов не теряет файлы 9–12.",
+        "Неполный/нечитаемый blob блокирует запись."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/implementer.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/repository/changeset.py"
+      ]
+    },
+    {
+      "id": "F02",
+      "priority": "P1",
+      "title": "Repair строится на исходном base, а не на предыдущем candidate",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/factory/implementer.py",
+        "src/forge/runs/service.py"
+      ],
+      "observed": "propose всегда читает run.base_sha; _begin_repair увеличивает commit_cycle, но не меняет рабочий snapshot. В сообщении при этом предлагается исправление поверх предыдущей реализации.",
+      "impact": "Агент не видит только что созданные файлы; update может откатывать предыдущую работу или create конфликтовать с существующим файлом.",
+      "proposed_fix": "Хранить отдельно source_base_oid и attempt_base_oid. Для первого candidate attempt_base=approved source; для repair — последний подтверждённый candidate. Перед стартом и публикацией проверять drift. Review полного результата сравнивать с согласованным source base.",
+      "acceptance_tests": [
+        "Цикл 1 создаёт файл, цикл 2 исправляет его без повторного create.",
+        "Цикл 2 сохраняет независимые изменения цикла 1.",
+        "Изменение ветки человеком блокирует repair без overwrite."
+      ],
+      "depends_on": [
+        "F01"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/implementer.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py"
+      ]
+    },
+    {
+      "id": "F03",
+      "priority": "P0",
+      "title": "Запись не привязана к одобренному snapshot и expected head",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/repository/writer.py",
+        "src/forge/runs/service.py",
+        "src/forge/runs/backends.py"
+      ],
+      "observed": "ensure_branch получает live FORGE_TARGET_BRANCH, а не immutable base SHA. _commit_actions не содержит file preconditions; перед commit нет строгой проверки ожидаемой версии ветки.",
+      "impact": "Gate одобряет одну базу, исполнение начинается с другой. Full-file update может перезаписать параллельную правку.",
+      "proposed_fix": "Создавать ветку от frozen source OID. Ввести PublicationIntent с expected head, исходными blob identifiers и operation key. Реализовать host-specific concurrency contract: GitHub expectedHeadOid; для GitLab не выдавать file-level last_commit_id за branch CAS. До сильного режима ограничить профиль единственным writer и проверяемыми неизменяемыми attempt branches.",
+      "acceptance_tests": [
+        "Target сдвинулся между /go и стартом — не возникает неявной смены базы.",
+        "Конкурирующий writer не получает молчаливый overwrite.",
+        "Результат commit подтверждается по parent/content, не только по HTTP 200."
+      ],
+      "depends_on": [
+        "F01"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/repository/writer.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py"
+      ]
+    },
+    {
+      "id": "F04",
+      "priority": "P0",
+      "title": "CI-harness имеет write token и обходит общий ChangeSet policy",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/backends.py",
+        "ci/templates/claude-code.gitlab-ci.yml",
+        "ci/templates/opencode.gitlab-ci.yml",
+        "ci/templates/grok.gitlab-ci.yml"
+      ],
+      "observed": "Harness job получает FORGE_BOT_TOKEN и origin с credential, сам делает git push. poll проверяет лишь совпадение reported head и live branch head и отличие от исходного base. Проверки write policy до remote side effect нет.",
+      "impact": "Ограничения builtin на CI/config/пути не распространяются на harness. Проверка SHA после push не отменяет уже выполненную запись и запущенный CI.",
+      "proposed_fix": "Сделать harness proposal-only: исходники доступны read-only относительно remote, workspace writable локально. Результат — CandidateBundle. Отдельный trusted publisher без исполнения кода из candidate проверяет net diff, policy, base и действительность grant и только затем пишет.",
+      "acceptance_tests": [
+        "В harness environment и .git/config отсутствуют remote write credentials.",
+        "Изменение CI/config отклоняется до публикации.",
+        "Прямой remote push из harness запрещён технически.",
+        "Проверка одного CandidateBundle одинакова для builtin/Claude/Codex/Grok/OpenCode."
+      ],
+      "depends_on": [
+        "F01",
+        "F03"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/claude-code.gitlab-ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/opencode.gitlab-ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/grok.gitlab-ci.yml"
+      ]
+    },
+    {
+      "id": "F05",
+      "priority": "P0",
+      "title": "MCP может быть открыт без auth и использует глобальный GitLab token",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/main.py",
+        "src/forge/mcp_server/server.py",
+        "src/forge/mcp_server/tools.py"
+      ],
+      "observed": "MCP монтируется всегда, middleware добавляется только при FORGE_MCP_KEY. По умолчанию key отсутствует. Tools читают проекты и публикуют комментарии через settings.GITLAB_TOKEN. Внешний reverse proxy мог бы закрывать доступ, но конфигурация развёрнутого стенда здесь не проверялась.",
+      "impact": "При доступности endpoint без дополнительной защиты клиент получает доступ к данным/действиям в пределах общего токена. Это обнаруженная небезопасная конфигурация по умолчанию, не доказательство фактической публичной утечки.",
+      "proposed_fix": "По умолчанию MCP выключен либо приложение отказывается запускать сетевой MCP без auth. На каждом tool call — identity, repository scope и capability checks. Не позволять tools обходить trusted publication/gate. Убрать привилегированный human-token fallback из unattended режима.",
+      "acceptance_tests": [
+        "Без credentials MCP выключен/401, а не открыт.",
+        "Ключ repo A не читает repo B.",
+        "Write tool проходит общий policy и журнал.",
+        "Авторизация работает и при обходе reverse proxy."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/main.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/mcp_server/server.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/mcp_server/tools.py"
+      ]
+    },
+    {
+      "id": "F06",
+      "priority": "P0",
+      "title": "Generic HTTP retry повторяет неидемпотентные POST",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/gitlab/client.py",
+        "src/forge/runs/service.py"
+      ],
+      "observed": "create_commit отключает retry, но create_pipeline, create_merge_request и create_issue_note вызывают _post с retry=True. HTTP errors и часть 5xx повторяются автоматически.",
+      "impact": "Потеря ответа может создать повторную job/MR/note; журнал одного intent не защищает от повтора внутри HTTP client.",
+      "proposed_fix": "Retry policy должна быть семантикой операции, а не HTTP клиента по умолчанию. Reads retry; non-idempotent writes intent-first, ambiguous outcome, reconcile by native identity/content, затем решение. Отличать definitive rejection от возможного выполнения.",
+      "acceptance_tests": [
+        "Удалённая система применила POST и разорвала соединение: второй POST не отправлен.",
+        "429/5xx и network disconnect тестируются отдельно.",
+        "Одна operation key имеет один подтверждённый remote effect либо явный unresolved outcome."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gitlab/client.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py"
+      ]
+    },
+    {
+      "id": "F07",
+      "priority": "P1",
+      "title": "Unknown commit outcome сопоставляется только по повторяющемуся message",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/repository/writer.py",
+        "src/forge/factory/implementer.py"
+      ],
+      "observed": "_resolve_unknown принимает ровно один commit с совпадающим message. Implementer использует один message на run, включая repair cycles; поиск не проверяет parent, candidate bytes или operation id.",
+      "impact": "Старый commit может быть ошибочно принят за результат новой попытки; несколько совпадений дают неопределённость даже при известном результате.",
+      "proposed_fix": "Ввести operation_id и attempt_id, digest нормализованного change manifest, expected parent. При reconciliation проверять actual commit tree/content и связь с конкретным intent. Не делать commit message единственным доказательством.",
+      "acceptance_tests": [
+        "Старый commit с тем же message не подтверждает новый запрос.",
+        "Применённый commit с потерянным ответом восстанавливается по evidence.",
+        "Unknown остаётся recoverable и не разрешает blind retry."
+      ],
+      "depends_on": [
+        "F03",
+        "F06"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/repository/writer.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/implementer.py"
+      ]
+    },
+    {
+      "id": "F08",
+      "priority": "P1",
+      "title": "EventInbox/Outbox не образуют durable путь от HTTP ingress до выполнения",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/gateway/router.py",
+        "src/forge/durable/models.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "Runtime receiver делает Redis dedup и queue.submit; таблица EventInbox не используется в показанном ingress. Без Redis применяется BackgroundTasks. Transition outbox записывается, но worker продолжает императивную цепочку, а не восстанавливаемый dispatch из этой таблицы.",
+      "impact": "202 Accepted не гарантирует сохранённую задачу. Потеря процесса после dedup и до enqueue может подавить повторную доставку и потерять работу.",
+      "proposed_fix": "Транзакционно сохранить native delivery identity, command и outbox/step schedule до 202. Dispatcher/reconciler повторяемо доставляет wake-ups. Redis сделать ускорителем, не единственным владельцем работы. BackgroundTasks явно dev-only.",
+      "acceptance_tests": [
+        "Crash в каждом окне между receive/dedup/enqueue/ack не теряет принятую команду.",
+        "Потеря Redis не теряет pending работу Postgres.",
+        "Повтор доставки не создаёт новый run/approval."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gateway/router.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F09",
+      "priority": "P1",
+      "title": "Redis claim, retry и heartbeat сохраняют прежние гонки",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/worker/queue.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "BZPOPMIN и ZADD processing раздельны. Retry немедленно re-enqueue; вычисленный delay только логируется. Reaper считает task stale спустя 300s, heartbeat обновляет worker key, не task lease.",
+      "impact": "Потеря задачи в окне claim; горячие повторения; длинный живой task выдаётся другому worker.",
+      "proposed_fix": "После F08 оставить Redis лишь сигналом. До cutover — атомарный claim и delayed scheduling, task-specific lease с heartbeat. Не вести два независимых authoritative статуса задачи.",
+      "acceptance_tests": [
+        "Убить worker между pop и tracking: работа находится.",
+        "Живой task >300s не выдаётся повторно.",
+        "Retry не доступен до next_attempt_at.",
+        "Completion старого owner не снимает работу нового owner."
+      ],
+      "depends_on": [
+        "F08"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/queue.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F10",
+      "priority": "P1",
+      "title": "Transitions и leases не имеют атомарного ownership/fencing",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/durable/controller.py",
+        "src/forge/durable/models.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "transition и acquire_lease читают строку и меняют поля без conditional UPDATE/row-version. StepRun lease API не подключён к RunService worker loop. Каждый worker запускает reconciler.",
+      "impact": "Два worker могут принять одно решение, начать review/repair или выдать два эффекта; expiry сам по себе не является fencing.",
+      "proposed_fix": "Conditional UPDATE с expected status/version либо короткие row locks, monotonic fence token на lease, проверка fence при intent dispatch. Уникальные step attempts, claim batches SKIP LOCKED. Внешние вызовы не держат долгую DB transaction.",
+      "acceptance_tests": [
+        "Два реальных Postgres connection одновременно claim одного run: ровно один owner.",
+        "Просроченный owner не публикует новый intent.",
+        "Одновременно /cancel и переход: одна согласованная версия state."
+      ],
+      "depends_on": [
+        "F08"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/controller.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F11",
+      "priority": "P1",
+      "title": "Нет восстановления всех промежуточных состояний",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py"
+      ],
+      "observed": "Reconciler сканирует waiting_ci и waiting_harness. После consumed gate и transition proposing процесс может умереть; повтор /go уже игнорируется, а active run препятствует новому /implement.",
+      "impact": "Запуск навсегда застревает в proposing/committing/reviewing/ensuring_draft_mr при допустимом crash.",
+      "proposed_fix": "Каждый nonterminal step получает persisted input/output, next action, deadline и recovery handler. Resume ищет существующий эффект, не повторяет LLM/write без причины. Outbox notifications повторяются отдельно от успешного business state.",
+      "acceptance_tests": [
+        "Crash после каждого transition и внешнего эффекта; новый процесс доводит run до результата или явного blocked.",
+        "Crash после READY до комментария не теряет уведомление.",
+        "Рестарт без исходной Redis task восстанавливает работу."
+      ],
+      "depends_on": [
+        "F06",
+        "F07",
+        "F08",
+        "F10"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py"
+      ]
+    },
+    {
+      "id": "F12",
+      "priority": "P1",
+      "title": "Проверки одного активного run и одного approval не защищены constraints",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/durable/models.py"
+      ],
+      "observed": "_find_active_run и последующий insert — отдельные действия. /go может создать GateApproval при отсутствии строки; нет уникальности gate generation. consume-once одной строки не исключает две одновременно созданные строки.",
+      "impact": "Два /implement или /go в конкуренции могут породить два run/исполнения, хотя последовательный unit test зелёный.",
+      "proposed_fix": "DB unique active key(connection,repository,issue) с явно выбранными активными статусами; unique gate(run,generation). Command inbox сохраняет native note ID. Transactional conflict означает idempotent lookup, не второй запуск.",
+      "acceptance_tests": [
+        "100 конкурентных /implement на один issue дают один active run.",
+        "Две /go одновременно потребляют одну gate generation и запускают один step.",
+        "READY/blocked semantics нового запуска задокументированы."
+      ],
+      "depends_on": [
+        "F08",
+        "F10"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py"
+      ]
+    },
+    {
+      "id": "F13",
+      "priority": "P1",
+      "title": "Cancel не отменяет внешний executor и не запрещает позднюю публикацию",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/runs/backends.py"
+      ],
+      "observed": "/cancel меняет FlowRun и пишет note. ImplementerBackend не имеет cancel; внешняя job продолжает работу с write token.",
+      "impact": "Пользователь видит cancelled, но позже появляются commits и расходы. Аналогичная проблема у run-level timeout.",
+      "proposed_fix": "Сначала durable cancel request и отзыв publication grant, затем executor.cancel(handle), ожидание подтверждения/таймаута и cleanup. Поздние artifacts считаются superseded. Гарантия запрета новых записей обеспечивается publisher, даже если внешний процесс не остановился.",
+      "acceptance_tests": [
+        "После подтверждения cancel новые commits не публикуются.",
+        "Поздний successful result после cancel не становится READY.",
+        "Недоступный executor отражается как cancel_pending/cleanup_required."
+      ],
+      "depends_on": [
+        "F04",
+        "F10",
+        "F11"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py"
+      ]
+    },
+    {
+      "id": "F14",
+      "priority": "P1",
+      "title": "Execution policy замораживается неполностью",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/config.py",
+        "src/forge/runs/backends.py"
+      ],
+      "observed": "В evidence сохранено имя backend, но _harness_backend строится из текущих Settings. _policy_digest хеширует только FORGE_APPROVERS. config_digest в модели не заполняется этим lifecycle.",
+      "impact": "После redeploy одобренный run может использовать другую модель, harness, target branch, required jobs или другую политику.",
+      "proposed_fix": "Сохранять versioned immutable RunSpec: provider connection, source/plan/policy/config digests, harness/image/template versions, model route, execution profile, budgets. Credentials хранить ссылками с revocation checks, не копировать secrets в RunSpec.",
+      "acceptance_tests": [
+        "Поменять глобальную настройку между approval и resume: выполняется сохранённый spec либо запрашивается reapproval.",
+        "Смена template digest инвалидирует grant, если меняет права/поведение.",
+        "Невозможно восстановить run на молча выбранном builtin вместо harness."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/config.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py"
+      ]
+    },
+    {
+      "id": "F15",
+      "priority": "P1",
+      "title": "Approval не имеет реального срока ожидания и полного task snapshot",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/factory/implementer.py"
+      ],
+      "observed": "Gate создаётся во время /go с expires_at=now+TTL и тут же потребляется. Исходный issue может перечитываться позднее. Actor проверяется по глобальному username list; текущие права в целевом проекте не перечитываются.",
+      "impact": "Старый план можно разрешить спустя произвольное время; обновлённая issue description может изменить одобренную работу.",
+      "proposed_fix": "Создавать pending decision при публикации плана с deadline и task digest. Проверять current numeric actor identity/authority в connection scope, plan/source/spec digest. Изменение task scope создаёт новую generation. Username — отображение, не долговечный security identifier.",
+      "acceptance_tests": [
+        "/go после decision deadline отклоняется.",
+        "Изменение issue после approval не меняет задачу текущего run.",
+        "Отозванные права/installation не дают выполнить старое разрешение."
+      ],
+      "depends_on": [
+        "F12",
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/implementer.py"
+      ]
+    },
+    {
+      "id": "F16",
+      "priority": "P1",
+      "title": "Preflight и authorization не являются обязательным admission gate",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/gateway/router.py"
+      ],
+      "observed": "start_run фиксирует статус preflight, но перед planner в прочитанном пути нет enforcement execution profile. /implement проходит до paid planning без проверки command actor; doctor — отдельная команда, не сертификат допуска.",
+      "impact": "Недоверенный пользователь может расходовать planning budget; небезопасный проект начинает исполнение без доказанного no-merge/isolation режима.",
+      "proposed_fix": "AdmissionPolicy до model call: разрешённые connection/project/actor, quotas, write restrictions и рабочий verification profile. Перед публикацией повторить необходимые fresh permission checks. Doctor печатает findings, RunService применяет decision.",
+      "acceptance_tests": [
+        "Неавторизованный /implement не вызывает LLM.",
+        "Проект без утверждённого CI profile блокируется до first commit.",
+        "Bot identity совпала с human approver: startup/preflight отказ."
+      ],
+      "depends_on": [
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gateway/router.py"
+      ]
+    },
+    {
+      "id": "F17",
+      "priority": "P1",
+      "title": "CI deadline не применяется к существующему running pipeline",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/runs/backends.py"
+      ],
+      "observed": "_evaluate_one проверяет ci_timeout только при отсутствии pipelines. Active statuses и часть read failures возвращают управление до проверки deadline.",
+      "impact": "Бесконечное ожидание running/pending CI или недоступной API; ресурсы и пользовательский workflow не закрываются.",
+      "proposed_fix": "Сохранять absolute deadline/next_poll_at per wait state; проверять deadline независимо от ответа API/status. Отдельно classify outage, manual hold и infrastructure failure; отменять/очищать внешние jobs согласно политике.",
+      "acceptance_tests": [
+        "Постоянный running pipeline после deadline становится timeout.",
+        "Повторяющиеся API 500 не обходят deadline.",
+        "Timeout сохраняется через process restart."
+      ],
+      "depends_on": [
+        "F11",
+        "F13"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py"
+      ]
+    },
+    {
+      "id": "F18",
+      "priority": "P1",
+      "title": "Отсутствие failed jobs ошибочно классифицируется как code failure",
+      "evidence_level": "static_source_and_executed_reduced_reproduction",
+      "files": [
+        "src/forge/runs/ci_contract.py",
+        "src/forge/runs/service.py"
+      ],
+      "observed": "classify_failure возвращает code после циклов по failed jobs. Для [] или только canceled jobs оба цикла пусты.",
+      "impact": "Отмена, skipped pipeline или неполное evidence вызывают ненужный LLM repair.",
+      "proposed_fix": "Ввести закрытый enum code/infrastructure/config/cancelled/unknown. Code только при положительном доказательстве script/test failure и известном pipeline состоянии; отсутствие данных — не code.",
+      "acceptance_tests": [
+        "classify_failure([]) не code.",
+        "Cancelled/skipped/unknown не вызывают repair.",
+        "Настоящий failing test с script_failure допускает bounded repair."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/ci_contract.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py"
+      ]
+    },
+    {
+      "id": "F19",
+      "priority": "P1",
+      "title": "CI/review evidence недостаточно связано с проверенным объектом",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/runs/ci_contract.py",
+        "src/forge/gitlab/client.py"
+      ],
+      "observed": "Первый pipeline по SHA выбирается без полного execution identity; required_jobs по умолчанию пусты. Head проверяется до потенциально долгого review; после READY drift больше не наблюдается. Diff completeness не передаётся явно.",
+      "impact": "Зелёный неподходящий workflow или устаревший candidate могут получить misleading READY. На GitHub сравнение только одного SHA будет ещё и неверным для merge-ref CI.",
+      "proposed_fix": "VerificationProfile и immutable evidence tuple: subject head, target base, tested revision, native run/attempt, workflow definition и trusted check producer. Не разрешать empty profile production. Проверка freshness перед READY, invalidation после изменения. Явно отмечать неполные diffs/reports.",
+      "acceptance_tests": [
+        "Зелёный нерелевантный pipeline не считается проверкой.",
+        "Push во время review инвалидирует результат.",
+        "Missing/matrix/child/allow-failure jobs обрабатываются по контракту.",
+        "GitHub synthetic merge SHA не смешивается с PR head."
+      ],
+      "depends_on": [
+        "F03",
+        "F14",
+        "F17",
+        "F18"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/ci_contract.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gitlab/client.py"
+      ]
+    },
+    {
+      "id": "F20",
+      "priority": "P1",
+      "title": "Harness handle не связывает реальный driver/model/attempt с результатом",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/backends.py",
+        "ci/templates/claude-code.gitlab-ci.yml",
+        "ci/templates/grok.gitlab-ci.yml"
+      ],
+      "observed": "ci_harness suffix не валидируется registry; job выбирается общим именем forge-agent. Claude template использует ANTHROPIC_MODEL вместо переданного FORGE_HARNESS_MODEL; Grok template не передаёт --model. Проверка no changes сравнивает с исходным run.base, не attempt base.",
+      "impact": "Выбранная конфигурация может не соответствовать выполненной; no-op repair считается новым candidate; чужой/retried job может быть принят по имени.",
+      "proposed_fix": "Typed ExecutionHandle и trusted job manifest: spec digest, driver/version/image, route/model, attempt id и checkout OID. Неизвестный driver отвергать при config validation. Проверять job run/attempt provenance и net diff относительно attempt base.",
+      "acceptance_tests": [
+        "Неизвестный driver — configuration error до dispatch.",
+        "Запрошенная модель видна в trusted launch arguments и receipt.",
+        "No-op repair не публикует второй candidate.",
+        "Результат другой attempt не усваивается."
+      ],
+      "depends_on": [
+        "F04",
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/claude-code.gitlab-ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/grok.gitlab-ci.yml"
+      ]
+    },
+    {
+      "id": "F21",
+      "priority": "P1",
+      "title": "Template supply chain и task credentials не зафиксированы",
+      "evidence_level": "static_source",
+      "files": [
+        "ci/templates/claude-code.gitlab-ci.yml",
+        "ci/templates/opencode.gitlab-ci.yml",
+        "ci/templates/grok.gitlab-ci.yml"
+      ],
+      "observed": "CLI устанавливаются из mutable registries; filters скачиваются с main. Grok получает полный OAuth auth.json с refresh credential. Brief/debug files могут попасть в промежуточные commits до последующего удаления wrapper-ом.",
+      "impact": "Рестарт запускает другой код; refresh credential доступен workload; удаление файла из финального дерева не удаляет его из истории.",
+      "proposed_fix": "Digest-pinned runner images и scripts; prebuilt CLI binary/version checks; API/service credential или short-lived model proxy grant по поддерживаемому контракту. Отдельный workspace control directory; публиковать только нормализованный net diff, не сырую agent git history. Не считать chmod600 изоляцией от того же процесса.",
+      "acceptance_tests": [
+        "Полностью записан provenance image/CLI/template.",
+        "Никаких refresh bundles в стандартном unattended profile.",
+        "Brief/logs не присутствуют ни в опубликованном tree, ни в commits.",
+        "Agent exit status отделён от наличия файлов."
+      ],
+      "depends_on": [
+        "F04",
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/claude-code.gitlab-ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/opencode.gitlab-ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/grok.gitlab-ci.yml"
+      ]
+    },
+    {
+      "id": "F22",
+      "priority": "P1",
+      "title": "Usage ledger не охватывает CLI calls и не ограничивает расход",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/factory/llm.py",
+        "src/forge/durable/models.py",
+        "src/forge/runs/backends.py"
+      ],
+      "observed": "LLMClient пишет prompt/completion counters и tier вместо resolved model, ledger best-effort. CLI внутренние calls не поступают в этот ledger; per-call max_tokens и commit cycles не являются полным run budget.",
+      "impact": "Нельзя сравнивать harnesses и считать traffic/cost per accepted unit; отменённые/повторные/внешние calls теряются. Budget enforcement не следует из наличия таблицы.",
+      "proposed_fix": "Provider receipt adapters и raw usage artifacts, parent/episode/attempt IDs, exclusive token buckets. Резервировать budget перед dispatch; reconcile фактические receipts. Unknown usage явно неполно, а не zero; на nonmetered route доступен только честный hard wallclock/quota envelope.",
+      "acceptance_tests": [
+        "CLI nested calls/failed attempts входят в ledger либо помечены неизвестными.",
+        "Cached input не суммируется повторно с inclusive input.",
+        "Concurrent attempts не расходуют один budget reservation дважды.",
+        "Actual model/provider/pricing snapshot отделены от routing alias."
+      ],
+      "depends_on": [
+        "F14",
+        "F20"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/llm.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py"
+      ]
+    },
+    {
+      "id": "F23",
+      "priority": "P1",
+      "title": "Redaction и ограничение контекста не едины для всех путей",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/factory/implementer.py",
+        "src/forge/factory/llm.py",
+        "src/forge/runs/service.py",
+        "ci/templates/grok.gitlab-ci.yml"
+      ],
+      "observed": "Factory path читает GitLab прямо, а repair context собирает raw job logs. Ошибки прокси и CLI/debug traces могут включать входной текст. Context limits в символах не отражают модельный tokenizer; repair context стоит последним и может отрезаться.",
+      "impact": "Secrets/context могут уйти в модель/логи в обход прежнего ContextEngine. Агент не получает самые важные diagnostics.",
+      "proposed_fix": "Единый evidence policy перед любым model/tool/log boundary; отдельные deterministic source blobs для materialization, которые не обязаны уходить в модель. Приоритетные slots для требований/repair/tool outputs и бюджет по route. Достоверная полнота evidence и явный отказ при недостатке.",
+      "acceptance_tests": [
+        "Canary secret из repo/CI/error/CLI trace не попадает в неразрешённый sink.",
+        "Repair context не теряется при длинном file evidence.",
+        "Redacted placeholder не может заменить original secret в commit.",
+        "Ошибки/retention тестируются отдельно от prompt."
+      ],
+      "depends_on": [
+        "F01",
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/implementer.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/llm.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/ci/templates/grok.gitlab-ci.yml"
+      ]
+    },
+    {
+      "id": "F24",
+      "priority": "P1",
+      "title": "Shared nested config мутирует defaults других экземпляров",
+      "evidence_level": "static_source_and_executed_reduced_reproduction",
+      "files": [
+        "src/forge/config.py"
+      ],
+      "observed": "dict(self._DEFAULTS) копирует только верхний уровень. _deep_merge меняет вложенные словари исходного class-level defaults.",
+      "impact": "Следующий экземпляр получает настройки предыдущего; это нарушение изоляции конфигурации и неприятная база для per-project Lego.",
+      "proposed_fix": "Immutable typed config либо deepcopy при загрузке; separate validated effective config per run. Убрать silent fallback на неверную schema/version.",
+      "acceptance_tests": [
+        "Override global_per_minute=999 не меняет fresh default=10.",
+        "Два project configs не влияют друг на друга.",
+        "Unknown ключ с security impact — явная ошибка."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/config.py"
+      ]
+    },
+    {
+      "id": "F25",
+      "priority": "P1",
+      "title": "Release image не содержит заявленного production набора",
+      "evidence_level": "static_source",
+      "files": [
+        "Containerfile",
+        "pyproject.toml",
+        "src/forge/main.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "Containerfile делает uv sync --frozen --no-dev без postgres extra. asyncpg находится только в extra. Образ копирует src, но не agents YAML и migration assets. Сам build и runtime здесь не запускались.",
+      "impact": "Postgres profile и reactive YAML-dependent функции могут не работать из standalone image, хотя source checkout работает.",
+      "proposed_fix": "Explicit service image profile с нужными extras; package data через importlib.resources, миграции в отдельном migration image/command либо поставляемых assets. Pin UV/base images. На deps layer использовать no-install-project при отсутствии source. Проверить точный build, а не объявлять его сломанным без запуска.",
+      "acceptance_tests": [
+        "Чистый image запускается с Postgres и Redis без bind mount исходников.",
+        "Built-in recipes/agents доступны из wheel/image.",
+        "Migration command доступен и не требует git checkout.",
+        "Release CI собирает и smoke-tests тот же digest, который публикует."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/Containerfile",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/pyproject.toml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/main.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F26",
+      "priority": "P1",
+      "title": "Schema lifecycle и закрытие DB engine не production-ready",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/database.py",
+        "src/forge/main.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "init_db вызывает Base.metadata.create_all. reset_engine только сбрасывает ссылки и не делает await dispose. Engine cache глобальный и не keyed по database URL.",
+      "impact": "create_all не заменяет upgrade существующей schema. Незакрытые async resources затрудняют shutdown/tests; в CI действительно есть aiosqlite Event loop is closed warning, но причинная связь здесь не проверялась отдельным экспериментом.",
+      "proposed_fix": "Явный migration stage с единственным владельцем; приложение проверяет schema compatibility. Async shutdown/dispose, lifecycle-managed dependency containers вместо globals.",
+      "acceptance_tests": [
+        "Upgrade с v0.1 DB на новую schema сохраняет активные runs.",
+        "Приложение не стартует с неподдерживаемой schema.",
+        "Shutdown тестов/worker без фоновых connection warnings.",
+        "Отдельные приложения с разными URL не разделяют engine."
+      ],
+      "depends_on": [
+        "F25"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/database.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/main.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F27",
+      "priority": "P2",
+      "title": "API evidence может быть неполным или не тем форматом",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/gitlab/client.py"
+      ],
+      "observed": "get_merge_request_raw_diff использует /diffs с Accept text/plain вместо /raw_diffs. Pagination обрывается после 50 страниц без completeness flag; raw compare собирается без явного large/collapsed diff состояния.",
+      "impact": "Reviewer/MCP получают JSON вместо unified diff либо неполное evidence без предупреждения.",
+      "proposed_fix": "Исправить endpoint, adapter DTO для complete/truncated/unavailable. Пределы API не выдавать за полное дерево/полный diff. Отдельные provider contract tests на реальные записанные fixtures.",
+      "acceptance_tests": [
+        "Raw endpoint даёт unified diff.",
+        "Превышение pagination limit возвращает incomplete.",
+        "Collapsed/too_large diff не получает безусловный review success."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gitlab/client.py"
+      ]
+    },
+    {
+      "id": "F28",
+      "priority": "P2",
+      "title": "Polling и HTTP resource management масштабируются плохо",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/gitlab/client.py",
+        "src/forge/factory/llm.py"
+      ],
+      "observed": "Для head check читается paginated история commits; trace tail обрезается после полного download. Каждая worker replica сканирует все waiting runs. Default agents создают HTTP LLM client без очевидного shutdown в task-scoped RunService.",
+      "impact": "Рост API requests/bytes и connection churn; масштабирование workers умножает polling вместо полезной работы.",
+      "proposed_fix": "GET branch/commit для head, bounded streaming/download, next_poll_at+jitter+event hints, claimed batches, shared lifecycle-managed HTTP clients. Метрики rate-limit/lag/bytes и backpressure.",
+      "acceptance_tests": [
+        "Добавление worker не умножает polls одного run.",
+        "Head check не читает тысячи commits.",
+        "Недоступный provider не создаёт hot loop.",
+        "Число открытых клиентов стабильно в long-running test."
+      ],
+      "depends_on": [
+        "F10",
+        "F11"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gitlab/client.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/llm.py"
+      ]
+    },
+    {
+      "id": "F29",
+      "priority": "P1",
+      "title": "Green CI не делает typecheck и реальные concurrency contracts обязательными",
+      "evidence_level": "static_source",
+      "files": [
+        ".github/workflows/ci.yml",
+        "tests/conftest.py"
+      ],
+      "observed": "Mypy step имеет continue-on-error:true. В просмотренном workflow tests работают на обычном checkout без отдельного Postgres/Redis/runner integration stage. Прочитанный Python3.13 job: 819 passed, 1 skipped, 3 xfailed, 1 warning.",
+      "impact": "Последовательные fakes не доказывают atomicity и restart safety; реальная ошибка types может оставлять общий workflow зелёным.",
+      "proposed_fix": "Blocking typing сначала в contracts/core/new code, затем весь проект. Required integration stage Postgres+Redis с 2 workers и failure injection; tracked xfails с issue/owner, release image smoke. JUnit и coverage artifacts.",
+      "acceptance_tests": [
+        "Нарушение protocol или CAS приводит к красному required check.",
+        "Three xfails имеют понятную причину и план закрытия.",
+        "Crash/recovery gate запускается на каждую lifecycle правку."
+      ],
+      "depends_on": [],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/.github/workflows/ci.yml",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/tests/conftest.py"
+      ]
+    },
+    {
+      "id": "F30",
+      "priority": "P2",
+      "title": "Management API показывает legacy flow, а не единый durable run",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/gateway/router.py",
+        "src/forge/main.py",
+        "src/forge/worker/app.py"
+      ],
+      "observed": "/flows/{id} читает legacy Redis flow state и возвращает state/error без auth на route. Legacy FlowRunner продолжает исполняться параллельно RunService; /metrics отдаёт JSON, не Prometheus exposition.",
+      "impact": "Два runtime/два источника правды осложняют диагностику и rollout, приватный state может быть доступен через открытый endpoint.",
+      "proposed_fix": "Единый /runs read model с auth/repo scope, events/actions/evidence/usage, отдельно liveness/readiness и Prometheus metrics. Legacy reactive functions временно сохранить за bridge, но не создавать через него новые write flows.",
+      "acceptance_tests": [
+        "Все /implement runs видны в management read model.",
+        "Приватный run не доступен чужому actor.",
+        "Startup/doctor объясняют текущий runtime/profile.",
+        "Один request не запускает два движка."
+      ],
+      "depends_on": [
+        "F05",
+        "F08"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/gateway/router.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/main.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/worker/app.py"
+      ]
+    },
+    {
+      "id": "F31",
+      "priority": "P1",
+      "title": "Выделить contracts/core и независимые адаптеры без big-bang rewrite",
+      "evidence_level": "static_source",
+      "files": [
+        "src/forge/runs/service.py",
+        "src/forge/runs/backends.py",
+        "src/forge/durable/models.py"
+      ],
+      "observed": "FlowRun ORM и GitLabClient проходят через backend protocol; source host, execution platform, harness и route смешаны.",
+      "impact": "Добавление GitHub через if provider размножит lifecycle, safety и несовместимые DTO.",
+      "proposed_fix": "Добавить чистые contracts/ports и SourceConnection identities, затем wrap существующий GitLabClient и вынести шаги из RunService. Monorepo, одна release train, compatibility tests; separate runtime images по trust/dependency boundary.",
+      "acceptance_tests": [
+        "Core не импортирует GitLab/GitHub SDK, FastAPI или CLI SDK.",
+        "Один lifecycle fixture работает с GitLab/GitHub source adapters.",
+        "Изменение harness не меняет issue/MR/PR state machine."
+      ],
+      "depends_on": [
+        "F01",
+        "F03",
+        "F08",
+        "F10",
+        "F14"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/service.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/runs/backends.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py"
+      ]
+    },
+    {
+      "id": "F32",
+      "priority": "P1",
+      "title": "Добавить GitHub App и минимальный same-repository vertical slice",
+      "evidence_level": "proposed_extension",
+      "files": [],
+      "observed": "В проверенном baseline GitHub source adapter не реализован; это новая функциональность, не дефект существующего GitLab support.",
+      "impact": "Нужна независимая provider semantics, а не механическое переименование MR в PR.",
+      "proposed_fix": "App installation identity, HMAC ingress, per-repository token, normalized work items/events, atomic text commit через expectedHeadOid, Draft PR, verification profile, human gate. Сначала builtin, затем общий candidate-based harness executor.",
+      "acceptance_tests": [
+        "Issue command → plan → approval → candidate → Draft PR → trusted CI → review.",
+        "Installation removed/token expired корректно останавливает новые effects.",
+        "Fork events не попадают в privileged path.",
+        "PR head/base/tested SHA хранятся раздельно."
+      ],
+      "depends_on": [
+        "F04",
+        "F06",
+        "F11",
+        "F15",
+        "F19",
+        "F31"
+      ],
+      "sources": []
+    },
+    {
+      "id": "F33",
+      "priority": "P2",
+      "title": "Создать packaging/profile registry и conformance kit для Lego",
+      "evidence_level": "proposed_extension",
+      "files": [
+        "pyproject.toml"
+      ],
+      "observed": "Все основные agent dependencies входят в единственный package; plugin contracts и capability negotiation отсутствуют в прочитанном execution path.",
+      "impact": "Выбор одного harness всё равно тянет чужие зависимости; внешние плагины смогут неявно получить лишнюю власть.",
+      "proposed_fix": "uv workspace/shared lock для control plane, optional extras и separate CLI images; entry-point registry с allowlist install-time, capabilities и versioned DTO. Никакого pip install по .forge.yml во время run.",
+      "acceptance_tests": [
+        "GitLab+builtin install не требует Claude/Codex binaries.",
+        "Несовместимые model/harness/executor комбинации отвергаются до side effects.",
+        "Plugin conformance suite проверяет cancel/result/usage/error semantics."
+      ],
+      "depends_on": [
+        "F20",
+        "F31"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/pyproject.toml"
+      ]
+    },
+    {
+      "id": "F34",
+      "priority": "P2",
+      "title": "Ввести end-to-end delivery и capacity acceptance",
+      "evidence_level": "proposed_extension",
+      "files": [
+        "src/forge/durable/models.py",
+        "src/forge/factory/llm.py"
+      ],
+      "observed": "Существующие token counters и job status не дают accepted-work-package throughput или capacity по всем harness calls. Предыдущий migration load profile — условный сценарий, не benchmark Forge.",
+      "impact": "Можно улучшать tokens/s, но ухудшать стоимость/время принятого результата и перегружать reviewer/CI.",
+      "proposed_fix": "Work package/role episode/attempt/call lineage, review acceptance, failed/abandoned usage; профиль нагрузки отдельно по LLM/API/CI/human queue. Калибровать на реальных задачах и длинных контекстах; фиксировать route/harness versions.",
+      "acceptance_tests": [
+        "Отчёт отличает generated candidate, CI-passed, ready-for-review и human-accepted.",
+        "Failed/superseded attempts не исчезают из затрат.",
+        "Тест нагрузки 3× baseline не объявляется измеренным production peak."
+      ],
+      "depends_on": [
+        "F19",
+        "F22",
+        "F28"
+      ],
+      "sources": [
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/durable/models.py",
+        "https://github.com/forcewake/forge/blob/6115523818bc363e4d671a991722eaad4e288d12/src/forge/factory/llm.py"
+      ]
+    }
+  ]
+}
