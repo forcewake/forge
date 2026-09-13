@@ -36,6 +36,12 @@ durable-runtime phases.
    `issue_comment` commands, builtin → Draft PR via trusted publisher →
    Actions verification → review. Fork/`pull_request_target` privileged
    flows are explicitly out of scope for the first beta.
+   **Trigger ground truth (research 2026-09-13, docs/research/github-api.md):**
+   App installation tokens DO trigger workflows and BYPASS the first-time-
+   contributor approval prompt — the execution adapter must therefore pin
+   the trigger model explicitly (dispatch vs push), never rely on GitHub's
+   recursion/approval guardrails for authorization, and validate every
+   trigger assumption with contract fixtures + a live canary.
 4. **Repository shape**: one repo, `src/forge` module boundaries first;
    uv workspace packages only after two adapters/driver boundaries prove
    stable; incompatible vendor CLIs live in separate runner images, not in
