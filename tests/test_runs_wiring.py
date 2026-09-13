@@ -422,6 +422,35 @@ class TestEndToEnd:
             run = await session.get(FlowRun, run_id)
         assert run.status == FlowStatus.CANCELLED.value
 
+    async def test_cancel_with_short_id_prefix(self, app, client, monkeypatch):
+        """Plan comments show the 8-char run id — /cancel must accept it."""
+        from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
+
+        monkeypatch.setattr(
+            "forge.runs.service.build_default_agents",
+            lambda *args, **kwargs: (StubPlanner(), StubImplementer(), StubReviewer()),
+        )
+
+        fake = FakeGitLab()
+        fake.seed_issue(ISSUE_IID, "Add a widget", "Make widgets real.")
+        fake.seed_commit("main", "base-sha-1", "initial")
+        monkeypatch.setattr("forge.runs.service.GitLabClient", FakeGitLabClientFactory(shared=fake))
+
+        await client.post("/webhook", json=note_payload("/implement"), headers=webhook_headers())
+        session_factory = app.state.session_factory
+        async with session_factory() as session:
+            run = (await session.execute(select(FlowRun))).scalars().one()
+
+        resp = await client.post(
+            "/webhook",
+            json=note_payload(f"@forge /cancel {run.id[:8]}", username="alice"),
+            headers=webhook_headers(),
+        )
+        assert resp.status_code == 202
+        async with session_factory() as session:
+            run = await session.get(FlowRun, run.id)
+        assert run.status == FlowStatus.CANCELLED.value
+
 
 class TestBotAuthorGate:
     """Forge's own comments contain /go lines — a bot-authored note must

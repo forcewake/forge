@@ -93,7 +93,7 @@ _CI_ACTIVE_STATUSES = frozenset(
 
 #: ``/go <run-id>`` — full 32-hex run id as posted in the plan comment.
 _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
-_CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-fA-F]{32})\b)?", re.IGNORECASE)
+_CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 
 #: Repair-loop log budgets (ADR-0013: bounded repair context).
 REPAIR_LOG_PER_JOB_CHARS = 4000
@@ -332,16 +332,42 @@ class RunService:
 
         requested = (match.group(1) or "").lower()
         async with self._session_factory() as session:
-            if requested:
+            if not requested:
+                run = await self._find_active_run(project_id, issue_iid)
+                if run is None:
+                    logger.info("/cancel on issue !%s — no active run", issue_iid)
+                    return
+            elif len(requested) == 32:
                 run = await session.get(FlowRun, requested)
                 if run is None or run.project_id != project_id or run.issue_iid != issue_iid:
                     logger.info("/cancel references unknown run %s — ignoring", requested[:8])
                     return
             else:
-                run = await self._find_active_run(project_id, issue_iid)
-                if run is None:
-                    logger.info("/cancel on issue !%s — no active run", issue_iid)
+                # Short id (plan comments show the 8-char form): resolve by
+                # prefix among the issue's runs; ambiguity means no action.
+                runs = (
+                    (
+                        await session.execute(
+                            select(FlowRun)
+                            .where(
+                                FlowRun.project_id == project_id,
+                                FlowRun.issue_iid == issue_iid,
+                                FlowRun.id.like(f"{requested}%"),
+                            )
+                            .order_by(FlowRun.created_at.desc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if len(runs) != 1:
+                    logger.info(
+                        "/cancel prefix %s matches %d runs — ignoring",
+                        requested[:8],
+                        len(runs),
+                    )
                     return
+                run = runs[0]
             run_id = run.id
             status = run.status
 
