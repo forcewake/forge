@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Assemble the full-UI forge demo: real GitLab screen recordings, sped up
 where needed, never cut. Voiceover per scene via adelay."""
-import subprocess, os
+import subprocess
+import os
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROD = f"{ROOT}/production"
