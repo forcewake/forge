@@ -87,9 +87,12 @@ forge-agent:
     - 'tail -30 .forge/grok-debug.log 2>/dev/null || true'
     # The brief is context, not deliverable — never commit it.
     - rm -f .forge/brief.md .forge/grok-debug.log
-    # The harness may or may not have committed. Stage everything and commit
-    # ONLY if there are staged changes; never amend or rewrite history.
+    # The harness may or may not have committed. Stage everything, drop
+    # build caches (running the implemented code can materialize
+    # __pycache__ after the harness's own commit — seen live), and commit
+    # ONLY if anything is left; never amend or rewrite history.
     - git add -A
+    - git diff --cached --name-only | grep -E '(^|/)__pycache__/|\.pyc$' | xargs -r git reset -q -- || true
     - |
       if ! git diff --cached --quiet; then
         git commit -m "forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8})"
