@@ -37,6 +37,12 @@ Forge itself only sends non-secret run variables with the pipeline trigger:
 `FORGE_RUN_ID`, `FORGE_ISSUE_IID`, `FORGE_ISSUE_TITLE`, `FORGE_PLAN`,
 `FORGE_HARNESS_MODEL`.
 
+Optional: `FORGE_HARNESS_HTTPS_PROXY` — an HTTP proxy for the harness's
+provider traffic only (git/npm stay direct via `NO_PROXY`). Some runner
+networks throttle long-lived AI streaming responses to a crawl while short
+requests remain fast; point this at a proxy on a fast path (verified on the
+lab: identical headless prompt, 226 s direct vs 2 s via proxy).
+
 ## 3. Runner requirements (ADR-0002 execution profile)
 
 - **Ephemeral docker executor** — an isolated, disposable container per job.

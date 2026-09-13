@@ -63,6 +63,16 @@ forge-agent:
     # where).
     - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/grok-events-filter.mjs -o /tmp/filter.mjs'
     - set -o pipefail
+    # Optional: route harness API traffic through a proxy. Some runner
+    # networks throttle long-lived streaming responses from AI providers to
+    # a crawl while short requests stay fast; a proxy on a fast path fixes
+    # it (verified: one-word prompt 226s direct vs 2s via proxy). NO_PROXY
+    # keeps git/npm traffic to GitLab direct.
+    - |
+      if [ -n "$FORGE_HARNESS_HTTPS_PROXY" ]; then
+        export HTTPS_PROXY="$FORGE_HARNESS_HTTPS_PROXY" https_proxy="$FORGE_HARNESS_HTTPS_PROXY"
+        export NO_PROXY="$CI_SERVER_HOST,127.0.0.1,localhost"
+      fi
     # Headless harness run (--always-approve: the ephemeral CI container is
     # the ADR-0002 execution profile). A nonzero exit does not abort the
     # audit trail: we still report the branch state so forge can verify.
