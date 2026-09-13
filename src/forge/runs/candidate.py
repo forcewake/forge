@@ -103,9 +103,7 @@ class HarnessUsage:
     source: str = ""
 
     @classmethod
-    def from_meta(
-        cls, data: object, *, driver: str = "", model: str = ""
-    ) -> HarnessUsage:
+    def from_meta(cls, data: object, *, driver: str = "", model: str = "") -> HarnessUsage:
         """Build a receipt from the meta JSON's ``usage`` object (defensive).
 
         Anything not a non-negative int stays ``None``; ``completeness``
@@ -190,9 +188,7 @@ class CandidateBundle:
         return completed
 
 
-def bundle_from_changeset(
-    cs: object, *, attempt_base_oid: str
-) -> CandidateBundle:
+def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBundle:
     """Wrap an already-materialized ChangeSet (builtin path) as a bundle.
 
     The builtin backend produces ChangeSets with FULL contents — no hunks are
@@ -320,9 +316,7 @@ class _DiffParser:
                 flush_hunk()
                 hunk_header = (int(match.group(1)), int(match.group(3)))
                 continue
-            if hunk_header is not None and (
-                line.startswith(("+", "-", " ", "\\")) or line == ""
-            ):
+            if hunk_header is not None and (line.startswith(("+", "-", " ", "\\")) or line == ""):
                 if line == _NO_NEWLINE_MARKER:
                     if pending:
                         pending[-1] = replace(pending[-1], no_newline=True)
@@ -407,7 +401,10 @@ class _DiffParser:
             # has no mode action, so the entry is dropped (documented).
             return None
         return ChangeManifestEntry(
-            path=path, operation="modify", new_content=None, mode=file.mode,
+            path=path,
+            operation="modify",
+            new_content=None,
+            mode=file.mode,
             hunks=tuple(file.hunks),
         )
 
@@ -445,9 +442,7 @@ def apply_unified_hunks(
     for hunk in hunks:
         target = max(hunk.old_start - 1, 0)
         if target < pos:
-            raise CandidateError(
-                "patch_does_not_apply", f"{where}hunk overlaps the previous hunk"
-            )
+            raise CandidateError("patch_does_not_apply", f"{where}hunk overlaps the previous hunk")
         out.extend(base_lines[pos:target])
         pos = target
         for item in hunk.lines:
@@ -458,8 +453,7 @@ def apply_unified_hunks(
             if pos >= len(base_lines) or base_lines[pos] != item.text:
                 raise CandidateError(
                     "patch_does_not_apply",
-                    f"{where}line {pos + 1} does not match the base "
-                    f"(expected {item.text!r})",
+                    f"{where}line {pos + 1} does not match the base (expected {item.text!r})",
                 )
             if item.tag == " ":
                 out.append(item.text)

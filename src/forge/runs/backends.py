@@ -474,9 +474,7 @@ class CITharnessBackend:
                 usage=usage,
             )
         except CandidateError as exc:
-            return HarnessOutcome.failed(
-                "code", f"harness_candidate_invalid: {exc.reason}: {exc}"
-            )
+            return HarnessOutcome.failed("code", f"harness_candidate_invalid: {exc.reason}: {exc}")
 
         if driver_exit != "completed":
             # The driver itself reported failure: never adopt a possibly
@@ -496,9 +494,7 @@ class CITharnessBackend:
     async def _download_meta(self, project_id: int, job_id: int) -> dict[str, Any]:
         """Fetch + parse ``candidate.meta.json``; raises ``_ArtifactMissing``."""
         try:
-            raw = await self._gitlab.get_job_artifacts_file(
-                project_id, job_id, CANDIDATE_META_PATH
-            )
+            raw = await self._gitlab.get_job_artifacts_file(project_id, job_id, CANDIDATE_META_PATH)
         except GitLabAPIError as exc:
             if exc.status_code == 404:
                 raise _ArtifactMissing() from exc

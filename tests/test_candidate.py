@@ -148,9 +148,7 @@ class TestParseRejections:
         assert excinfo.value.reason == "rename_not_supported"
 
     def test_oversized_created_file_rejected(self, monkeypatch):
-        monkeypatch.setattr(
-            "forge.runs.candidate.FORGE_MATERIALIZE_MAX_FILE_CHARS", 10
-        )
+        monkeypatch.setattr("forge.runs.candidate.FORGE_MATERIALIZE_MAX_FILE_CHARS", 10)
         diff = (
             "diff --git a/big.txt b/big.txt\n"
             "new file mode 100644\n"
@@ -164,11 +162,7 @@ class TestParseRejections:
         assert excinfo.value.reason == "file_too_large"
 
     def test_mode_only_change_is_dropped(self):
-        diff = (
-            "diff --git a/script.sh b/script.sh\n"
-            "old mode 100644\n"
-            "new mode 100755\n"
-        )
+        diff = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n"
         bundle = parse_unified_diff(diff, BASE, "completed")
         assert bundle.is_empty  # no content delta — documented drop
 
@@ -328,9 +322,7 @@ class TestHelpers:
         )
         monkeypatch.setattr(
             "forge.runs.candidate._enforce_cap",
-            lambda path, content: (_ for _ in ()).throw(
-                CandidateError("file_too_large", path)
-            ),
+            lambda path, content: (_ for _ in ()).throw(CandidateError("file_too_large", path)),
         )
         with pytest.raises(CandidateError) as excinfo:
             bundle.materialize({"mod.py": "old\n"})

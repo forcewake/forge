@@ -88,10 +88,7 @@ async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
     row = (
         (
             await session.execute(
-                select(RunSpec)
-                .where(RunSpec.run_id == run.id)
-                .order_by(RunSpec.id.desc())
-                .limit(1)
+                select(RunSpec).where(RunSpec.run_id == run.id).order_by(RunSpec.id.desc()).limit(1)
             )
         )
         .scalars()

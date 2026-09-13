@@ -1689,9 +1689,7 @@ class RunService:
                     model=(
                         usage.model
                         if usage is not None and usage.model
-                        else str(
-                            getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "unknown"
-                        )
+                        else str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "unknown")
                     ),
                     status="ok",
                     input_tokens=usage.input_tokens if usage is not None else None,

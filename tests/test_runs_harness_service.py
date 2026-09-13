@@ -536,9 +536,7 @@ class TestHarnessRepairInterplay:
             await svc.evaluate_waiting_ci()
             if (await get_run(db, run_id)).status != FlowStatus.WAITING_HARNESS.value:
                 break
-            repair_pipeline_id = int(
-                (await get_run(db, run_id)).evidence["harness"]["pipeline_id"]
-            )
+            repair_pipeline_id = int((await get_run(db, run_id)).evidence["harness"]["pipeline_id"])
             seed_success_with_candidate(
                 fake_gitlab,
                 repair_pipeline_id,

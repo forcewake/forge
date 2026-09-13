@@ -249,9 +249,7 @@ class TestRejections:
     async def test_spec_digest_match_passes(self, db, fake_gitlab):
         run = await persisted(db, make_run(spec_digest="the-digest"))
         async with db() as session:
-            session.add(
-                RunSpec(run_id=run.id, document={"plan": "v1"}, digest="the-digest")
-            )
+            session.add(RunSpec(run_id=run.id, document={"plan": "v1"}, digest="the-digest"))
             await session.commit()
         result = await publish(db, fake_gitlab, run, bundle_for(_create_diff("x.md", "hi\n")))
         assert result.ok
@@ -268,9 +266,7 @@ class TestRejections:
             "-fantasy\n"
             "+changed\n"
         )
-        await self._assert_rejected(
-            db, fake_gitlab, run, bundle_for(diff), "patch_does_not_apply"
-        )
+        await self._assert_rejected(db, fake_gitlab, run, bundle_for(diff), "patch_does_not_apply")
 
     async def test_delete_of_missing_file(self, db, fake_gitlab):
         run = await persisted(db, make_run())
@@ -282,9 +278,7 @@ class TestRejections:
             "@@ -1,1 +0,0 @@\n"
             "-gone\n"
         )
-        await self._assert_rejected(
-            db, fake_gitlab, run, bundle_for(diff), "changeset_invalid"
-        )
+        await self._assert_rejected(db, fake_gitlab, run, bundle_for(diff), "changeset_invalid")
 
     async def test_oversized_base_content(self, db, fake_gitlab, monkeypatch):
         monkeypatch.setattr("forge.runs.publisher.FORGE_MATERIALIZE_MAX_FILE_CHARS", 10)
@@ -305,9 +299,7 @@ class TestRejections:
         # matching commit → the outcome stays unknown.
         fake_gitlab.create_commit_timeout_drops = True
         run = await persisted(db, make_run())
-        result = await publish(
-            db, fake_gitlab, run, bundle_for(_create_diff("x.md", "hi\n"))
-        )
+        result = await publish(db, fake_gitlab, run, bundle_for(_create_diff("x.md", "hi\n")))
 
         assert not result.ok
         assert result.reason == "commit_unknown_outcome"

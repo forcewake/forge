@@ -88,11 +88,7 @@ class TestCandidateContract:
         # v0.2 → v0.3 migration window only; it carries the attempt base,
         # not a branch claim.
         line = next(
-            (
-                ln
-                for ln in template_text.splitlines()
-                if "FORGE_RESULT:" in ln and "printf" in ln
-            ),
+            (ln for ln in template_text.splitlines() if "FORGE_RESULT:" in ln and "printf" in ln),
             "",
         )
         assert 'FORGE_RESULT:{"head": "%s"' in line.replace('\\"', '"')
@@ -120,4 +116,4 @@ class TestEventFilters:
     def test_filters_write_the_usage_file_templates_read(self):
         for name in ("grok.gitlab-ci.yml", "claude-code.gitlab-ci.yml"):
             text = (TEMPLATES_DIR / name).read_text()
-            assert '.forge/usage.json' in text, name
+            assert ".forge/usage.json" in text, name
