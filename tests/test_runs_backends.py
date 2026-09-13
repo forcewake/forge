@@ -40,6 +40,7 @@ def make_settings(**overrides) -> Settings:
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_TARGET_BRANCH="main",
+        FORGE_HARNESS_MODEL="glm-5.3-flash[1m]",
     )
     values.update(overrides)
     return Settings(**values)

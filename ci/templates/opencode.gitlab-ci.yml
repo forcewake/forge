@@ -43,6 +43,7 @@ forge-agent:
       cat > ~/.config/opencode/opencode.json <<'EOF'
       {
         "$schema": "https://opencode.ai/config.json",
+        "permission": "allow",
         "provider": {
           "zai": {
             "npm": "@ai-sdk/openai-compatible",
@@ -61,14 +62,20 @@ forge-agent:
       EOF
       sed -i "s/__MODEL__/${FORGE_HARNESS_MODEL}/g" ~/.config/opencode/opencode.json
   script:
-    # The task brief: approved plan, written to an ephemeral file (ADR-0012:
-    # context passes through GitLab CI variables, not forge-side state).
-    - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
-    # Headless harness run. opencode streams its own progress to the trace.
-    # A nonzero exit does not abort the audit trail: we still report the
-    # branch state so forge can verify.
+    # The task brief lives INSIDE the workspace: opencode auto-rejects reads
+    # outside the project directory in headless mode (external_directory).
+    # ADR-0012: context passes through GitLab CI variables, not forge state.
+    - mkdir -p .forge
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # Headless harness run (--auto approves what the permission config does
+    # not explicitly deny; the ephemeral CI container is the ADR-0002
+    # execution profile). opencode streams its own progress to the trace; a
+    # nonzero exit does not abort the audit trail: we still report the branch
+    # state so forge can verify.
     - |
-      opencode run "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push."
+      opencode run --auto "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push."
+    # The brief is context, not deliverable — never commit it.
+    - rm -f .forge/brief.md
     # The harness may or may not have committed. Stage everything and commit
     # ONLY if there are staged changes; never amend or rewrite history.
     - git add -A
