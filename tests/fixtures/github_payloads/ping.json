@@ -1,0 +1,10 @@
+{
+  "zen": "Design for failure.",
+  "hook_id": 555001,
+  "hook": {
+    "type": "App",
+    "id": 555001,
+    "active": true,
+    "events": ["issues", "issue_comment", "pull_request", "push"]
+  }
+}

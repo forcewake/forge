@@ -1,0 +1,10 @@
+{
+  "action": "deleted",
+  "installation": {
+    "id": 12345,
+    "app_slug": "forge",
+    "account": {"login": "acme", "id": 9001, "type": "Organization"}
+  },
+  "repositories": [{"id": 70010, "name": "acme-widget", "full_name": "acme/acme-widget"}],
+  "sender": {"login": "acme-admin", "id": 9010, "type": "User"}
+}

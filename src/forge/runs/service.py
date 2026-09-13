@@ -177,7 +177,17 @@ async def execute_run_command(
 
     Shared by the worker (queued tasks) and the gateway's no-Redis
     BackgroundTasks fallback, so both paths behave identically.
+
+    ADR-0019 slice: GitHub-subject commands (``provider: github``, ingested
+    by the GitHub webhook) dispatch to the separate github_flow bridge —
+    RunService stays GitLab-bound until the v0.5 contracts extraction.
     """
+    if metadata.get("provider") == "github":
+        from forge.integrations.github_flow import execute_github_run_command
+
+        await execute_github_run_command(settings, forge_config, session_factory, metadata)
+        return
+
     async with GitLabClient(
         base_url=settings.GITLAB_URL,
         token=forge_token(settings),

@@ -5,6 +5,7 @@ Run inside the release image before starting app/worker:
 
     DATABASE_URL=postgresql+asyncpg://... python -m forge.migrate
 """
+
 from __future__ import annotations
 
 import argparse

@@ -1,0 +1,14 @@
+{
+  "ref": "refs/heads/main",
+  "before": "1111111111111111111111111111111111111111",
+  "after": "2222222222222222222222222222222222222222",
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "default_branch": "main"
+  },
+  "pusher": {"name": "bob", "email": "bob@example.com"},
+  "sender": {"login": "bob", "id": 502, "type": "User"},
+  "installation": {"id": 12345}
+}

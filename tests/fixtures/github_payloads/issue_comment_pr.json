@@ -1,0 +1,32 @@
+{
+  "action": "created",
+  "issue": {
+    "id": 1011,
+    "number": 43,
+    "title": "Fix slow query",
+    "body": "The report query takes 30s.",
+    "state": "open",
+    "user": {"login": "bob", "id": 502, "type": "User"},
+    "pull_request": {
+      "url": "https://api.github.com/repos/acme/acme-widget/pulls/43",
+      "number": 43,
+      "head": {"ref": "fix-slow-query", "sha": "abc1234"},
+      "base": {"ref": "main"}
+    }
+  },
+  "comment": {
+    "id": 9011,
+    "body": "@forge /implement",
+    "user": {"login": "bob", "id": 502, "type": "User"},
+    "created_at": "2026-09-13T10:05:00Z"
+  },
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "private": true,
+    "default_branch": "main"
+  },
+  "sender": {"login": "bob", "id": 502, "type": "User"},
+  "installation": {"id": 12345}
+}

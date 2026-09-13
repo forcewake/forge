@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from forge import __version__
+from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
 from forge.gateway.validator import is_bot_event, validate_webhook_token
@@ -22,6 +23,11 @@ from forge.orchestrator.orchestrator import Orchestrator
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# GitHub ingress (ADR-0019 slice) is mounted unconditionally; the endpoint
+# itself answers 503 unless FORGE_GITHUB_ENABLED and the webhook secret are
+# set — fail closed.
+router.include_router(github_router)
 
 #: Commands served by the durable run service (M1), not the legacy flow engine.
 _RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel"})
