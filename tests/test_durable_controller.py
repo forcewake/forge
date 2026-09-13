@@ -161,6 +161,79 @@ class TestTransitionGraph:
         assert updated.status == terminal.value
 
 
+class TestWaitingHarnessTransitions:
+    """ADR-0015: the durable harness wait (worker-free, like waiting_ci)."""
+
+    async def test_harness_leg_transition_sequence(self, db_session: AsyncSession):
+        run = await _add_run(db_session)
+        controller = Controller(db_session)
+
+        for target in [
+            FlowStatus.PREFLIGHT,
+            FlowStatus.PLANNING,
+            FlowStatus.WAITING_APPROVAL,
+            FlowStatus.PROPOSING,
+            FlowStatus.WAITING_HARNESS,  # harness job started, run parked
+            FlowStatus.COMMITTING,  # verified harness head adopted
+            FlowStatus.ENSURING_DRAFT_MR,
+            FlowStatus.WAITING_CI,
+            FlowStatus.EVALUATING_CI,
+            FlowStatus.REVIEWING,
+            FlowStatus.READY_FOR_HUMAN,
+        ]:
+            await controller.transition(run.id, target)
+
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+
+    @pytest.mark.parametrize("start", ["proposing", "committing"])
+    async def test_entry_into_waiting_harness(self, db_session: AsyncSession, start: str):
+        run = await _add_run(db_session, status=start)
+        controller = Controller(db_session)
+
+        await controller.transition(run.id, FlowStatus.WAITING_HARNESS)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            FlowStatus.COMMITTING,  # verified ok
+            FlowStatus.BLOCKED,
+            FlowStatus.FAILED,
+            FlowStatus.CANCELLED,
+        ],
+    )
+    async def test_legal_exits_from_waiting_harness(
+        self, db_session: AsyncSession, target: FlowStatus
+    ):
+        run = await _add_run(db_session, status="waiting_harness")
+        controller = Controller(db_session)
+
+        await controller.transition(run.id, target)
+        assert run.status == target.value
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            FlowStatus.PROPOSING,
+            FlowStatus.VALIDATING,
+            FlowStatus.ENSURING_DRAFT_MR,
+            FlowStatus.WAITING_CI,
+            FlowStatus.REVIEWING,
+            FlowStatus.READY_FOR_HUMAN,
+            FlowStatus.WAITING_HARNESS,  # no self-transition
+        ],
+    )
+    async def test_illegal_exits_from_waiting_harness(
+        self, db_session: AsyncSession, target: FlowStatus
+    ):
+        run = await _add_run(db_session, status="waiting_harness")
+        controller = Controller(db_session)
+
+        with pytest.raises(InvalidTransition):
+            await controller.transition(run.id, target)
+        assert run.status == "waiting_harness"
+
+
 class TestTransitionPersistence:
     async def test_transition_records_reason_and_updated_at(self, db_session: AsyncSession):
         run = await _add_run(db_session)

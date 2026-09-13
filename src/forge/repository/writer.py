@@ -72,7 +72,7 @@ class ChangesetWriter:
         Returns :class:`WriteResult`; on ``unknown_outcome`` the caller must
         block the run (ADR-0005) — the commit may or may not exist.
         """
-        await self._ensure_branch(cs.branch, start_ref)
+        await self.ensure_branch(cs.branch, start_ref)
 
         async with self._session_factory() as session:
             # (b) intent row before dispatch (ADR-0005), correlated by branch.
@@ -90,7 +90,7 @@ class ChangesetWriter:
                 cs.commit_message,
                 # Never pass start_branch: on GitLab CE 18.x the Commits API
                 # then tries to create the branch again and 400s with
-                # "already exists" — _ensure_branch has already guaranteed
+                # "already exists" — ensure_branch has already guaranteed
                 # the branch exists.
             )
         except CommitOutcomeUnknown:
@@ -104,8 +104,11 @@ class ChangesetWriter:
         # Exact-SHA correlation: this is the sha all later CI evidence must match.
         return WriteResult(WriteOutcome.COMMITTED, sha)
 
-    async def _ensure_branch(self, branch: str, start_ref: str) -> bool:
+    async def ensure_branch(self, branch: str, start_ref: str) -> bool:
         """Create the branch; tolerate 'already exists' (idempotent re-entry).
+
+        Public so the ci_harness backend can guarantee the factory branch
+        exists before triggering the harness pipeline (ADR-0015).
 
         Returns True when this call created the branch, False when it
         pre-existed (retry after crash).

@@ -22,6 +22,7 @@ class FakeGitLab:
         self.merge_requests: dict[int, dict] = {}
         self.pipelines: list[dict] = []
         self.pipeline_jobs: dict[int, list[dict]] = {}  # pipeline id -> job dicts
+        self.pipeline_variables: list[dict] = []  # journal of create_pipeline variables
         self.job_logs: dict[int, str] = {}  # job id -> raw log text
         self.notes: list[dict] = []  # issue notes
         self.mr_notes: list[dict] = []  # merge-request notes
@@ -56,7 +57,9 @@ class FakeGitLab:
         self.calls.append(("get_branch", (project_id, branch_name)))
         if branch_name not in self.branches:
             raise GitLabAPIError(404, "branch not found")
-        return {"name": branch_name, "commit": None}
+        commits = self.branches[branch_name]
+        head = {"id": commits[0]["sha"], "short_id": commits[0]["short_id"]} if commits else None
+        return {"name": branch_name, "commit": head}
 
     async def create_commit(
         self,
@@ -168,11 +171,22 @@ class FakeGitLab:
         ]
         return [Pipeline.model_validate(p) for p in found]
 
-    async def create_pipeline(self, project_id: int, ref: str) -> dict:
+    async def create_pipeline(
+        self, project_id: int, ref: str, variables: list[dict] | None = None
+    ) -> dict:
         self.calls.append(("create_pipeline", (project_id, ref)))
         pid = self._id()
-        pipeline = {"id": pid, "ref": ref, "status": "pending", "sha": None}
+        pipeline = {
+            "id": pid,
+            "ref": ref,
+            "status": "pending",
+            "sha": None,
+            "variables": [dict(v) for v in (variables or [])],
+        }
         self.pipelines.append(pipeline)
+        self.pipeline_variables.append(
+            {"project_id": project_id, "ref": ref, "variables": variables or []}
+        )
         return dict(pipeline)
 
     def set_pipeline_status(self, pipeline_id: int, status: str, sha: str | None = None) -> None:
@@ -190,9 +204,12 @@ class FakeGitLab:
         """Seed jobs for a pipeline (dicts shaped like the GitLab Job schema)."""
         self.pipeline_jobs[pipeline_id] = jobs
 
-    async def get_job_log(self, project_id: int, job_id: int) -> str:
+    async def get_job_log(self, project_id: int, job_id: int, tail: int | None = None) -> str:
         self.calls.append(("get_job_log", (project_id, job_id)))
-        return self.job_logs.get(job_id, "")
+        log = self.job_logs.get(job_id, "")
+        if tail is not None and len(log) > tail:
+            return log[-tail:]
+        return log
 
     def set_job_log(self, job_id: int, log: str) -> None:
         self.job_logs[job_id] = log

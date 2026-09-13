@@ -9,13 +9,19 @@ ready_for_human`` by polling pipelines.
 
 Since M2-1 the planner/implementer/reviewer behind these steps are real LLM
 agents (ADR-0014), constructor-injected with the LLM-driven defaults; tests
-inject stubs/fakes. CI verdicts go through the ADR-0008 quality contract with
-failure classification: only *code* failures trigger the bounded repair loop
-(``evaluating_ci → proposing → … → waiting_ci``, at most
-``FORGE_MAX_COMMIT_CYCLES - 1`` repairs); infrastructure and config failures
-block the run instead of burning model calls. Every model call lands in the
-``llm_calls`` ledger (ADR-0013) and the run accumulates evidence (plan,
-review, pipeline) in ``flow_runs.evidence``.
+inject stubs/fakes. Since M2-2 the implementer step itself is pluggable
+(ADR-0015): the ``builtin`` backend keeps the synchronous propose→validate→
+commit path, while ``ci_harness`` delegates implementation to a coding
+harness running as a job in the target project's CI — the run parks durably
+in ``waiting_harness`` and the reconciler polls it, adopting the result only
+after verifying the real branch head SHA. CI verdicts go through the
+ADR-0008 quality contract with failure classification: only *code* failures
+trigger the bounded repair loop (``evaluating_ci → proposing → … →
+waiting_ci``, at most ``FORGE_MAX_COMMIT_CYCLES - 1`` repairs) — and never
+on harness runs, which make no forge-side LLM calls after the gate.
+Infrastructure and config failures block the run instead of burning model
+calls. Every model call lands in the ``llm_calls`` ledger (ADR-0013) and the
+run accumulates evidence (plan, review, pipeline) in ``flow_runs.evidence``.
 
 Durability rules (ADR-0005): every transition goes through
 :class:`forge.durable.Controller` (which journals an outbox row atomically)
@@ -27,8 +33,8 @@ run — the service never blind-retries a write.
 
 from __future__ import annotations
 
-import base64
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -64,6 +70,12 @@ from forge.repository import (
     MaterializationError,
     WriteOutcome,
     validate_changeset,
+)
+from forge.runs.backends import (
+    HarnessOutcome,
+    build_backend,
+    fetch_git_base,
+    is_harness_backend,
 )
 from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
 from forge.runs.stubs import factory_branch, plan_digest_of
@@ -201,14 +213,17 @@ class RunService:
             run = await session.get(FlowRun, run_id)
             run.plan_digest = digest
             run.base_sha = await self._read_base_sha(project_id)
+            # ADR-0015: the backend choice is frozen at run start so the run
+            # survives restarts with the backend it was created with.
             run.evidence = _merge_evidence(
                 run.evidence,
                 {
+                    "backend": self._backend_name(),
                     "plan": {
                         "digest": digest,
                         "summary": self._plan_summary(plan),
                         "files_hint": self._plan_files_hint(),
-                    }
+                    },
                 },
             )
             await session.commit()
@@ -321,10 +336,17 @@ class RunService:
             await controller.transition(
                 run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
             )
+            # ADR-0015: the backend frozen at run start decides the advance leg.
+            backend_name = (
+                str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+            )
             await session.commit()
 
         logger.info("Gate for run %s consumed by @%s — advancing", run_id[:8], author_username)
-        await self._advance_proposal(project_id, run_id)
+        if is_harness_backend(backend_name):
+            await self._advance_harness(project_id, run_id)
+        else:
+            await self._advance_proposal(project_id, run_id)
 
     async def run_command(self, metadata: dict[str, Any]) -> None:
         """Dispatch a ``run_command`` task produced by the gateway router."""
@@ -434,13 +456,15 @@ class RunService:
                     project_id,
                     run_id,
                     mr_iid,
-                    changeset,
+                    changeset.branch,
                     commit_sha,
                     cycle,
                     repair_reason=repair_reason,
                 )
             else:
-                mr_iid = await self._create_draft_mr(project_id, run_id, changeset, commit_sha)
+                mr_iid = await self._create_draft_mr(
+                    project_id, run_id, changeset.branch, commit_sha
+                )
         except GitLabAPIError as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"mr_failed: {exc}")
             return
@@ -463,18 +487,107 @@ class RunService:
             "Run %s committed %s (cycle %d) — waiting for CI", run_id[:8], commit_sha[:8], cycle
         )
 
+    async def _advance_harness(self, project_id: int, run_id: str) -> None:
+        """ci_harness leg (ADR-0015): start the harness job, park the run.
+
+        ``proposing`` = backend.start (ensures the factory branch, triggers
+        the harness pipeline with the task brief as pipeline variables) →
+        ``waiting_harness`` with the durable handle in the run's evidence.
+        The reconciler (``evaluate_waiting_harness``) polls from here — the
+        wait is worker-free, like ``waiting_ci``.
+        """
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            plan_summary, _ = self._plan_evidence(run)
+
+        issue_title = await self._read_issue_title(project_id, run)
+        try:
+            backend = self._harness_backend(project_id)
+        except ValueError as exc:
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"backend_config: {exc}")
+            return
+
+        # Intent-first journal for the harness start (ADR-0005). The pipeline
+        # id only exists once start returns, so it lands in the action's
+        # correlation and outcome below.
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(run_id, "harness_start")
+            await session.commit()
+
+        try:
+            handle = await backend.start(run, issue_title, "", plan_summary)
+        except (GitLabAPIError, httpx.HTTPError) as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            return
+
+        handle_data = json.loads(handle)
+        pipeline_id = int(handle_data.get("pipeline_id") or 0)
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action = await controller.complete_action(
+                action_id,
+                "succeeded",
+                {
+                    "pipeline_id": pipeline_id,
+                    "job_id": handle_data.get("job_id"),
+                    "branch": handle_data.get("branch"),
+                },
+            )
+            action.correlation_id = f"pipeline-{pipeline_id}"
+            await controller.transition(
+                run_id, FlowStatus.WAITING_HARNESS, reason=f"harness pipeline {pipeline_id}"
+            )
+            run = await session.get(FlowRun, run_id)
+            # The durable handle: the reconciler restarts from exactly here.
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "harness": {
+                        "handle": handle,
+                        "pipeline_id": pipeline_id,
+                        "job_id": handle_data.get("job_id"),
+                        "branch": handle_data.get("branch"),
+                    }
+                },
+            )
+            await session.commit()
+
+        logger.info(
+            "Run %s delegated to harness backend (pipeline %d) — waiting_harness",
+            run_id[:8],
+            pipeline_id,
+        )
+
+    def _backend_name(self) -> str:
+        """The configured implementer backend (ADR-0015), frozen per run."""
+        raw = getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin"
+        return str(raw).strip()
+
+    def _harness_backend(self, project_id: int):
+        """Construct the ci_harness backend for *project_id* (ADR-0015)."""
+        writer = self._writer_class(self._gitlab, self._session_factory, project_id)
+        return build_backend(
+            self._settings,
+            gitlab=self._gitlab,
+            session_factory=self._session_factory,
+            writer=writer,
+        )
+
     async def _create_draft_mr(
         self,
         project_id: int,
         run_id: str,
-        changeset,  # ChangeSet
+        branch: str,
         commit_sha: str | None,
     ) -> int:
         """Create the Draft MR for the run branch, journaling intent/outcome."""
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(
-                run_id, "create_merge_request", correlation_id=changeset.branch
+                run_id, "create_merge_request", correlation_id=branch
             )
             await session.commit()
 
@@ -487,7 +600,7 @@ class RunService:
         try:
             mr = await self._gitlab.create_merge_request(
                 project_id,
-                changeset.branch,
+                branch,
                 self._target_branch(),
                 f"Draft: {issue_title}",  # Draft: prefix marks it draft (GitLab convention)
                 description,
@@ -511,7 +624,7 @@ class RunService:
         project_id: int,
         run_id: str,
         mr_iid: int,
-        changeset,  # ChangeSet
+        branch: str,
         commit_sha: str | None,
         cycle: int,
         *,
@@ -521,7 +634,7 @@ class RunService:
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(
-                run_id, "update_merge_request", correlation_id=changeset.branch
+                run_id, "update_merge_request", correlation_id=branch
             )
             await session.commit()
 
@@ -595,6 +708,7 @@ class RunService:
             mr_iid = run.mr_iid
             plan_digest = run.plan_digest or ""
             base_sha = run.base_sha or ""
+            backend_name = str((run.evidence or {}).get("backend") or "").strip()
             deadline = await self._waiting_ci_deadline(session, run_id)
 
         candidate_sha = candidate_shas[-1] if candidate_shas else None
@@ -693,6 +807,15 @@ class RunService:
 
         cycle = await self._read_commit_cycle(run_id)
         max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
+        if is_harness_backend(backend_name):
+            # ADR-0015 (v1): harness runs make no forge-side LLM calls, so a
+            # code failure cannot be repaired by the builtin path either.
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                "commit_cycles_exhausted: repair requires builtin backend",
+            )
+            return
         if cycle >= max_cycles:
             await self._to_terminal(
                 run_id,
@@ -876,6 +999,130 @@ class RunService:
         return as_aware_utc(entered) + timedelta(seconds=wait_seconds)
 
     # ------------------------------------------------------------------
+    # Reconciler tick: waiting_harness → … (ADR-0015)
+    # ------------------------------------------------------------------
+
+    async def evaluate_waiting_harness(self, now: datetime | None = None) -> None:
+        """One reconciler pass over every run parked in ``waiting_harness``."""
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run_ids = (
+                (
+                    await session.execute(
+                        select(FlowRun.id).where(FlowRun.status == FlowStatus.WAITING_HARNESS.value)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run_id in run_ids:
+            try:
+                await self._evaluate_harness_one(run_id, now)
+            except Exception:
+                # One broken run must not stall the reconciler loop.
+                logger.exception("Harness reconcile pass failed for run %s", run_id[:8])
+
+    async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
+        """Poll one waiting_harness run through its journaled backend handle."""
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            evidence = dict(run.evidence or {})
+            project_id = run.project_id
+
+        backend_name = str(evidence.get("backend") or "").strip()
+        if backend_name and not is_harness_backend(backend_name):
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness on a non-harness backend"
+            )
+            return
+
+        handle = ((evidence.get("harness") or {}).get("handle")) or ""
+        if not handle:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness without harness handle"
+            )
+            return
+
+        try:
+            backend = self._harness_backend(project_id)
+        except ValueError as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"backend_config: {exc}")
+            return
+
+        try:
+            outcome = await backend.poll(run, handle, now=now)
+        except (GitLabAPIError, httpx.HTTPError):
+            logger.exception("Harness poll read failed for run %s — keeping it waiting", run_id[:8])
+            return
+
+        if outcome.status == "running":
+            return  # keep waiting — the durable deadline decides the rest
+
+        if outcome.status == "failed":
+            kind = outcome.failure_kind or "code"
+            # Harness failures never enter the LLM repair loop (ADR-0015):
+            # blocked, with the harness-level classification in the reason.
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            return
+
+        await self._adopt_harness_change(run_id, project_id, outcome)
+
+    async def _adopt_harness_change(
+        self,
+        run_id: str,
+        project_id: int,
+        outcome: HarnessOutcome,
+    ) -> None:
+        """Verified harness head → committing → Draft MR → waiting_ci.
+
+        The verified branch head SHA becomes the candidate (appended to
+        ``candidate_shas``) — forge makes **no** commit of its own; the
+        harness's commits are already on the branch (ADR-0015). From
+        ``waiting_ci`` the existing quality-contract → review → evidence
+        flow takes over, unchanged.
+        """
+        sha = outcome.commit_sha or ""
+        await self._transition(
+            run_id, FlowStatus.COMMITTING, reason=f"harness change verified {sha[:8]}"
+        )
+        await self._merge_run_evidence(
+            run_id, {"harness_change": {"sha": sha, "summary": outcome.summary}}
+        )
+        await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
+
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            mr_iid = run.mr_iid
+        branch = factory_branch(run.issue_iid, run_id)
+        try:
+            if mr_iid is not None:
+                await self._update_draft_mr(project_id, run_id, mr_iid, branch, sha)
+            else:
+                mr_iid = await self._create_draft_mr(project_id, run_id, branch, sha)
+        except GitLabAPIError as exc:
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"mr_failed: {exc}")
+            return
+        except httpx.HTTPError:
+            await self._to_terminal(run_id, FlowStatus.FAILED, "mr_unknown_outcome")
+            return
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(
+                run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {sha[:8]}"
+            )
+            run = await session.get(FlowRun, run_id)
+            run.mr_iid = mr_iid
+            run.candidate_shas = list(run.candidate_shas or []) + [sha]
+            await session.commit()
+
+        logger.info(
+            "Run %s adopted verified harness change %s — waiting for CI",
+            run_id[:8],
+            sha[:8],
+        )
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -962,22 +1209,10 @@ class RunService:
     ) -> dict[str, str]:
         """Fetch base content for the update/delete paths at the base snapshot.
 
-        This is the trusted layer's own read (ADR-0001/0006): validation is
-        checked against the pinned snapshot, not against the proposer's claim.
-        Missing files are absent from the result.
+        Delegates to :func:`forge.runs.backends.fetch_git_base` — the trusted
+        layer's own read (ADR-0001/0006), shared with the builtin backend.
         """
-        ref = base_sha or "HEAD"
-        git_base: dict[str, str] = {}
-        for path in dict.fromkeys(paths):
-            try:
-                repo_file = await self._gitlab.get_file(project_id, path, ref=ref)
-            except GitLabAPIError:
-                continue  # not in the snapshot — validate_changeset reports it
-            content = repo_file.content
-            if (repo_file.encoding or "") == "base64":
-                content = base64.b64decode(content).decode("utf-8", errors="replace")
-            git_base[path] = content
-        return git_base
+        return await fetch_git_base(self._gitlab, project_id, paths, base_sha)
 
     def _plan_comment(self, run_id: str, plan: str, digest: str) -> str:
         mention = getattr(self._settings, "FORGE_MENTION_PATTERN", "@forge")

@@ -19,8 +19,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from forge.models.base import Base
 
-#: Closed set of flow run lifecycle statuses (ADR-0004). The linear order and
-#: the transition graph live in ``forge.durable.controller``.
+#: Closed set of flow run lifecycle statuses (ADR-0004, extended by ADR-0015
+#: with ``waiting_harness``). The linear order and the transition graph live
+#: in ``forge.durable.controller``.
 FLOW_STATUSES: tuple[str, ...] = (
     "accepted",
     "preflight",
@@ -29,6 +30,7 @@ FLOW_STATUSES: tuple[str, ...] = (
     "proposing",
     "validating",
     "committing",
+    "waiting_harness",
     "ensuring_draft_mr",
     "waiting_ci",
     "evaluating_ci",

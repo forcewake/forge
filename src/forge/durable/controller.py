@@ -43,6 +43,9 @@ class FlowStatus(str, Enum):
     PROPOSING = "proposing"
     VALIDATING = "validating"
     COMMITTING = "committing"
+    #: ADR-0015: a ci_harness backend job is running in the target project's
+    #: CI. Worker-free and durable, like waiting_ci — the reconciler polls it.
+    WAITING_HARNESS = "waiting_harness"
     ENSURING_DRAFT_MR = "ensuring_draft_mr"
     WAITING_CI = "waiting_ci"
     EVALUATING_CI = "evaluating_ci"
@@ -75,14 +78,20 @@ _FROM_ANY_TERMINAL: frozenset[FlowStatus] = frozenset(
 #: The ADR-0004 transition graph. Branches of ``evaluating_ci``:
 #: repair loop re-enters ``proposing``, checks passed move on to ``reviewing``,
 #: infrastructure failure parks the run as ``blocked`` (with a reason).
+#: ADR-0015 adds the harness leg: a ci_harness backend parks the run in
+#: ``waiting_harness`` (from ``proposing`` after the harness job is started,
+#: or from ``committing`` on re-entry); a verified harness change moves it on
+#: to ``committing``, where the candidate sha is recorded — forge never
+#: commits on the harness's behalf.
 ALLOWED_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
     FlowStatus.ACCEPTED: {FlowStatus.PREFLIGHT},
     FlowStatus.PREFLIGHT: {FlowStatus.PLANNING},
     FlowStatus.PLANNING: {FlowStatus.WAITING_APPROVAL},
     FlowStatus.WAITING_APPROVAL: {FlowStatus.PROPOSING},
-    FlowStatus.PROPOSING: {FlowStatus.VALIDATING},
+    FlowStatus.PROPOSING: {FlowStatus.VALIDATING, FlowStatus.WAITING_HARNESS},
     FlowStatus.VALIDATING: {FlowStatus.COMMITTING},
-    FlowStatus.COMMITTING: {FlowStatus.ENSURING_DRAFT_MR},
+    FlowStatus.COMMITTING: {FlowStatus.ENSURING_DRAFT_MR, FlowStatus.WAITING_HARNESS},
+    FlowStatus.WAITING_HARNESS: {FlowStatus.COMMITTING},
     FlowStatus.ENSURING_DRAFT_MR: {FlowStatus.WAITING_CI},
     FlowStatus.WAITING_CI: {FlowStatus.EVALUATING_CI},
     FlowStatus.EVALUATING_CI: {FlowStatus.PROPOSING, FlowStatus.REVIEWING},

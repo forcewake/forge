@@ -285,9 +285,13 @@ class GitLabClient:
         raw = await self._paginated(f"/projects/{project_id}/pipelines/{pipeline_id}/jobs")
         return [Job.model_validate(j) for j in raw]
 
-    async def get_job_log(self, project_id: int, job_id: int) -> str:
+    async def get_job_log(self, project_id: int, job_id: int, tail: int | None = None) -> str:
+        """Fetch a job's raw trace; with *tail*, only its last *tail* chars."""
         resp = await self._get(f"/projects/{project_id}/jobs/{job_id}/trace")
-        return resp.text
+        text = resp.text
+        if tail is not None and len(text) > tail:
+            return text[-tail:]
+        return text
 
     async def get_job_artifacts_file(
         self, project_id: int, job_id: int, artifact_path: str
@@ -486,9 +490,24 @@ class GitLabClient:
             for c in raw
         ]
 
-    async def create_pipeline(self, project_id: int, ref: str) -> dict[str, Any]:
-        """Create a pipeline for a ref (``POST /projects/:id/pipeline``)."""
-        resp = await self._post(f"/projects/{project_id}/pipeline", json={"ref": ref})
+    async def create_pipeline(
+        self,
+        project_id: int,
+        ref: str,
+        variables: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a pipeline for a ref (``POST /projects/:id/pipeline``).
+
+        *variables* is an optional list of ``{"key", "value"}`` dicts passed
+        as pipeline variables — the ci_harness backend uses it to hand the
+        harness job its task brief (ADR-0015).
+        """
+        payload: dict[str, Any] = {"ref": ref}
+        if variables:
+            payload["variables"] = [
+                {"key": str(v["key"]), "value": str(v["value"])} for v in variables
+            ]
+        resp = await self._post(f"/projects/{project_id}/pipeline", json=payload)
         return resp.json()
 
     async def create_merge_request(

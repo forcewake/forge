@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     # failures never consume a cycle (they block instead of repairing).
     FORGE_MAX_COMMIT_CYCLES: int = 3
 
+    # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
+    # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
+    # a coding harness executing as a job in the target project's CI.
+    FORGE_IMPLEMENTER_BACKEND: str = "builtin"
+
+    # ADR-0015 harness budgets: run-level wall-clock timeout for a harness
+    # job (enforced durably by the controller; GitLab's own maximum_timeout
+    # is the first line of defence) and the model passed to the harness job
+    # as FORGE_HARNESS_MODEL.
+    FORGE_HARNESS_TIMEOUT_SECONDS: int = 1800
+    FORGE_HARNESS_MODEL: str = "glm-5.3-flash[1m]"
+
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 
