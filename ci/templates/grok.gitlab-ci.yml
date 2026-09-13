@@ -1,0 +1,66 @@
+# forge implementer harness — grok (xAI Grok Build CLI, ADR-0015)
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/grok.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block.
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   FORGE_GROK_AUTH    full contents of ~/.grok/auth.json from a machine
+#                      where `grok login` was completed (OAuth bundle with
+#                      refresh token — the CLI renews itself)
+#   FORGE_BOT_TOKEN    bot PAT with write access to the factory branch
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Result contract (ADR-0015 §3): the job commits and pushes to the factory
+# branch it was started on, then prints a machine-readable last line:
+#   FORGE_RESULT:{"head": "<sha>", "summary": "..."}
+# forge verifies the branch head independently and never trusts this claim.
+
+forge-agent:
+  image: node:22-bookworm
+  timeout: 30m
+  rules:
+    - if: '$FORGE_RUN_ID'
+  before_script:
+    - npm install -g @xai-official/grok
+    - grok --version
+    - mkdir -p ~/.grok
+    - 'printf "%s" "$FORGE_GROK_AUTH" > ~/.grok/auth.json && chmod 600 ~/.grok/auth.json'
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_TOKEN}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+  script:
+    # The task brief lives INSIDE the workspace (ADR-0012: context passes
+    # through GitLab CI variables, not forge-side state).
+    - mkdir -p .forge
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # Headless harness run (--always-approve: the ephemeral CI container is
+    # the ADR-0002 execution profile). Grok streams its own progress to the
+    # trace; a nonzero exit does not abort the audit trail: we still report
+    # the branch state so forge can verify.
+    - |
+      grok --no-auto-update --always-approve -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push."
+    # The brief is context, not deliverable — never commit it.
+    - rm -f .forge/brief.md
+    # The harness may or may not have committed. Stage everything and commit
+    # ONLY if there are staged changes; never amend or rewrite history.
+    - git add -A
+    - |
+      if ! git diff --cached --quiet; then
+        git commit -m "forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8})"
+      fi
+    # Push the factory branch. With no changes this is a harmless no-op
+    # ("Everything up-to-date") — forge detects the unchanged head and
+    # classifies it as harness_no_changes.
+    - git push origin "HEAD:${CI_COMMIT_REF_NAME}"
+    # Machine-readable result. head == base sha ⇒ no changes were made;
+    # anything else must match the real branch head or forge rejects it.
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"done\"}\n" "$(git rev-parse HEAD)"'
