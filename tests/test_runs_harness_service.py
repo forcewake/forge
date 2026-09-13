@@ -270,6 +270,24 @@ class TestHarnessReconciler:
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("harness_code")
 
+    async def test_unknown_failure_reason_blocks_as_infrastructure(self, service, fake_gitlab, db):
+        """No failure reason does not blame the code (ADR-0008) — seen live
+        when a canceled job was read transiently as failed with no reason."""
+        run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
+        seed_forge_agent_job(
+            fake_gitlab,
+            pipeline_id,
+            status="failed",
+            failure_reason=None,
+            log="still streaming output...",
+        )
+
+        await service.evaluate_waiting_harness()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("harness_infrastructure")
+
     async def test_sha_mismatch_blocks_the_run(self, service, fake_gitlab, db):
         run_id, pipeline_id, branch = await start_and_go(service, db, fake_gitlab)
         seed_forge_agent_job(

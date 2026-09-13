@@ -43,14 +43,15 @@ def classify_failure(jobs: list[Job]) -> FailureClass:
 
     Priority: infrastructure > config > code — if a runner died while a
     script also failed, the honest verdict is infrastructure (do not repair).
-    No failed job information at all defaults to ``code`` (script_failure or
-    unknown causes are treated as the code's problem until proven otherwise).
+    An empty/unknown failure reason is infrastructure as well: unknown means
+    the evidence does not blame the code (ADR-0008; seen live when a cancel
+    or a runner death killed a job without a recorded reason).
     """
     failed = [job for job in jobs if job.status == "failed"]
 
     for job in failed:
         reason = (job.failure_reason or "").strip().lower()
-        if reason in _INFRASTRUCTURE_REASONS:
+        if not reason or reason in _INFRASTRUCTURE_REASONS:
             return "infrastructure"
 
     for job in failed:

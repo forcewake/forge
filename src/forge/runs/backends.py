@@ -450,7 +450,10 @@ class CITharnessBackend:
 
         Auth/quota/connectivity patterns in the trace mean the *environment*
         failed → infrastructure; otherwise the job's ``failure_reason``
-        classifies it (infrastructure > config > code, ADR-0008).
+        classifies it (infrastructure > config > code, ADR-0008). An empty
+        failure reason is treated as infrastructure too: "unknown" means the
+        evidence does not blame the code (seen live: a canceled job read
+        transiently as failed with no reason).
         """
         try:
             log = await self._gitlab.get_job_log(project_id, job.id, tail=LOG_TAIL_CHARS)
@@ -459,7 +462,7 @@ class CITharnessBackend:
         lowered = log.lower()
         reason = (job.failure_reason or "").strip().lower()
         detail = f"harness job {job.name} failed ({reason or 'unknown reason'})"
-        if any(pattern in lowered for pattern in _HARNESS_INFRASTRUCTURE_PATTERNS):
+        if not reason or any(pattern in lowered for pattern in _HARNESS_INFRASTRUCTURE_PATTERNS):
             return HarnessOutcome.failed("infrastructure", detail)
 
         try:

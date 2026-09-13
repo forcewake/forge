@@ -19,8 +19,10 @@ class TestClassifyFailure:
         jobs = [job("build", "success"), job("test", "failed", "script_failure")]
         assert classify_failure(jobs) == "code"
 
-    def test_no_failure_reason_defaults_to_code(self):
-        assert classify_failure([job("test", "failed")]) == "code"
+    def test_no_failure_reason_is_infrastructure(self):
+        """Unknown means the evidence does not blame the code (ADR-0008) —
+        e.g. a canceled or runner-killed job read with no recorded reason."""
+        assert classify_failure([job("test", "failed")]) == "infrastructure"
 
     def test_runner_system_failure_is_infrastructure(self):
         jobs = [job("build", "failed", "runner_system_failure")]
