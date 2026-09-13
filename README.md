@@ -26,10 +26,13 @@ permissions — not by prompt instructions. See
 
 ## Status
 
-forge is at the **M2 baseline**: the M0 reactive bot core (imported from
-Codeward, pinned at commit `fd63ec8`) plus a live-accepted durable run loop
-whose planner/implementer/reviewer are now real LLM agents behind the same
-seams — still pre-production, honestly listed below.
+forge is at the **M4 (release engineering) baseline**: the reactive bot core
+(imported from Codeward, pinned at commit `fd63ec8`), the durable run loop
+live-accepted end-to-end with real LLM agents **and pluggable CI harness
+backends** (claude-code / opencode / grok executing in the target project's
+CI, with harness-backed repair), plus lab-validated failure-injection
+drills (provider outage, worker crash mid-run, job cancellation, duplicate
+commands, /go burst) — still pre-production, honestly listed below.
 
 Reactive bot core (as imported and rebranded):
 
@@ -58,13 +61,31 @@ The factory agents call the model through a thin LiteLLM HTTP client
 ([ADR-0014](docs/adr/0014-llm-http-client-over-agno.md)); Agno stays on the
 reactive path only.
 
-**Still pre-production.** Not yet done: per-project quality-contract
-onboarding/`doctor` verification, budget enforcement beyond the commit-cycle
-cap (reserve/reconcile), redaction at every agent boundary, drift policies
-beyond block, and production hardening of the live-accepted slice. The
+**Still pre-production.** Not yet done: budget enforcement beyond the
+commit-cycle cap (reserve/reconcile), redaction at every agent boundary,
+drift policies beyond block, and production hardening of the live-accepted
+slice. The
 [architecture decision records](docs/adr/0000-record-architecture-decisions.md)
 record what is decided; the gap between ADRs and running code is where work
 remains.
+
+## For AI agents
+
+This repository is built to be worked on by coding agents:
+
+- **[AGENTS.md](AGENTS.md)** — the agent entry point: rules, repo map,
+  gotchas, verification gates.
+- **[docs/onboarding-prompt.md](docs/onboarding-prompt.md)** — a
+  copy-paste prompt that takes a fresh clone to a verified dev environment.
+- **[.claude/skills/](.claude/skills/)** — task playbooks (readable by any
+  agent): [`forge-setup`](.claude/skills/forge-setup/SKILL.md),
+  [`forge-lab`](.claude/skills/forge-lab/SKILL.md),
+  [`forge-debug-run`](.claude/skills/forge-debug-run/SKILL.md),
+  [`forge-onboard-project`](.claude/skills/forge-onboard-project/SKILL.md).
+- **`forge doctor`** — the setup oracle: `uv run python -m forge.doctor
+  [--project <id>] [--json]`; exit code 0 means the environment (or a
+  target project's onboarding) is complete. Read-only; never prints
+  secret values.
 
 The upstream multi-agent YAML flows (including the old `/implement`,
 issue → MR) are **not** part of forge's working functionality: the upstream
