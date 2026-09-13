@@ -301,9 +301,7 @@ class TestHarnessRepairInterplay:
         assert run.status == FlowStatus.WAITING_CI.value
         return run_id, pipeline_id, branch
 
-    async def test_ci_code_failure_repairs_via_new_harness_pipeline(
-        self, service, fake_gitlab, db
-    ):
+    async def test_ci_code_failure_repairs_via_new_harness_pipeline(self, service, fake_gitlab, db):
         """CI code failure with budget left re-delegates to the harness with
         the repair context in the brief (ADR-0015) — not a builtin repair."""
         run_id, _pipeline_id, branch = await self._adopt_candidate(service, fake_gitlab, db)
