@@ -26,7 +26,7 @@ permissions — not by prompt instructions. See
 
 ## Status
 
-forge is at the **M4 (release engineering) baseline**: the reactive bot core
+forge is at **v0.1.0** — the M4 (release engineering) milestone: the reactive bot core
 (imported from Codeward, pinned at commit `fd63ec8`), the durable run loop
 live-accepted end-to-end with real LLM agents **and pluggable CI harness
 backends** (claude-code / opencode / grok executing in the target project's
