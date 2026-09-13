@@ -41,25 +41,27 @@ forge-agent:
     - git config user.name "forge"
     - git config user.email "forge@users.noreply.gitlab.com"
   script:
+    # Live visibility: the compacted agent-event stream (tool calls,
+    # thinking, API errors, retries, final result) flows into the job trace
+    # while the harness works — GitLab tails job traces live. The full
+    # stream-json log stays in /tmp/claude-events.jsonl for the final tail.
+    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/claude-events-filter.mjs -o /tmp/filter.mjs'
     # The task brief: approved plan, written to an ephemeral file (ADR-0012:
     # context passes through GitLab CI variables, not forge-side state).
     - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
-    # Headless harness run. stream-json pipes every agent event (tool calls,
-    # retries, API errors) into the job trace — live progress in the GitLab
-    # UI instead of SSH archaeology. A nonzero exit does not abort the audit
-    # trail: we still report the branch state so forge can verify.
+    # Headless harness run. A nonzero exit does not abort the audit trail:
+    # we still report the branch state so forge can verify (pipefail keeps
+    # claude's exit code through the tee/filter pipeline).
+    - set -o pipefail
     - >-
       claude -p "Implement the task described in /tmp/brief.md for issue
       #$FORGE_ISSUE_IID. Work in the current repository. Commit your changes
       with message: forge: implement issue $FORGE_ISSUE_IID (run
       ${FORGE_RUN_ID:0:8}). Do not push." --model "$ANTHROPIC_MODEL"
-      --dangerously-skip-permissions --output-format stream-json --verbose
-      > /tmp/claude-events.jsonl 2>&1
+      --dangerously-skip-permissions --output-format stream-json --verbose 2>&1
+      | tee /tmp/claude-events.jsonl
+      | node /tmp/filter.mjs
       || echo "claude exited nonzero — verifying branch state anyway"
-    # Tail of the agent event stream lands in the trace: the last events show
-    # what the harness was doing when it stopped (tool call, API error,
-    # retry loop) — the ECONNRESET/timeout class is visible immediately.
-    - 'echo "--- agent events (tail) ---"; tail -c 3000 /tmp/claude-events.jsonl || true; echo "--- end ---"'
     # The harness may or may not have committed. Stage everything and commit
     # ONLY if there are staged changes; never amend or rewrite history.
     - git add -A

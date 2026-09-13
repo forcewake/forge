@@ -87,13 +87,15 @@ repair with bounded LLM cycles; harness runs block instead).
 
 ## Monitoring and triage
 
-**Primary window — the job trace.** The harness runs claude with
-`--output-format stream-json --verbose` redirected into
-`/tmp/claude-events.jsonl`, and the job prints the last 3 KB of that stream
-before reporting `FORGE_RESULT`. Every tool call, API error and retry lands
-in the GitLab job log while the job runs — no SSH needed. A healthy run
-shows a steady stream of assistant/tool events; a stalled stream with
-`api_error ... retryAttempt N` lines means network/provider trouble.
+**Primary window — the job trace, live.** The harness runs claude with
+`--output-format stream-json --verbose` and pipes the stream through a
+compacting filter (`claude-events-filter.mjs`) straight into the job trace:
+tool calls, assistant messages, API errors and retries appear in the GitLab
+job log *while the harness works*. The full-fidelity stream is kept at
+`/tmp/claude-events.jsonl` inside the job. A healthy run shows a steady flow
+of `tool:`/`say:`/`think:` lines; `API-ERROR retry N/M: ...` lines mean
+network/provider trouble. The same pattern generalizes to any headless
+harness that can stream machine-readable progress (opencode, copilot cli).
 
 **Timeouts (two layers).** GitLab kills the job at the template `timeout`
 (30m, first line of defence per ADR-0015 §6). Forge independently blocks the
