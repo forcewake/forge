@@ -6,9 +6,11 @@ Idempotent: reuses the existing branch/PR; every step verified live
 find-by-head-first, Actions pull_request run).
 """
 
-import subprocess, os
+import subprocess
+import os
 
-import asyncio, base64, sys
+import asyncio
+import sys
 
 sys.path.insert(0, "src")
 
@@ -68,10 +70,8 @@ async def main():
         await client.create_branch(owner, repo, branch, head)
         print("3. branch created from", head[:8])
 
-    # 3. CAS commit adding farewell.py
-    content = base64.b64encode(
-        b'"""Farewell helper."""\n\n\ndef farewell(name: str) -> str:\n    return f"Goodbye, {name}!"\n'
-    ).decode()
+    # 3. CAS commit adding farewell.py (raw text; the client base64-encodes)
+    content = '"""Farewell helper."""\n\n\ndef farewell(name: str) -> str:\n    return f"Goodbye, {name}!"\n'
     op = "live-smoke-0001"
     res = await client.create_commit_on_branch(
         owner,
@@ -82,19 +82,14 @@ async def main():
         additions=[("farewell.py", content)],
         client_mutation_id=op,
     )
-    print("4. raw mutation keys:", sorted(res.keys()))
-    import json as _j
-
-    print("   payload:", _j.dumps(res)[:300])
-    new_head = res["oid"]
     print(
         "4. CAS commit:",
-        new_head[:8],
+        res["oid"][:8],
         "| parent check:",
-        (await client.get_branch_head(owner, repo, branch))[:8] == new_head[:8],
+        (await client.get_branch_head(owner, repo, branch))[:8] == res["oid"][:8],
     )
 
-    # 4. STALE_DATA drift: commit against the OLD head must fail
+    # 4. STALE_DATA drift: commit against a stale head must fail
     from forge.integrations.github import GitHubAPIError
 
     try:
@@ -104,7 +99,7 @@ async def main():
             branch,
             expected_head_oid=head,
             headline="stale attempt",
-            additions=[("stale.py", "eA==")],
+            additions=[("stale.py", "x")],
             client_mutation_id="stale-1",
         )
         print("5. STALE: NOT DETECTED — BUG")
