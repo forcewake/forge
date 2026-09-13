@@ -104,12 +104,13 @@ def is_valid(
     plan_digest: str | None = None,
     base_sha: str | None = None,
     policy_digest: str | None = None,
+    spec_digest: str | None = None,
 ) -> bool:
     """Check that *gate* is unconsumed, unexpired and matches the expectations.
 
-    Pass the digests the run currently carries; a mismatch means the plan or
-    policy changed after the approval was given, which invalidates it
-    (ADR-0009).
+    Pass the digests the run currently carries; a mismatch means the plan,
+    policy or RunSpec changed after the approval was given, which invalidates
+    it (ADR-0009, ADR-0018 §1).
     """
     if gate.consumed_at is not None:
         return False
@@ -120,5 +121,7 @@ def is_valid(
     if base_sha is not None and gate.base_sha != base_sha:
         return False
     if policy_digest is not None and gate.policy_digest != policy_digest:
+        return False
+    if spec_digest is not None and gate.spec_digest != spec_digest:
         return False
     return True

@@ -12,8 +12,11 @@ Public surface:
   stand-ins used by tests and offline runs.
 - :mod:`forge.runs.ci_contract` — the ADR-0008 quality contract and CI
   failure classification.
+- :mod:`forge.runs.admission` — the ADR-0018 §3 pre-spend admission check.
+- :mod:`forge.runs.verification` — the F19 verification profile.
 """
 
+from forge.runs.admission import AdmissionDecision, check_admission
 from forge.runs.backends import (
     CITharnessBackend,
     BuiltinBackend,
@@ -33,8 +36,11 @@ from forge.runs.stubs import (
     plan_digest_of,
     short_run_id,
 )
+from forge.runs.verification import VerificationProfile
+from forge.runs.verification import evaluate as evaluate_verification
 
 __all__ = [
+    "AdmissionDecision",
     "BuiltinBackend",
     "CITharnessBackend",
     "GATE_TTL_SECONDS",
@@ -44,10 +50,13 @@ __all__ = [
     "StubImplementer",
     "StubPlanner",
     "StubReviewer",
+    "VerificationProfile",
     "build_backend",
+    "check_admission",
     "classify_failure",
     "execute_run_command",
     "evaluate_quality_contract",
+    "evaluate_verification",
     "factory_branch",
     "is_harness_backend",
     "plan_digest_of",

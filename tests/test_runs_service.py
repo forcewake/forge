@@ -145,7 +145,9 @@ async def outbox_targets(db, run_id: str) -> list[str]:
 
 
 async def start_issue_run(service: RunService) -> str:
-    return await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+    # ADR-0018 §3: only approvers may start runs — the /implement author is
+    # an approver here; non-approver denial is covered by its own tests.
+    return await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
 
 
 class TestStartRun:
@@ -198,7 +200,10 @@ class TestGate:
         assert run.status == FlowStatus.WAITING_APPROVAL.value
         async with db() as session:
             gates = (await session.execute(select(GateApproval))).scalars().all()
-        assert gates == []
+        # F15: the decision was created at plan publication; a non-approver's
+        # /go leaves it pending and unconsumed.
+        assert len(gates) == 1
+        assert gates[0].consumed_at is None
 
     async def test_go_without_run_id_is_ignored(self, service, db):
         # No run id in the command: parse returns nothing — must not raise.

@@ -102,7 +102,7 @@ async def start_and_go(service, db, fake_gitlab) -> tuple[str, int, str]:
 
     Returns (run_id, pipeline_id, factory_branch).
     """
-    run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+    run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
     await service.handle_command_note(
         PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
     )
@@ -129,7 +129,7 @@ def result_log(sha: str, summary: str = "done") -> str:
 
 class TestGoStartsHarness:
     async def test_go_creates_pipeline_and_parks_in_waiting_harness(self, service, fake_gitlab, db):
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
         await service.handle_command_note(
             PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
         )

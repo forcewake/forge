@@ -159,7 +159,7 @@ async def outbox_targets(db, run_id: str) -> list[str]:
 
 async def start_and_go(service: RunService, fake_gitlab: FakeGitLab) -> str:
     """@forge /implement + /go — the run lands in waiting_ci."""
-    run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+    run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
     await service.handle_command_note(
         PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
     )
@@ -610,7 +610,7 @@ class TestAgentFailures:
         service = make_service(db, fake_gitlab, llm)
 
         with pytest.raises(LLMError):
-            await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+            await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
 
         run = await get_run(db, (await _only_run_id(db)))
         assert run is not None
@@ -625,7 +625,7 @@ class TestAgentFailures:
         llm = FakeLLM(db, script=[PLAN_JSON, "this is not json"])
         service = make_service(db, fake_gitlab, llm)
 
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
         # The service converts the parse failure into a terminal state instead
         # of letting it escape (the ledger still records the failed call).
         await service.handle_command_note(
@@ -659,7 +659,7 @@ class TestAgentFailures:
         llm = FakeLLM(db, script=[PLAN_JSON, bad_update])
         service = make_service(db, fake_gitlab, llm)
 
-        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "bob")
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
         await service.handle_command_note(
             PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
         )

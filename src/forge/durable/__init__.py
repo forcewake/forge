@@ -48,6 +48,7 @@ from forge.durable.models import (
     GateApproval,
     LLMCall,
     Outbox,
+    RunSpec,
     StepRun,
 )
 
@@ -70,6 +71,7 @@ __all__ = [
     "LLMCall",
     "Outbox",
     "RunNotFound",
+    "RunSpec",
     "TERMINAL_STATUSES",
     "TRANSITION_EVENT_TYPE",
     "StepRun",

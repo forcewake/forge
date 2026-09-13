@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     FORGE_HARNESS_TIMEOUT_SECONDS: int = 1800
     FORGE_HARNESS_MODEL: str = "glm-5.3-flash[1m]"
 
+    # ADR-0018 (F15): how long the pending plan decision — created when the
+    # plan note is posted — stays consumable. After the deadline a `/go` is
+    # refused: the plan is stale and must be re-planned and re-approved.
+    FORGE_DECISION_TTL_SECONDS: int = 7 * 86400
+
     # Webhook payload capture (debug/diagnostics; path relative to CWD)
     FORGE_CAPTURE_DIR: str | None = None
 

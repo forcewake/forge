@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     CheckConstraint,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -60,6 +61,8 @@ _STEP_STATUSES: tuple[str, ...] = (
     "failed",
     "skipped",
     "dead",
+    # ADR-0018 §4: a cancel request withdraws steps that were never claimed.
+    "cancelled",
 )
 _ACTION_STATUSES: tuple[str, ...] = ("requested", "succeeded", "failed", "unknown_outcome")
 _LLM_STATUSES: tuple[str, ...] = ("ok", "failed", "cancelled")
@@ -138,6 +141,13 @@ class FlowRun(Base):
     candidate_shas: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     plan_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     config_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: ADR-0018 §1 (F14): digest of the immutable RunSpec frozen at plan
+    #: acceptance — the value the pending decision binds (drift ⇒ re-approval).
+    spec_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: ADR-0018 §4 (F13): a durable cancel request. Set BEFORE the terminal
+    #: cancelled transition; in-flight publication legs re-read it and stand
+    #: down, and a verified candidate for a cancelled run stays superseded.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     #: Incremental ADR-0008 evidence: plan digest/summary, review verdict+sha,
     #: pipeline id/url/status — written as the run accumulates proof.
     evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
@@ -152,6 +162,35 @@ class FlowRun(Base):
         nullable=False,
         default=_utcnow,
         onupdate=_utcnow,
+    )
+
+
+class RunSpec(Base):
+    """The immutable, versioned specification of one run (ADR-0018 §1, F14).
+
+    Frozen at plan acceptance, *before* the plan is published: subject,
+    source snapshot OID, plan/task/policy digests, the resolved backend
+    config and the budgets. Changing a setting mid-run never changes an
+    approved RunSpec — the run executes its spec or requests re-approval.
+    ``digest`` is the sha256 over the canonical (sorted-key) JSON of
+    ``document``; the pending decision carries it and a ``/go`` whose run's
+    current spec digest differs is invalid.
+    """
+
+    __tablename__ = "run_specs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    document: Mapped[dict] = mapped_column(JSON, nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
 
@@ -238,6 +277,12 @@ class GateApproval(Base):
     plan_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     policy_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: ADR-0018 §2 (F15): the pending decision carries the RunSpec digest it
+    #: freezes and the issue-text snapshot digest at plan time (drift between
+    #: approval and execution is detected, never silent).
+    spec_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 0 while the decision is pending; set to the consuming approver's id.
     approver_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     source_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
