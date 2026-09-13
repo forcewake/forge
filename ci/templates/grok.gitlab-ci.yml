@@ -57,14 +57,26 @@ forge-agent:
     # through GitLab CI variables, not forge-side state).
     - mkdir -p .forge
     - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # Live visibility: the compacted streaming-json event lines flow into the
+    # job trace while grok works; the raw debug log stays in .forge/ and its
+    # tail is printed afterwards (when grok stalls silently, that log says
+    # where).
+    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/grok-events-filter.mjs -o /tmp/filter.mjs'
+    - set -o pipefail
     # Headless harness run (--always-approve: the ephemeral CI container is
-    # the ADR-0002 execution profile). Grok streams its own progress to the
-    # trace; a nonzero exit does not abort the audit trail: we still report
-    # the branch state so forge can verify.
-    - |
-      grok --no-auto-update --always-approve -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push."
+    # the ADR-0002 execution profile). A nonzero exit does not abort the
+    # audit trail: we still report the branch state so forge can verify.
+    - >-
+      grok --no-auto-update --always-approve --no-alt-screen
+      --output-format streaming-json
+      --debug-file .forge/grok-debug.log
+      -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. When the work is done, commit all changes with the message: forge: implement issue $FORGE_ISSUE_IID (run ${FORGE_RUN_ID:0:8}). Do not push." 2>&1
+      | node /tmp/filter.mjs
+      || echo "grok exited nonzero — verifying branch state anyway"
+    # Post-mortem visibility when the stream produced nothing.
+    - 'tail -30 .forge/grok-debug.log 2>/dev/null || true'
     # The brief is context, not deliverable — never commit it.
-    - rm -f .forge/brief.md
+    - rm -f .forge/brief.md .forge/grok-debug.log
     # The harness may or may not have committed. Stage everything and commit
     # ONLY if there are staged changes; never amend or rewrite history.
     - git add -A
