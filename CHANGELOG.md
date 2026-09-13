@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-13
+
+### Added — GitHub App adapter, same-repository slice (ADR-0019, F32)
+
+- **GitHub App identity**: RS256 JWT → installation tokens (cached, re-mint
+  on 401), least-privilege permissions, private key held as a credential
+  reference. Per-installation rate limits with `Retry-After` handling —
+  no hot loops.
+- **Fail-closed webhook ingress** (`/webhook/github`): `X-Hub-Signature-256`
+  over raw bytes (constant-time; official test vector covered by tests),
+  503 when disabled, ping, redelivery dedup via the durable inbox.
+  `issue_comment` commands route into the same durable step path as GitLab;
+  PR comments are distinguishable; installation-deleted disables the
+  connection.
+- **Publishing**: factory branch cut from the expected head,
+  `createCommitOnBranch` with `expectedHeadOid` CAS (STALE_DATA → drift,
+  never retried), Draft PR created find-by-head-first (never duplicated).
+  Same trusted-publisher/validation semantics as GitLab; human gate is the
+  documented next step (this slice is the adapter + flow foundation).
+- 57 tests over a CAS-faithful fake, recorded webhook payloads, and JWT
+  shape assertions.
+
+### Added — operations read model and API correctness (F26–F28, F30)
+
+- `GET /runs` + `GET /runs/{id}`: durable run read model (steps, evidence
+  summary) with optional bearer auth; the legacy `/flows/{id}` route is
+  removed. Prometheus exposition at `/metrics.prometheus` (F30).
+- DB lifecycle (F26): engines keyed per database URL, async dispose on
+  shutdown, `schema_version` compatibility gate (migration 007b) — an
+  incompatible existing database refuses to start with upgrade pointers.
+- GitLab API correctness (F27/F28): raw-diff endpoint with legacy
+  fallback, head checks via single branch GET (no history pagination),
+  pagination-cap warning so incomplete evidence is honest. Two raw-diff
+  contract xfails closed.
+
 ## [0.3.0] - 2026-09-13
 
 ### Added — proposal-only harnesses and the trusted publisher (ADR-0016)
