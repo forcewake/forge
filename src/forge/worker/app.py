@@ -23,9 +23,56 @@ from forge.utils.logging import setup_logging
 from forge.utils.redis_client import RedisManager
 from forge.worker.queue import TaskQueue
 from forge.worker.retry import RetryPolicy
+from forge.worker.steps import (
+    claim_command_step,
+    command_step_known,
+    execute_claimed_step,
+    run_step_reaper,
+    run_step_worker,
+)
 from forge.worker.tasks import deserialize_event
 
 logger = logging.getLogger(__name__)
+
+
+async def _execute_run_command_task(
+    settings,
+    forge_config,
+    session_factory,
+    metadata: dict,
+    *,
+    owner: str,
+) -> None:
+    """Execute a queued ``run_command`` task through the step runtime (ADR-0017).
+
+    The persisted StepRun is the authority; this Redis task is only the
+    wake-up. The step is claimed first (lease + fence), so a step worker can
+    never double-run the same command. When no step was persisted (legacy
+    producer) or the DB is unreachable, execution falls back to the direct
+    :func:`execute_run_command` path.
+    """
+    source_event_id = str(metadata.get("source_event_id") or "")
+    if source_event_id and session_factory is not None:
+        try:
+            known = await command_step_known(session_factory, source_event_id)
+        except Exception:
+            logger.warning("Step lookup failed — executing run command directly", exc_info=True)
+            known = None
+        if known:
+            claimed = await claim_command_step(session_factory, owner, source_event_id)
+            if claimed is None:
+                # Not claimable (running / in backoff / done): the step
+                # runtime owns the command — skip, do not double-execute.
+                logger.info(
+                    "Run command step %s not claimable — left to the step runtime",
+                    source_event_id[:12],
+                )
+                return
+            await execute_claimed_step(session_factory, settings, forge_config, claimed)
+            return
+        if known is False:
+            logger.warning("No persisted step for %s — executing directly", source_event_id[:12])
+    await execute_run_command(settings, forge_config, session_factory, metadata)
 
 
 async def bootstrap():
@@ -110,8 +157,16 @@ async def run_worker(
                     step_index=task.metadata["step_index"],
                 )
             elif task.task_type == "run_command":
-                # M1 durable run loop: /implement and /go notes (RunService).
-                await execute_run_command(settings, forge_config, session_factory, task.metadata)
+                # M1 durable run loop — ADR-0017: executed through the step
+                # runtime (claim → lease + fence → run), never concurrently
+                # with the step worker.
+                await _execute_run_command_task(
+                    settings,
+                    forge_config,
+                    session_factory,
+                    task.metadata,
+                    owner=worker_id,
+                )
             else:
                 event = deserialize_event(task)
                 orchestrator = Orchestrator(
@@ -216,7 +271,9 @@ async def main() -> None:
             # Windows doesn't support add_signal_handler
             signal.signal(sig, lambda *_: _signal_handler())
 
-    # Run worker, reaper, heartbeat, and the run reconciler concurrently
+    # Run worker, step runtime, reaper, heartbeat, and the run reconciler
+    # concurrently (ADR-0017: the step runtime owns run commands; the Redis
+    # queue loop keeps serving the legacy event/flow_step path).
     try:
         await asyncio.gather(
             run_worker(
@@ -230,8 +287,17 @@ async def main() -> None:
                 flow_runner=flow_runner,
                 mcp_manager=mcp_manager,
             ),
+            run_step_worker(
+                session_factory,
+                settings,
+                forge_config,
+                worker_id,
+                shutdown_event,
+                redis_manager,
+            ),
             run_reconciler(run_service, interval_seconds=15, shutdown_event=shutdown_event),
             run_reaper(task_queue, shutdown_event),
+            run_step_reaper(session_factory, shutdown_event),
             run_heartbeat(worker_id, redis_manager, shutdown_event),
         )
     finally:

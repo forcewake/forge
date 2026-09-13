@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.durable.controller import RunNotFound, as_aware_utc
@@ -45,11 +45,22 @@ async def record_approval(
 
     The *approver list itself* is a trusted-configuration concern (ADR-0009):
     verify that ``approver_user_id`` is allowed to approve before calling.
+
+    The approval generation is allocated as ``max(generation) + 1`` for the
+    run, so successive approval rounds coexist while the DB-level unique index
+    ``uq_gate_per_run_generation`` (ADR-0017 §4) rejects duplicates of the
+    same round.
     """
     if await session.get(FlowRun, flow_run_id) is None:
         raise RunNotFound(f"flow run {flow_run_id!r} not found")
+    current = (
+        await session.execute(
+            select(func.max(GateApproval.generation)).where(GateApproval.flow_run_id == flow_run_id)
+        )
+    ).scalar_one()
     gate = GateApproval(
         flow_run_id=flow_run_id,
+        generation=(current + 1) if current is not None else 0,
         plan_digest=plan_digest,
         base_sha=base_sha,
         policy_digest=policy_digest,

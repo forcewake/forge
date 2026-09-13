@@ -13,7 +13,7 @@ import hashlib
 from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.durable.models import EventInbox
@@ -55,40 +55,41 @@ async def ingest_event(
 ) -> tuple[EventInbox, bool]:
     """Insert an inbox row unless *source_event_id* was already ingested.
 
-    Returns ``(row, created)``. Duplicate deliveries — whether observed in
-    this transaction or concurrently in another — return the existing row
-    with ``created=False``; the original payload is preserved.
+    Returns ``(row, created)``. The insert is the dedup arbiter (ADR-0017 §1):
+    ``INSERT ... ON CONFLICT DO NOTHING`` against the unique delivery key, so
+    a concurrent ingester racing in another transaction is resolved by the
+    index itself — no select-then-insert window, no savepoint. Duplicate
+    deliveries return the existing row with ``created=False``; the original
+    payload is preserved.
     """
-    existing = (
-        await session.execute(
-            select(EventInbox).where(EventInbox.source_event_id == source_event_id)
+    # ON CONFLICT DO NOTHING works identically on Postgres and SQLite (tests);
+    # the pg insert construct compiles to the same statement on both.
+    result = await session.execute(
+        pg_insert(EventInbox)
+        .values(
+            source_event_id=source_event_id,
+            project_id=project_id,
+            event_type=event_type,
+            payload=payload,
         )
-    ).scalar_one_or_none()
-    if existing is not None:
-        return existing, False
-
-    row = EventInbox(
-        source_event_id=source_event_id,
-        project_id=project_id,
-        event_type=event_type,
-        payload=payload,
+        .on_conflict_do_nothing(index_elements=[EventInbox.source_event_id])
     )
-    try:
-        # SAVEPOINT: if a concurrent writer won the unique index, roll back
-        # only this insert and keep the caller's transaction intact.
-        async with session.begin_nested():
-            session.add(row)
-            await session.flush()
-    except IntegrityError:
-        winner = (
+    if result.rowcount == 1:
+        row = (
             await session.execute(
-                select(EventInbox)
-                .where(EventInbox.source_event_id == source_event_id)
-                .execution_options(populate_existing=True)
+                select(EventInbox).where(EventInbox.source_event_id == source_event_id)
             )
         ).scalar_one()
-        return winner, False
-    return row, True
+        return row, True
+
+    winner = (
+        await session.execute(
+            select(EventInbox)
+            .where(EventInbox.source_event_id == source_event_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    return winner, False
 
 
 async def mark_processed(

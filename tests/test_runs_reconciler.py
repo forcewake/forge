@@ -64,7 +64,9 @@ def service(db, fake_gitlab):
     )
 
 
-async def make_waiting_ci_run(db, fake_gitlab: FakeGitLab | None = None) -> str:
+async def make_waiting_ci_run(
+    db, fake_gitlab: FakeGitLab | None = None, *, issue_iid: int = ISSUE_IID
+) -> str:
     """Create a run parked in waiting_ci with a candidate sha (as /go leaves it)."""
     run_id = uuid4().hex
     mr_iid = 12
@@ -76,7 +78,7 @@ async def make_waiting_ci_run(db, fake_gitlab: FakeGitLab | None = None) -> str:
     async with db() as session:
         controller = Controller(session)
         session.add(
-            FlowRun(id=run_id, project_id=PROJECT_ID, issue_iid=ISSUE_IID, plan_digest="dig")
+            FlowRun(id=run_id, project_id=PROJECT_ID, issue_iid=issue_iid, plan_digest="dig")
         )
         await controller.transition(run_id, FlowStatus.PREFLIGHT)
         await controller.transition(run_id, FlowStatus.PLANNING)
@@ -301,8 +303,9 @@ class TestEvaluateWaitingCi:
     async def test_one_broken_run_does_not_stall_others(self, service, fake_gitlab, db):
         run_id = await make_waiting_ci_run(db, fake_gitlab)
         await seed_success_pipeline(fake_gitlab, run_id)
-        # A second, healthy run in waiting_ci (same candidate sha, seeded too).
-        other = await make_waiting_ci_run(db)
+        # A second, healthy run in waiting_ci on a DIFFERENT issue — the F12
+        # invariant allows only one ACTIVE run per (project, issue).
+        other = await make_waiting_ci_run(db, issue_iid=ISSUE_IID + 1)
         await seed_success_pipeline(fake_gitlab, other)
 
         # Corrupt the first run's project so its reads explode mid-tick.

@@ -51,6 +51,14 @@ class RedisManager:
         result = await self._client.bzpopmin(key, timeout=timeout)  # type: ignore[arg-type]
         return result  # type: ignore[return-value]
 
+    async def blpop(self, key: str, timeout: float = 5.0) -> tuple[str, str] | None:
+        """Blocking pop from the head of a list (wake-up signals).
+
+        Returns (key, value) or None on timeout.
+        """
+        result = await self._client.blpop(key, timeout=timeout)  # type: ignore[arg-type]
+        return result  # type: ignore[return-value]
+
     async def zrem(self, key: str, *members: str) -> int:
         return await self._client.zrem(key, *members)  # type: ignore[return-value]
 

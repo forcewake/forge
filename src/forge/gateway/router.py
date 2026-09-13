@@ -104,6 +104,103 @@ def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str
         logger.warning("Failed to capture webhook payload", exc_info=True)
 
 
+async def _ingest_run_command(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    event: GitLabEvent,
+    run_command: dict[str, Any],
+) -> dict[str, Any]:
+    """Transactional ingress for run commands (ADR-0017 §1).
+
+    ONE transaction persists the inbox row (native delivery identity) and the
+    first scheduled step; the ``202`` is answered only after that commit, so
+    the command is durable in Postgres before it is acknowledged. The Redis
+    dedup check in front of the transaction is an accelerator, not the
+    authority — the inbox unique index decides; the queue submit and the
+    step-wake push after the commit are accelerators too, and losing them
+    only costs one step-worker poll interval.
+    """
+    from forge.durable import ingest_event
+    from forge.worker.steps import (
+        STEP_WAKE_KEY,
+        command_source_event_id,
+        run_pending_command_step,
+        schedule_command_step,
+    )
+    from forge.worker.tasks import create_run_command_task
+
+    settings = request.app.state.settings
+    session_factory = getattr(request.app.state, "session_factory", None)
+    queue = getattr(request.app.state, "task_queue", None)
+    note_id = event.object_attributes.id
+    source_event_id = command_source_event_id(
+        run_command["command"], run_command["project_id"], note_id
+    )
+
+    if queue is not None:
+        # Content-stable identity: re-delivered note webhooks collapse. This
+        # SET-NX check is the fast path only — a false negative still gets
+        # caught by the inbox unique index below.
+        if await queue.is_duplicate(f"run:{run_command['project_id']}:{note_id}"):
+            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
+
+    if session_factory is not None:
+        deduplicated = False
+        async with session_factory() as session:
+            async with session.begin():
+                _, created = await ingest_event(
+                    session,
+                    source_event_id=source_event_id,
+                    project_id=run_command["project_id"],
+                    event_type="run_command",
+                    payload={**run_command, "note_id": note_id},
+                )
+                if created:
+                    # The scheduled step is the durability contract behind
+                    # the 202: once this commits, a worker WILL attempt it.
+                    await schedule_command_step(
+                        session, run_command, source_event_id=source_event_id
+                    )
+                else:
+                    deduplicated = True
+        if deduplicated:
+            return {"status": "accepted", "event": event.object_kind, "deduplicated": True}
+
+    if queue is not None:
+        # Wake-up accelerators only — Postgres owns the work (ADR-0017).
+        try:
+            await queue.submit(create_run_command_task(run_command, note_id=note_id))
+        except Exception:
+            logger.warning("Run command queue wake-up failed", exc_info=True)
+        redis_manager = getattr(request.app.state, "redis_manager", None)
+        if redis_manager is not None:
+            try:
+                await redis_manager.lpush(STEP_WAKE_KEY, source_event_id)
+            except Exception:
+                logger.debug("Run command step wake-up failed", exc_info=True)
+        return {
+            "status": "accepted",
+            "event": event.object_kind,
+            "queued": True,
+            "run_command": True,
+        }
+
+    if session_factory is not None:
+        # No Redis — dev fallback: execute the persisted step in-process,
+        # through the SAME claim/lease/fence protocol as the worker.
+        background_tasks.add_task(
+            run_pending_command_step,
+            session_factory,
+            settings,
+            request.app.state.forge_config,
+            source_event_id,
+            owner=f"gateway-{uuid4().hex[:6]}",
+        )
+        return {"status": "accepted", "event": event.object_kind, "run_command": True}
+
+    return {"status": "accepted", "event": event.object_kind}
+
+
 @router.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     """Health check endpoint with DB, LiteLLM, and Redis connectivity."""
@@ -242,40 +339,7 @@ async def webhook(
     # orchestrator/flow dispatch entirely (they never need an LLM here).
     run_command = _match_run_command(event, settings)
     if run_command is not None:
-        from forge.worker.tasks import create_run_command_task
-
-        queue = getattr(request.app.state, "task_queue", None)
-        note_id = event.object_attributes.id
-        if queue is not None:
-            # Content-stable identity: re-delivered note webhooks collapse.
-            is_dup = await queue.is_duplicate(f"run:{run_command['project_id']}:{note_id}")
-            if is_dup:
-                return {
-                    "status": "accepted",
-                    "event": event.object_kind,
-                    "deduplicated": True,
-                }
-            await queue.submit(create_run_command_task(run_command, note_id=note_id))
-            return {
-                "status": "accepted",
-                "event": event.object_kind,
-                "queued": True,
-                "run_command": True,
-            }
-
-        # No Redis — execute in-process via BackgroundTasks.
-        from forge.runs import execute_run_command
-
-        session_factory = getattr(request.app.state, "session_factory", None)
-        if session_factory is not None:
-            background_tasks.add_task(
-                execute_run_command,
-                settings,
-                request.app.state.forge_config,
-                session_factory,
-                run_command,
-            )
-            return {"status": "accepted", "event": event.object_kind, "run_command": True}
+        return await _ingest_run_command(request, background_tasks, event, run_command)
 
     # enqueue to Redis if available
     task_queue = getattr(request.app.state, "task_queue", None)

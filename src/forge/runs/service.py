@@ -44,6 +44,7 @@ from uuid import uuid4
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.config import ForgeConfig, Settings
@@ -218,11 +219,33 @@ class RunService:
 
         run_id = uuid4().hex
 
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            session.add(FlowRun(id=run_id, project_id=project_id, issue_iid=issue_iid))
-            await controller.transition(run_id, FlowStatus.PREFLIGHT)
-            await session.commit()
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                session.add(FlowRun(id=run_id, project_id=project_id, issue_iid=issue_iid))
+                await controller.transition(run_id, FlowStatus.PREFLIGHT)
+                await session.commit()
+        except IntegrityError:
+            # F12 (ADR-0017): the partial unique index uq_active_run_per_issue
+            # is the invariant of last resort — a concurrent /implement won
+            # the (project, issue) slot between the active-run check and this
+            # insert. Treat it as a duplicate, never surface the raw error.
+            existing = await self._find_active_run(project_id, issue_iid)
+            if existing is None:
+                raise
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                self._active_run_comment(existing),
+                existing.id,
+                "duplicate_implement",
+            )
+            logger.info(
+                "/implement on issue !%s lost the run-creation race — run %s is active",
+                issue_iid,
+                existing.id[:8],
+            )
+            return existing.id
 
         try:
             plan = await self._planner.plan(issue_title, issue_description, flow_run_id=run_id)

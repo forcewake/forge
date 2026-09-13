@@ -13,6 +13,7 @@ from forge.database import reset_engine
 from forge.durable import FlowRun, FlowStatus
 from forge.main import create_app
 from forge.runs import RunService
+from forge.worker.steps import command_source_event_id
 from forge.worker.tasks import create_run_command_task
 from tests.fixtures.fake_gitlab import FakeGitLab, FakeGitLabClientFactory
 
@@ -21,7 +22,15 @@ PROJECT_ID = 42
 ISSUE_IID = 5
 
 
-def note_payload(note: str, *, username: str = "alice", issue: bool = True) -> dict:
+def note_payload(
+    note: str, *, username: str = "alice", issue: bool = True, note_id: int = 900
+) -> dict:
+    """A note webhook payload.
+
+    ``note_id`` mimics GitLab's global note id: distinct notes MUST carry
+    distinct ids — only true re-deliveries of the same note share one, which
+    is what the durable inbox dedups on (ADR-0017).
+    """
     payload = {
         "object_kind": "note",
         "event_type": "note",
@@ -33,7 +42,7 @@ def note_payload(note: str, *, username: str = "alice", issue: bool = True) -> d
             "web_url": "https://gitlab.test/group/test",
         },
         "object_attributes": {
-            "id": 900,
+            "id": note_id,
             "note": note,
             "noteable_type": "Issue" if issue else "MergeRequest",
         },
@@ -240,7 +249,15 @@ class TestWorkerDispatch:
 
         await run_worker("w", object(), object(), object(), object(), queue, shutdown)
 
-        assert executed == [{"command": "go", "project_id": 1}]
+        # ADR-0017: the wake task's metadata carries the command's inbox
+        # identity so the worker can claim the persisted step.
+        assert executed == [
+            {
+                "command": "go",
+                "project_id": 1,
+                "source_event_id": command_source_event_id("go", 1, 5),
+            }
+        ]
         queue.complete.assert_awaited_once_with(task)
 
     async def test_worker_fails_run_command_on_error(self, monkeypatch):
@@ -319,10 +336,10 @@ class TestEndToEnd:
         run_id = run.id
         assert f"@forge /go {run_id}" in fake.notes[0]["body"]
 
-        # 2. Non-approver /go is ignored.
+        # 2. Non-approver /go is ignored (a distinct note → distinct inbox id).
         resp = await client.post(
             "/webhook",
-            json=note_payload(f"@forge /go {run_id}", username="mallory"),
+            json=note_payload(f"@forge /go {run_id}", username="mallory", note_id=901),
             headers=webhook_headers(),
         )
         async with session_factory() as session:
@@ -332,7 +349,7 @@ class TestEndToEnd:
         # 3. Approver /go drives stub propose → commit → Draft MR → waiting_ci.
         resp = await client.post(
             "/webhook",
-            json=note_payload(f"@forge /go {run_id}", username="alice"),
+            json=note_payload(f"@forge /go {run_id}", username="alice", note_id=902),
             headers=webhook_headers(),
         )
         async with session_factory() as session:
@@ -391,9 +408,12 @@ class TestEndToEnd:
         assert len(runs) == 1
         run_id = runs[0].id
 
-        # Second /implement (a distinct note, so gateway dedup does not fire).
+        # Second /implement — a DISTINCT note (GitLab ids are global), so the
+        # inbox does not dedup it and the active-run guard answers it.
         resp = await client.post(
-            "/webhook", json=note_payload("/implement"), headers=webhook_headers()
+            "/webhook",
+            json=note_payload("/implement", note_id=901),
+            headers=webhook_headers(),
         )
         assert resp.status_code == 202
         async with session_factory() as session:
@@ -413,9 +433,11 @@ class TestEndToEnd:
         assert "cancelled by @alice" in (run.status_reason or "")
         assert fake.notes_containing("by @alice"), "cancellation note posted"
 
-        # Non-approver /cancel on a terminal run changes nothing.
+        # Non-approver /cancel on a terminal run changes nothing (distinct note).
         resp = await client.post(
-            "/webhook", json=note_payload("/cancel", username="mallory"), headers=webhook_headers()
+            "/webhook",
+            json=note_payload("/cancel", username="mallory", note_id=902),
+            headers=webhook_headers(),
         )
         assert resp.status_code == 202
         async with session_factory() as session:
