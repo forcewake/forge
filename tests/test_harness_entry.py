@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from forge.harness_entry import DRIVERS, main, parse_usage, render_driver_script
+from forge.harness_entry import (
+    DRIVERS,
+    main,
+    parse_usage,
+    render_brief,
+    render_driver_script,
+)
 
 BRIEF = ".forge/brief.md"
 
@@ -86,12 +92,92 @@ class TestRenderCommon:
         with pytest.raises(ValueError, match="unknown driver"):
             render_driver_script("codex", "", BRIEF)
 
-    def test_brief_paths_are_shell_quoted(self):
-        """The prompt embedding the brief path is quoted as one shell word
-        (drivers that interpolate the path — claude-code does)."""
-        script = render_driver_script("claude-code", "", "/tmp/wei rd brief.md")
+    def test_the_prompt_is_the_short_shared_pointer(self):
+        """The quality lives in the brief file; the -p prompt only points at
+        it (forge.harnesses.prompt.TASK_PROMPT), identically for every
+        driver."""
+        import shlex
 
-        assert "'/tmp/wei rd brief.md" in script or "-p '/tmp/wei rd brief.md" in script
+        from forge.harnesses.prompt import TASK_PROMPT
+
+        for driver in DRIVERS:
+            script = render_driver_script(driver, "m", BRIEF)
+            assert shlex.quote(TASK_PROMPT) in script
+            assert "brief.md" in script  # the pointer names the brief
+
+
+# ----------------------------------------------------------------------
+# The shared brief builder (single source for both lanes)
+# ----------------------------------------------------------------------
+
+
+class TestRenderBrief:
+    def test_brief_carries_role_constraints_and_contract(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        brief = render_brief("Users cannot reset their password.", "1. Add the endpoint.\n")
+
+        assert "## Role" in brief and "staff engineer" in brief
+        assert "1. Add the endpoint." in brief  # plan verbatim
+        assert "Users cannot reset their password." in brief
+        assert "NEVER create or modify" in brief  # denied paths
+        assert "working tree" in brief  # ci_lane output contract
+        assert "NOT** commit" in brief
+
+    def test_skills_line_names_conventions_files_present_in_the_workspace(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Fixture-level skills check: a workspace containing AGENTS.md → the
+        brief instructs the agent to read it (Claude reads CLAUDE.md the
+        same way)."""
+        monkeypatch.chdir(tmp_path)
+
+        bare = render_brief("body", "plan")
+        assert "if `AGENTS.md` or `CLAUDE.md` exists" in bare  # conditional form
+
+        (tmp_path / "AGENTS.md").write_text("# conventions\n")
+        with_agents = render_brief("body", "plan")
+        assert "`AGENTS.md`" in with_agents
+        assert "read" in with_agents and "follow" in with_agents
+
+    def test_render_brief_mode_fetches_issue_and_plan_and_writes_the_brief(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """--render-brief: the lane fetches its own brief content (issue body
+        + the forge plan comment) with the read-only runner token — no
+        dispatch-input size limit ever binds."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GITHUB_REPOSITORY", "acme/acme-widget")
+        monkeypatch.setenv("GITHUB_TOKEN", "ghs_runner")  # noqa: S105 — fake
+        monkeypatch.setenv("FORGE_ISSUE_NUMBER", "42")
+
+        async def _noop_async():
+            return None
+
+        def fake_fetch(repo: str, issue_number: int, token: str):
+            assert (repo, issue_number, token) == ("acme/acme-widget", 42, "ghs_runner")
+            return ("Users cannot reset their password.", "## Forge plan — run `abcd`\n...")
+
+        monkeypatch.setattr("forge.harness_entry.fetch_issue_context", fake_fetch)
+
+        rc = main(["--render-brief"])
+
+        assert rc == 0
+        brief = (tmp_path / ".forge" / "brief.md").read_text()
+        assert "## Approved plan" in brief
+        assert "## Forge plan — run `abcd`" in brief  # the plan, verbatim
+        assert "Users cannot reset their password." in brief
+
+    def test_render_brief_mode_requires_repo_issue_and_token(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("FORGE_ISSUE_NUMBER", raising=False)
+
+        rc = main(["--render-brief", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
 
 
 # ----------------------------------------------------------------------

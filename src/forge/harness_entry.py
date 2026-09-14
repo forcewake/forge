@@ -288,7 +288,9 @@ def main(argv: list[str] | None = None) -> int:
     import os
 
     driver = (args.driver or os.environ.get("FORGE_DRIVER") or "").strip()
-    model = (args.model or os.environ.get("FORGE_HARNESS_MODEL") or "").strip()
+    model = (
+        args.model or os.environ.get("FORGE_HARNESS_MODEL") or os.environ.get("FORGE_MODEL") or ""
+    ).strip()
     brief = args.brief or os.environ.get("FORGE_BRIEF") or ".forge/brief.md"
     exit_file = Path(args.exit_file or os.environ.get("FORGE_EXIT_FILE") or ".forge/exit")
 

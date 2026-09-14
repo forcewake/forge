@@ -139,6 +139,7 @@ class GitHubActionsExecutor:
             "attempt_base_oid": handle.attempt_base,
             "driver": handle.driver,
             "model": "",
+            "issue_number": "",
             **(inputs or {}),
         }
         response = await self._client.dispatch_workflow(

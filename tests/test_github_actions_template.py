@@ -32,12 +32,44 @@ class TestWorkflowTemplateContract:
 
         assert workflow["name"] == "forge-harness"
         inputs = dispatch["inputs"]
-        assert set(inputs) == {"run_id", "attempt_base_oid", "driver", "model"}
+        assert set(inputs) == {
+            "run_id",
+            "attempt_base_oid",
+            "driver",
+            "model",
+            "issue_number",  # the lane fetches its brief from the issue
+        }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
-        assert inputs["run_id"]["required"] is True
-        assert inputs["attempt_base_oid"]["required"] is True
-        assert inputs["driver"]["required"] is True
+        for required in ("run_id", "attempt_base_oid", "driver", "issue_number"):
+            assert inputs[required]["required"] is True
+
+    def test_brief_is_rendered_from_the_issue_before_the_driver_runs(self):
+        """The approved plan lives as the forge plan comment on the issue —
+        the lane fetches it read-only and renders the shared brief. The
+        plan TEXT never travels through dispatch inputs (size limits)."""
+        workflow = load_template()
+        steps = workflow["jobs"]["harness"]["steps"]
+        brief_step = next(
+            (step for step in steps if step.get("name") == "Render the implementation brief"),
+            None,
+        )
+
+        assert brief_step is not None
+        assert "python -m forge.harness_entry --render-brief" in brief_step["run"]
+        assert brief_step["env"]["GITHUB_TOKEN"] == "${{ github.token }}"  # read-only
+        assert brief_step["env"]["FORGE_ISSUE_NUMBER"] == "${{ inputs.issue_number }}"
+        # The driver step runs AFTER the brief step and only runs the driver.
+        names = [step.get("name") for step in steps]
+        assert names.index("Render the implementation brief") < names.index("Run harness driver")
+
+    def test_lane_is_read_only(self):
+        workflow = load_template()
+
+        assert workflow["jobs"]["harness"]["permissions"] == {
+            "contents": "read",
+            "issues": "read",
+        }
 
     def test_proposal_only_lane_has_no_write_credentials(self):
         text = TEMPLATE.read_text()
@@ -77,9 +109,11 @@ class TestWorkflowTemplateContract:
         run = driver_step["run"]
         assert "python -m forge.harness_entry" in run
         # The pin is a placeholder the onboarding must replace (never a
-        # moving branch): docs/harness-onboarding.md, "GitHub Actions harness".
-        assert "<PINNED_REF>" in run
-        assert "git+https://github.com/" in run
+        # moving branch) — it lives on the pip install (brief step):
+        # docs/harness-onboarding.md, "GitHub Actions harness".
+        text = TEMPLATE.read_text()
+        assert "<PINNED_REF>" in text
+        assert "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" in text
 
     def test_concurrency_groups_one_run_per_forge_run(self):
         workflow = load_template()

@@ -115,6 +115,7 @@ class TestLaunch:
             "attempt_base_oid": ATTEMPT_BASE,
             "driver": "claude-code",
             "model": "",
+            "issue_number": "",
         }
 
     async def test_legacy_empty_response_falls_back_to_discovery(self):

@@ -714,6 +714,10 @@ class GitHubRunService:
                 inputs={
                     "run_id": run_id,
                     "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+                    # The lane renders its brief from the issue's forge plan
+                    # comment (fetched read-only) — it needs the issue
+                    # number, never the plan TEXT (no input size limits).
+                    "issue_number": str(issue_number),
                 },
             )
         except Exception as exc:

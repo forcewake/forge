@@ -4,9 +4,11 @@ The /go decision on a repo onboarded for harness execution
 (``FORGE_GITHUB_HARNESS_WORKFLOW``): dispatch → ``waiting_harness`` with a
 journaled Actions handle → reconciler poll → trusted publisher → Draft PR →
 review → ``ready_for_human`` — plus supersede-on-cancel and failure
-classification, all over :class:`tests.fixtures.fake_github.FakeGitHub`.
+classification and the worker-side reconciler tick, all over
+:class:`tests.fixtures.fake_github.FakeGitHub`.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -210,6 +212,9 @@ class TestGoDispatchesHarness:
             "attempt_base_oid": BASE_HEAD,
             "driver": "claude-code",
             "model": MODEL,
+            # The brief TEXT never travels in dispatch inputs — the lane
+            # fetches the forge plan comment read-only; it needs the number.
+            "issue_number": str(ISSUE),
         }
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []
@@ -470,3 +475,54 @@ class TestGateUnchanged:
             )
         assert gate.consumed_at is not None
         assert len(fake.dispatch_inputs) == 1  # one harness run, not two
+
+
+# ----------------------------------------------------------------------
+# Worker-side reconciler pass (the worker's GitHub harness tick)
+# ----------------------------------------------------------------------
+
+
+class TestWorkerReconcilerPass:
+    async def test_pass_ticks_every_repo_with_waiting_harness_runs(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)
+        seed_success_with_candidate(fake, run_id)
+        clear_comments(fake)
+
+        await evaluate_github_waiting_harness(
+            make_settings(), ForgeConfig(), db, stack_factory=lambda o, r: make_stack(fake)
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value  # driven to the end
+
+    async def test_pass_is_a_noop_when_no_harness_lane_is_configured(self, db, fake):
+        settings = make_settings(FORGE_GITHUB_HARNESS_WORKFLOW="")
+
+        await evaluate_github_waiting_harness(settings, ForgeConfig(), db)  # no repos, no stacks
+
+    async def test_reconciler_loop_exits_when_github_is_disabled(self, db):
+        settings = make_settings(FORGE_GITHUB_ENABLED=False)  # explicit: beats any .env
+        shutdown = asyncio.Event()
+        shutdown.set()  # a pre-set event: the loop exits after (at most) one pass
+
+        await asyncio.wait_for(
+            run_github_harness_reconciler(settings, ForgeConfig(), db, shutdown_event=shutdown),
+            timeout=5.0,
+        )
+
+    async def test_reconciler_loop_exits_without_github_credentials(self, db):
+        settings = make_settings(
+            FORGE_GITHUB_ENABLED=True,
+            # Explicit Nones beat the repo's .env — no App key, no PAT.
+            FORGE_GITHUB_PRIVATE_KEY=None,
+            FORGE_GITHUB_TOKEN=None,
+        )
+        shutdown = asyncio.Event()
+        shutdown.set()
+
+        await asyncio.wait_for(
+            run_github_harness_reconciler(settings, ForgeConfig(), db, shutdown_event=shutdown),
+            timeout=5.0,
+        )

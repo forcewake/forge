@@ -8,7 +8,9 @@
 # publishes (create_commit_on_branch + Draft PR).
 #
 # Dispatched by forge via workflow_dispatch with inputs:
-#   run_id, attempt_base_oid, driver, model   (see forge.execution.github_actions)
+#   run_id, attempt_base_oid, driver, model, issue_number
+#   (see forge.execution.github_actions; the plan/issue TEXT is fetched by
+#   the lane from the issue + forge plan comment — no input size limits)
 #
 # The driver step is rendered by forge's HarnessDriver.build_script()
 # (Stage D) — the template only provisions the lane.
@@ -35,6 +37,10 @@ on:
         required: false
         default: ""
         type: string
+      issue_number:
+        description: "issue whose forge plan comment carries the approved plan"
+        required: true
+        type: string
 
 concurrency:
   group: forge-${{ inputs.run_id }}
@@ -44,6 +50,12 @@ jobs:
   harness:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # READ-ONLY: the lane fetches the issue body + the forge plan comment
+    # to render .forge/brief.md (forge.harness_entry --render-brief). No
+    # write permission is granted — the candidate travels as an artifact.
+    permissions:
+      contents: read
+      issues: read
     steps:
       - name: Checkout target at the frozen attempt base (detached)
         uses: actions/checkout@v4
@@ -69,6 +81,17 @@ jobs:
       # the repo owner (never forge's publisher token):
       #   FORGE_CLAUDE_OAUTH / ANTHROPIC_API_KEY / ZAI_API_KEY / XAI_API_KEY
       # per driver — set explicitly in repo Actions secrets.
+      - name: Render the implementation brief
+        env:
+          # Read-only runner token: fetches the issue body + the forge plan
+          # comment (the APPROVED plan) and renders .forge/brief.md via the
+          # shared prompt builder. Nothing is written to the repository.
+          GITHUB_TOKEN: ${{ github.token }}
+          FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"
+          python -m forge.harness_entry --render-brief
+
       - name: Run harness driver
         env:
           FORGE_DRIVER: ${{ inputs.driver }}
@@ -82,12 +105,11 @@ jobs:
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode):
           #   - installs the pinned CLI (retry, platform binary check)
-          #   - writes the brief from the RunSpec
-          #   - runs the agent unattended with the model from the RunSpec
+          #   - runs the agent unattended; the -p prompt is the SHORT
+          #     pointer at .forge/brief.md (the shared brief IS the prompt)
           #   - streams normalized events into the job log
           #   - writes .forge/exit (completed|failed) — file presence is
           #     decoupled from agent exit status
-          pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"
           python -m forge.harness_entry
 
       - name: Emit candidate artifact
