@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
 
+# Pushes to the same branch cancel superseding runs.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,10 +39,22 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      # Non-blocking for now: typing is being tightened during M0 hardening.
-      # Remove continue-on-error once the codebase passes mypy cleanly.
-      - name: Mypy
-        run: uv run mypy src
+      # Blocking since F29: the core packages (durable state machine, runs
+      # services, repository, factory agents, execution, integrations) must
+      # pass mypy cleanly — a regression here fails the workflow.
+      - name: Mypy (core packages, blocking)
+        run: >-
+          uv run mypy src/forge/durable src/forge/runs src/forge/repository
+          src/forge/factory src/forge/execution src/forge/integrations
+
+      # TODO(F29 follow-up): the legacy surface (worker, orchestrator,
+      # gateway, agents, flows, stores, utils, harness_entry, main,
+      # mcp_client, database) still carries ~46 mypy errors. They are
+      # reported below but do NOT fail CI. Shrink this count to zero, then
+      # fold the legacy surface into the blocking step above and delete this
+      # job step.
+      - name: Mypy (legacy surface, non-blocking — tracked debt)
+        run: uv run mypy src/forge
         continue-on-error: true
 
   test:
@@ -63,3 +76,50 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -q
+
+  # Real-Postgres integration stage (F29): the ADR-0017 failure-injection
+  # exit bar (tests/test_failure_injection.py) runs only when
+  # FORGE_PG_TEST_URL is set — without the service it self-skips, so this
+  # job is the one place the durable exit bar is actually enforced. No
+  # artifacts, no continue-on-error: pass/fail gates the workflow.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The job runs directly on the runner VM, so the service containers are
+      # reached via the mapped localhost ports (GitHub's documented pattern
+      # for non-container jobs), not via the service label hostnames.
+      FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies (with the postgres extra)
+        run: uv sync --extra postgres
+
+      - name: Failure-injection exit bar (real Postgres)
+        run: uv run pytest tests/test_failure_injection.py -q

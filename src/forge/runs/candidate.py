@@ -196,7 +196,13 @@ def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBund
     gives every backend identical validation. ``cs`` is typed loosely to
     avoid an import cycle with :mod:`forge.repository`.
     """
-    operation_map = {"create": "create", "update": "modify", "delete": "delete"}
+    # ChangeSet operation (create/update/delete) → manifest operation; typed
+    # so the manifest Literal is checked at this boundary, not erased to str.
+    operation_map: dict[str, CandidateOperation] = {
+        "create": "create",
+        "update": "modify",
+        "delete": "delete",
+    }
     entries = tuple(
         ChangeManifestEntry(
             path=change.path,  # type: ignore[attr-defined]

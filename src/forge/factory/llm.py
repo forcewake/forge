@@ -10,9 +10,13 @@ Every call — successes, HTTP failures, invalid JSON, cancellations — is
 recorded in the durable ``llm_calls`` ledger (ADR-0013). Unknown usage stays
 ``NULL``, never zero: zero would silently falsify totals.
 
-Token budgets are enforced by the callers: each consumer truncates its input
+Token budgets are enforced two ways: each consumer truncates its input
 to its own ``MAX_INPUT_CHARS`` before calling :meth:`LLMClient.complete`
-(deterministically, via :func:`truncate_chars`).
+(deterministically, via :func:`truncate_chars`), and a run-level budget
+handle (:class:`forge.durable.budgets.BudgetGuard`, ADR-0018 §5) reserves
+calls/tokens before dispatch and reconciles the provider's real usage
+afterwards — a refused reservation raises ``LLMError("budget_exhausted")``
+without any HTTP request.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from forge.durable import LLMCall
 
 if TYPE_CHECKING:
     from forge.config import Settings
+    from forge.durable.budgets import BudgetGuard, Reservation
 
 logger = logging.getLogger(__name__)
 
@@ -162,16 +167,27 @@ async def record_llm_call(
 
 
 class LLMClient:
-    """Async httpx client for the LiteLLM proxy's chat-completions endpoint."""
+    """Async httpx client for the LiteLLM proxy's chat-completions endpoint.
+
+    With an optional *budget* handle (:class:`forge.durable.budgets.BudgetGuard`)
+    every completion is budget-enforced (ADR-0018 §5): a hold for one call and
+    the ``max_tokens`` estimate is reserved BEFORE the provider is contacted —
+    a refusal raises :class:`LLMError` ``"budget_exhausted"`` without any HTTP
+    request — and the provider's real usage reconciles the hold afterwards.
+    A dispatch that fails or is cancelled still consumes its call (the
+    provider may have processed it) with unknown tokens.
+    """
 
     def __init__(
         self,
         settings: Settings,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         timeout: float = 120.0,
+        budget: BudgetGuard | None = None,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
+        self._budget = budget
         self._client = httpx.AsyncClient(
             base_url=settings.LITELLM_URL.rstrip("/"),
             headers={
@@ -180,6 +196,11 @@ class LLMClient:
             },
             timeout=timeout,
         )
+
+    def set_budget(self, budget: BudgetGuard | None) -> None:
+        """Bind (or clear) the run budget — per-run rebinding after the
+        RunSpec freeze (the client outlives a single run on shared agents)."""
+        self._budget = budget
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -208,8 +229,15 @@ class LLMClient:
         asking for raw JSON in the system prompt. The response text of a
         ``json_mode`` call is validated with :func:`parse_json` before the
         call counts as successful.
+
+        With a budget handle the call is reserved first (1 call + a
+        ``max_tokens`` token estimate); a refused reservation raises
+        :class:`LLMError` ``"budget_exhausted"`` before any HTTP request.
         """
         started = time.monotonic()
+        reservation = await self._reserve_for_call(
+            tier=tier, role=role, flow_run_id=flow_run_id, max_tokens=max_tokens, started=started
+        )
         try:
             text, usage = await self._dispatch(
                 tier=tier,
@@ -219,30 +247,83 @@ class LLMClient:
                 max_tokens=max_tokens,
             )
         except asyncio.CancelledError:
+            # The request may still have been processed provider-side: the
+            # call is consumed, the token actuals stay unknown (never zero).
+            await self._reconcile_dispatch(reservation, None, None)
             await self._journal(
                 flow_run_id, role, tier, "cancelled", None, None, started, _CANCELLED
             )
             raise
         except LLMError as exc:
+            await self._reconcile_dispatch(reservation, None, None)
             await self._journal(flow_run_id, role, tier, "failed", None, None, started, str(exc))
-            raise
-        except LLMResponseError as exc:
-            await self._journal(flow_run_id, role, tier, "failed", *usage, started, str(exc))
             raise
 
         if json_mode:
             try:
                 parse_json(text)
             except LLMResponseError as exc:
+                await self._reconcile_dispatch(reservation, *usage)
                 await self._journal(
                     flow_run_id, role, tier, "failed", *usage, started, f"{_INVALID_JSON}: {exc}"
                 )
                 raise
 
+        await self._reconcile_dispatch(reservation, *usage)
         await self._journal(flow_run_id, role, tier, "ok", *usage, started, None)
         return LLMResult(text=text, input_tokens=usage[0], output_tokens=usage[1])
 
     # ------------------------------------------------------------------
+
+    async def _reserve_for_call(
+        self,
+        *,
+        tier: str,
+        role: str,
+        flow_run_id: str | None,
+        max_tokens: int,
+        started: float,
+    ) -> Reservation | None:
+        """The pre-dispatch budget hold, or ``None`` when unrestricted.
+
+        A refused reservation never reaches the provider: it is journaled as a
+        failed row (unknown usage — nothing was spent) and
+        ``LLMError("budget_exhausted")`` is raised.
+        """
+        if self._budget is None:
+            return None
+        reservation = await self._budget.reserve(calls=1, tokens=max_tokens)
+        if reservation is not None:
+            return reservation
+        await self._journal(
+            flow_run_id, role, tier, "failed", None, None, started, "budget_exhausted"
+        )
+        raise LLMError("budget_exhausted")
+
+    async def _reconcile_dispatch(
+        self,
+        reservation: Reservation | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> None:
+        """Settle the hold against actuals; best-effort, never raises.
+
+        The known usage parts sum to the token actual; unknown parts add
+        nothing (unknown is never counted as zero). A reconciliation failure
+        is logged and swallowed — the ledger-write posture of
+        :func:`record_llm_call`: the call outcome stays authoritative.
+        """
+        if self._budget is None or reservation is None:
+            return
+        known = [value for value in (input_tokens, output_tokens) if isinstance(value, int)]
+        actual_tokens = sum(known) if known else None
+        try:
+            await self._budget.reconcile(reservation, actual_calls=1, actual_tokens=actual_tokens)
+        except Exception:
+            logger.exception(
+                "Failed to reconcile budget reservation %s — the hold stays reserved",
+                reservation.id,
+            )
 
     async def _dispatch(
         self,

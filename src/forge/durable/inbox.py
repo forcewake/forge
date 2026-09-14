@@ -74,7 +74,9 @@ async def ingest_event(
         )
         .on_conflict_do_nothing(index_elements=[EventInbox.source_event_id])
     )
-    if result.rowcount == 1:
+    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only
+    # type it on CursorResult, so access it via the runtime attr.
+    if result.rowcount == 1:  # type: ignore[attr-defined]
         row = (
             await session.execute(
                 select(EventInbox).where(EventInbox.source_event_id == source_event_id)

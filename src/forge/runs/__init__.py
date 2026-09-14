@@ -20,7 +20,7 @@ Public surface:
 - :mod:`forge.runs.verification` — the F19 verification profile.
 """
 
-from forge.runs.admission import AdmissionDecision, check_admission
+from forge.runs.admission import AdmissionDecision, approvers_for, check_admission
 from forge.runs.backends import (
     CITharnessBackend,
     BuiltinBackend,
@@ -72,6 +72,7 @@ __all__ = [
     "StubReviewer",
     "VerificationProfile",
     "attempt_base_for",
+    "approvers_for",
     "build_backend",
     "bundle_from_changeset",
     "check_admission",

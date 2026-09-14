@@ -29,6 +29,7 @@ from forge.durable import (
 from forge.factory.reviewer import ReviewVerdict
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
+from forge.runs.admission import approvers_for, check_admission
 from forge.runs.github_service import GitHubRunService, execute_github_run_command
 from forge.runs.stubs import StubImplementer, StubPlanner
 from tests.fixtures.fake_github import FakeGitHub
@@ -287,6 +288,78 @@ class TestImplement:
 async def _only_run_id(db) -> str:
     async with db() as session:
         return (await session.execute(select(FlowRun.id))).scalars().one()
+
+
+# ----------------------------------------------------------------------
+# Connection-scoped approvers (v0.6): FORGE_GITHUB_APPROVERS
+# ----------------------------------------------------------------------
+
+
+class TestApproverScoping:
+    """The GitHub connection resolves its own approver list — the shared
+    FORGE_APPROVERS (GitLab usernames) must never authorize a GitHub run."""
+
+    def test_github_approvers_resolve_independently(self):
+        settings = make_settings(FORGE_APPROVERS="demo,alice", FORGE_GITHUB_APPROVERS="alice")
+
+        assert approvers_for("github", settings) == frozenset({"alice"})
+        assert approvers_for("gitlab", settings) == frozenset({"demo", "alice"})
+
+    def test_empty_github_list_falls_back_to_the_shared_list(self):
+        settings = make_settings(FORGE_APPROVERS="alice")
+
+        assert approvers_for("github", settings) == frozenset({"alice"})
+        assert approvers_for("gitlab", settings) == frozenset({"alice"})
+
+    async def test_gitlab_only_login_cannot_start_a_github_run(self, db, fake):
+        # The live-found leak: 'demo' exists only in the GitLab list.
+        settings = make_settings(FORGE_APPROVERS="demo", FORGE_GITHUB_APPROVERS="alice")
+        service = make_service(
+            db, fake, settings=settings, stack=make_stack(fake, planner=BoomPlanner())
+        )
+
+        run_id = await start(service, author="demo")
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "admission_denied" in (run.status_reason or "")
+
+    async def test_go_from_a_gitlab_only_login_is_ignored(self, db, fake):
+        settings = make_settings(FORGE_APPROVERS="demo", FORGE_GITHUB_APPROVERS="alice")
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service, author="alice")
+        clear_comments(fake)
+
+        await go(service, run_id, author="demo")
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
+
+    async def test_bot_in_the_github_list_denies_github_runs(self, db, fake):
+        settings = make_settings(
+            FORGE_APPROVERS="alice",
+            FORGE_GITHUB_APPROVERS="forge-bot,alice",
+            FORGE_BOT_USERNAME="forge-bot",
+        )
+        service = make_service(
+            db, fake, settings=settings, stack=make_stack(fake, planner=BoomPlanner())
+        )
+
+        run_id = await start(service, author="alice")
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "must not appear in FORGE_GITHUB_APPROVERS" in (run.status_reason or "")
+
+    def test_bot_in_the_shared_list_still_denies_github_via_fallback(self):
+        settings = make_settings(FORGE_APPROVERS="forge-bot", FORGE_BOT_USERNAME="forge-bot")
+
+        decision = check_admission(settings, ForgeConfig(), PROJECT_ID, "alice", provider="github")
+
+        assert decision.allowed is False
+        assert "must not appear in FORGE_APPROVERS" in decision.reason
 
 
 # ----------------------------------------------------------------------

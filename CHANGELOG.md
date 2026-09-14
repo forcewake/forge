@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-14
+
+### Added — trust surface (v0.6, ADR-0021)
+
+- **Budget reservation** (F22, ADR-0018 §5): run budgets opened at RunSpec
+  freeze; every model call reserves before dispatch (refusal =
+  `budget_exhausted`, provider never touched); harness usage receipts
+  reconcile actuals; unknown completeness stays unknown — never zero.
+  Migration 009.
+- **Evidence policy** (F23): deny-pattern redaction + char caps on repair
+  contexts and harness evidence; canary tests prove secrets cannot reach
+  prompts or evidence comments.
+- **Connection-scoped approvers**: FORGE_GITHUB_APPROVERS vs GitLab
+  approvers — provider logins are separate identities (the @demo
+  cross-provider leak, found live, closed systematically).
+
+### Fixed — CI hardening (F29)
+
+- Typecheck is blocking on six core packages (110 errors fixed, including
+  a real PAT-mode crash: GitHubStaticCredentials field/method collision).
+- New required `integration` CI job: the failure-injection exit-bar runs
+  on real Postgres service containers.
+
+## [0.6.0] - 2026-09-14
+
+### Added — trust surface (v0.6, ADR-0021)
+
+- **Budget reservation** (F22, ADR-0018 §5): run budgets opened at RunSpec
+  freeze; every model call reserves before dispatch (refusal =
+  `budget_exhausted`, provider never touched); harness usage receipts
+  reconcile actuals; unknown completeness stays unknown — never zero.
+  Migration 009.
+- **Evidence policy** (F23): deny-pattern redaction + char caps on repair
+  contexts and harness evidence; canary tests prove secrets cannot reach
+  prompts or evidence comments.
+- **Connection-scoped approvers**: FORGE_GITHUB_APPROVERS vs GitLab
+  approvers — provider logins are separate identities.
+
+### Fixed — CI hardening (F29)
+
+- Typecheck is blocking on six core packages (110 errors fixed, including
+  a real PAT-mode crash: GitHubStaticCredentials field/method collision).
+- New required `integration` CI job: the failure-injection exit-bar runs
+  on real Postgres service containers.
+
 ## [0.5.0] - 2026-09-14
 
 ### Added — GitHub path at parity (ADR-0019/0020, F32 completion)

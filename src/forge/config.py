@@ -128,6 +128,20 @@ class Settings(BaseSettings):
     # /implement — the actor is the labeler, so admission still applies.
     FORGE_TRIGGER_LABEL: str = "forge"
 
+    # Connection-scoped approvers (ADR-0018 §3): comma-separated GitHub
+    # logins allowed to /implement and /go on the GitHub path. Empty — fall
+    # back to FORGE_APPROVERS (backward compat). The lists never merge, so a
+    # GitLab username in FORGE_APPROVERS can never approve a GitHub run.
+    FORGE_GITHUB_APPROVERS: str = ""
+
+    # Evidence policy (F23): before CI-log-derived text enters a comment,
+    # the run row or a repair brief, values matching these deny patterns
+    # (literal substrings, comma-separated) are replaced with a
+    # [REDACTED:rule] placeholder and the item is capped at FORGE_EVIDENCE_
+    # MAX_CHARS.
+    FORGE_EVIDENCE_DENY_PATTERNS: str = "glpat-,ghs_,sk-,xai-"
+    FORGE_EVIDENCE_MAX_CHARS: int = 8000
+
 
 class ForgeConfig:
     """Optional YAML-based configuration loaded from forge.yml.

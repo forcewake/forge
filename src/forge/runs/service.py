@@ -59,6 +59,7 @@ from forge.durable import (
     GateAlreadyConsumed,
     LLMCall,
     Outbox,
+    RunNotFound,
     RunSpec,
     StepRun,
     as_aware_utc,
@@ -67,12 +68,14 @@ from forge.durable import (
     is_valid,
     record_approval,
 )
+from forge.durable.budgets import BudgetGuard
 from forge.durable.controller import TERMINAL_STATUSES
 from forge.factory.implementer import LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
     ChangesetWriter,
     MaterializationError,
@@ -157,9 +160,14 @@ def build_default_agents(
     settings: Settings,
     gitlab: GitLabClient,
     session_factory: async_sessionmaker[AsyncSession],
+    budget: "BudgetGuard | None" = None,
 ) -> tuple[LLMPlanner, LLMImplementer, LLMReviewer]:
-    """Construct the real LLM-driven factory agents over one shared client."""
-    llm = LLMClient(settings=settings, session_factory=session_factory)
+    """Construct the real LLM-driven factory agents over one shared client.
+
+    When a run budget is supplied, every model call through the shared
+    client reserves against it before dispatch (F22).
+    """
+    llm = LLMClient(settings=settings, session_factory=session_factory, budget=budget)
     return (
         LLMPlanner(llm, settings=settings),
         LLMImplementer(llm, gitlab=gitlab, settings=settings),
@@ -319,6 +327,8 @@ class RunService:
             )
             return run_id
 
+        # F22: bind the run's budget guard before the first paid call.
+        await self._apply_run_budget(run_id)
         try:
             plan = await self._planner.plan(issue_title, issue_description, flow_run_id=run_id)
         except (LLMError, LLMResponseError) as exc:
@@ -331,7 +341,7 @@ class RunService:
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(run_id, FlowStatus.PLANNING)
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.plan_digest = digest
             base_sha = run.base_sha = await self._read_base_sha(project_id)
             # ADR-0015: the backend choice is frozen at run start so the run
@@ -366,6 +376,16 @@ class RunService:
                 )
             )
             run.spec_digest = spec_digest
+            await session.commit()
+
+        # F22: open the run's budget from the spec (idempotent) so the
+        # planning + factory legs reserve against real limits.
+        from forge.durable import open_budget_from_spec
+
+        async with self._session_factory() as session:
+            await open_budget_from_spec(
+                session, run_id=run_id, spec_document=spec_document, spec_digest=spec_digest
+            )
             await session.commit()
 
         await self._post_journaled_note(
@@ -404,8 +424,26 @@ class RunService:
         )
         return run_id
 
-    async def _find_active_run(self, project_id: int, issue_iid: int) -> FlowRun | None:
-        """The latest non-terminal run for the issue, or None."""
+    async def _apply_run_budget(self, run_id: str) -> None:
+        """Bind the run's budget guard to the factory agents (F22).
+
+        Agents are shared across the service instance; the budget lives in
+        the database and is re-loaded per execution leg.
+        """
+        from forge.durable import load_budget_guard
+
+        guard = await load_budget_guard(self._session_factory, run_id)
+        for agent in (self._planner, self._implementer, self._reviewer):
+            client = getattr(agent, "_llm", None)
+            if client is not None and hasattr(client, "set_budget"):
+                client.set_budget(guard)
+
+    async def _find_active_run(self, project_id: int, issue_iid: int | None) -> FlowRun | None:
+        """The latest non-terminal run for the issue, or None.
+
+        *issue_iid* may be None (a note webhook without issue context); the
+        query then matches issue-less runs, which never collide in practice.
+        """
         terminal = {status.value for status in TERMINAL_STATUSES}
         async with self._session_factory() as session:
             run = (
@@ -428,6 +466,19 @@ class RunService:
                 return None
             session.expunge(run)
             return run
+
+    async def _get_run(self, session: AsyncSession, run_id: str) -> FlowRun:
+        """Fetch a run row this service minted earlier, or fail loudly.
+
+        Callers only ever dereference ids created in the same flow (start_run
+        / the journaled legs), so a missing row is an invariant violation, not
+        a tolerated outcome — unlike the guarded ``session.get`` sites, which
+        keep their explicit ``if run is None`` branches.
+        """
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        return run
 
     @staticmethod
     def _active_run_comment(run: FlowRun) -> str:
@@ -510,7 +561,7 @@ class RunService:
         # durable flag is what in-flight legs re-read before publishing, and
         # scheduled steps are withdrawn so no worker picks them up later.
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.cancel_requested = True
             await session.execute(
                 update(StepRun)
@@ -701,14 +752,18 @@ class RunService:
         durable state says it is (ADR-0017 §3).
         """
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             plan_summary, files_hint = self._plan_evidence(run)
             cycle = run.commit_cycle or 1
             # F02 (review): repairs build on the last VERIFIED candidate, not
             # the original approved base — otherwise cycle 2 cannot see
             # cycle 1's files and its update would roll work back. The
             # source base stays frozen for full-result review.
-            attempt_base = (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
+            # ``or ""`` mirrors _read_base_sha's failure fallback: base_sha is
+            # schema-nullable, and writer.apply needs a concrete ref.
+            attempt_base = (
+                (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
+            ) or ""
             entry_status = run.status
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
 
@@ -790,6 +845,11 @@ class RunService:
                 await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
                 return
             commit_sha = result.commit_sha
+            if commit_sha is None:
+                # A known (committed) outcome always carries the sha — treat a
+                # missing one as unknown rather than crash downstream.
+                await self._to_terminal(run_id, FlowStatus.FAILED, "commit_unknown_outcome")
+                return
 
         if entry_status != FlowStatus.ENSURING_DRAFT_MR.value:
             await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
@@ -797,7 +857,7 @@ class RunService:
         # ensuring_draft_mr: Draft MR before CI (ADR-0007). On a repair the MR
         # already exists — update it instead of creating a second one.
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             mr_iid = run.mr_iid
             cycle = run.commit_cycle or 1
         if mr_iid is None:
@@ -833,7 +893,7 @@ class RunService:
             await controller.transition(
                 run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {commit_sha[:8]}"
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.mr_iid = mr_iid
             run.candidate_shas = list(run.candidate_shas or []) + [commit_sha]
             await session.commit()
@@ -861,7 +921,7 @@ class RunService:
         own candidate.
         """
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             plan_summary, _ = self._plan_evidence(run)
 
         brief = plan_summary
@@ -911,7 +971,7 @@ class RunService:
             await controller.transition(
                 run_id, FlowStatus.WAITING_HARNESS, reason=f"harness pipeline {pipeline_id}"
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             # The durable handle: the reconciler restarts from exactly here.
             run.evidence = _merge_evidence(
                 run.evidence,
@@ -963,7 +1023,7 @@ class RunService:
             await session.commit()
 
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             plan_digest = run.plan_digest or ""
             issue_iid = run.issue_iid
         issue_title = await self._read_issue_title(project_id, issue_iid)
@@ -1021,7 +1081,7 @@ class RunService:
             sha = str(((row.remote_result or {}).get("sha") if row is not None else "") or "")
             if not sha:
                 return None
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             if run is not None and sha in list(run.candidate_shas or []):
                 return None  # repair cycle — this commit is accounted for
         try:
@@ -1079,7 +1139,7 @@ class RunService:
             await session.commit()
 
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             plan_digest = run.plan_digest or ""
             issue_iid = run.issue_iid
         description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha, cycle)
@@ -1141,7 +1201,7 @@ class RunService:
 
     async def _evaluate_one(self, run_id: str, now: datetime) -> None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             project_id = run.project_id
             issue_iid = run.issue_iid
             candidate_shas = list(run.candidate_shas or [])
@@ -1409,7 +1469,7 @@ class RunService:
 
         async with self._session_factory() as session:
             controller = Controller(session)
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.commit_cycle = next_cycle
             await controller.transition(
                 run_id,
@@ -1465,7 +1525,12 @@ class RunService:
             except GitLabAPIError:
                 log = "(log unavailable)"
             sections.append(f"--- failed job: {job.name} ---\n{log[-REPAIR_LOG_PER_JOB_CHARS:]}")
-        return "\n\n".join(sections)[-REPAIR_CONTEXT_MAX_CHARS:]
+        # F23: CI logs are untrusted — redact deny-pattern values before the
+        # context enters a brief or an MR note (then apply the ADR-0013 cap).
+        redacted, _ = EvidencePolicy.from_settings(self._settings).apply_policy(
+            "\n\n".join(sections)
+        )
+        return redacted[-REPAIR_CONTEXT_MAX_CHARS:]
 
     async def _waiting_ci_deadline(self, session: AsyncSession, run_id: str) -> datetime | None:
         """Durable CI deadline: waiting_ci outbox timestamp + FORGE_CI_WAIT_SECONDS.
@@ -1520,7 +1585,7 @@ class RunService:
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
         """Poll one waiting_harness run through its journaled backend handle."""
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             evidence = dict(run.evidence or {})
             project_id = run.project_id
 
@@ -1587,12 +1652,20 @@ class RunService:
         unchanged.
         """
         bundle = outcome.bundle
+        if bundle is None:
+            # A non-running, non-failed outcome must carry a candidate bundle
+            # (HarnessOutcome.change_candidate) — a malformed one parks the
+            # run instead of crashing the reconciler tick.
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
+            )
+            return
         # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
         # recorded as evidence only; it can never become a commit/MR because
         # the publication grant is gone. The run stays cancelled even if the
         # harness could not be stopped.
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
         if revoked:
             await self._merge_run_evidence(
@@ -1649,10 +1722,13 @@ class RunService:
                 )
             return
         sha = result.commit_sha or ""
+        # F23: the artifact meta summary is harness-controlled text — apply
+        # the evidence policy before it is stored on the run row.
+        summary, _ = EvidencePolicy.from_settings(self._settings).apply_policy(outcome.summary)
         await self._merge_run_evidence(
             run_id,
             {
-                "harness_change": {"sha": sha, "summary": outcome.summary},
+                "harness_change": {"sha": sha, "summary": summary},
                 "published_candidate": {
                     "sha": sha,
                     "attempt_base": bundle.attempt_base_oid,
@@ -1664,7 +1740,7 @@ class RunService:
         await self._transition(run_id, FlowStatus.ENSURING_DRAFT_MR)
 
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             mr_iid = run.mr_iid
             cycle = run.commit_cycle or 1
         branch = factory_branch(run.issue_iid, run_id)
@@ -1685,7 +1761,7 @@ class RunService:
             await controller.transition(
                 run_id, FlowStatus.WAITING_CI, reason=f"pipeline for {sha[:8]}"
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.mr_iid = mr_iid
             run.candidate_shas = list(run.candidate_shas or []) + [sha]
             await session.commit()
@@ -1765,7 +1841,7 @@ class RunService:
 
     async def _post_missing_evidence_note(self, run_id: str) -> None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             sha = (run.candidate_shas or [""])[-1]
             plan_digest = run.plan_digest or ""
             mr_iid = run.mr_iid
@@ -1982,30 +2058,30 @@ class RunService:
 
     async def _read_plan_evidence(self, run_id: str) -> tuple[str, list[str]]:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             return self._plan_evidence(run)
 
     async def _merge_run_evidence(self, run_id: str, patch: dict) -> None:
         """Incrementally fold *patch* into flow_runs.evidence (ADR-0008)."""
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.evidence = _merge_evidence(run.evidence, patch)
             await session.commit()
 
     async def _read_review_evidence(self, run_id: str) -> dict | None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             review = (run.evidence or {}).get("review")
             return dict(review) if isinstance(review, dict) else None
 
     async def _read_commit_cycle(self, run_id: str) -> int:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             return run.commit_cycle or 1
 
     async def _read_issue_iid(self, run_id: str) -> int | None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             return run.issue_iid
 
     async def _fetch_git_base(

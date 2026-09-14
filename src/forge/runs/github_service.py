@@ -13,8 +13,9 @@ mirrors GitLab cancel-as-revoke semantics (F13).
 
 GitHub-specific deviations, all deliberate:
 
-- **Admission/approvers are GitHub logins** — the same ``FORGE_APPROVERS``
-  configuration, matched against the comment author's login.
+- **Admission/approvers are GitHub logins** — ``FORGE_GITHUB_APPROVERS``
+  when set, else the shared ``FORGE_APPROVERS`` fallback (never merged):
+  a GitLab username in the shared list can never approve a GitHub run.
 - **One active run per (repo, issue)** reuses the existing partial unique
   index ``uq_active_run_per_issue`` over ``flow_runs.(project_id,
   issue_iid)`` — for GitHub those columns carry the webhook's numeric
@@ -57,6 +58,7 @@ from forge.durable import (
     FlowStatus,
     GateAlreadyConsumed,
     GateApproval,
+    RunNotFound,
     RunSpec,
     StepRun,
     as_aware_utc,
@@ -76,7 +78,7 @@ from forge.integrations.github_flow import (
     github_factory_branch,
 )
 from forge.repository import Change, ChangeSet, Operation, validate_changeset
-from forge.runs.admission import check_admission
+from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
 from forge.runs.service import (
@@ -195,9 +197,12 @@ class GitHubRunService:
             )
             return existing.id
 
-        # ADR-0018 §3: admission before the first paid call. FORGE_APPROVERS
-        # carry GitHub logins on this path.
-        admission = check_admission(self._settings, self._config, project_id, author_username)
+        # ADR-0018 §3: admission before the first paid call. The GitHub
+        # connection's own approver list (FORGE_GITHUB_APPROVERS, falling
+        # back to FORGE_APPROVERS) carries the GitHub logins on this path.
+        admission = check_admission(
+            self._settings, self._config, project_id, author_username, provider="github"
+        )
         if not admission.allowed:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, f"admission_denied: {admission.reason}"
@@ -241,7 +246,7 @@ class GitHubRunService:
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(run_id, FlowStatus.PLANNING)
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.plan_digest = digest
             run.base_sha = base_sha
             run.evidence = _merge_evidence(
@@ -332,7 +337,7 @@ class GitHubRunService:
         now = now or datetime.now(timezone.utc)
 
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             if (
                 run is None
                 or run.provider != "github"
@@ -357,7 +362,7 @@ class GitHubRunService:
             # ADR-0009: authority comes from trusted configuration.
             if author_username not in self._approvers():
                 logger.info(
-                    "GitHub /go from @%s who is not in FORGE_APPROVERS — ignoring",
+                    "GitHub /go from @%s who is not in the GitHub approver list — ignoring",
                     author_username,
                 )
                 return
@@ -440,7 +445,7 @@ class GitHubRunService:
             return
         if author_username not in self._approvers():
             logger.info(
-                "GitHub /cancel from @%s who is not in FORGE_APPROVERS — ignoring",
+                "GitHub /cancel from @%s who is not in the GitHub approver list — ignoring",
                 author_username,
             )
             return
@@ -506,7 +511,7 @@ class GitHubRunService:
         # what an in-flight publish leg re-reads before writing — then
         # withdraw scheduled steps so no worker picks them up later.
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             evidence = dict(run.evidence or {})
             run.cancel_requested = True
             await session.execute(
@@ -562,7 +567,7 @@ class GitHubRunService:
             return
 
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             plan_summary, _ = _plan_evidence(run)
             base_sha = run.base_sha or ""
             plan_digest = run.plan_digest or ""
@@ -619,7 +624,7 @@ class GitHubRunService:
             await controller.transition(
                 run_id, FlowStatus.ENSURING_DRAFT_MR, reason=f"Draft PR #{outcome.pr_number}"
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.mr_iid = outcome.pr_number
             run.candidate_shas = list(run.candidate_shas or []) + [commit_oid]
             run.evidence = _merge_evidence(
@@ -683,7 +688,7 @@ class GitHubRunService:
         from here — the wait is worker-free, like ``waiting_ci``.
         """
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             attempt_base = attempt_base_for(run)
         branch = github_factory_branch(issue_number, run_id)
         executor = GitHubActionsExecutor(self._stack.client, self._settings)
@@ -747,7 +752,7 @@ class GitHubRunService:
                     + (f" run {correlated.run_id}" if correlated.run_id else " (run pending)")
                 ),
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             # The durable handle: the reconciler restarts from exactly here
             # (workflow filename, Actions run id, attempt base, started_at).
             run.evidence = _merge_evidence(
@@ -887,11 +892,19 @@ class GitHubRunService:
         Actions checks on the head are the verification surface.
         """
         bundle = outcome.bundle
+        if bundle is None:
+            # A non-running, non-failed outcome must carry a candidate bundle
+            # (HarnessOutcome.change_candidate) — a malformed one parks the
+            # run instead of crashing the reconciler tick.
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
+            )
+            return
         # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
         # recorded as evidence only; the publication grant is gone. The run
         # stays cancelled even if the harness could not be stopped.
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
             plan_digest = run.plan_digest or ""
             base_sha = run.base_sha or ""
@@ -1016,7 +1029,7 @@ class GitHubRunService:
                 reason=f"Draft PR #{publish_outcome.pr_number} on "
                 f"{(publish_outcome.expected_head_oid or '')[:8]}",
             )
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.mr_iid = publish_outcome.pr_number
             run.candidate_shas = list(run.candidate_shas or []) + [commit_oid]
             run.evidence = _merge_evidence(
@@ -1170,6 +1183,19 @@ class GitHubRunService:
             session.expunge(run)
             return run
 
+    async def _get_run(self, session: AsyncSession, run_id: str) -> FlowRun:
+        """Fetch a run row this service minted earlier, or fail loudly.
+
+        Callers only ever dereference ids created in the same flow, so a
+        missing row is an invariant violation, not a tolerated outcome —
+        unlike the guarded ``session.get`` sites, which keep their explicit
+        ``if run is None`` branches.
+        """
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        return run
+
     @staticmethod
     def _active_run_comment(run: FlowRun) -> str:
         return (
@@ -1181,9 +1207,13 @@ class GitHubRunService:
         )
 
     def _approvers(self) -> list[str]:
-        """The trusted approver list (GitHub logins, comma-separated)."""
-        raw = getattr(self._settings, "FORGE_APPROVERS", "") or ""
-        return [name.strip() for name in raw.split(",") if name.strip()]
+        """The trusted approver list (GitHub logins, connection-scoped).
+
+        ``FORGE_GITHUB_APPROVERS`` when set, else the shared
+        ``FORGE_APPROVERS`` fallback; sorted so the policy digest is
+        insensitive to the setting's order.
+        """
+        return sorted(approvers_for("github", self._settings))
 
     def _required_jobs(self) -> list[str]:
         raw = getattr(self._settings, "FORGE_REQUIRED_JOBS", "") or ""
@@ -1356,18 +1386,18 @@ class GitHubRunService:
 
     async def _read_plan_evidence(self, run_id: str) -> tuple[str, list[str]]:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             return _plan_evidence(run)
 
     async def _read_review_evidence(self, run_id: str) -> dict | None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             review = (run.evidence or {}).get("review")
             return dict(review) if isinstance(review, dict) else None
 
     async def _merge_run_evidence(self, run_id: str, patch: dict) -> None:
         async with self._session_factory() as session:
-            run = await session.get(FlowRun, run_id)
+            run = await self._get_run(session, run_id)
             run.evidence = _merge_evidence(run.evidence, patch)
             await session.commit()
 
@@ -1391,7 +1421,8 @@ class GitHubRunService:
         # Mentions stay OUTSIDE code spans: GitHub does not linkify (or
         # notify) @usernames inside backticks either.
         approver_note = (
-            ", ".join(f"@{name}" for name in approvers) or "none configured — set `FORGE_APPROVERS`"
+            ", ".join(f"@{name}" for name in approvers)
+            or "none configured — set `FORGE_GITHUB_APPROVERS`"
         )
         return (
             f"## Forge plan — run `{run_id[:8]}`\n\n"
@@ -1546,7 +1577,7 @@ def _admission_denied_comment(run_id: str, actor: str) -> str:
     return (
         "## Forge — run not started\n\n"
         f"Run `{run_id[:8]}` was **not started**: admission denied — "
-        f"@{actor} is not in the approver list (`FORGE_APPROVERS`).\n\n"
+        f"@{actor} is not in the GitHub approver list (`FORGE_GITHUB_APPROVERS`).\n\n"
         "*This is an automated message.*"
     )
 

@@ -29,7 +29,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,6 +38,7 @@ from forge.durable.identity import factory_branch
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.repository.writer import ChangesetWriter
 from forge.runs.candidate import (
+    CandidateBundle,
     CandidateError,
     HarnessUsage,
     attempt_base_for,
@@ -123,7 +124,7 @@ class HarnessOutcome:
 
     status: Literal["change_ready", "change_candidate", "running", "failed"]
     commit_sha: str | None = None
-    bundle: Any | None = None  # CandidateBundle | None (typed loosely: no cycle)
+    bundle: CandidateBundle | None = None
     summary: str = ""
     failure_kind: HarnessFailureKind | None = None
     reason: str = ""
@@ -133,7 +134,7 @@ class HarnessOutcome:
         return cls(status="change_ready", commit_sha=commit_sha, summary=summary)
 
     @classmethod
-    def change_candidate(cls, bundle: Any, summary: str = "") -> HarnessOutcome:
+    def change_candidate(cls, bundle: CandidateBundle, summary: str = "") -> HarnessOutcome:
         return cls(status="change_candidate", bundle=bundle, summary=summary)
 
     @classmethod
@@ -324,7 +325,7 @@ class CITharnessBackend:
             {"key": "FORGE_ATTEMPT_BASE", "value": attempt_base},
         ]
         pipeline = await self._gitlab.create_pipeline(run.project_id, branch, variables=variables)
-        pipeline_id = int(pipeline.get("id"))
+        pipeline_id = int(pipeline["id"])
         job_id = await self._discover_job_id(run.project_id, pipeline_id)
 
         handle = json.dumps(
@@ -539,7 +540,8 @@ class CITharnessBackend:
         kind = classify_failure(jobs) if jobs else "code"
         if kind not in ("code", "infrastructure", "config"):
             kind = "code"
-        return HarnessOutcome.failed(kind, detail)
+        # The clamp above guarantees the value is a HarnessFailureKind.
+        return HarnessOutcome.failed(cast(HarnessFailureKind, kind), detail)
 
 
 # ----------------------------------------------------------------------

@@ -89,7 +89,9 @@ async def consume_approval(session: AsyncSession, gate_id: int, now: datetime) -
         .where(GateApproval.id == gate_id, GateApproval.consumed_at.is_(None))
         .values(consumed_at=now)
     )
-    if result.rowcount != 1:
+    # rowcount is the conditional UPDATE's matched-row count; SQLAlchemy 2.0
+    # stubs only type it on CursorResult, so access it via the runtime attr.
+    if result.rowcount != 1:  # type: ignore[attr-defined]
         raise GateAlreadyConsumed(f"gate approval {gate_id} was already consumed")
     # Keep the identity-mapped instance consistent with the conditional UPDATE.
     gate.consumed_at = now

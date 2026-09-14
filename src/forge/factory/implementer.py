@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from forge.durable import factory_branch, short_run_id
 from forge.factory.llm import LLMClient, parse_json, truncate_chars
@@ -24,7 +24,7 @@ from forge.repository.changeset import MaterializationError, materialize
 if TYPE_CHECKING:
     from forge.config import Settings
     from forge.durable import FlowRun
-    from forge.gitlab.client import GitLabClient
+    from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
     from forge.repository.changeset import ChangeSet
 
 logger = logging.getLogger(__name__)
@@ -71,13 +71,32 @@ _SYSTEM_PROMPT = (
 )
 
 
+class RepositoryReader(Protocol):
+    """The authoritative read surface the implementer needs (ADR-0001/0019).
+
+    :class:`~forge.gitlab.client.GitLabClient` and
+    :class:`~forge.integrations.github.GitHubRepositoryReader` both satisfy it
+    structurally — the implementer is provider-agnostic (GitLab or GitHub).
+    """
+
+    async def get_file(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> RepositoryFile: ...
+
+    async def get_tree(
+        self, project_id: int, path: str = "", ref: str = "HEAD", recursive: bool = False
+    ) -> list[TreeEntry]: ...
+
+    async def get_issue(self, project_id: int, issue_iid: int) -> Issue: ...
+
+
 class LLMImplementer:
     """Proposes a ChangeSet for a run via the LiteLLM proxy + repo evidence."""
 
     def __init__(
         self,
         llm: LLMClient,
-        gitlab: GitLabClient,
+        gitlab: RepositoryReader,
         settings: Settings | None = None,
     ) -> None:
         self._llm = llm
@@ -141,9 +160,9 @@ class LLMImplementer:
         cs_raw["attempt_base_oid"] = base_sha
 
         touched = [
-            change.get("path")
+            path
             for change in (cs_raw.get("changes") or [])
-            if isinstance(change, dict) and isinstance(change.get("path"), str)
+            if isinstance(change, dict) and isinstance((path := change.get("path")), str)
         ]
         git_base = await self._authoritative_contents(run.project_id, base_sha, touched)
         return materialize(cs_raw, git_base)

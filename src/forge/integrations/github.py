@@ -151,12 +151,17 @@ class TokenProvider(Protocol):
 
 @dataclass(frozen=True)
 class GitHubStaticCredentials:
-    """PAT/static-token provider (lab + PAT mode): returns one fixed token."""
+    """PAT/static-token provider (lab + PAT mode): returns one fixed token.
 
-    token: str
+    The stored value is ``static_token`` — a field named ``token`` would
+    collide with the :class:`TokenProvider` method (the dataclass field would
+    shadow the method and ``await creds.token()`` would call the raw string).
+    """
+
+    static_token: str
 
     async def token(self) -> str:
-        return self.token
+        return self.static_token
 
     async def invalidate(self) -> None:
         pass  # a static token cannot be re-minted

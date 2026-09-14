@@ -66,6 +66,9 @@ _STEP_STATUSES: tuple[str, ...] = (
 )
 _ACTION_STATUSES: tuple[str, ...] = ("requested", "succeeded", "failed", "unknown_outcome")
 _LLM_STATUSES: tuple[str, ...] = ("ok", "failed", "cancelled")
+#: ADR-0018 §5 (F22): closed set of run-budget lifecycle statuses. ``exhausted``
+#: budgets stop granting reservations; ``closed`` is terminal (run finished).
+_BUDGET_STATUSES: tuple[str, ...] = ("open", "exhausted", "closed")
 
 
 def _status_check(name: str, values: tuple[str, ...]) -> CheckConstraint:
@@ -373,3 +376,79 @@ class LLMCall(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class RunBudget(Base):
+    """Per-run budget ledger with reserved/consumed counters (ADR-0018 §5, F22).
+
+    Enforcement is *reserve, then reconcile* (ADR-0013): a dispatch reserves
+    calls/tokens BEFORE the provider is contacted; the provider receipt
+    reconciles the hold against actuals afterwards. All counter moves are
+    single conditional UPDATEs against the row — never read-modify-write —
+    so parallel attempts cannot overshoot a limit between measurement points.
+
+    A ``NULL`` limit means unlimited on that dimension; the consumed counters
+    keep recording actuals regardless of status, so failed and exhausted runs
+    stay explainable. ``run_id`` is UNIQUE: one budget per run —
+    :func:`forge.durable.budgets.open_budget` is idempotent per run.
+    """
+
+    __tablename__ = "run_budgets"
+    __table_args__ = (_status_check("ck_run_budgets_status", _BUDGET_STATUSES),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+        unique=True,
+    )
+    #: The RunSpec digest the limits were frozen from (ADR-0018 §1); NULL when
+    #: the budget was opened outside a spec.
+    spec_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Recorded limits — NULL = unlimited on that dimension.
+    wallclock_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Holds granted to in-flight dispatches (moved back out at reconcile).
+    reserved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Actuals recorded from provider receipts / harness usage evidence.
+    consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
+class BudgetReservation(Base):
+    """Audit row for one granted budget hold (ADR-0018 §5, F22).
+
+    Written when a reservation is granted; ``released`` flips to true exactly
+    once at :func:`forge.durable.budgets.reconcile_actual` — the conditional
+    flip is what makes reconciliation exactly-once (a crash between the flip
+    and the counter move cannot double-apply the move).
+    """
+
+    __tablename__ = "budget_reservations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_budget_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("run_budgets.id"),
+        nullable=False,
+        index=True,
+    )
+    #: Caller-supplied attempt identity (e.g. the flow run id of the dispatch).
+    attempt_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reserved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    released: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

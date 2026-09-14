@@ -176,8 +176,13 @@ class GitHubActionsExecutor:
         started = _parse_started_at(handle.started_at)
         return await self._discover(handle, since=started)
 
-    async def _discover(self, handle: ActionsHandle, *, since: datetime) -> ActionsHandle:
-        """Find the dispatch run by head_sha + created window (newest first)."""
+    async def _discover(self, handle: ActionsHandle, *, since: datetime | None) -> ActionsHandle:
+        """Find the dispatch run by head_sha + created window (newest first).
+
+        ``since`` (the journaled dispatch time) bounds the search below; a
+        handle whose journaled timestamp is unparseable re-discovers without
+        a lower bound rather than crashing on the window arithmetic.
+        """
         try:
             runs = await self._client.list_workflow_dispatch_runs(
                 handle.owner,
@@ -185,7 +190,7 @@ class GitHubActionsExecutor:
                 handle.workflow,
                 head_branch=handle.branch,
                 head_sha=handle.attempt_base,
-                created_after=since - timedelta(minutes=5),
+                created_after=(since - timedelta(minutes=5)) if since else None,
             )
         except GitHubAPIError:
             logger.warning(
