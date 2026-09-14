@@ -105,6 +105,8 @@ forge-agent:
     - |
       FORGE_DRIVER_EXIT="completed"
       grok --no-auto-update --always-approve --no-alt-screen \
+        --trust --max-turns 200 \
+        --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \
         --output-format streaming-json \
         --debug-file .forge/grok-debug.log \
         -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." 2>&1 \

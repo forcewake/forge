@@ -47,8 +47,15 @@ forge-agent:
     # The ephemeral CI container IS the execution profile (ADR-0002).
     IS_SANDBOX: "1"
   before_script:
-    - npm install -g @anthropic-ai/claude-code
-    - git config user.name "forge"
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${FORGE_CLAUDE_VERSION:-latest}" && break
+        echo "npm install of claude-code failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+      claude --version
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    git config user.name "forge"
     - git config user.email "forge@users.noreply.gitlab.com"
     # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
     # credential at most, and push is disabled by construction — the job has
@@ -86,10 +93,14 @@ forge-agent:
     # In -p mode un-allowed tools are auto-denied, never prompted.
     - |
       FORGE_DRIVER_EXIT="completed"
-      claude -p "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
+      export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000 BASH_MAX_TIMEOUT_MS=600000
+      claude -p "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository." \
         --model "$ANTHROPIC_MODEL" \
         --allowedTools "Bash(git status:*),Bash(git diff:*),Bash(git log:*)" \
+        --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \
+        --permission-prompts none \
         --permission-mode acceptEdits \
+        --max-turns 200 \
         --setting-sources '' --output-format stream-json --verbose 2>&1 \
         | tee /tmp/claude-events.jsonl \
         | node /tmp/filter.mjs \

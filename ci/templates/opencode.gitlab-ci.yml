@@ -41,7 +41,8 @@ forge-agent:
     - curl -fsSL https://opencode.ai/install | bash
     - export PATH="$HOME/.opencode/bin:$PATH"
     - opencode --version
-    - git config user.name "forge"
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    git config user.name "forge"
     - git config user.email "forge@users.noreply.gitlab.com"
     # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
     # credential at most, and push is disabled by construction — the job has
@@ -66,7 +67,7 @@ forge-agent:
       cat > ~/.config/opencode/opencode.json <<'EOF'
       {
         "$schema": "https://opencode.ai/config.json",
-        "permission": "allow",
+        "permission": {"bash": {"git commit *": "deny", "git push *": "deny", "*": "allow"}},
         "provider": {
           "zai": {
             "npm": "@ai-sdk/openai-compatible",
