@@ -5,8 +5,6 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from typing import TYPE_CHECKING
-
 import yaml
 from pydantic import BaseModel, Field
 
