@@ -27,6 +27,8 @@ and the Draft PR is created with ``draft: true``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -388,9 +390,15 @@ def _credentials_from_settings(settings: Settings) -> Any:
 
     key_setting = getattr(settings, "FORGE_GITHUB_PRIVATE_KEY", None)
     if key_setting is not None:
+        pem = key_setting.get_secret_value()
+        # Accept either the PEM text or a path to an existing .pem file.
+        if not pem.lstrip().startswith("-----BEGIN"):
+            pem_path = Path(pem).expanduser()
+            if pem_path.is_file():
+                pem = pem_path.read_text()
         return GitHubAppCredentials(
             app_id=str(getattr(settings, "FORGE_GITHUB_APP_ID", "") or ""),
-            private_key=key_setting.get_secret_value(),
+            private_key=pem,
             installation_id=str(getattr(settings, "FORGE_GITHUB_INSTALLATION_ID", "") or ""),
             base_url=getattr(settings, "FORGE_GITHUB_API_URL", "https://api.github.com"),
         )

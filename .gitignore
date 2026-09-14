@@ -43,3 +43,4 @@ htmlcov/
 .ruff_cache/
 litellm-config.yaml
 demo/production/
+.secrets/
