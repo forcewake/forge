@@ -1,0 +1,122 @@
+# forge harness executor for GitHub Actions (ADR-0016/0019, Stage E3b)
+#
+# Human-applied to the TARGET repository at onboarding (mirrors the GitLab
+# onboarding): this workflow is what forge dispatches when a run needs a
+# coding agent. The agent runs in GitHub's ephemeral runner — the lane has
+# NO write credentials and NO forge secrets; its only output is the
+# candidate artifact, which the forge trusted publisher validates and
+# publishes (create_commit_on_branch + Draft PR).
+#
+# Dispatched by forge via workflow_dispatch with inputs:
+#   run_id, attempt_base_oid, driver, model   (see forge.execution.github_actions)
+#
+# The driver step is rendered by forge's HarnessDriver.build_script()
+# (Stage D) — the template only provisions the lane.
+
+name: forge-harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "forge run id"
+        required: true
+        type: string
+      attempt_base_oid:
+        description: "frozen attempt base (detached checkout)"
+        required: true
+        type: string
+      driver:
+        description: "harness driver: claude-code | grok-build | opencode"
+        required: true
+        type: string
+      model:
+        description: "model route from the approved RunSpec"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: forge-${{ inputs.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout target at the frozen attempt base (detached)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.attempt_base_oid }}
+          fetch-depth: 0
+          # No credentials are configured for push; persist-credentials is
+          # disabled so nothing actionable remains in .git/config.
+          persist-credentials: false
+
+      - name: Disable push (proposal-only lane, ADR-0016)
+        run: git remote set-url --push origin FORBIDDEN
+
+      - name: Forge control directory
+        run: mkdir -p .forge && echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # The lane receives ONLY harness credentials, injected as secrets by
+      # the repo owner (never forge's publisher token):
+      #   FORGE_CLAUDE_OAUTH / ANTHROPIC_API_KEY / ZAI_API_KEY / XAI_API_KEY
+      # per driver — set explicitly in repo Actions secrets.
+      - name: Run harness driver
+        env:
+          FORGE_DRIVER: ${{ inputs.driver }}
+          FORGE_MODEL: ${{ inputs.model }}
+          FORGE_BRIEF: .forge/brief.md
+          FORGE_EXIT_FILE: .forge/exit
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: |
+          # Driver provisioning + invocation is rendered by forge's
+          # HarnessDriver (claude-code | grok-build | opencode):
+          #   - installs the pinned CLI (retry, platform binary check)
+          #   - writes the brief from the RunSpec
+          #   - runs the agent unattended with the model from the RunSpec
+          #   - streams normalized events into the job log
+          #   - writes .forge/exit (completed|failed) — file presence is
+          #     decoupled from agent exit status
+          pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"
+          python -m forge.harness_entry
+
+      - name: Emit candidate artifact
+        if: always()
+        run: |
+          git add -A
+          git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
+            > .forge/candidate.diff || true
+          python - <<'PY'
+          import json, os
+          meta = {
+              "attempt_base_oid": "${{ inputs.attempt_base_oid }}",
+              "run_id": "${{ inputs.run_id }}",
+              "driver": "${{ inputs.driver }}",
+              "model": "${{ inputs.model }}",
+              "exit": (open(".forge/exit").read().strip()
+                       if os.path.exists(".forge/exit") else "unknown"),
+              "completeness": "aggregate",
+          }
+          json.dump(meta, open(".forge/candidate.meta.json", "w"))
+          PY
+
+      - name: Upload candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-candidate-${{ inputs.run_id }}
+          path: |
+            .forge/candidate.diff
+            .forge/candidate.meta.json
+          if-no-files-found: error
+          retention-days: 7
