@@ -292,7 +292,9 @@ class GitHubActionsExecutor:
         except CandidateArchiveError as exc:
             return HarnessOutcome.failed("code", f"harness_artifact_invalid: {exc}")
 
-        reported_base = str(meta.get("attempt_base") or "")
+        # The template writes attempt_base_oid (contracts naming); accept
+        # the short historical key too.
+        reported_base = str(meta.get("attempt_base_oid") or meta.get("attempt_base") or "")
         if reported_base != handle.attempt_base:
             return HarnessOutcome.failed(
                 "code",

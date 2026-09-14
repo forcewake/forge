@@ -99,6 +99,8 @@ jobs:
           FORGE_BRIEF: .forge/brief.md
           FORGE_EXIT_FILE: .forge/exit
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: |
