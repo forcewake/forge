@@ -179,7 +179,7 @@ async def go(
     await service.handle_go(
         project_id=PROJECT_ID,
         issue_number=ISSUE,
-        note_text=note or f"@forge /go {run_id}",
+        note_text=note or f"/go {run_id}",
         author_username=author,
         now=now,
     )
@@ -250,7 +250,7 @@ class TestImplement:
         (body,) = comments(fake)
         assert "Forge plan" in body
         assert run.plan_digest in body
-        assert f"@forge /go {run_id}" in body
+        assert f"/go {run_id}" in body
 
         # NO PR yet — publishing happens only after /go.
         assert fake.calls_of("create_branch") == []
@@ -546,7 +546,7 @@ class TestOneActiveRun:
         (refusal,) = comments(fake)
         assert "already active" in refusal
         assert first_id in refusal
-        assert f"@forge /go {first_id}" in refusal
+        assert f"/go {first_id}" in refusal
 
     async def test_race_loser_adopts_the_existing_run(self, db, fake, monkeypatch):
         service = make_service(db, fake)
