@@ -387,9 +387,25 @@ def _credentials_from_settings(settings: Settings) -> Any:
     from forge.integrations.github import GitHubAppCredentials
 
     key_setting = getattr(settings, "FORGE_GITHUB_PRIVATE_KEY", None)
-    return GitHubAppCredentials(
-        app_id=str(getattr(settings, "FORGE_GITHUB_APP_ID", "") or ""),
-        private_key=key_setting.get_secret_value() if key_setting is not None else "",
-        installation_id=str(getattr(settings, "FORGE_GITHUB_INSTALLATION_ID", "") or ""),
-        base_url=getattr(settings, "FORGE_GITHUB_API_URL", "https://api.github.com"),
+    if key_setting is not None:
+        return GitHubAppCredentials(
+            app_id=str(getattr(settings, "FORGE_GITHUB_APP_ID", "") or ""),
+            private_key=key_setting.get_secret_value(),
+            installation_id=str(getattr(settings, "FORGE_GITHUB_INSTALLATION_ID", "") or ""),
+            base_url=getattr(settings, "FORGE_GITHUB_API_URL", "https://api.github.com"),
+        )
+
+    # PAT mode (no App): a static provider over FORGE_GITHUB_TOKEN. The
+    # token carries the creator's scopes — intended for personal/lab use;
+    # production identity is the App above.
+    token_setting = getattr(settings, "FORGE_GITHUB_TOKEN", None)
+    if token_setting is not None:
+        from forge.integrations.github import GitHubStaticCredentials
+
+        return GitHubStaticCredentials(token_setting.get_secret_value())
+
+    raise ValueError(
+        "GitHub credentials not configured: set FORGE_GITHUB_PRIVATE_KEY + "
+        "FORGE_GITHUB_APP_ID + FORGE_GITHUB_INSTALLATION_ID (App mode) or "
+        "FORGE_GITHUB_TOKEN (PAT mode)"
     )

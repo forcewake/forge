@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     # /mcp with its own authentication.
     FORGE_MCP_ENABLED: bool = True
     FORGE_MCP_KEY: SecretStr | None = None
+    FORGE_GITHUB_TOKEN: SecretStr | None = None
 
     # Agno telemetry (disabled for self-hosted)
     AGNO_TELEMETRY: bool = False

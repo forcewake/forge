@@ -150,6 +150,19 @@ class TokenProvider(Protocol):
 
 
 @dataclass(frozen=True)
+class GitHubStaticCredentials:
+    """PAT/static-token provider (lab + PAT mode): returns one fixed token."""
+
+    token: str
+
+    async def token(self) -> str:
+        return self.token
+
+    async def invalidate(self) -> None:
+        pass  # a static token cannot be re-minted
+
+
+@dataclass(frozen=True)
 class InstallationToken:
     """One minted installation access token (research §1.2)."""
 
