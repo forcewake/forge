@@ -153,6 +153,14 @@ def render_driver_script(
     events = shlex.quote(events_file)
 
     if driver == "claude-code":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            "  npm install -g --no-fund --no-audit @anthropic-ai/claude-code && break\n"
+            '  echo "npm install of claude-code failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "claude --version\n"
+        )
         model_flag = f" --model {shlex.quote(model)}" if model else ""
         invocation = (
             f"claude -p {quoted_prompt}{model_flag} \\\n"
@@ -160,7 +168,7 @@ def render_driver_script(
             "  --permission-mode acceptEdits \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
         )
-        return f"{invocation} | tee -a {events}"
+        return preamble + f"{invocation} | tee -a {events}"
 
     if driver == "grok-build":
         preamble = (
@@ -184,8 +192,16 @@ def render_driver_script(
         return preamble + f"{invocation} | tee -a {events}"
 
     if driver == "opencode":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            "  npm install -g --no-fund --no-audit opencode-ai && break\n"
+            '  echo "npm install of opencode failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "opencode --version\n"
+        )
         invocation = f"opencode run --auto {quoted_prompt} 2>&1"
-        return f"{invocation} | tee -a {events}"
+        return preamble + f"{invocation} | tee -a {events}"
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 
