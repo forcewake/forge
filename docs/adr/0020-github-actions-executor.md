@@ -18,7 +18,7 @@ parity with the GitLab lane.
    first-class inputs and run correlation. Correlation: the dispatch
    response is empty (204), so forge discovers the run by
    `event=workflow_dispatch` + `head_branch` + created-window and verifies
-   `head_sha == attempt_base_oid` — never trusts ordering alone.
+   `head_sha == attempt_base_oid` — never trusts ordering alone. Since the 2026-02-19 changelog the dispatch API returns the run id directly (github.blog/changelog/2026-02-19-workflow-dispatch-api-now-returns-run-ids) — use it; keep discovery only as a GHES fallback.
 2. **Proposal-only lane on Actions.** The workflow checks out the frozen
    attempt base detached with `persist-credentials: false`, push is
    disabled, and the agent's only output is the candidate artifact
