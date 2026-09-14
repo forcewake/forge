@@ -59,3 +59,28 @@ docs/specs/contracts-v0.2.md, existing bridge src/forge/integrations/github_flow
   semantics).
 - All existing tests stay green; new tests for adapter, ingress routing of
   /go /cancel, workflow template contract, publisher unchanged paths.
+
+## Addendum (user requirement): real CLIs, quality prompts, skills
+
+The GitHub path must use the REAL harnesses — Claude Code, Grok Build,
+opencode — the same ones as the GitLab lane, with first-class prompts and
+skills support:
+
+1. **Prompt builder** (src/forge/harnesses/prompt.py, shared by GitLab
+   templates and the Actions entry): renders the implementation brief from
+   the RunSpec: Role (staff engineer implementing an approved plan), Task
+   (issue text + approved plan summary + plan digest), Constraints
+   (stdlib/pinned deps per policy, denied paths, CI/config files,
+   type hints, docstrings, repo language), Quality bar (run the project's
+   tests if present; read AGENTS.md / CLAUDE.md at the repo root and follow
+   them), Output contract — lane-specific:
+   - proposal-only lane (both CI flavors): leave changes in the working
+     tree; do NOT commit, do NOT push;
+   - dev/local lane: commit with the forge message.
+2. **Skills support**: the harness CLIs auto-load project conventions
+   (Claude Code: CLAUDE.md + .claude/skills/; Grok Build + opencode:
+   AGENTS.md). The prompt directs the agent to consult them; the target
+   repo's own skills/conventions always win. forge NEVER injects its own
+   files into the published tree.
+3. `forge.harness_entry` (Actions) and the GitLab templates consume the
+   same builder — one prompt source, three CLIs.
