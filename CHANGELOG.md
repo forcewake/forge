@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-14
+
+### Added — reactive parity + complex workloads (v0.7, ADR-0021)
+
+- **GitHub reactive review engine**: pull_request opened/synchronize on
+  tracked repos → readonly LLM review posted as a native GitHub review
+  (inline severity comments, REQUEST_CHANGES for critical); incremental
+  via synchronize before/after SHAs; sticky progress comments never
+  duplicate; forge-authored PRs skipped (recursion guard).
+- **Actions failure debugging**: failed Actions jobs on PR heads →
+  durable debug step → pipeline-debugger agent → sticky root-cause
+  comment (fork-safe PR correlation; forge's own harness failures
+  excluded — they have their own triage).
+- **GitLab durable pipeline-debug**: failed pipelines on non-forge
+  branches → root-cause MR notes (the repair loop keeps its own log
+  ingestion).
+- **Security findings ingestion + triage** (research:
+  ci-security-surface.md): GitLab CE gl-sast/secret-detection artifacts +
+  GitHub code/secret scanning + Dependabot alerts → forge-owned triage
+  state keyed by forge-computed fingerprints (CE has no vulnerabilities
+  API); `/security` command → bounded security-triage agent → grouped
+  comment; remote dismissal opt-in
+  (`FORGE_SECURITY_REMOTE_DISMISS`, default off).
+- **Monorepo path-scoped packages**: `.forge.yml` implement.paths globs
+  frozen into the RunSpec and enforced at validation and the publisher;
+  the plan prompt carries the scope; unscoped projects byte-identical.
+
+41 new tests; 1328 passed / 2 skipped.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added — trust surface (v0.6, ADR-0021)
@@ -27,6 +56,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real PAT-mode crash: GitHubStaticCredentials field/method collision).
 - New required `integration` CI job: the failure-injection exit-bar runs
   on real Postgres service containers.
+
+## [0.7.0] - 2026-09-14
+
+### Added — reactive parity + complex workloads (v0.7, ADR-0021)
+
+- **GitHub reactive review engine**: pull_request opened/synchronize on
+  tracked repos → readonly LLM review posted as a native GitHub review
+  (inline severity comments, REQUEST_CHANGES for critical); incremental
+  via synchronize before/after SHAs; sticky progress comments never
+  duplicate; forge-authored PRs skipped (recursion guard).
+- **Actions failure debugging**: failed Actions jobs on PR heads →
+  durable debug step → pipeline-debugger agent → sticky root-cause
+  comment (fork-safe PR correlation; forge's own harness failures
+  excluded — they have their own triage).
+- **GitLab durable pipeline-debug**: failed pipelines on non-forge
+  branches → root-cause MR notes (the repair loop keeps its own log
+  ingestion).
+- **Security findings ingestion + triage** (research:
+  ci-security-surface.md): GitLab CE gl-sast/secret-detection artifacts +
+  GitHub code/secret scanning + Dependabot alerts → forge-owned triage
+  state keyed by forge-computed fingerprints (CE has no vulnerabilities
+  API); `/security` command → bounded security-triage agent → grouped
+  comment; remote dismissal opt-in
+  (`FORGE_SECURITY_REMOTE_DISMISS`, default off).
+- **Monorepo path-scoped packages**: `.forge.yml` implement.paths globs
+  frozen into the RunSpec and enforced at validation and the publisher;
+  the plan prompt carries the scope; unscoped projects byte-identical.
+
+41 new tests; 1328 passed / 2 skipped.
 
 ## [0.6.0] - 2026-09-14
 
