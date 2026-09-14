@@ -350,6 +350,11 @@ async def _ingest_github_run_command(
 
     if queue is not None:
         try:
+            # The wake task must address the step that was actually
+            # scheduled (its inbox identity), not a recomputed one — two
+            # different hashes meant the worker never found the step and
+            # executed the command directly, doubling the run.
+            run_command.setdefault("source_event_id", source_event_id)
             await queue.submit(create_run_command_task(run_command, note_id=note_id or 0))
         except Exception:
             logger.warning("GitHub run command queue wake-up failed", exc_info=True)

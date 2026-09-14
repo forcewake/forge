@@ -602,3 +602,51 @@ class TestBackgroundFallbackUsesStepRuntime:
 
         await run_pending_command_step(db, object(), object(), seid, owner="gateway-2")
         assert len(executed) == 1
+
+
+class TestWakeIdentityContract:
+    async def test_gateway_wake_identity_matches_scheduled_step(self):
+        """The GitHub wake task must carry the SAME source_event_id the
+        ingress scheduled the step with — two different hashes meant the
+        worker never found the step and executed the command directly
+        (double run, found live)."""
+        from forge.gateway.github_webhook import github_source_event_id
+        from forge.worker.tasks import create_run_command_task
+
+        source_event_id = github_source_event_id("github:1:repo", "issue_comment", "created", 77)
+        run_command = {
+            "command": "start_run",
+            "project_id": 42,
+            "issue_iid": 5,
+            "provider": "github",
+        }
+        # The gateway sets the identity before submitting the wake task.
+        run_command.setdefault("source_event_id", source_event_id)
+        task = create_run_command_task(run_command, note_id=77)
+        assert task.metadata["source_event_id"] == source_event_id
+
+    async def test_worker_skips_direct_execution_when_step_missing(self, monkeypatch):
+        """A source_event_id with no persisted step belongs to the step
+        runtime — the wake path must NOT fall back to direct execution."""
+        import forge.worker.app as app_mod
+
+        executed = []
+
+        async def fake_known(sf, seid):
+            return False
+
+        async def fake_execute(*a, **k):
+            executed.append(a)
+
+        monkeypatch.setattr(app_mod, "command_step_known", fake_known)
+        monkeypatch.setattr(app_mod, "execute_run_command", fake_execute)
+        from forge.worker.app import _execute_run_command_task
+
+        await _execute_run_command_task(
+            object(),  # settings
+            object(),  # forge_config
+            object(),  # session_factory
+            {"source_event_id": "a" * 64, "command": "start_run"},
+            owner="w1",
+        )
+        assert executed == [], "direct execution must not happen for a known identity"

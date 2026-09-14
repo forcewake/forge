@@ -71,7 +71,15 @@ async def _execute_run_command_task(
             await execute_claimed_step(session_factory, settings, forge_config, claimed)
             return
         if known is False:
-            logger.warning("No persisted step for %s — executing directly", source_event_id[:12])
+            # The identity is known to this system but the step is not
+            # visible yet — the ingress transaction may still be committing
+            # or the step belongs to another deployment. The step runtime
+            # owns this command; executing directly here has already caused
+            # double execution (review-class bug, found live).
+            logger.warning(
+                "No persisted step for %s yet — skipping direct execution", source_event_id[:12]
+            )
+            return
     await execute_run_command(settings, forge_config, session_factory, metadata)
 
 
