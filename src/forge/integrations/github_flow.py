@@ -1,50 +1,56 @@
-"""GitHub publish bridge: plan → (human gate deferred) → publish → Draft PR.
+"""GitHub publish bridge: the publish leg behind the GitHub run service.
 
-The GitHub vertical slice (ADR-0019 §3, review finding F32) sits BESIDE
-RunService as a separate bridge until v0.5 extracts the source-adapter
-contracts (docs/specs/contracts-v0.2.md). Honest boundaries of this slice:
+The GitHub vertical slice (ADR-0019 §3, review finding F32). Since E3a the
+orchestration (``/implement`` → plan → human gate → ``/go`` → publish) lives
+in :mod:`forge.runs.github_service` on FlowRun rows — this module keeps ONLY
+the bridge pieces the service reuses:
 
-- **The human gate is deferred.** A GitHub ``/implement`` currently plans and
-  publishes without a pending decision — no approver set is enforced on
-  GitHub subjects yet. ``FORGE_GITHUB_ENABLED`` defaults to false; enabling
-  the integration accepts exactly that.
-- **Runs are not FlowRun-backed yet.** Durability is limited to the webhook
-  inbox row and the scheduled command step that triggered the flow. The
-  remote effects stay idempotent anyway:
-  * the run id is derived deterministically from the command's inbox
-    identity, so a re-executed step re-derives the same factory branch;
-  * the branch CAS (``expectedHeadOid``) turns a would-be duplicate commit
-    into ``STALE_DATA`` — surfaced as a drift outcome, never a silent retry
-    (research §3.4);
-  * the Draft-PR lookup by head adopts an existing PR, never opens a second.
+- :func:`build_github_agents` — ensures the GitHubClient / repository reader
+  / planner / implementer / reviewer construction (the LLM agents run
+  against GitHub through the duck-typed reader);
+- :class:`GitHubPublishFlow` — the publish leg: ensure factory branch,
+  branch-CAS commit (``expectedHeadOid``), Draft PR find-by-head-first;
+- :class:`GitHubPRReviewer` — the readonly review of the published PR diff.
 
 Write-path semantics (ADR-0016 §3/§4 adapted to GitHub): the factory branch
-``forge/<issue>/<run>`` is cut from the EXPECTED base head fetched moments
-before (that read + ``expectedHeadOid`` IS the concurrency contract —
+``forge/<issue>/<run>`` is cut from the FROZEN base head the plan was made
+against (that read + ``expectedHeadOid`` IS the concurrency contract —
 GitLab's ``last_commit_id`` file-level CAS becomes a branch-wide CAS here),
-and the Draft PR is created with ``draft: true``.
+and the Draft PR is created with ``draft: true``. The branch CAS turns a
+would-be duplicate commit into ``STALE_DATA`` — surfaced as a drift outcome,
+never a silent retry (research §3.4).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import logging
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from forge.config import ForgeConfig, Settings
+import logging
+
+from forge.config import Settings
 from forge.durable import short_run_id
 from forge.factory.implementer import LLMImplementer
 from forge.factory.llm import LLMClient
 from forge.factory.planner import LLMPlanner
+from forge.factory.reviewer import (
+    REVIEWER_MAX_DIFF_CHARS,
+    REVIEWER_MAX_INPUT_CHARS,
+    REVIEWER_TIER,
+    LLMReviewer,
+    ReviewVerdict,
+)
+from forge.factory.llm import truncate_chars
 from forge.integrations.github import (
     GitHubAPIError,
+    GitHubAppCredentials,
     GitHubClient,
     GitHubRepositoryReader,
     GitHubStaleBranchError,
+    GitHubStaticCredentials,
 )
 from forge.repository.changeset import ChangeSet, Operation
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
@@ -110,6 +116,7 @@ class GitHubPublishFlow:
         issue_title: str,
         plan_summary: str = "",
         base_branch: str | None = None,
+        expected_head: str | None = None,
     ) -> GitHubPublishOutcome:
         """Builtin-implementer leg: propose against the frozen base, publish.
 
@@ -117,11 +124,16 @@ class GitHubPublishFlow:
         :class:`GitHubRepositoryReader` (injected at construction), so the
         builtin implementer runs against GitHub unchanged. ``run`` is a
         minimal stub — the implementer only uses id/issue_iid/base_sha of it.
+
+        ``expected_head`` is the FROZEN base the plan was approved against —
+        pinned by the gate at plan time. When omitted the base head is read
+        live (the caller owns that decision).
         """
         if self._proposer is None:
             raise ValueError("publish_proposal requires a proposer")
         base = base_branch or self._base_branch
-        expected_head = await self._client.get_branch_head(owner, repo, base)
+        if expected_head is None:
+            expected_head = await self._client.get_branch_head(owner, repo, base)
         run_stub = SimpleNamespace(
             id=run_id, issue_iid=issue_number, project_id=0, base_sha=expected_head
         )
@@ -303,91 +315,150 @@ class GitHubPublishFlow:
             return None
 
 
-async def execute_github_run_command(
-    settings: Settings,
-    forge_config: ForgeConfig,
-    session_factory: async_sessionmaker[AsyncSession],
-    metadata: dict[str, Any],
-    *,
-    flow_builder: Any | None = None,
-) -> GitHubPublishOutcome | None:
-    """Execute a GitHub run command — the ``provider: github`` step dispatch.
+class GitHubPRReviewer:
+    """Readonly review of the published candidate over the PR diff (E3a).
 
-    Wired from :func:`forge.runs.service.execute_run_command`. ``go`` and
-    ``cancel`` are logged and ignored for now: the human gate is deferred, so
-    there is no pending decision to consume (see module docstring). The
-    *flow_builder* hook exists for tests to run the flow over a fake client.
+    The GitHub twin of :class:`forge.factory.reviewer.LLMReviewer`: instead
+    of a GitLab compare it reads the PR's changed-file patches, and feeds
+    the SAME system prompt / JSON contract to the strong tier (ADR-0008).
+    The verdict is recorded with the SHA it reviewed — the review approves a
+    *specific* commit.
     """
-    command = metadata.get("command")
-    if command != "start_run":
-        logger.info(
-            "GitHub command %r not wired yet (human gate deferred, ADR-0019) — ignoring",
-            command,
-        )
-        return None
 
-    repo_full_name = str(metadata.get("repo_full_name") or "")
-    if "/" not in repo_full_name:
-        logger.error("GitHub start_run without repo_full_name — ignoring")
-        return None
-    owner, repo = repo_full_name.split("/", 1)
-    issue_number = int(metadata.get("issue_number") or 0)
-    # Deterministic run id from the command's inbox identity: a re-executed
-    # step re-derives the same branch, and the CAS + PR-lookup keep the
-    # remote effects exactly-once (module docstring).
-    source_event_id = str(metadata.get("source_event_id") or "")
-    run_id = source_event_id[:32] or uuid4().hex
+    def __init__(
+        self,
+        llm: LLMClient,
+        client: GitHubClient,
+        settings: Settings | None = None,
+    ) -> None:
+        self._llm = llm
+        self._client = client
+        self._settings = settings
 
-    client = GitHubClient(
-        base_url=getattr(settings, "FORGE_GITHUB_API_URL", "https://api.github.com"),
-        token_provider=_credentials_from_settings(settings),
-    )
-    try:
-        issue = await client.get_issue(owner, repo, issue_number)
-        plan_summary = ""
-        if flow_builder is not None:
-            flow = flow_builder()
-        else:
-            reader = GitHubRepositoryReader(client, owner, repo)
-            llm = LLMClient(settings=settings, session_factory=session_factory)
-            planner = LLMPlanner(llm, settings=settings)
-            plan = await planner.plan(issue.title, issue.description or "", flow_run_id=run_id)
-            plan_summary = str(getattr(plan, "summary", "") or "")
-            flow = GitHubPublishFlow(
-                client,
-                proposer=LLMImplementer(llm, gitlab=reader, settings=settings),
-                base_branch=getattr(settings, "FORGE_TARGET_BRANCH", "main"),
-            )
-        outcome = await flow.publish_proposal(
-            owner=owner,
-            repo=repo,
-            issue_number=issue_number,
-            run_id=run_id,
-            issue_title=issue.title,
-            plan_summary=plan_summary,
+    async def review(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        issue_title: str,
+        plan_summary: str,
+        base_sha: str,
+        candidate_sha: str,
+        flow_run_id: str | None = None,
+    ) -> ReviewVerdict:
+        """Review the PR diff and return the parsed verdict."""
+        diff = await self._pr_diff(owner, repo, pr_number)
+        user = (
+            f"Issue title: {issue_title}\n\n"
+            f"Plan summary:\n{plan_summary or '(no plan summary available)'}\n\n"
+            f"Candidate diff ({base_sha[:8]}..{candidate_sha[:8]}):\n{diff}"
         )
-        if outcome.ok:
-            logger.info(
-                "GitHub run %s published %s as PR #%s",
-                short_run_id(run_id),
-                (outcome.commit_oid or "?")[:8],
-                outcome.pr_number,
-            )
-        else:
+        result = await self._llm.complete(
+            tier=REVIEWER_TIER,
+            system=_REVIEW_SYSTEM_PROMPT,
+            user=truncate_chars(user, REVIEWER_MAX_INPUT_CHARS),
+            role="reviewer",
+            flow_run_id=flow_run_id,
+            json_mode=True,
+        )
+        return LLMReviewer._parse(result.text)
+
+    async def _pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
+        """Render the PR's file patches as diff text, biggest files first."""
+        try:
+            files = await self._client.get_pr_files(owner, repo, pr_number)
+        except Exception:
             logger.warning(
-                "GitHub run %s publish failed: %s (drift=%s)",
-                short_run_id(run_id),
-                outcome.reason,
-                outcome.drift,
+                "PR files read failed for %s/%s#%s — reviewing without diff",
+                owner,
+                repo,
+                pr_number,
+                exc_info=True,
             )
-        return outcome
-    finally:
-        await client.aclose()
+            return "(diff unavailable)"
+        ordered = sorted(files, key=lambda f: len(str(f.get("patch") or "")), reverse=True)
+        parts: list[str] = []
+        for entry in ordered:
+            patch = str(entry.get("patch") or "")
+            if not patch:
+                continue
+            parts.append(f"diff --git a/{entry.get('filename', '')} b/{entry.get('filename', '')}")
+            parts.append(patch)
+        return truncate_chars("\n".join(parts), REVIEWER_MAX_DIFF_CHARS)
 
 
-def _credentials_from_settings(settings: Settings) -> Any:
-    from forge.integrations.github import GitHubAppCredentials
+# Kept identical to forge.factory.reviewer._SYSTEM_PROMPT — the same JSON
+# review contract on the GitHub path (ADR-0008).
+_REVIEW_SYSTEM_PROMPT = (
+    "You are the readonly review agent of a code-writing bot. You review a "
+    "candidate diff against the issue and plan it implements. You cannot "
+    "change anything; you only judge.\n"
+    "Respond with ONLY a JSON object:\n"
+    '{"verdict": "ok" | "concerns", "summary": "<1-3 sentences>", '
+    '"findings": [{"severity": "info"|"minor"|"major", "file": "<path>", '
+    '"note": "<what and why>"}]}\n'
+    'Use "ok" when the diff is a sound implementation of the issue; use '
+    '"concerns" when a human should look closely before merging. Never '
+    "invent files that are not in the diff."
+)
 
+
+@dataclass(frozen=True)
+class GitHubAgents:
+    """The constructed GitHub stack one connection/repo runs with."""
+
+    client: GitHubClient
+    reader: GitHubRepositoryReader
+    planner: LLMPlanner
+    implementer: LLMImplementer
+    reviewer: GitHubPRReviewer
+    flow: GitHubPublishFlow
+
+
+def build_github_agents(
+    settings: Settings,
+    session_factory: async_sessionmaker[AsyncSession],
+    owner: str,
+    repo: str,
+    *,
+    client: GitHubClient | None = None,
+) -> GitHubAgents:
+    """Ensure planner/reviewer/reader construction for one GitHub repo.
+
+    The single place the LLM-driven defaults are built for the GitHub path
+    (the twin of :func:`forge.runs.service.build_default_agents`): the reader
+    duck-types the GitLab read surface, so the planner/implementer run
+    unchanged; the reviewer reads PR diffs; the publish flow is bound to the
+    same client.
+    """
+    if client is None:
+        client = GitHubClient(
+            base_url=getattr(settings, "FORGE_GITHUB_API_URL", "https://api.github.com"),
+            token_provider=credentials_from_settings(settings),
+        )
+    reader = GitHubRepositoryReader(client, owner, repo)
+    llm = LLMClient(settings=settings, session_factory=session_factory)
+    planner = LLMPlanner(llm, settings=settings)
+    implementer = LLMImplementer(llm, gitlab=reader, settings=settings)
+    reviewer = GitHubPRReviewer(llm, client, settings=settings)
+    flow = GitHubPublishFlow(
+        client,
+        proposer=implementer,
+        base_branch=str(getattr(settings, "FORGE_TARGET_BRANCH", "main") or "main"),
+    )
+    return GitHubAgents(
+        client=client,
+        reader=reader,
+        planner=planner,
+        implementer=implementer,
+        reviewer=reviewer,
+        flow=flow,
+    )
+
+
+def credentials_from_settings(settings: Settings) -> Any:
+    """The GitHub token provider configured on *settings* (App or PAT)."""
     key_setting = getattr(settings, "FORGE_GITHUB_PRIVATE_KEY", None)
     if key_setting is not None:
         pem = key_setting.get_secret_value()
@@ -408,8 +479,6 @@ def _credentials_from_settings(settings: Settings) -> Any:
     # production identity is the App above.
     token_setting = getattr(settings, "FORGE_GITHUB_TOKEN", None)
     if token_setting is not None:
-        from forge.integrations.github import GitHubStaticCredentials
-
         return GitHubStaticCredentials(token_setting.get_secret_value())
 
     raise ValueError(

@@ -589,6 +589,17 @@ class GitHubClient:
             return dict(pull_requests[0])
         return None
 
+    async def get_pr_files(self, owner: str, repo: str, number: int) -> list[dict[str, Any]]:
+        """The changed-file entries of PR *number* (REST, paginated).
+
+        Each entry carries ``filename``, ``status`` and, for text changes,
+        the unified ``patch`` — the readonly reviewer's diff surface (E3a).
+        """
+        return [
+            dict(entry)
+            for entry in await self._paginated(f"/repos/{owner}/{repo}/pulls/{number}/files")
+        ]
+
     # -- REST: verification reads ---------------------------------------------------
 
     async def list_check_runs_for_sha(

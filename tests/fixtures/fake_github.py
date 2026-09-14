@@ -28,6 +28,9 @@ class FakeGitHub:
         self.issues: dict[str, dict[int, dict]] = {}
         # full_name -> list of PR dicts
         self.pull_requests: dict[str, list[dict]] = {}
+        # pr number -> list of PR file dicts (filename / patch), the reviewer's
+        # diff surface
+        self.pr_files: dict[int, list[dict]] = {}
         # sha -> list of check-run dicts
         self.check_runs: dict[str, list[dict]] = {}
         # list of workflow-run dicts (head_sha / name keyed filtering)
@@ -167,6 +170,14 @@ class FakeGitHub:
         return [
             pr for pr in self.pull_requests.get(full_name, []) if pr["head"]["ref"] == head_branch
         ]
+
+    def seed_pr_files(self, pr_number: int, files: list[dict]) -> None:
+        """Seed the changed-file entries the reviewer reads for a PR."""
+        self.pr_files[pr_number] = files
+
+    async def get_pr_files(self, owner: str, repo: str, number: int) -> list[dict]:
+        self.calls.append(("get_pr_files", (owner, repo, number)))
+        return [dict(entry) for entry in self.pr_files.get(number, [])]
 
     # -- verification reads -------------------------------------------------------------
 

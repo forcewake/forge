@@ -1,6 +1,9 @@
-"""GitHub publish flow tests: branch CAS, drift outcome, Draft PR dedup.
+"""GitHub publish bridge tests: branch CAS, drift outcome, Draft PR dedup.
 
-Drives :class:`forge.integrations.github_flow.GitHubPublishFlow` over
+Since E3a the bridge (forge.integrations.github_flow) keeps ONLY the publish
+leg and the agent construction; the run lifecycle lives in
+forge.runs.github_service (covered by tests/test_github_runs.py). These
+tests drive :class:`GitHubPublishFlow` and :class:`GitHubPRReviewer` over
 :class:`tests.fixtures.fake_github.FakeGitHub` — the in-memory fake mirrors
 the parsed client semantics (branch-wide CAS included), so the concurrency
 contract is exercised without any network.
@@ -8,7 +11,9 @@ contract is exercised without any network.
 
 import pytest
 
+from forge.factory.reviewer import ReviewVerdict
 from forge.integrations.github_flow import (
+    GitHubPRReviewer,
     GitHubPublishFlow,
     github_factory_branch,
 )
@@ -17,7 +22,7 @@ from tests.fixtures.fake_github import FakeGitHub
 
 REPO = "acme/acme-widget"
 BASE_HEAD = "1" * 40
-RUN_ID = "abcd1234" + "0" * 24  # 32-hex, like an inbox-derived run id
+RUN_ID = "abcd1234" + "0" * 24  # 32-hex, like a FlowRun id
 
 
 @pytest.fixture()
@@ -177,7 +182,7 @@ class TestPublish:
 
 
 class TestDraftPrDedup:
-    async def test_re_run_adopts_existing_pr_and_never_duplicates(self, fake: FakeGitHub):
+    async def test_re_entry_adopts_existing_pr_and_never_duplicates(self, fake: FakeGitHub):
         """Re-drive after a crash between commit and PR: the second attempt
         hits the CAS (head moved past the pinned base) and the existing PR is
         adopted — one branch, one PR, one commit."""
@@ -193,8 +198,9 @@ class TestDraftPrDedup:
         assert first.ok is True
         head_after_first = fake.heads[REPO]["forge/42/abcd1234"]
 
-        # Re-execution with the SAME run identity (deterministic run id from
-        # the inbox identity): base head unchanged, branch head moved.
+        # Re-execution with the SAME run identity (the run row owns the run
+        # id now — a re-driven /go leg re-derives the same branch): base head
+        # unchanged, branch head moved.
         second = await flow.publish_changeset(
             "acme",
             "acme-widget",
@@ -256,134 +262,126 @@ class TestProposalLeg:
         assert proposal["run_id"] == RUN_ID
         assert outcome.pr_number is not None
 
+    async def test_publish_proposal_pins_the_frozen_expected_head(self, fake: FakeGitHub):
+        """The gate-approved base is the CAS pin — not the live branch head.
 
-class TestCommandDispatch:
-    async def test_github_provider_dispatches_to_bridge(self, monkeypatch, tmp_path):
-        """execute_run_command routes provider:github payloads to the bridge —
-        RunService/GitLabClient are never constructed for GitHub commands."""
-        from forge.config import ForgeConfig, Settings
-        from pydantic import SecretStr
+        main may have moved between plan time and /go; the publish leg must
+        still cut the factory branch from the snapshot the plan was made
+        against.
+        """
+        fake.heads[REPO]["main"] = "9" * 40  # main moved after the plan
+        moved_head = await fake.get_branch_head("acme", "acme-widget", "main")
+        assert moved_head == "9" * 40
 
-        import forge.runs.service as service_module
+        class StubProposer:
+            async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
+                assert attempt_base == BASE_HEAD  # proposes against the frozen base
+                return changeset()
 
-        settings = Settings(
-            GITLAB_URL="https://gitlab.test",
-            GITLAB_TOKEN=SecretStr("glpat-test"),
-            GITLAB_WEBHOOK_SECRET=SecretStr("s"),
-            DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/dispatch.db",
-        )
-        dispatched = []
-
-        async def fake_bridge(settings, config, sf, metadata, **kwargs):
-            dispatched.append(metadata)
-
-        def boom_gitlab(**kwargs):  # pragma: no cover — must not be hit
-            raise AssertionError("GitLabClient constructed for a GitHub command")
-
-        monkeypatch.setattr(service_module, "GitLabClient", boom_gitlab)
-        monkeypatch.setattr(
-            "forge.integrations.github_flow.execute_github_run_command", fake_bridge
+        flow = make_flow(fake, proposer=StubProposer())
+        outcome = await flow.publish_proposal(
+            owner="acme",
+            repo="acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            issue_title="Add password reset",
+            expected_head=BASE_HEAD,
         )
 
-        await service_module.execute_run_command(
-            settings, ForgeConfig(), None, {"command": "start_run", "provider": "github"}
+        assert outcome.ok is True
+        assert outcome.expected_head_oid == BASE_HEAD
+        assert (
+            fake.heads[REPO]["forge/42/abcd1234"].endswith(outcome.commit_oid or "")
+            or fake.heads[REPO]["forge/42/abcd1234"] == outcome.commit_oid
         )
 
-        assert dispatched and dispatched[0]["provider"] == "github"
 
-    async def test_go_and_cancel_commands_are_not_wired(self, tmp_path):
-        """The human gate is deferred: /go has no pending decision to consume."""
-        from forge.config import ForgeConfig, Settings
-        from pydantic import SecretStr
+class TestPRReviewer:
+    """The bridge's reviewer: readonly review over the PR diff."""
 
-        import forge.integrations.github_flow as flow_module
+    def _reviewer(self, fake: FakeGitHub, text: str) -> GitHubPRReviewer:
+        class StubLLM:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
 
-        settings = Settings(
-            GITLAB_URL="https://gitlab.test",
-            GITLAB_TOKEN=SecretStr("glpat-test"),
-            GITLAB_WEBHOOK_SECRET=SecretStr("s"),
-            DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/gate.db",
-            FORGE_GITHUB_PRIVATE_KEY=SecretStr("k"),
-        )
+            async def complete(
+                self, *, tier, system, user, role, flow_run_id=None, json_mode=False
+            ):
+                self.prompts.append(user)
+                from types import SimpleNamespace
 
-        class Boom:
-            def __init__(self, *a, **k):
-                raise AssertionError("GitHubClient constructed for a deferred command")
+                return SimpleNamespace(text=text)
 
-        original = flow_module.GitHubClient
-        flow_module.GitHubClient = Boom  # type: ignore[misc]
-        try:
-            for command in ("go", "cancel"):
-                outcome = await flow_module.execute_github_run_command(
-                    settings,
-                    ForgeConfig(),
-                    None,
-                    {"command": command, "provider": "github", "repo_full_name": REPO},
-                )
-                assert outcome is None
-        finally:
-            flow_module.GitHubClient = original  # type: ignore[misc]
+        llm = StubLLM()
+        reviewer = GitHubPRReviewer(llm, fake)
+        reviewer._llm = llm  # keep the stub observable
+        return reviewer
 
-    async def test_start_run_via_flow_builder_publishes_and_opens_pr(
-        self, fake: FakeGitHub, monkeypatch, tmp_path
-    ):
-        """The step-execution path end-to-end with an injected flow factory."""
-        from forge.config import ForgeConfig, Settings
-        from pydantic import SecretStr
-
-        import forge.integrations.github_flow as flow_module
-
-        settings = Settings(
-            GITLAB_URL="https://gitlab.test",
-            GITLAB_TOKEN=SecretStr("glpat-test"),
-            GITLAB_WEBHOOK_SECRET=SecretStr("s"),
-            DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/start.db",
-            FORGE_GITHUB_PRIVATE_KEY=SecretStr("k"),
-        )
-        source_event_id = "e" * 64  # sha256 hex from the command's inbox row
-
-        class StubClient:
-            """Routes the bridge's issue read to the fake; no network."""
-
-            def __init__(self, **kwargs) -> None:
-                self._fake = fake
-
-            async def get_issue(self, owner, repo, number):
-                return await self._fake.get_issue(owner, repo, number)
-
-            async def aclose(self):
-                return None
-
-        monkeypatch.setattr(flow_module, "GitHubClient", StubClient)
-        flow = make_flow(fake, proposer=StubProposerForDispatch())
-        outcome = await flow_module.execute_github_run_command(
-            settings,
-            ForgeConfig(),
-            None,
-            {
-                "command": "start_run",
-                "provider": "github",
-                "repo_full_name": REPO,
-                "issue_number": 42,
-                "source_event_id": source_event_id,
-            },
-            flow_builder=lambda: flow,
-        )
-
-        assert outcome is not None and outcome.ok is True
-        # Deterministic run id from the inbox identity → deterministic branch.
-        assert outcome.branch == f"forge/42/{source_event_id[:8]}"
-        assert outcome.pr_number is not None
-
-
-class StubProposerForDispatch:
-    """Minimal proposer double for the dispatch test."""
-
-    async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
-        return ChangeSet(
-            branch=github_factory_branch(run.issue_iid, run.id),
-            commit_message=f"forge: implement {run.issue_iid}",
-            changes=[
-                Change(path="src/feature.py", operation=Operation.CREATE, content="VALUE = 1\n")
+    async def test_review_renders_the_pr_patches(self, fake: FakeGitHub):
+        fake.seed_pr_files(
+            7,
+            [
+                {"filename": "src/app.py", "patch": "@@ -1 +1 @@\n-print('hi')\n+print('hello')"},
+                {"filename": "src/feature.py", "patch": "@@ -0,0 +1 @@\n+VALUE = 1"},
             ],
         )
+        reviewer = self._reviewer(
+            fake,
+            '{"verdict": "ok", "summary": "sound", "findings": []}',
+        )
+
+        verdict = await reviewer.review(
+            owner="acme",
+            repo="acme-widget",
+            pr_number=7,
+            issue_title="Add password reset",
+            plan_summary="1. add reset",
+            base_sha=BASE_HEAD,
+            candidate_sha="c" * 40,
+            flow_run_id=RUN_ID,
+        )
+
+        assert isinstance(verdict, ReviewVerdict)
+        assert verdict.verdict == "ok"
+        prompt = reviewer._llm.prompts[0]  # type: ignore[attr-defined]
+        assert "src/app.py" in prompt
+        assert "VALUE = 1" in prompt
+        assert "Add password reset" in prompt
+
+    async def test_review_failure_to_read_pr_still_reviews_without_diff(self, fake: FakeGitHub):
+        async def failing(owner, repo, number):
+            raise RuntimeError("boom")
+
+        fake.get_pr_files = failing  # type: ignore[method-assign]
+        reviewer = self._reviewer(
+            fake,
+            '{"verdict": "concerns", "summary": "cannot see the diff", "findings": []}',
+        )
+
+        verdict = await reviewer.review(
+            owner="acme",
+            repo="acme-widget",
+            pr_number=7,
+            issue_title="Add password reset",
+            plan_summary="",
+            base_sha=BASE_HEAD,
+            candidate_sha="c" * 40,
+        )
+        assert verdict.verdict == "concerns"
+
+    async def test_review_rejects_an_unknown_verdict(self, fake: FakeGitHub):
+        fake.seed_pr_files(7, [{"filename": "a.py", "patch": "@@ -1 +1 @@\n+x"}])
+        reviewer = self._reviewer(fake, '{"verdict": "shipit", "summary": "!", "findings": []}')
+
+        from forge.factory.llm import LLMResponseError
+
+        with pytest.raises(LLMResponseError):
+            await reviewer.review(
+                owner="acme",
+                repo="acme-widget",
+                pr_number=7,
+                issue_title="t",
+                plan_summary="",
+                base_sha=BASE_HEAD,
+                candidate_sha="c" * 40,
+            )

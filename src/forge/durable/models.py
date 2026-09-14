@@ -134,6 +134,16 @@ class FlowRun(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
     project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     issue_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: E3a: which integration owns the subject — ``gitlab`` (default) or
+    #: ``github``. For GitHub runs ``project_id`` is the webhook's numeric
+    #: repository id and ``issue_iid`` the issue number, so the partial
+    #: unique index below enforces one active run per (repo, issue) too.
+    provider: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="gitlab", server_default="gitlab"
+    )
+    #: GitHub subject identity for ``provider='github'`` runs.
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mr_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="accepted")
     status_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
