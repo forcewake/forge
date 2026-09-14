@@ -576,15 +576,15 @@ class TestPullRequestIngress:
         inbox, steps = await self.rows(app)
         assert inbox == [] and steps == []
 
-    async def test_non_draft_pr_is_recorded_inbox_only(self, app, client):
+    async def test_non_draft_pr_gets_reviewed(self, app, client):
+        """Non-draft PRs are the common case — the reviewer must react to
+        them exactly like to drafts (the draft marker is not a skip)."""
         body = self.payload("pull_request_synchronize.json", **{"pull_request.draft": False})
         response = await self.post(client, body)
 
-        assert response.json()["recorded"] is True
+        assert response.json()["run_command"] is True
         inbox, steps = await self.rows(app)
-        assert len(inbox) == 1
-        assert inbox[0].event_type == "github:pull_request"
-        assert steps == []
+        assert any(s.step_name == "review_pr" for s in steps)
 
     async def test_forge_branch_is_recorded_inbox_only(self, app, client):
         body = self.payload(

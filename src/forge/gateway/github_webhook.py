@@ -234,8 +234,8 @@ def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | No
     action = str(payload.get("action") or "")
     if action not in _PR_REVIEW_ACTIONS:
         return None
-    if not pull_request.get("draft"):
-        return None
+    # Reviews fire for draft AND ready PRs alike — the draft marker is not
+    # a skip signal (research §6: major agents review drafts too).
 
     head = pull_request.get("head") or {}
     head_branch = str(head.get("ref") or "")
