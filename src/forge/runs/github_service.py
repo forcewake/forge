@@ -19,9 +19,16 @@ GitHub-specific deviations, all deliberate:
   index ``uq_active_run_per_issue`` over ``flow_runs.(project_id,
   issue_iid)`` — for GitHub those columns carry the webhook's numeric
   repository id and the issue number.
-- **No Actions executor yet (that is E3b)**: the run walks ``waiting_ci``
-  synchronously; the evidence comment notes that Actions checks on the head
-  are the verification surface — no required jobs are enforced yet.
+- **Actions harness lane (E3b, ADR-0020)**: when
+  ``FORGE_GITHUB_HARNESS_WORKFLOW`` names the harness workflow human-applied
+  to the target repo, an approved /go dispatches it (run_id / attempt_base /
+  driver / model inputs on the factory branch) and parks the run in
+  ``waiting_harness`` with a journaled :class:`ActionsHandle`; the
+  reconciler (``evaluate_waiting_harness``) polls the Actions run, adopts
+  the candidate artifact through the SAME trusted publisher (branch CAS
+  commit + Draft PR) and walks on to ``waiting_ci`` → review →
+  ``ready_for_human``. Empty/unset → builtin in-worker execution as before.
+  Actions checks on the head are the verification surface.
 - **Expired or drifted decisions block** the run with a friendly comment
   (``decision_expired`` / ``decision_drift``) instead of silently ignoring
   the /go: on GitHub the comment thread is the only operator surface.
@@ -33,6 +40,7 @@ are journaled intent-first in ``action_log``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -56,12 +64,21 @@ from forge.durable import (
     consume_approval,
     is_valid,
     record_approval,
+    short_run_id,
 )
 from forge.durable.controller import TERMINAL_STATUSES
+from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.llm import LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS
-from forge.integrations.github_flow import GitHubAgents, build_github_agents
+from forge.integrations.github_flow import (
+    GitHubAgents,
+    build_github_agents,
+    github_factory_branch,
+)
+from forge.repository import Change, ChangeSet, Operation, validate_changeset
 from forge.runs.admission import check_admission
+from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
+from forge.runs.candidate import attempt_base_for
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -490,6 +507,7 @@ class GitHubRunService:
         # withdraw scheduled steps so no worker picks them up later.
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
+            evidence = dict(run.evidence or {})
             run.cancel_requested = True
             await session.execute(
                 update(StepRun)
@@ -497,6 +515,22 @@ class GitHubRunService:
                 .values(status="cancelled")
             )
             await session.commit()
+
+        # Actions lane: also stop the harness run itself (best-effort — the
+        # grant revocation above is the safety property; a late candidate is
+        # superseded, never published).
+        raw_handle = str((evidence.get("harness") or {}).get("handle") or "")
+        if raw_handle:
+            try:
+                await GitHubActionsExecutor(self._stack.client, self._settings).cancel(
+                    ActionsHandle.from_json(raw_handle)
+                )
+            except Exception:
+                logger.warning(
+                    "Actions run cancel failed for run %s — grant already revoked",
+                    run_id[:8],
+                    exc_info=True,
+                )
 
         await self._transition(
             run_id, FlowStatus.CANCELLED, reason=f"cancelled by @{author_username}"
@@ -516,7 +550,17 @@ class GitHubRunService:
     # ------------------------------------------------------------------
 
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
-        """One gate-approved publish cycle, ending at ``ready_for_human``."""
+        """One gate-approved publish cycle, ending at ``ready_for_human``.
+
+        Harness lane (ADR-0020): a repo onboarded for Actions execution
+        (``FORGE_GITHUB_HARNESS_WORKFLOW``) dispatches the harness and parks
+        in ``waiting_harness`` — the reconciler drives the rest. Builtin
+        (default): propose + publish synchronously as before.
+        """
+        if self._harness_workflow():
+            await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
+            return
+
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             plan_summary, _ = _plan_evidence(run)
@@ -621,6 +665,398 @@ class GitHubRunService:
             project_id=project_id,
             issue_number=issue_number,
             pr_number=outcome.pr_number,
+            candidate_sha=commit_oid,
+            base_sha=base_sha,
+        )
+
+    # ------------------------------------------------------------------
+    # Harness leg (E3b, ADR-0020): dispatch → waiting_harness → reconcile
+    # ------------------------------------------------------------------
+
+    async def _advance_harness(self, run_id: str, *, project_id: int, issue_number: int) -> None:
+        """Dispatch the harness workflow and park the run in ``waiting_harness``.
+
+        ``proposing`` = ensure the factory branch at the frozen attempt base
+        (idempotent 422) → workflow_dispatch with run_id / attempt_base_oid /
+        driver / model → ``waiting_harness`` with the journaled
+        :class:`ActionsHandle` in the run's evidence. The reconciler polls
+        from here — the wait is worker-free, like ``waiting_ci``.
+        """
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            attempt_base = attempt_base_for(run)
+        branch = github_factory_branch(issue_number, run_id)
+        executor = GitHubActionsExecutor(self._stack.client, self._settings)
+        handle = ActionsHandle(
+            provider="github",
+            owner=self._owner,
+            repo=self._repo,
+            workflow=self._harness_workflow(),
+            run_id=0,
+            branch=branch,
+            attempt_base=attempt_base,
+            run_spec_digest=run.spec_digest or "",
+            driver=self._harness_driver(),
+            forge_run_id=run_id,
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        # Intent-first journal for the harness dispatch (ADR-0005).
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(run_id, "harness_start")
+            await session.commit()
+
+        try:
+            await self._ensure_harness_branch(branch, attempt_base)
+            correlated = await executor.launch(
+                handle,
+                inputs={
+                    "run_id": run_id,
+                    "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+                },
+            )
+        except Exception as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            return
+
+        await self._complete_action(
+            action_id,
+            "succeeded",
+            {
+                "workflow": correlated.workflow,
+                "actions_run_id": correlated.run_id or None,
+                "branch": branch,
+                "attempt_base": attempt_base,
+                "correlated": bool(correlated.run_id),
+            },
+        )
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(
+                run_id,
+                FlowStatus.WAITING_HARNESS,
+                reason=(
+                    f"harness workflow {correlated.workflow}"
+                    + (f" run {correlated.run_id}" if correlated.run_id else " (run pending)")
+                ),
+            )
+            run = await session.get(FlowRun, run_id)
+            # The durable handle: the reconciler restarts from exactly here
+            # (workflow filename, Actions run id, attempt base, started_at).
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "backend": "ci_harness",
+                    "harness": {
+                        "handle": correlated.to_json(),
+                        "workflow": correlated.workflow,
+                        "run_id": correlated.run_id or None,
+                        "branch": branch,
+                        "attempt_base": attempt_base,
+                        "driver": correlated.driver,
+                        "started_at": correlated.started_at,
+                    },
+                },
+            )
+            await session.commit()
+
+        logger.info(
+            "Run %s delegated to the Actions harness (workflow %s, run %s) — waiting_harness",
+            run_id[:8],
+            correlated.workflow,
+            correlated.run_id or "pending",
+        )
+
+    async def _ensure_harness_branch(self, branch: str, attempt_base: str) -> None:
+        """Cut the factory branch at the frozen attempt base; 422 = already cut."""
+        try:
+            await self._stack.client.create_branch(self._owner, self._repo, branch, attempt_base)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status == 422:
+                return  # idempotent re-entry — the ref is there (ADR-0016)
+            raise
+
+    async def evaluate_waiting_harness(self, now: datetime | None = None) -> None:
+        """One reconciler pass over every GitHub run parked in ``waiting_harness``."""
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run_ids = (
+                (
+                    await session.execute(
+                        select(FlowRun.id).where(
+                            FlowRun.provider == "github",
+                            FlowRun.status == FlowStatus.WAITING_HARNESS.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run_id in run_ids:
+            try:
+                await self._evaluate_harness_one(run_id, now)
+            except Exception:
+                # One broken run must not stall the reconciler loop.
+                logger.exception("Actions harness reconcile failed for run %s", run_id[:8])
+
+    async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
+        """Poll one waiting_harness run through its journaled Actions handle."""
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            evidence = dict(run.evidence or {})
+            project_id = run.project_id
+            issue_number = run.issue_iid or 0
+
+        if evidence.get("backend") and not is_harness_backend(str(evidence["backend"])):
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness on a non-harness backend"
+            )
+            return
+        raw_handle = str((evidence.get("harness") or {}).get("handle") or "")
+        if not raw_handle:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness without harness handle"
+            )
+            return
+        handle = ActionsHandle.from_json(raw_handle)
+        executor = GitHubActionsExecutor(self._stack.client, self._settings)
+
+        try:
+            # A handle left uncorrelated by a lost dispatch response is
+            # re-discovered first (ADR-0005: one launch per intent).
+            if not handle.run_id:
+                handle = await executor.reconcile_launch(handle)
+                if handle.run_id:
+                    await self._merge_run_evidence(
+                        run_id,
+                        {
+                            "harness": {
+                                **(evidence.get("harness") or {}),
+                                "handle": handle.to_json(),
+                                "run_id": handle.run_id,
+                            }
+                        },
+                    )
+                else:
+                    return  # discovery retries next tick; the deadline decides
+            outcome = await executor.poll(handle, now=now)
+        except Exception:
+            logger.exception(
+                "Actions harness poll failed for run %s — keeping it waiting", run_id[:8]
+            )
+            return
+
+        if outcome.status == "running":
+            return  # keep waiting — the durable deadline decides the rest
+
+        if outcome.status == "failed":
+            kind = outcome.failure_kind or "code"
+            # Harness failures never enter the LLM repair loop (ADR-0015):
+            # blocked, with the harness-level classification in the reason.
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            return
+
+        await self._publish_harness_candidate(run_id, project_id, issue_number, outcome, handle)
+
+    async def _publish_harness_candidate(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        outcome: HarnessOutcome,
+        handle: ActionsHandle,
+    ) -> None:
+        """Well-formed candidate → trusted publisher → Draft PR → waiting_ci.
+
+        The bundle crosses the SAME trusted boundary as the builtin path
+        (ADR-0016 §2): publication grant, spec digest, strict
+        materialization against the authoritative attempt-base contents
+        (via the repository reader), policy validation, then ONE branch-CAS
+        commit via :class:`GitHubPublishFlow`. From ``waiting_ci`` the
+        existing review → ready_for_human flow takes over, unchanged —
+        Actions checks on the head are the verification surface.
+        """
+        bundle = outcome.bundle
+        # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
+        # recorded as evidence only; the publication grant is gone. The run
+        # stays cancelled even if the harness could not be stopped.
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
+            plan_digest = run.plan_digest or ""
+            base_sha = run.base_sha or ""
+        if revoked:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled",
+                        "attempt_base": bundle.attempt_base_oid,
+                    }
+                },
+            )
+            logger.info(
+                "Run %s cancelled — Actions candidate on %s recorded as superseded",
+                run_id[:8],
+                bundle.attempt_base_oid[:8],
+            )
+            return
+
+        await self._transition(
+            run_id,
+            FlowStatus.COMMITTING,
+            reason=f"publishing Actions candidate on {bundle.attempt_base_oid[:8]}",
+        )
+
+        # Stage-B fence reused via a callable (ADR-0017): the publication is
+        # abandoned unless the run is still the COMMITTING run we just made
+        # it — a cancel or a state move between transition and write fences
+        # the publisher out.
+        async def _fence_valid() -> bool:
+            async with self._session_factory() as session:
+                run = await session.get(FlowRun, run_id)
+                if run is None:
+                    return False
+                if run.cancel_requested or run.status == FlowStatus.CANCELLED.value:
+                    return False
+                return run.status == FlowStatus.COMMITTING.value
+
+        # Authoritative full-content reads at the attempt base for the
+        # modify entries (no truncation); missing files are absent —
+        # validation reports create/update/delete existence against it.
+        base_contents: dict[str, str] = {}
+        try:
+            for path in dict.fromkeys(bundle.paths):
+                try:
+                    base_contents[path] = await self._stack.reader.read_text(
+                        path, ref=bundle.attempt_base_oid
+                    )
+                except Exception:
+                    continue
+            entries = bundle.materialize(base_contents)
+        except Exception as exc:
+            reason = getattr(exc, "reason", None) or "materialize_failed"
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"harness_candidate_invalid: {reason}: {exc}"
+            )
+            return
+
+        changeset = ChangeSet(
+            branch=github_factory_branch(issue_number, run_id),
+            commit_message=(f"forge: implement {issue_number or 0} (run {short_run_id(run_id)})"),
+            changes=[
+                Change(
+                    path=entry.path,
+                    operation=Operation.UPDATE
+                    if entry.operation == "modify"
+                    else Operation.CREATE
+                    if entry.operation == "create"
+                    else Operation.DELETE,
+                    content=entry.new_content,
+                )
+                for entry in entries
+            ],
+            attempt_base_oid=bundle.attempt_base_oid,
+        )
+        violations = validate_changeset(changeset, base_contents)
+        if violations:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
+            )
+            return
+
+        if not await _fence_valid():
+            logger.info("Run %s fenced out of the Actions publish — standing down", run_id[:8])
+            return
+
+        publish_outcome = await self._stack.flow.publish_changeset(
+            self._owner,
+            self._repo,
+            issue_number=issue_number,
+            run_id=run_id,
+            changeset=changeset,
+            base_branch=self._target_branch(),
+            expected_head=bundle.attempt_base_oid,
+        )
+        if not publish_outcome.ok:
+            reason = publish_outcome.reason or "publish_failed"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED if publish_outcome.drift else FlowStatus.FAILED,
+                reason,
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` could not publish: {reason}\n\n"
+                "*This is an automated message.*",
+                run_id,
+                "publish_failed",
+            )
+            return
+
+        commit_oid = publish_outcome.commit_oid or ""
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            # The publish leg walked COMMITTING (validation + CAS write
+            # happened inside the trusted boundary above) → ENSURING_DRAFT_MR.
+            await controller.transition(
+                run_id,
+                FlowStatus.ENSURING_DRAFT_MR,
+                reason=f"Draft PR #{publish_outcome.pr_number} on "
+                f"{(publish_outcome.expected_head_oid or '')[:8]}",
+            )
+            run = await session.get(FlowRun, run_id)
+            run.mr_iid = publish_outcome.pr_number
+            run.candidate_shas = list(run.candidate_shas or []) + [commit_oid]
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "published_candidate": {
+                        "sha": commit_oid,
+                        "base": publish_outcome.expected_head_oid,
+                        "branch": publish_outcome.branch,
+                        "pr_number": publish_outcome.pr_number,
+                        "pr_url": publish_outcome.pr_url,
+                        "harness_workflow": handle.workflow,
+                        "actions_run_id": handle.run_id or None,
+                    }
+                },
+            )
+            await session.commit()
+
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            self._evidence_comment(publish_outcome, plan_digest),
+            run_id,
+            "post_evidence_note",
+        )
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(
+                run_id,
+                FlowStatus.WAITING_CI,
+                reason=f"Draft PR #{publish_outcome.pr_number} for {commit_oid[:8]}",
+            )
+            await session.commit()
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
+            await session.commit()
+
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            pr_number=publish_outcome.pr_number,
             candidate_sha=commit_oid,
             base_sha=base_sha,
         )
@@ -752,15 +1188,45 @@ class GitHubRunService:
     def _target_branch(self) -> str:
         return str(getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
 
+    def _harness_workflow(self) -> str:
+        """The target repo's harness workflow filename, or "" for builtin.
+
+        ``FORGE_GITHUB_HARNESS_WORKFLOW`` (ADR-0020): set at onboarding to
+        the human-applied ``ci/templates/forge-harness.github.yml`` filename;
+        empty (default) keeps the builtin in-worker lane.
+        """
+        return str(getattr(self._settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or "").strip()
+
+    def _harness_driver(self) -> str:
+        """The harness driver id frozen into the RunSpec (multi-harness).
+
+        Follows the ``ci_harness[:<driver>]`` convention of
+        ``FORGE_IMPLEMENTER_BACKEND`` (ADR-0015); the bare value or empty
+        default selects ``claude-code``.
+        """
+        raw = str(getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "") or "").strip()
+        if raw.startswith("ci_harness:") and raw.partition(":")[2].strip():
+            return raw.partition(":")[2].strip()
+        return HARNESS_NAME
+
     def _policy_digest(self) -> str:
-        """ADR-0009 + ADR-0018 §1: bind the effective execution policy."""
+        """ADR-0009 + ADR-0018 §1: bind the effective execution policy.
+
+        The harness workflow filename is part of the policy (ADR-0020 §3): a
+        changed workflow invalidates approval like any other execution
+        profile change.
+        """
         document = {
             "approvers": self._approvers(),
             "target_branch": self._target_branch(),
             "required_jobs": self._required_jobs(),
-            "implementer_backend": "builtin",
+            "implementer_backend": "ci_harness" if self._harness_workflow() else "builtin",
             "harness_model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
         }
+        workflow = self._harness_workflow()
+        if workflow:
+            document["harness_workflow"] = workflow
+            document["harness_driver"] = self._harness_driver()
         return canonical_json_digest(document)
 
     def _build_run_spec_document(
@@ -772,7 +1238,22 @@ class GitHubRunService:
         plan_digest: str,
         task_digest: str,
     ) -> dict:
-        """The immutable RunSpec document frozen at plan acceptance (F14)."""
+        """The immutable RunSpec document frozen at plan acceptance (F14).
+
+        With the harness lane configured, backend_config carries the frozen
+        execution profile: backend ``ci_harness``, the harness workflow
+        filename and the driver — the dispatch inputs later come FROM this
+        document, so a spec change means a different harness run.
+        """
+        workflow = self._harness_workflow()
+        backend_config: dict = {
+            "backend": "ci_harness" if workflow else "builtin",
+            "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            "target_branch": self._target_branch(),
+        }
+        if workflow:
+            backend_config["harness_workflow"] = workflow
+            backend_config["driver"] = self._harness_driver()
         return {
             "subject": {
                 "provider": "github",
@@ -784,11 +1265,7 @@ class GitHubRunService:
             "plan_digest": plan_digest,
             "task_digest": task_digest,
             "policy_digest": self._policy_digest(),
-            "backend_config": {
-                "backend": "builtin",
-                "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
-                "target_branch": self._target_branch(),
-            },
+            "backend_config": backend_config,
             "budgets": {
                 "commit_cycles": int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
                 "harness_timeout": int(
@@ -1070,7 +1547,122 @@ def _admission_denied_comment(run_id: str, actor: str) -> str:
     )
 
 
+async def run_github_harness_reconciler(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    interval_seconds: float = 15,
+    shutdown_event: asyncio.Event | None = None,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """Periodic tick driving the Actions harness lane to convergence.
+
+    Plain asyncio task for ``asyncio.gather`` in the worker (same shape as
+    :func:`forge.runs.reconciler.run_reconciler`). Exits immediately when
+    the GitHub adapter is disabled or carries no credentials — a GitLab-only
+    deployment never pays for it.
+    """
+    if not bool(getattr(settings, "FORGE_GITHUB_ENABLED", False)):
+        return
+    try:
+        from forge.integrations.github_flow import credentials_from_settings
+
+        credentials_from_settings(settings)  # fail fast, before the loop
+    except ValueError:
+        logger.info("GitHub credentials not configured — harness reconciler not started")
+        return
+    if not str(getattr(settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or "").strip():
+        return
+
+    shutdown_event = shutdown_event or asyncio.Event()
+    logger.info("GitHub harness reconciler started (interval=%ss)", interval_seconds)
+    while not shutdown_event.is_set():
+        try:
+            await evaluate_github_waiting_harness(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            # A failed pass must never kill the reconciler task.
+            logger.exception("GitHub harness reconciler pass failed")
+
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
+            break  # Event set — clean shutdown.
+        except asyncio.TimeoutError:
+            pass  # Interval elapsed — next tick.
+    logger.info("GitHub harness reconciler stopped")
+
+
+async def evaluate_github_waiting_harness(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One worker-side reconciler pass over GitHub harness runs (E3b).
+
+    Groups the ``provider=github`` runs parked in ``waiting_harness`` by
+    repository and gives each repo's service one
+    :meth:`GitHubRunService.evaluate_waiting_harness` tick — the twin of the
+    GitLab ``RunService.evaluate_waiting_harness`` slot in
+    :func:`forge.runs.reconciler.run_reconciler`. Silent no-op when the
+    GitHub adapter is disabled or no harness lane is configured.
+    """
+    if not str(getattr(settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or "").strip():
+        return
+    repos = await _repos_with_waiting_harness(session_factory)
+    if not repos:
+        return
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+    for repo_full_name in repos:
+        owner, _, repo = repo_full_name.partition("/")
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service.evaluate_waiting_harness(now=now)
+        except Exception:
+            # One broken repo must not stall the reconciler pass.
+            logger.exception("GitHub harness reconcile failed for %s", repo_full_name)
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def _repos_with_waiting_harness(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct GitHub repos that hold a run parked in ``waiting_harness``."""
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(FlowRun.github_repo_full_name)
+                    .where(
+                        FlowRun.provider == "github",
+                        FlowRun.status == FlowStatus.WAITING_HARNESS.value,
+                        FlowRun.cancel_requested.is_(False),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [row for row in rows if row]
+
+
 __all__ = [
     "GitHubRunService",
     "execute_github_run_command",
+    "evaluate_github_waiting_harness",
+    "run_github_harness_reconciler",
 ]

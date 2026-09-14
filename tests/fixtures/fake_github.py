@@ -4,12 +4,18 @@ No network, no live services: every method mirrors the PARSED semantics of
 :class:`forge.integrations.github.GitHubClient` (the same level the flow
 consumes), including the branch-wide CAS of ``create_commit_on_branch`` —
 a moved head surfaces as :class:`GitHubStaleBranchError`, never as a silent
-overwrite — and the base64 blob handling of the contents API.
+overwrite — and the base64 blob handling of the contents API. The Actions
+surface (E3b) mirrors the parsed shapes of the workflow-run / artifact
+endpoints, including the 2026 dispatch run-id response and the legacy
+empty-202 fallback.
 """
 
 from __future__ import annotations
 
 import base64
+import io
+import json
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
@@ -35,9 +41,21 @@ class FakeGitHub:
         self.check_runs: dict[str, list[dict]] = {}
         # list of workflow-run dicts (head_sha / name keyed filtering)
         self.workflow_runs: list[dict] = []
+        # Actions state (E3b): dispatch mode ("run_id" | "legacy"),
+        # workflow-run dicts, per-run artifacts, per-job logs, cancellations
+        self.dispatch_mode: str = "run_id"
+        self.dispatch_inputs: list[dict] = []
+        self.actions_runs: list[dict] = []
+        self.actions_artifacts: dict[int, list[dict]] = {}
+        self.artifact_zips: dict[int, bytes] = {}
+        self.job_logs: dict[int, str] = {}
+        self.actions_jobs: dict[int, list[dict]] = {}
+        self.cancelled_runs: list[int] = []
         self.calls: list[tuple[str, tuple]] = []
         self._next_number = 100
         self._next_oid = 1
+        self._next_actions_run = 500
+        self._next_artifact = 900
 
     # -- ids ----------------------------------------------------------------
 
@@ -237,6 +255,11 @@ class FakeGitHub:
             }
         )
 
+    async def read_text(self, file_path: str, ref: str = "HEAD") -> str:
+        """Duck-typed :meth:`GitHubRepositoryReader.read_text`."""
+        repo_file = await self.get_file(0, file_path, ref)
+        return base64.b64decode(repo_file.content).decode("utf-8")
+
     async def get_tree(
         self,
         project_id: int,
@@ -261,6 +284,159 @@ class FakeGitHub:
                 )
             )
         return entries
+
+    # -- Actions: the E3b execution surface -----------------------------------
+    #
+    # Mirrors the PARSED semantics of the new client methods: the 2026
+    # dispatch response carries the run id (dispatch_mode="run_id"), the
+    # legacy one answers empty (dispatch_mode="legacy") and the run is only
+    # discoverable via the workflow_dispatch runs listing.
+
+    def seed_actions_run(
+        self,
+        *,
+        run_id: int,
+        head_branch: str,
+        head_sha: str,
+        status: str = "completed",
+        conclusion: str | None = None,
+        event: str = "workflow_dispatch",
+        created_at: datetime | None = None,
+        workflow_name: str = "forge-harness",
+    ) -> dict:
+        run = {
+            "id": run_id,
+            "name": workflow_name,
+            "event": event,
+            "status": status,
+            "conclusion": conclusion,
+            "head_branch": head_branch,
+            "head_sha": head_sha,
+            "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
+        }
+        self.actions_runs.append(run)
+        return dict(run)
+
+    def seed_actions_artifact(self, run_id: int, name: str, files: dict[str, bytes]) -> dict:
+        """Upload an artifact: a real in-memory zip (download returns bytes)."""
+        self._next_artifact += 1
+        artifact_id = self._next_artifact
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for path, payload in files.items():
+                archive.writestr(path, payload)
+        self.artifact_zips[artifact_id] = buffer.getvalue()
+        artifact = {"id": artifact_id, "name": name, "run_id": run_id}
+        self.actions_artifacts.setdefault(run_id, []).append(artifact)
+        return dict(artifact)
+
+    def seed_candidate_artifact(
+        self,
+        run_id: int,
+        *,
+        name: str,
+        diff_text: str,
+        meta: dict,
+    ) -> dict:
+        """The candidate contract zip: candidate.diff + candidate.meta.json."""
+        return self.seed_actions_artifact(
+            run_id,
+            name,
+            {
+                "forge/candidate.diff": diff_text.encode("utf-8"),
+                "forge/candidate.meta.json": json.dumps(meta).encode("utf-8"),
+            },
+        )
+
+    def seed_job_log(self, job_id: int, log: str) -> None:
+        self.job_logs[job_id] = log
+
+    def seed_actions_jobs(self, run_id: int, jobs: list[dict]) -> None:
+        self.actions_jobs[run_id] = [dict(job) for job in jobs]
+
+    async def dispatch_workflow(
+        self,
+        owner: str,
+        repo: str,
+        workflow_filename: str,
+        ref: str,
+        inputs: dict[str, str] | None = None,
+    ) -> dict:
+        self.calls.append(("dispatch_workflow", (owner, repo, workflow_filename, ref)))
+        self.dispatch_inputs.append(
+            {"workflow": workflow_filename, "ref": ref, "inputs": dict(inputs or {})}
+        )
+        if self.dispatch_mode == "legacy":
+            return {}  # legacy empty 202 — discovery must find the run
+        self._next_actions_run += 1
+        run_id = self._next_actions_run
+        self.seed_actions_run(
+            run_id=run_id,
+            head_branch=ref,
+            head_sha=str((inputs or {}).get("attempt_base_oid") or ""),
+            status="queued",
+            conclusion=None,
+        )
+        return {"run_id": run_id}
+
+    async def list_workflow_dispatch_runs(
+        self,
+        owner: str,
+        repo: str,
+        workflow_filename: str,
+        *,
+        head_branch: str | None = None,
+        head_sha: str | None = None,
+        created_after: datetime | None = None,
+    ) -> list[dict]:
+        self.calls.append(
+            ("list_workflow_dispatch_runs", (owner, repo, workflow_filename, head_branch))
+        )
+        found = [
+            run
+            for run in self.actions_runs
+            if run["event"] == "workflow_dispatch"
+            and (head_branch is None or run["head_branch"] == head_branch)
+            and (head_sha is None or run["head_sha"] == head_sha)
+            and (
+                created_after is None or datetime.fromisoformat(run["created_at"]) >= created_after
+            )
+        ]
+        # newest first (the API's default ordering)
+        found.sort(key=lambda run: run["created_at"], reverse=True)
+        return [dict(run) for run in found]
+
+    async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict:
+        self.calls.append(("get_workflow_run", (owner, repo, run_id)))
+        for run in self.actions_runs:
+            if run["id"] == run_id:
+                return dict(run)
+        raise GitHubAPIError(404, f"workflow run {run_id} not found")
+
+    async def get_workflow_run_jobs(self, owner: str, repo: str, run_id: int) -> list[dict]:
+        self.calls.append(("get_workflow_run_jobs", (owner, repo, run_id)))
+        return [dict(job) for job in self.actions_jobs.get(run_id, [])]
+
+    async def list_workflow_run_artifacts(self, owner: str, repo: str, run_id: int) -> list[dict]:
+        self.calls.append(("list_workflow_run_artifacts", (owner, repo, run_id)))
+        return [dict(a) for a in self.actions_artifacts.get(run_id, [])]
+
+    async def download_artifact_zip(self, owner: str, repo: str, artifact_id: int) -> bytes:
+        self.calls.append(("download_artifact_zip", (owner, repo, artifact_id)))
+        payload = self.artifact_zips.get(artifact_id)
+        if payload is None:
+            raise GitHubAPIError(404, f"artifact {artifact_id} not found")
+        return payload
+
+    async def get_job_log(self, owner: str, repo: str, job_id: int) -> str:
+        self.calls.append(("get_job_log", (owner, repo, job_id)))
+        return self.job_logs.get(job_id, "")
+
+    async def cancel_workflow_run(self, owner: str, repo: str, run_id: int) -> None:
+        self.calls.append(("cancel_workflow_run", (owner, repo, run_id)))
+        if run_id in {run["id"] for run in self.actions_runs if run["status"] == "completed"}:
+            raise GitHubAPIError(409, "cannot cancel a completed run")
+        self.cancelled_runs.append(run_id)
 
     # -- helpers ------------------------------------------------------------------------
 

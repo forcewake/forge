@@ -22,6 +22,12 @@ Event routing for this slice:
   SAME durable step path as GitLab commands (inbox row + scheduled step in
   one transaction). The EventInbox identity is connection-scoped:
   ``github:{installation_id}:{repo_full_name}`` + event + comment id.
+- ``issues`` ``labeled`` → when the label name matches
+  ``FORGE_TRIGGER_LABEL`` (default ``forge``, case-insensitive) the SAME
+  run command is normalized (``start_run``) with the labeler as the actor
+  (ADR-0020 §4: the honest agent-UX fallback — a label trigger, not a
+  partner-program listing). Admission still applies downstream: only
+  FORGE_APPROVERS logins actually start runs.
 - ``installation`` ``deleted``/``removed`` → the connection is disabled:
   logged and persisted as an inbox row (reconciliation hooks come with the
   v0.5 contracts extraction).
@@ -142,6 +148,43 @@ def normalize_issue_comment(
     }
 
 
+def normalize_labeled_event(
+    payload: dict[str, Any],
+    trigger_label: str = "forge",
+) -> dict[str, Any] | None:
+    """Normalize an ``issues.labeled`` payload into run-command metadata.
+
+    Fires only when the applied label matches *trigger_label*
+    case-insensitively (ADR-0020 §4). The labeler (``sender.login``) becomes
+    the acting user — the run then crosses the SAME admission gate as a
+    /implement, so a non-approver's label starts nothing. Any other label
+    (or an unlabeled issue payload) returns None → inbox-only recording.
+    """
+    issue = payload.get("issue") or {}
+    label = payload.get("label") or {}
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+
+    name = str(label.get("name") or "").strip().lower()
+    if not trigger_label or name != trigger_label.strip().lower():
+        return None
+
+    return {
+        "command": "start_run",
+        "provider": "github",
+        "connection_id": github_connection_id(
+            installation.get("id"), str(repository.get("full_name") or "")
+        ),
+        "project_id": int(repository.get("id") or 0),
+        "repo_full_name": str(repository.get("full_name") or ""),
+        "issue_number": int(issue.get("number") or 0),
+        "issue_is_pr": "pull_request" in issue,
+        "author_username": str((payload.get("sender") or {}).get("login") or ""),
+        "note_text": "",
+        "note_id": label.get("id"),
+    }
+
+
 @github_router.post("/webhook/github")
 async def github_webhook(
     request: Request,
@@ -225,6 +268,28 @@ async def _ingest_github_event(
             request, background_tasks, run_command, source_event_id
         )
 
+    if event == "issues" and action == "labeled":
+        sender = payload.get("sender") or {}
+        author = str(sender.get("login") or "")
+        if author and author == settings.FORGE_BOT_USERNAME:
+            # Forge never labels issues, but the guard stays symmetric with
+            # the comment path (bot-loop safety by construction).
+            logger.info("Skipping bot-authored GitHub label event", extra={"event": event})
+            return {"status": "skipped", "reason": "bot-loop"}
+        run_command = normalize_labeled_event(
+            payload, trigger_label=getattr(settings, "FORGE_TRIGGER_LABEL", "forge")
+        )
+        if run_command is None:
+            return _record_inbox_only(
+                request, background_tasks, event, delivery, connection_id, project_id, payload
+            )
+        source_event_id = github_source_event_id(
+            connection_id, event, action, f"label:{run_command['note_id']}"
+        )
+        return await _ingest_github_run_command(
+            request, background_tasks, run_command, source_event_id, event=event
+        )
+
     if event == "installation" and action in _INSTALLATION_REMOVED_ACTIONS:
         # Connection disabled: log loudly and persist the fact; reconciliation
         # hooks (pause runs, drain steps) come with the v0.5 contracts work.
@@ -303,6 +368,8 @@ async def _ingest_github_run_command(
     background_tasks: BackgroundTasks,
     run_command: dict[str, Any],
     source_event_id: str,
+    *,
+    event: str = "issue_comment",
 ) -> Any:
     """Transactional ingress for GitHub run commands (ADR-0017 §1 semantics).
 
@@ -320,7 +387,7 @@ async def _ingest_github_run_command(
         if await queue.is_duplicate(f"run:{run_command['connection_id']}:{note_id}"):
             return JSONResponse(
                 status_code=202,
-                content={"status": "accepted", "event": "issue_comment", "deduplicated": True},
+                content={"status": "accepted", "event": event, "deduplicated": True},
             )
 
     if session_factory is not None:
@@ -345,7 +412,7 @@ async def _ingest_github_run_command(
         if deduplicated:
             return JSONResponse(
                 status_code=202,
-                content={"status": "accepted", "event": "issue_comment", "deduplicated": True},
+                content={"status": "accepted", "event": event, "deduplicated": True},
             )
 
     if queue is not None:
@@ -368,7 +435,7 @@ async def _ingest_github_run_command(
             status_code=202,
             content={
                 "status": "accepted",
-                "event": "issue_comment",
+                "event": event,
                 "queued": True,
                 "run_command": True,
             },
@@ -390,7 +457,7 @@ async def _ingest_github_run_command(
         )
         return JSONResponse(
             status_code=202,
-            content={"status": "accepted", "event": "issue_comment", "run_command": True},
+            content={"status": "accepted", "event": event, "run_command": True},
         )
 
-    return JSONResponse(status_code=202, content={"status": "accepted", "event": "issue_comment"})
+    return JSONResponse(status_code=202, content={"status": "accepted", "event": event})

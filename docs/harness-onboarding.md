@@ -116,6 +116,48 @@ repair with bounded LLM cycles; harness runs block instead).
 | `ci/templates/opencode.gitlab-ci.yml` | opencode | OpenAI-compatible (`/chat/completions`) | validated live on GLM via z.ai coding endpoint; tool loops complete in tens of seconds |
 | `ci/templates/claude-code.gitlab-ci.yml` | claude code | Anthropic-compatible (`/v1/messages`) | validated for short prompts; long streaming turns can hit connection resets on some networks — stream-json events land in the trace for diagnosis |
 
+## GitHub Actions harness (E3b, ADR-0020)
+
+A GitHub repo can run the same proposal-only lane in its own Actions
+runner. The lane has **no write token and no forge secret**: its only
+output is the candidate artifact (`.forge/candidate.diff` +
+`.forge/candidate.meta.json`, uploaded as
+`forge-candidate-<run-id>`), which forge downloads and pushes through the
+same trusted publisher as the GitLab path (branch-CAS commit → Draft PR).
+
+One-time, human-applied:
+
+1. Copy `ci/templates/forge-harness.github.yml` into the target repo at
+   `.github/workflows/forge-harness.github.yml`.
+2. **Replace `<PINNED_REF>`** in the "Run harness driver" step with the
+   forge ref the deployment pins to (a tag or commit SHA — never a moving
+   branch): the lane installs forge from that ref and runs
+   `python -m forge.harness_entry`, so the pin decides which driver
+   contract the lane speaks. A changed workflow file invalidates pending
+   approvals (the filename is part of the frozen RunSpec).
+3. Add the harness provider keys as repo **Actions secrets** (per driver:
+   `ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `XAI_API_KEY`) — never forge's
+   publisher credentials.
+
+Forge-side configuration:
+
+```bash
+FORGE_GITHUB_HARNESS_WORKFLOW=forge-harness.github.yml  # empty = builtin in-worker
+FORGE_HARNESS_MODEL=glm-5.3-flash[1m]
+FORGE_HARNESS_TIMEOUT_SECONDS=1800
+```
+
+With the workflow set, an approved `/go` dispatches `workflow_dispatch`
+with `run_id` / `attempt_base_oid` / `driver` / `model` on the factory
+branch (`forge/<issue>/<run-id>`), parks the run in `waiting_harness`, and
+the reconciler collects the candidate when the run completes — then walks
+waiting_ci → review → `ready_for_human` exactly like the GitLab lane.
+Actions checks on the head are the verification surface. Agents can also be
+pointed at an issue with a label instead of a comment:
+`issues.labeled` with the `FORGE_TRIGGER_LABEL` label (default `forge`,
+case-insensitive) starts the same run command — the labeler must be in
+`FORGE_APPROVERS`, or admission denies the run.
+
 ## Monitoring and triage
 
 **Primary window — the job trace, live.** The harness runs claude with

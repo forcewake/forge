@@ -541,6 +541,156 @@ async def test_list_workflow_runs_for_sha_filters_by_name(
 
 
 # ---------------------------------------------------------------------------
+# Actions endpoints (E3b, ADR-0020) — docs/research/github-actions-executor.md
+# ---------------------------------------------------------------------------
+
+
+class TestActionsEndpoints:
+    async def test_dispatch_parses_the_2026_run_id_response(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/workflows/forge-harness.github.yml/dispatches",
+            method="POST",
+            status_code=202,
+            json={"run_id": 501},
+        )
+
+        response = await github.dispatch_workflow(
+            "acme",
+            "widget",
+            "forge-harness.github.yml",
+            "forge/42/abcd1234",
+            {"run_id": "abc", "attempt_base_oid": TEST_HEAD, "driver": "claude-code"},
+        )
+
+        assert response == {"run_id": 501}
+        (request,) = [
+            r
+            for r in httpx_mock.get_requests()
+            if r.method == "POST" and "dispatches" in str(r.url)
+        ]
+        body = json.loads(request.content)
+        assert body == {
+            "ref": "forge/42/abcd1234",
+            "inputs": {"run_id": "abc", "attempt_base_oid": TEST_HEAD, "driver": "claude-code"},
+        }
+
+    async def test_dispatch_legacy_empty_body_returns_empty_dict(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/workflows/harness.yml/dispatches",
+            method="POST",
+            status_code=202,
+        )  # no body
+
+        response = await github.dispatch_workflow("acme", "widget", "harness.yml", "main")
+
+        assert response == {}  # discovery is the caller's job
+
+    async def test_dispatch_is_never_retried(self, httpx_mock: HTTPXMock, github: GitHubClient):
+        url = f"{BASE}/repos/acme/widget/actions/workflows/harness.yml/dispatches"
+        httpx_mock.add_response(url=url, method="POST", status_code=500)
+
+        with pytest.raises(GitHubAPIError):
+            await github.dispatch_workflow("acme", "widget", "harness.yml", "main")
+
+        # Non-idempotent: a replay would start a SECOND harness run.
+        assert len([r for r in httpx_mock.get_requests() if str(r.url) == url]) == 1
+
+    async def test_list_workflow_dispatch_runs_filters_and_windows(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        url = (
+            f"{BASE}/repos/acme/widget/actions/workflows/forge-harness.github.yml/runs"
+            f"?event=workflow_dispatch&per_page=100&head_sha={TEST_HEAD}&head_branch=forge%2F42%2Fabcd1234"
+        )
+        httpx_mock.add_response(
+            url=url,
+            json={
+                "workflow_runs": [
+                    {"id": 2, "created_at": "2026-09-14T12:00:00Z", "head_sha": TEST_HEAD},
+                    {"id": 1, "created_at": "2026-09-14T11:00:00Z", "head_sha": TEST_HEAD},
+                ]
+            },
+        )
+
+        runs = await github.list_workflow_dispatch_runs(
+            "acme",
+            "widget",
+            "forge-harness.github.yml",
+            head_branch="forge/42/abcd1234",
+            head_sha=TEST_HEAD,
+            created_after=datetime(2026, 9, 14, 11, 30, tzinfo=timezone.utc),
+        )
+
+        assert [run["id"] for run in runs] == [2]  # window filtered, newest first
+
+    async def test_download_artifact_zip_follows_the_302(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        signed = "https://objects.github.test/artifact.zip?sig=abc"
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/artifacts/900/zip",
+            status_code=302,
+            headers={"location": signed},
+        )
+        httpx_mock.add_response(url=signed, content=b"PK-zip-bytes")
+
+        payload = await github.download_artifact_zip("acme", "widget", 900)
+
+        assert payload == b"PK-zip-bytes"
+
+    async def test_get_workflow_run_and_jobs_and_artifacts(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/runs/501",
+            json={"id": 501, "status": "completed", "conclusion": "success"},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/runs/501/jobs?per_page=100",
+            json={"jobs": [{"id": 9, "name": "harness", "conclusion": "success"}]},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/runs/501/artifacts?per_page=100",
+            json={"artifacts": [{"id": 900, "name": "forge-candidate-abc"}]},
+        )
+
+        run = await github.get_workflow_run("acme", "widget", 501)
+        jobs = await github.get_workflow_run_jobs("acme", "widget", 501)
+        artifacts = await github.list_workflow_run_artifacts("acme", "widget", 501)
+
+        assert run["conclusion"] == "success"
+        assert jobs[0]["id"] == 9
+        assert artifacts[0]["name"] == "forge-candidate-abc"
+
+    async def test_cancel_workflow_run_posts_once(
+        self, httpx_mock: HTTPXMock, github: GitHubClient
+    ):
+        url = f"{BASE}/repos/acme/widget/actions/runs/501/cancel"
+        httpx_mock.add_response(url=url, method="POST", status_code=202)
+
+        await github.cancel_workflow_run("acme", "widget", 501)
+
+        assert len([r for r in httpx_mock.get_requests() if str(r.url) == url]) == 1
+
+    async def test_get_job_log_follows_the_302(self, httpx_mock: HTTPXMock, github: GitHubClient):
+        signed = "https://productionresultssa.github.test/logs/9"
+        httpx_mock.add_response(
+            url=f"{BASE}/repos/acme/widget/actions/jobs/9/logs",
+            status_code=302,
+            headers={"location": signed},
+        )
+        httpx_mock.add_response(url=signed, text="2026-09-14T12:00:00Z claude: done\n")
+
+        log = await github.get_job_log("acme", "widget", 9)
+
+        assert "claude: done" in log
+
+
+# ---------------------------------------------------------------------------
 # Repository reader: AuthoritativeReader semantics
 # ---------------------------------------------------------------------------
 

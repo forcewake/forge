@@ -273,6 +273,16 @@ def _parse_expires_at(value: str) -> datetime:
     return parsed
 
 
+def _parse_maybe_datetime(value: Any) -> datetime | None:
+    """Parse GitHub's ISO-8601 timestamps defensively (None when absent/garbage)."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return _parse_expires_at(value)
+    except ValueError:
+        return None
+
+
 class GitHubClient:
     """Async client for the GitHub REST + GraphQL APIs (ADR-0019 slice)."""
 
@@ -311,6 +321,7 @@ class GitHubClient:
         json: Any = None,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool = False,
     ) -> httpx.Response:
         """Request with GitLab-transport retry semantics plus 401 re-auth.
 
@@ -333,7 +344,12 @@ class GitHubClient:
                 **(headers or {}),
             }
             response = await self._client.request(
-                method, path, json=json, params=params, headers=request_headers
+                method,
+                path,
+                json=json,
+                params=params,
+                headers=request_headers,
+                follow_redirects=follow_redirects,
             )
             if response.status_code == 401 and not reauth_used:
                 logger.info("401 from %s %s — re-minting installation token", method, path)
@@ -374,11 +390,19 @@ class GitHubClient:
         """POST with explicit retry semantics (non-idempotent writes pass False)."""
         return await self._request("POST", path, retry=retry, **kwargs)
 
-    async def _paginated(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
+    async def _paginated(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        envelope: str | None = None,
+    ) -> list[Any]:
         """Follow GitHub's Link-header pagination (research §9.1).
 
         Iterate until no ``rel="next"`` — never compute totals from item
-        counts, ``rel="last"`` may be absent.
+        counts, ``rel="last"`` may be absent. *envelope* names the array
+        inside an object response (the Actions list endpoints wrap their
+        items, e.g. ``workflow_runs``); a bare list response ignores it.
         """
         params = dict(params or {})
         params.setdefault("per_page", _PER_PAGE)
@@ -386,6 +410,8 @@ class GitHubClient:
         for _ in range(_MAX_PAGES):
             response = await self._get(path, params=params)
             data = response.json()
+            if envelope is not None and isinstance(data, dict):
+                data = data.get(envelope) or []
             if isinstance(data, list):
                 results.extend(data)
             else:
@@ -631,6 +657,151 @@ class GitHubClient:
         if workflow_name is None:
             return runs
         return [run for run in runs if run.get("name") == workflow_name]
+
+    # -- REST: Actions (the E3b execution adapter, ADR-0020) ----------------------
+    #
+    # Ground truth: docs/research/github-actions-executor.md (tagged there).
+
+    async def dispatch_workflow(
+        self,
+        owner: str,
+        repo: str,
+        workflow_filename: str,
+        ref: str,
+        inputs: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Trigger ``workflow_dispatch`` on *workflow_filename* at *ref*.
+
+        The workflow file must declare ``on: workflow_dispatch`` **on that
+        ref** (research §1); ``actions:write`` is required. Non-idempotent —
+        a lost response must be reconciled by discovery, never replayed (a
+        replay would start a second harness run).
+
+        Since 2026-02-19 the response carries the run id
+        (research §1, github.blog changelog) — parsed here as ``run_id``
+        (falling back to ``id``) when the body provides one. Legacy/GHES
+        answers with an EMPTY body: the caller discovers the run via
+        :meth:`list_workflow_dispatch_runs`. Returns ``{}`` in that case.
+        """
+        encoded = quote(workflow_filename, safe="")
+        response = await self._post(
+            f"/repos/{owner}/{repo}/actions/workflows/{encoded}/dispatches",
+            retry=False,
+            json={"ref": ref, "inputs": dict(inputs or {})},
+        )
+        try:
+            data = response.json()
+        except Exception:
+            return {}  # legacy empty 202 — discovery is the caller's job
+        if not isinstance(data, dict):
+            return {}
+        run_id = data.get("run_id", data.get("id"))
+        if run_id is None:
+            return {}
+        return {"run_id": int(run_id)}
+
+    async def list_workflow_dispatch_runs(
+        self,
+        owner: str,
+        repo: str,
+        workflow_filename: str,
+        *,
+        head_branch: str | None = None,
+        head_sha: str | None = None,
+        created_after: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """The workflow's ``workflow_dispatch`` runs, newest first.
+
+        The legacy-dispatch correlation primitive (research §1): filter by
+        ``event=workflow_dispatch`` server-side, narrow by ``head_sha`` /
+        ``head_branch`` natively, and enforce the created window client-side
+        (``created_after`` — ordering alone is never trusted, ADR-0020 §1).
+        The runs list endpoint returns newest first by default.
+        """
+        encoded = quote(workflow_filename, safe="")
+        params: dict[str, Any] = {"event": "workflow_dispatch", "per_page": _PER_PAGE}
+        if head_sha is not None:
+            params["head_sha"] = head_sha
+        if head_branch is not None:
+            params["head_branch"] = head_branch
+        runs = [
+            dict(run)
+            for run in await self._paginated(
+                f"/repos/{owner}/{repo}/actions/workflows/{encoded}/runs",
+                params,
+                envelope="workflow_runs",
+            )
+        ]
+        if created_after is None:
+            return runs
+        window = []
+        for run in runs:
+            created = _parse_maybe_datetime(run.get("created_at"))
+            if created is None or created >= created_after:
+                window.append(run)
+        return window
+
+    async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
+        """One Actions workflow run (status / conclusion / head_sha)."""
+        response = await self._get(f"/repos/{owner}/{repo}/actions/runs/{run_id}")
+        return dict(response.json())
+
+    async def get_workflow_run_jobs(
+        self, owner: str, repo: str, run_id: int
+    ) -> list[dict[str, Any]]:
+        """The jobs of run *run_id* (ids + statuses + conclusions, paginated)."""
+        return [
+            dict(job)
+            for job in await self._paginated(
+                f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", envelope="jobs"
+            )
+        ]
+
+    async def list_workflow_run_artifacts(
+        self, owner: str, repo: str, run_id: int
+    ) -> list[dict[str, Any]]:
+        """Artifacts uploaded by run *run_id* (artifacts v4, research §2)."""
+        return [
+            dict(artifact)
+            for artifact in await self._paginated(
+                f"/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts", envelope="artifacts"
+            )
+        ]
+
+    async def download_artifact_zip(self, owner: str, repo: str, artifact_id: int) -> bytes:
+        """Download one artifact archive (raw bytes, research §2).
+
+        The endpoint answers ``302`` to a short-lived signed URL on a
+        separate host — followed here explicitly (per-request, so the rest
+        of the client keeps its strict no-redirect posture). Any token with
+        ``actions:read`` works, including cross-run downloads (v4 removed
+        the same-run limit of v3).
+        """
+        response = await self._get(
+            f"/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip",
+            follow_redirects=True,
+        )
+        return response.content
+
+    async def get_job_log(self, owner: str, repo: str, job_id: int) -> str:
+        """The raw log text of job *job_id* (``302`` → plain text, followed)."""
+        response = await self._get(
+            f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+            follow_redirects=True,
+        )
+        return response.text
+
+    async def cancel_workflow_run(self, owner: str, repo: str, run_id: int) -> None:
+        """Request cancellation of run *run_id* (research §4).
+
+        Non-idempotent: fired once. A 409 (already finished) / 404 (never
+        started) propagates as :class:`GitHubAPIError` — the caller decides
+        whether that matters (a finished run has nothing left to cancel).
+        """
+        await self._post(
+            f"/repos/{owner}/{repo}/actions/runs/{run_id}/cancel",
+            retry=False,
+        )
 
     # -- REST: raw content primitives (the reader builds on these) ------------------
 

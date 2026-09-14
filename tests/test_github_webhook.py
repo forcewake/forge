@@ -312,3 +312,104 @@ class TestSignatureUnit:
         assert not verify_github_signature("s3cret", body, sign(body, "other"))
         # Legacy sha1 headers are not accepted (research §2.1).
         assert not verify_github_signature("s3cret", body, "sha1=abcdef")
+
+
+class TestLabeledTrigger:
+    """ADR-0020 §4: issues.labeled with the reserved label → run command."""
+
+    def normalize(self, payload: dict, trigger: str = "forge") -> dict | None:
+        from forge.gateway.github_webhook import normalize_labeled_event
+
+        return normalize_labeled_event(payload, trigger_label=trigger)
+
+    def labeled_payload(self, *, label: str = "Forge", sender: str = "alice") -> dict:
+        payload = json.loads(load_payload("issues_labeled.json"))
+        payload["label"]["name"] = label
+        payload["sender"]["login"] = sender
+        return payload
+
+    async def test_matching_label_normalizes_to_start_run(self):
+        metadata = self.normalize(self.labeled_payload())
+
+        assert metadata is not None
+        assert metadata["command"] == "start_run"
+        assert metadata["provider"] == "github"
+        assert metadata["repo_full_name"] == "acme/acme-widget"
+        assert metadata["project_id"] == 70010
+        assert metadata["issue_number"] == 42
+        assert metadata["issue_is_pr"] is False
+        assert metadata["author_username"] == "alice"  # the labeler is the actor
+        assert metadata["note_id"] == 88100  # the label id keys dedupe
+
+    async def test_label_match_is_case_insensitive(self):
+        assert self.normalize(self.labeled_payload(label="FORGE")) is not None
+        assert self.normalize(self.labeled_payload(label="forge")) is not None
+
+    async def test_other_labels_are_ignored(self):
+        assert self.normalize(self.labeled_payload(label="bug")) is None
+        assert self.normalize(self.labeled_payload(label="forge-it")) is None  # no prefix match
+
+    async def test_trigger_label_is_configurable(self):
+        assert self.normalize(self.labeled_payload(label="forge"), trigger="run-forge") is None
+        assert (
+            self.normalize(self.labeled_payload(label="Run-Forge"), trigger="run-forge") is not None
+        )
+
+    async def test_pr_labeling_is_flagged(self):
+        payload = self.labeled_payload()
+        payload["issue"]["pull_request"] = {"url": "https://github.test/x"}
+        assert self.normalize(payload)["issue_is_pr"] is True
+
+    async def test_labeled_delivery_ingests_a_durable_run_command(self, tmp_path):
+        """Full ingress: inbox row + scheduled step in ONE transaction, keyed
+        by the label id — the same durable path an /implement comment takes."""
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = load_payload("issues_labeled.json")
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    response = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert response.status_code == 202
+                assert response.json()["run_command"] is True
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert len(inbox) == 1 and len(steps) == 1
+                assert inbox[0].payload["command"] == "start_run"
+                assert inbox[0].payload["author_username"] == "alice"
+                assert steps[0].status == "scheduled"
+                (task,) = application.state.task_queue.submit.await_args[0]
+                assert task.task_type == "run_command"
+        finally:
+            reset_engine()
+
+    async def test_non_matching_label_delivery_is_recorded_inbox_only(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    payload = self.labeled_payload(label="bug")
+                    body = json.dumps(payload).encode()
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    response = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert response.json()["recorded"] is True
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert len(inbox) == 1 and inbox[0].event_type == "github:issues"
+                assert steps == []  # no run for an unrelated label
+        finally:
+            reset_engine()

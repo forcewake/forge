@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None
 
+    # Stage E3b (ADR-0020): the harness workflow filename human-applied to
+    # the TARGET repo (e.g. "forge-harness.github.yml"). Empty (default) →
+    # builtin in-worker execution as before. When set, an approved /go
+    # dispatches the Actions harness instead of running the builtin
+    # proposer; the candidate returns as an Actions artifact for the same
+    # trusted publisher.
+    FORGE_GITHUB_HARNESS_WORKFLOW: str = ""
+
+    # ADR-0020 §4 label trigger: an ``issues.labeled`` delivery whose label
+    # name matches (case-insensitive) starts the same run command as
+    # /implement — the actor is the labeler, so admission still applies.
+    FORGE_TRIGGER_LABEL: str = "forge"
+
 
 class ForgeConfig:
     """Optional YAML-based configuration loaded from forge.yml.
