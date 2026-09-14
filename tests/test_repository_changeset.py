@@ -166,3 +166,48 @@ class TestStructuralRules:
         )
         violations = validate_changeset(cs)
         assert len(violations) >= 3  # message + denylist + traversal + missing content
+
+
+class TestPathScope:
+    """Monorepo path scoping (v0.7, complex-projects.md §1): allowed_paths."""
+
+    def test_in_scope_change_passes(self):
+        violations = validate_changeset(
+            _cs(_create("services/api/handler.py")), allowed_paths=["services/**"]
+        )
+        assert violations == []
+
+    def test_out_of_scope_change_rejected_with_reason(self):
+        violations = validate_changeset(
+            _cs(_create("webapp/ui/button.tsx")), allowed_paths=["services/**"]
+        )
+        assert len(violations) == 1
+        assert "outside the allowed scope" in violations[0]
+        assert "services/**" in violations[0]
+        assert "webapp/ui/button.tsx" in violations[0]
+
+    def test_scope_covers_nested_files(self):
+        # fnmatch semantics: `*` spans `/`, so a dir glob covers the subtree.
+        violations = validate_changeset(
+            _cs(_create("services/api/v1/deep/file.py")), allowed_paths=["services/api/*"]
+        )
+        assert violations == []
+
+    def test_every_change_must_be_in_scope(self):
+        cs = _cs(_create("services/a.py"), _create("services/b.py"), _create("other/c.py"))
+        violations = validate_changeset(cs, allowed_paths=["services/**"])
+        assert len(violations) == 1
+        assert "other/c.py" in violations[0]
+
+    def test_unscoped_changesets_are_unchanged(self):
+        # None (legacy callers) and [] both mean "the whole repo is in scope".
+        cs = _cs(_create("anything/anywhere.py"))
+        assert validate_changeset(cs, allowed_paths=None) == []
+        assert validate_changeset(cs, allowed_paths=[]) == []
+
+    def test_scope_composes_with_the_denylist(self):
+        # In-scope does not mean allowed: the global denylist still wins.
+        violations = validate_changeset(
+            _cs(_create("services/package-lock.json")), allowed_paths=["services/**"]
+        )
+        assert any("lockfiles are denylisted" in v for v in violations)

@@ -327,6 +327,19 @@ class FakeGitLab:
             raise GitLabAPIError(404, "mr not found")
         return MergeRequest.model_validate(self.merge_requests[mr_iid])
 
+    async def list_merge_requests(
+        self,
+        project_id: int,
+        state: str = "opened",
+        per_page: int = 20,
+    ) -> list[MergeRequest]:
+        self.calls.append(("list_merge_requests", (project_id, state, per_page)))
+        return [
+            MergeRequest.model_validate(mr)
+            for mr in self.merge_requests.values()
+            if mr.get("state", "opened") == state
+        ][:per_page]
+
     async def create_mr_note(self, project_id: int, mr_iid: int, body: str) -> Note:
         self.calls.append(("create_mr_note", (project_id, mr_iid, body)))
         if mr_iid not in self.merge_requests:

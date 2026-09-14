@@ -75,6 +75,7 @@ from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
+from forge.orchestrator.project_config import ProjectConfig, load_project_config
 from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
     ChangesetWriter,
@@ -90,7 +91,7 @@ from forge.runs.backends import (
     is_harness_backend,
 )
 from forge.runs.ci_contract import classify_failure
-from forge.runs.publisher import publish_candidate
+from forge.runs.publisher import publish_candidate, spec_allowed_paths
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import VerificationProfile
 from forge.runs.verification import evaluate as evaluate_verification
@@ -194,7 +195,10 @@ async def execute_run_command(
     v0.7: ``security_triage`` commands dispatch to
     :mod:`forge.findings.triage` BEFORE the gate machinery — findings are a
     separate subsystem wired into the same durable step runtime (they never
-    touch RunService state).
+    touch RunService state). ``debug_pipeline`` commands dispatch to
+    :mod:`forge.reactive.ci_debug` the same way — the durable pipeline
+    failure debugger (factory/ branches are skipped there: the run's own
+    repair loop owns those failures).
     """
     if metadata.get("command") == "security_triage":
         from forge.findings.triage import execute_security_command
@@ -207,6 +211,18 @@ async def execute_run_command(
             token=forge_token(settings),
         ) as gitlab:
             await execute_security_command(
+                settings, forge_config, session_factory, metadata, gitlab=gitlab
+            )
+        return
+
+    if metadata.get("command") == "debug_pipeline":
+        from forge.reactive.ci_debug import execute_debug_pipeline_command
+
+        async with GitLabClient(
+            base_url=settings.GITLAB_URL,
+            token=forge_token(settings),
+        ) as gitlab:
+            await execute_debug_pipeline_command(
                 settings, forge_config, session_factory, metadata, gitlab=gitlab
             )
         return
@@ -349,8 +365,30 @@ class RunService:
 
         # F22: bind the run's budget guard before the first paid call.
         await self._apply_run_budget(run_id)
+        # v0.7 monorepo path scoping: the project's `.forge.yml`
+        # ``implement.paths`` globs are resolved BEFORE the plan — they shape
+        # the plan prompt and are frozen into the RunSpec the publisher and
+        # the builtin validation enforce. A config read failure degrades to
+        # unscoped (whole repo), never aborts the run.
         try:
-            plan = await self._planner.plan(issue_title, issue_description, flow_run_id=run_id)
+            project_config = await load_project_config(
+                self._gitlab, project_id, ref=self._target_branch()
+            )
+        except Exception:
+            logger.warning(
+                "Project config read failed for project %d — run is unscoped",
+                project_id,
+                exc_info=True,
+            )
+            project_config = ProjectConfig()
+        path_scope = list(project_config.implement_paths)
+        try:
+            plan = await self._planner.plan(
+                issue_title,
+                issue_description,
+                flow_run_id=run_id,
+                path_scope=path_scope or None,
+            )
         except (LLMError, LLMResponseError) as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
             raise
@@ -385,6 +423,7 @@ class RunService:
                 base_sha=base_sha,
                 plan_digest=digest,
                 task_digest=task_digest,
+                allowed_paths=path_scope,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -812,10 +851,14 @@ class RunService:
             await self._transition(run_id, FlowStatus.VALIDATING)
 
         # validating: trusted ADR-0001 validation; violations block the run.
+        # The run's frozen RunSpec ``allowed_paths`` scope (v0.7 monorepo
+        # scoping) is enforced here too — the builtin path is the second of
+        # the two write boundaries (the trusted publisher is the other).
+        allowed_paths = await self._read_spec_allowed_paths(run_id)
         git_base = await self._fetch_git_base(
             project_id, [change.path for change in changeset.changes], run.base_sha
         )
-        violations = validate_changeset(changeset, git_base)
+        violations = validate_changeset(changeset, git_base, allowed_paths=allowed_paths)
         if violations:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
@@ -1935,9 +1978,15 @@ class RunService:
         base_sha: str,
         plan_digest: str,
         task_digest: str,
+        allowed_paths: list[str] | None = None,
     ) -> dict:
-        """The immutable RunSpec document frozen at plan acceptance (F14)."""
-        return {
+        """The immutable RunSpec document frozen at plan acceptance (F14).
+
+        ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
+        runs — an unscoped project's document is byte-identical to the
+        pre-v0.7 shape, so its digest is unchanged.
+        """
+        document: dict = {
             "subject": {"project_id": project_id, "issue_iid": issue_iid},
             "source_base_oid": base_sha or "",
             "plan_digest": plan_digest,
@@ -1958,6 +2007,9 @@ class RunService:
                 ),
             },
         }
+        if allowed_paths:
+            document["allowed_paths"] = [str(glob) for glob in allowed_paths]
+        return document
 
     async def _open_pending_decision(
         self,
@@ -2098,6 +2150,12 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             return run.commit_cycle or 1
+
+    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
+        """The RunSpec's frozen ``allowed_paths`` globs ([] when unscoped)."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            return await spec_allowed_paths(session, run)
 
     async def _read_issue_iid(self, run_id: str) -> int | None:
         async with self._session_factory() as session:

@@ -36,6 +36,17 @@ ISSUE_TITLE = "Add a widget"
 ISSUE_DESC = "Widgets make the app better."
 
 
+@pytest.fixture(autouse=True)
+def _clear_project_config_cache():
+    """The project-config cache is process-global (5-min TTL) — never leak
+    a seeded `.forge.yml` scope between tests."""
+    from forge.orchestrator.project_config import clear_cache
+
+    clear_cache()
+    yield
+    clear_cache()
+
+
 def make_settings(**overrides) -> Settings:
     values = dict(
         GITLAB_URL="https://gitlab.test",
@@ -355,3 +366,76 @@ class TestAdmission:
 
         assert planner.calls == 1
         assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+
+
+class TestPathScope:
+    """Monorepo path scoping (v0.7): `implement.paths` → RunSpec + prompt."""
+
+    class ScopeRecordingPlanner(StubPlanner):
+        """Records the path_scope kwarg the service passes to the planner."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.path_scopes: list[list[str] | None] = []
+
+        async def plan(self, *args, **kwargs) -> str:
+            self.path_scopes.append(kwargs.get("path_scope"))
+            return await super().plan(*args, **kwargs)
+
+    class OutOfScopeImplementer(StubImplementer):
+        """Proposes one CREATE outside any configured scope."""
+
+        async def propose(self, run, issue_title, **kwargs):
+            from forge.repository import Change, ChangeSet, Operation
+
+            return ChangeSet(
+                branch=factory_branch(run.issue_iid, run.id),
+                commit_message=f"forge: implement {run.issue_iid or 0}",
+                changes=[
+                    Change(
+                        path="webapp/out-of-scope.ts",
+                        operation=Operation.CREATE,
+                        content="// outside implement.paths\n",
+                    )
+                ],
+            )
+
+    async def _scoped_service(self, db, fake_gitlab, planner) -> RunService:
+        fake_gitlab.seed_file(".forge.yml", "implement:\n  paths:\n    - 'services/**'\n")
+        return make_service(db, fake_gitlab, planner=planner)
+
+    async def test_scoped_project_freezes_allowed_paths_into_the_spec(self, db, fake_gitlab):
+        planner = self.ScopeRecordingPlanner()
+        service = await self._scoped_service(db, fake_gitlab, planner)
+
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        spec = await get_spec(db, run_id)
+        assert spec is not None
+        assert spec.document["allowed_paths"] == ["services/**"]
+        assert spec.digest == sha256_of_document(spec.document)
+        # The plan prompt aimed inside the scope from the start.
+        assert planner.path_scopes == [["services/**"]]
+
+    async def test_unscoped_project_spec_has_no_allowed_paths(self, service, fake_gitlab, db):
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        spec = await get_spec(db, run_id)
+        assert spec is not None
+        assert "allowed_paths" not in spec.document
+
+    async def test_out_of_scope_change_blocks_at_builtin_validation(self, db, fake_gitlab):
+        from forge.durable import FlowStatus
+
+        planner = self.ScopeRecordingPlanner()
+        service = await self._scoped_service(db, fake_gitlab, planner)
+        service._implementer = self.OutOfScopeImplementer()
+
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "outside the allowed scope" in (run.status_reason or "")

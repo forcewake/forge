@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from fnmatch import fnmatchcase
 from typing import Any
 
 
@@ -104,6 +105,18 @@ def is_lockfile(path: str) -> bool:
     """Return True when *path* looks like a dependency lockfile."""
     name = path.rsplit("/", 1)[-1].lower()
     return name in DENIED_LOCKFILE_NAMES or name.endswith(LOCKFILE_SUFFIX)
+
+
+def in_path_scope(path: str, allowed_paths: list[str]) -> bool:
+    """Whether *path* matches at least one of the *allowed_paths* globs.
+
+    Monorepo path scoping (docs/research/complex-projects.md §1): a work
+    package may carry a path allowlist; a change outside it is a failed run,
+    not a review comment. Globs are fnmatch-style and matched against the
+    repo-relative path — ``*`` also spans ``/``, so ``services/api/*``
+    covers nested files without needing ``**``.
+    """
+    return any(fnmatchcase(path, glob) for glob in allowed_paths if glob)
 
 
 def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
@@ -202,7 +215,11 @@ def _materialize_change(raw: Any, git_base: dict[str, str]) -> Change:
     return Change(path=path, operation=operation, content=None)
 
 
-def validate_changeset(cs: ChangeSet, git_base: dict[str, str] | None = None) -> list[str]:
+def validate_changeset(
+    cs: ChangeSet,
+    git_base: dict[str, str] | None = None,
+    allowed_paths: list[str] | None = None,
+) -> list[str]:
     """Validate *cs* against the write policy and return all violations.
 
     An empty list means the ChangeSet may be committed. Every violation is a
@@ -213,6 +230,16 @@ def validate_changeset(cs: ChangeSet, git_base: dict[str, str] | None = None) ->
     When *git_base* (path -> base content at the approved snapshot) is given,
     ADR-0001 existence rules are enforced on top of the path policy: an
     ``update``/``delete`` must address a file that exists in the snapshot.
+
+    When *allowed_paths* (v0.7 monorepo path scoping, complex-projects.md §1)
+    is non-empty, every change must fall under at least one glob — a change
+    outside the work package's scope is rejected with a clear reason (the
+    publisher and the builtin validation both enforce this; the plan prompt
+    carries the same restriction so agents aim inside it from the start).
+    Nested per-directory instruction files (CLAUDE.md / AGENTS.md) need no
+    forge-side resolution: coding CLIs load them natively for the paths they
+    touch (complex-projects.md §1.3) — the scope check stays purely on the
+    write boundary.
     """
     violations: list[str] = []
 
@@ -246,6 +273,12 @@ def validate_changeset(cs: ChangeSet, git_base: dict[str, str] | None = None) ->
 
         if is_lockfile(change.path):
             violations.append(f"{where}: lockfiles are denylisted")
+
+        if allowed_paths and not in_path_scope(change.path, allowed_paths):
+            violations.append(
+                f"{where}: path is outside the allowed scope "
+                f"(allowed_paths: {', '.join(allowed_paths)})"
+            )
 
         if change.operation is Operation.CREATE and change.content is None:
             violations.append(f"{where}: create requires content")

@@ -292,6 +292,15 @@ class FakeGitHub:
             found = [run for run in found if run.get("name") == workflow_name]
         return [dict(run) for run in found]
 
+    async def list_pull_requests_for_commit(self, owner: str, repo: str, sha: str) -> list[dict]:
+        self.calls.append(("list_pull_requests_for_commit", (owner, repo, sha)))
+        full = f"{owner}/{repo}"
+        return [
+            dict(pr)
+            for pr in self.pull_requests.get(full, [])
+            if pr.get("head", {}).get("sha") == sha
+        ]
+
     # -- issues ---------------------------------------------------------------------------
 
     async def get_issue(self, owner: str, repo: str, number: int) -> Issue:

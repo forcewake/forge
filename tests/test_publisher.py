@@ -322,3 +322,44 @@ def _create_diff(path: str, content: str) -> str:
         f"@@ -0,0 +1,{len(lines)} @@\n"
         f"{body}"
     )
+
+
+class TestPathScope:
+    """RunSpec-driven path scoping at the publisher (v0.7 monorepo)."""
+
+    async def _persist_scoped_spec(self, db, run: FlowRun, globs: list[str]) -> None:
+        async with db() as session:
+            session.add(
+                RunSpec(
+                    run_id=run.id,
+                    document={"allowed_paths": globs},
+                    digest="digest-with-scope",
+                )
+            )
+            await session.commit()
+
+    async def test_out_of_scope_candidate_is_rejected(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        await self._persist_scoped_spec(db, run, ["services/**"])
+
+        result = await publish(db, fake_gitlab, run, bundle_for(_create_diff("web/x.ts", "hi\n")))
+
+        assert not result.ok
+        assert "outside the allowed scope" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_in_scope_candidate_is_published(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        await self._persist_scoped_spec(db, run, ["services/**"])
+
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_create_diff("services/api/x.py", "hi\n"))
+        )
+
+        assert result.ok
+
+    async def test_run_without_a_spec_keeps_whole_repo_scope(self, db, fake_gitlab):
+        # Legacy/unscoped: no spec row, no allowed_paths — unchanged behavior.
+        run = await persisted(db, make_run())
+        result = await publish(db, fake_gitlab, run, bundle_for(_create_diff("any/where.md", "x")))
+        assert result.ok

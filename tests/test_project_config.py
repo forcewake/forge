@@ -87,3 +87,30 @@ class TestLoadProjectConfig:
         client = _make_gitlab_client(file_content=yaml_content)
         config = await load_project_config(client, project_id=7)
         assert config.enabled_agents == ["code-reviewer"]
+
+
+class TestImplementPaths:
+    """`implement.paths` — the v0.7 monorepo path-scope allowlist."""
+
+    async def test_parses_implement_paths(self):
+        yaml_content = "implement:\n  paths:\n    - 'services/api/**'\n    - 'packages/shared/*'\n"
+        client = _make_gitlab_client(file_content=yaml_content)
+        config = await load_project_config(client, project_id=20)
+        assert config.implement_paths == ["services/api/**", "packages/shared/*"]
+
+    async def test_implement_paths_empty_by_default(self):
+        client = _make_gitlab_client(file_content="review_rules:\n  - Rule 1\n")
+        config = await load_project_config(client, project_id=21)
+        assert config.implement_paths == []
+
+    async def test_implement_paths_under_forge_key(self):
+        yaml_content = "forge:\n  implement:\n    paths:\n      - 'webapp/**'\n"
+        client = _make_gitlab_client(file_content=yaml_content)
+        config = await load_project_config(client, project_id=22)
+        assert config.implement_paths == ["webapp/**"]
+
+    async def test_malformed_implement_section_yields_empty_scope(self):
+        yaml_content = "implement:\n  paths: not-a-list\n"
+        client = _make_gitlab_client(file_content=yaml_content)
+        config = await load_project_config(client, project_id=23)
+        assert config.implement_paths == []

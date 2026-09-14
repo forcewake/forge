@@ -46,6 +46,7 @@ class StubPlanner:
         issue_description: str,
         *,
         flow_run_id: str | None = None,
+        path_scope: list[str] | None = None,
     ) -> str:
         description = (issue_description or "").strip() or "_(no description)_"
         return (

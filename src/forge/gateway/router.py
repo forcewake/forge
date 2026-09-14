@@ -20,7 +20,7 @@ from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
 from forge.gateway.validator import is_bot_event, validate_webhook_token
-from forge.gitlab.events import GitLabEvent, NoteEvent
+from forge.gitlab.events import GitLabEvent, NoteEvent, PipelineEvent
 from forge.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,35 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     if slash_command == "/cancel":
         return {**common, "command": "cancel", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
+
+
+def _match_pipeline_debug(event: GitLabEvent, settings) -> dict[str, Any] | None:
+    """Detect failed pipeline events that belong to the durable CI debug lane.
+
+    v0.7 (research F3 port): a ``pipeline`` hook with ``status == "failed"``
+    is normalized to a ``debug_pipeline`` command and routed through the
+    SAME durable step path as the run commands — the durable equivalent of
+    the legacy reactive pipeline-debugger (which no longer sees failed
+    pipeline events; successful/active pipelines keep the legacy path).
+    The executor (:mod:`forge.reactive.ci_debug`) skips forge's own
+    ``factory/`` branches — the run's bounded repair loop already fetches
+    failed-job logs and posts the repair-cycle MR note — and correlates the
+    remaining failures to their MR for the root-cause comment.
+    """
+    if not isinstance(event, PipelineEvent):
+        return None
+    attrs = event.object_attributes
+    if (attrs.status or "") != "failed":
+        return None
+    return {
+        "command": "debug_pipeline",
+        "project_id": event.project.id if event.project else 0,
+        "pipeline_id": attrs.id,
+        "branch": attrs.ref or "",
+        "sha": attrs.sha or "",
+        "mr_iid": event.merge_request.iid if event.merge_request else None,
+        "author_username": event.user.username if event.user else "",
+    }
 
 
 def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str, Any]) -> None:
@@ -443,6 +472,12 @@ async def webhook(
     run_command = _match_run_command(event, settings)
     if run_command is not None:
         return await _ingest_run_command(request, background_tasks, event, run_command)
+
+    # v0.7 durable CI debug lane: failed pipelines bypass the legacy
+    # orchestrator the same way (the durable step IS the replacement).
+    pipeline_debug = _match_pipeline_debug(event, settings)
+    if pipeline_debug is not None:
+        return await _ingest_run_command(request, background_tasks, event, pipeline_debug)
 
     # enqueue to Redis if available
     task_queue = getattr(request.app.state, "task_queue", None)

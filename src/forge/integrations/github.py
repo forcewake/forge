@@ -722,6 +722,20 @@ class GitHubClient:
         response = await self._get(f"/repos/{owner}/{repo}/compare/{encoded}")
         return dict(response.json())
 
+    async def list_pull_requests_for_commit(
+        self, owner: str, repo: str, sha: str
+    ) -> list[dict[str, Any]]:
+        """Open/merged PRs associated with *sha* (research §4.1).
+
+        The universal run→PR correlation key: unlike ``workflow_run``
+        payloads, whose ``pull_requests[]`` is EMPTY for fork-PR runs, this
+        endpoint returns the (open) pull requests a commit belongs to on the
+        base repository — the one-call association the CI debugger needs for
+        any failed Actions run.
+        """
+        response = await self._get(f"/repos/{owner}/{repo}/commits/{sha}/pulls")
+        return [dict(pr) for pr in response.json() if isinstance(pr, dict)]
+
     # -- REST: verification reads ---------------------------------------------------
 
     async def list_check_runs_for_sha(

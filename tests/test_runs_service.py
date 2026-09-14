@@ -283,7 +283,9 @@ class TestAdvanceFailures:
         import forge.runs.service as service_module
 
         monkeypatch.setattr(
-            service_module, "validate_changeset", lambda cs, git_base=None: ["forbidden path"]
+            service_module,
+            "validate_changeset",
+            lambda cs, git_base=None, allowed_paths=None: ["forbidden path"],
         )
         FakeWriter.reset()
         service = make_service(db, fake_gitlab)

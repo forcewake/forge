@@ -1,0 +1,27 @@
+{
+  "action": "completed",
+  "workflow_job": {
+    "id": 3994444969,
+    "run_id": 3994440871,
+    "workflow_name": "CI",
+    "head_branch": "feature/rate-limiter",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "failure",
+    "name": "build-and-test",
+    "steps": [
+      {"number": 1, "name": "Set up job", "status": "completed", "conclusion": "success"},
+      {"number": 2, "name": "Run tests", "status": "completed", "conclusion": "failure"}
+    ],
+    "html_url": "https://github.test/acme/acme-widget/actions/runs/3994440871/jobs/3994444969"
+  },
+  "workflow_name": "CI",
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "default_branch": "main"
+  },
+  "sender": {"login": "alice", "id": 501, "type": "User"},
+  "installation": {"id": 12345}
+}

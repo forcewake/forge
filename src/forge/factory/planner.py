@@ -56,10 +56,18 @@ class LLMPlanner:
         issue_description: str,
         *,
         flow_run_id: str | None = None,
+        path_scope: list[str] | None = None,
     ) -> str:
-        """Return the plan as markdown (the text the gate digest binds to)."""
+        """Return the plan as markdown (the text the gate digest binds to).
+
+        *path_scope* (v0.7 monorepo scoping) carries the project's
+        ``implement.paths`` globs; when set, the prompt states the
+        restriction so the plan aims inside it from the start.
+        """
         self.last_plan = None
         user = f"Issue title: {issue_title}\n\nIssue description:\n{issue_description or '(empty)'}"
+        if path_scope:
+            user += "\n\nOnly modify files under: " + ", ".join(f"`{glob}`" for glob in path_scope)
         result = await self._llm.complete(
             tier=PLANNER_TIER,
             system=_SYSTEM_PROMPT,

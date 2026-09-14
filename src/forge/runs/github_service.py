@@ -77,10 +77,12 @@ from forge.integrations.github_flow import (
     build_github_agents,
     github_factory_branch,
 )
+from forge.orchestrator.project_config import ProjectConfig, load_project_config
 from forge.repository import Change, ChangeSet, Operation, validate_changeset
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
+from forge.runs.publisher import spec_allowed_paths
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -222,9 +224,30 @@ class GitHubRunService:
             )
             return run_id
 
+        # v0.7 monorepo path scoping: the repo's `.forge.yml`
+        # ``implement.paths`` globs shape the plan prompt and are frozen into
+        # the RunSpec the candidate validation enforces. The repository
+        # reader duck-types the config loader's ``get_file`` surface (its
+        # ``project_id`` argument is accepted and ignored). A read failure
+        # degrades to unscoped, never aborts the run.
+        try:
+            project_config = await load_project_config(
+                self._stack.reader, project_id, ref=self._target_branch()
+            )
+        except Exception:
+            logger.warning(
+                "Project config read failed for %s — run is unscoped",
+                self._repo_full_name,
+                exc_info=True,
+            )
+            project_config = ProjectConfig()
+        path_scope = list(project_config.implement_paths)
         try:
             plan = await self._stack.planner.plan(
-                issue_title, issue_description, flow_run_id=run_id
+                issue_title,
+                issue_description,
+                flow_run_id=run_id,
+                path_scope=path_scope or None,
             )
         except (LLMError, LLMResponseError) as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
@@ -268,6 +291,7 @@ class GitHubRunService:
                 base_sha=base_sha,
                 plan_digest=digest,
                 task_digest=task_digest,
+                allowed_paths=path_scope,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -981,7 +1005,11 @@ class GitHubRunService:
             ],
             attempt_base_oid=bundle.attempt_base_oid,
         )
-        violations = validate_changeset(changeset, base_contents)
+        violations = validate_changeset(
+            changeset,
+            base_contents,
+            allowed_paths=await self._read_spec_allowed_paths(run_id),
+        )
         if violations:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
@@ -1271,6 +1299,7 @@ class GitHubRunService:
         base_sha: str,
         plan_digest: str,
         task_digest: str,
+        allowed_paths: list[str] | None = None,
     ) -> dict:
         """The immutable RunSpec document frozen at plan acceptance (F14).
 
@@ -1278,6 +1307,8 @@ class GitHubRunService:
         execution profile: backend ``ci_harness``, the harness workflow
         filename and the driver — the dispatch inputs later come FROM this
         document, so a spec change means a different harness run.
+        ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
+        runs; unscoped documents keep the pre-v0.7 shape and digest.
         """
         workflow = self._harness_workflow()
         backend_config: dict = {
@@ -1288,7 +1319,7 @@ class GitHubRunService:
         if workflow:
             backend_config["harness_workflow"] = workflow
             backend_config["driver"] = self._harness_driver()
-        return {
+        document: dict = {
             "subject": {
                 "provider": "github",
                 "repo_full_name": self._repo_full_name,
@@ -1307,6 +1338,9 @@ class GitHubRunService:
                 ),
             },
         }
+        if allowed_paths:
+            document["allowed_paths"] = [str(glob) for glob in allowed_paths]
+        return document
 
     async def _open_pending_decision(
         self,
@@ -1400,6 +1434,12 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             run.evidence = _merge_evidence(run.evidence, patch)
             await session.commit()
+
+    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
+        """The RunSpec's frozen ``allowed_paths`` globs ([] when unscoped)."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            return await spec_allowed_paths(session, run)
 
     async def _read_issue_title(self, issue_number: int) -> str:
         """Fetch the issue title; fall back to a neutral label on read failure."""
@@ -1506,15 +1546,21 @@ async def execute_github_run_command(
     client + stub agents (no network, no model).
 
     ``review_pr`` dispatches to the reactive review lane
-    (:mod:`forge.reactive.github_review`) — a separate lane beside the
-    durable run path below: no FlowRun, no RunSpec, one step in/one review
-    out. RunService/GitHubRunService state is untouched by it.
+    (:mod:`forge.reactive.github_review`) and ``debug_ci`` to the CI debug
+    lane (:mod:`forge.reactive.ci_debug`) — separate lanes beside the
+    durable run path below: no FlowRun, no RunSpec, one step in/one comment
+    out. RunService/GitHubRunService state is untouched by them.
     """
     command = metadata.get("command")
     if command == "review_pr":
         from forge.reactive.github_review import execute_reactive_review
 
         await execute_reactive_review(settings, forge_config, session_factory, metadata)
+        return
+    if command == "debug_ci":
+        from forge.reactive.ci_debug import execute_debug_ci_command
+
+        await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
     if command not in {"start_run", "go", "cancel"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)

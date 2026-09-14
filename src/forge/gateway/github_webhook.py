@@ -34,6 +34,14 @@ Event routing for this slice:
   step path (inbox row + scheduled step in one transaction). Bot senders,
   bot-authored PRs and forge's own ``forge/*`` branches are skipped — the
   reactive reviewer never reviews forge's own output.
+- ``workflow_job`` ``completed`` with ``conclusion == "failure"`` → the CI
+  debug lane (v0.7, github-reactive §4 F3): normalized to a ``debug_ci``
+  command on the same durable step path. Forge's own harness runs
+  (``forge/`` branches × ``FORGE_GITHUB_HARNESS_WORKFLOW``) are skipped at
+  normalization — their failures have their own triage; the PR-author
+  recursion guard and fork-safe ``head_sha`` correlation run in the
+  executor (:mod:`forge.reactive.ci_debug`). Any other ``workflow_job``
+  action is inbox-only.
 - ``installation`` ``deleted``/``removed`` → the connection is disabled:
   logged and persisted as an inbox row (reconciliation hooks come with the
   v0.5 contracts extraction).
@@ -278,6 +286,79 @@ def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def normalize_workflow_job_event(
+    payload: dict[str, Any],
+    harness_workflow: str = "",
+) -> dict[str, Any] | None:
+    """Normalize a failed ``workflow_job`` payload into a ``debug_ci`` command.
+
+    Fires only for ``completed`` jobs with ``conclusion == "failure"`` (the
+    per-step-granularity trigger, github-reactive research §4.1). Forge's
+    own harness runs are skipped at normalization: a ``forge/`` head branch
+    running ``FORGE_GITHUB_HARNESS_WORKFLOW`` is the durable flow's own
+    execution, whose failures have their own triage — debugging them here
+    would recurse into forge's own output. The PR-author recursion guard
+    and the fork-safe ``head_sha`` → PR correlation live in the executor
+    (:mod:`forge.reactive.ci_debug`), which needs API reads the ingress
+    must not pay for.
+
+    The delivery key is content-stable — ``wfjob:{job_id}:{conclusion}`` —
+    so re-delivered completions collapse onto one inbox identity.
+    """
+    workflow_job = payload.get("workflow_job") or {}
+    if not workflow_job:
+        return None
+    if str(payload.get("action") or "") != "completed":
+        return None
+    conclusion = str(workflow_job.get("conclusion") or "")
+    if conclusion != "failure":
+        return None
+
+    head_branch = str(workflow_job.get("head_branch") or "")
+    workflow_name = str(payload.get("workflow_name") or "")
+    if (
+        head_branch.startswith("forge/")
+        and bool(harness_workflow)
+        and workflow_name == harness_workflow
+    ):
+        logger.info(
+            "Skipping forge harness run %s on %s — no CI debug",
+            workflow_name,
+            head_branch,
+            extra={"event": "workflow_job"},
+        )
+        return None
+
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+    sender = payload.get("sender") or {}
+    job_id = int(workflow_job.get("id") or 0)
+    delivery_key = f"wfjob:{job_id}:{conclusion}"
+
+    return {
+        "command": "debug_ci",
+        "provider": "github",
+        "connection_id": github_connection_id(
+            installation.get("id"), str(repository.get("full_name") or "")
+        ),
+        "project_id": int(repository.get("id") or 0),
+        "repo_full_name": str(repository.get("full_name") or ""),
+        "head_sha": str(workflow_job.get("head_sha") or ""),
+        "head_branch": head_branch,
+        "job_id": job_id,
+        "run_id": int(workflow_job.get("run_id") or 0),
+        "job_name": str(workflow_job.get("name") or ""),
+        "workflow_name": workflow_name,
+        "conclusion": conclusion,
+        "html_url": str(workflow_job.get("html_url") or ""),
+        "sender_type": str(sender.get("type") or ""),
+        "author_username": str(sender.get("login") or ""),
+        "note_text": "",
+        "note_id": delivery_key,  # stable fast-path dedup + task identity
+        "delivery_key": delivery_key,
+    }
+
+
 @github_router.post("/webhook/github")
 async def github_webhook(
     request: Request,
@@ -401,6 +482,24 @@ async def _ingest_github_event(
         )
         return await _ingest_github_run_command(
             request, background_tasks, review_command, source_event_id, event=event
+        )
+
+    if event == "workflow_job" and action == "completed":
+        debug_command = normalize_workflow_job_event(
+            payload,
+            harness_workflow=str(
+                getattr(settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or ""
+            ).strip(),
+        )
+        if debug_command is None:
+            return _record_inbox_only(
+                request, background_tasks, event, delivery, connection_id, project_id, payload
+            )
+        source_event_id = github_source_event_id(
+            connection_id, event, action, debug_command["delivery_key"]
+        )
+        return await _ingest_github_run_command(
+            request, background_tasks, debug_command, source_event_id, event=event
         )
 
     if event == "installation" and action in _INSTALLATION_REMOVED_ACTIONS:

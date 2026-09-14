@@ -12,7 +12,8 @@ crosses this boundary before anything reaches GitLab. The publisher:
    (no truncation; strict hunk application with no fuzz);
 4. validates the resulting ChangeSet against the write policy
    (:func:`validate_changeset` — denied paths, lockfiles, size caps,
-   existence rules);
+   existence rules) and the RunSpec's frozen ``allowed_paths`` scope
+   (v0.7 monorepo path scoping: any change outside the globs is rejected);
 5. writes through the journaled, reconcilable :class:`ChangesetWriter`
    with ``start_ref = expected_head = attempt base`` — the factory branch
    already sits at the attempt base in the proposal-only model, so the
@@ -99,6 +100,29 @@ async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
     return str(row.digest) == run.spec_digest
 
 
+async def spec_allowed_paths(session: AsyncSession, run: FlowRun) -> list[str]:
+    """The ``allowed_paths`` globs frozen in the run's RunSpec document.
+
+    Monorepo path scoping (v0.7, complex-projects.md §1): empty/missing —
+    the run is unscoped and every path is in scope.
+    """
+    row = (
+        (
+            await session.execute(
+                select(RunSpec).where(RunSpec.run_id == run.id).order_by(RunSpec.id.desc()).limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        return []
+    raw = (row.document or {}).get("allowed_paths")
+    if not isinstance(raw, list):
+        return []
+    return [str(glob) for glob in raw if str(glob).strip()]
+
+
 async def _fetch_base_contents(
     gitlab: GitLabClient,
     project_id: int,
@@ -159,6 +183,7 @@ async def publish_candidate(
         if fresh is None:
             return PublishResult(False, "run_not_found")
         spec_ok = await _spec_digest_matches(session, fresh)
+        allowed_paths = await spec_allowed_paths(session, fresh)
 
     attempt_base = attempt_base_for(fresh)
     if bundle.attempt_base_oid != attempt_base:
@@ -203,7 +228,7 @@ async def publish_candidate(
         ],
         attempt_base_oid=attempt_base,
     )
-    violations = validate_changeset(changeset, base_contents)
+    violations = validate_changeset(changeset, base_contents, allowed_paths=allowed_paths)
     if violations:
         return PublishResult(False, "changeset_invalid: " + "; ".join(violations))
 
