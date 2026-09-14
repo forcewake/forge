@@ -52,6 +52,8 @@ def make_settings(**overrides) -> Settings:
     values = dict(
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
+        GITLAB_WEBHOOK_SECRET="whsec-test",  # noqa: S105
+        FORGE_BOT_TOKEN="glpat-bot-test",  # noqa: S105
         FORGE_BOT_USERNAME=BOT,
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
     )
