@@ -1538,6 +1538,14 @@ class RunService:
             )
             return
 
+        # GitHub-subject runs are polled by the GitHub harness reconciler
+        # (runs/github_service.py) — the GitLab CI backend cannot read an
+        # Actions handle (its pipeline_id contract does not apply).
+        if getattr(run, "provider", "gitlab") == "github" or '"provider": "github"' in (
+            handle or ""
+        ):
+            return
+
         try:
             backend = self._harness_backend(project_id)
         except ValueError as exc:
