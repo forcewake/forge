@@ -2,11 +2,12 @@
 
 The shared implementation brief rendered from the approved RunSpec + issue
 + plan. ONE prompt, BOTH lanes: the Actions entry point
-(:mod:`forge.harness_entry`) renders it into ``.forge/brief.md`` before the
-driver runs, and the GitLab templates' brief carries the same contract.
-The per-CLI ``-p`` prompt stays a SHORT pointer ("read .forge/brief.md and
-follow it exactly") — the quality lives in the brief file, not in the
-one-liner. Per-CLI flags stay in the driver scripts
+(:mod:`forge.harness_entry`) renders it into ``.forge/brief.md`` — after
+fetching the plan (the forge plan comment on the issue) and the issue body
+over the read-only runner token — and the GitLab templates' brief carries
+the same contract around ``$FORGE_PLAN``. The per-CLI ``-p`` prompt stays
+a SHORT pointer (:data:`TASK_PROMPT`) — the quality lives in the brief
+file, not in the one-liner. Per-CLI flags stay in the driver scripts
 (docs/research/harness-interfaces.md); the PROMPT is shared.
 
 Skills = the CLIs' native conventions: Claude Code reads ``CLAUDE.md`` +

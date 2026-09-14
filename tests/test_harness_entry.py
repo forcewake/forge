@@ -87,10 +87,11 @@ class TestRenderCommon:
             render_driver_script("codex", "", BRIEF)
 
     def test_brief_paths_are_shell_quoted(self):
-        """The prompt embedding the path is quoted as one shell word."""
-        script = render_driver_script("opencode", "", "/tmp/wei rd brief.md")
+        """The prompt embedding the brief path is quoted as one shell word
+        (drivers that interpolate the path — claude-code does)."""
+        script = render_driver_script("claude-code", "", "/tmp/wei rd brief.md")
 
-        assert "'Read /tmp/wei rd brief.md and implement" in script
+        assert "'/tmp/wei rd brief.md" in script or "-p '/tmp/wei rd brief.md" in script
 
 
 # ----------------------------------------------------------------------

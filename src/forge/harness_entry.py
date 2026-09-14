@@ -4,10 +4,16 @@ The "Run harness driver" step of ``ci/templates/forge-harness.github.yml``
 installs forge from a pinned ref and runs ``python -m forge.harness_entry``.
 This module is the ENTIRE forge surface inside the ephemeral runner:
 
+- it renders the SHARED implementation brief
+  (:func:`forge.harnesses.prompt.render_brief` — one prompt builder for
+  both the Actions and the GitLab lanes) into ``.forge/brief.md``; the
+  brief file the agent reads IS the prompt, and the per-CLI ``-p``
+  invocation stays the short pointer :data:`forge.harnesses.prompt.TASK_PROMPT`;
 - it renders the per-driver invocation (claude-code | grok-build | opencode)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
-  ``docs/research/harness-interfaces.md``);
+  ``docs/research/harness-interfaces.md``) — per-CLI FLAGS live here, the
+  PROMPT is shared;
 - it runs the driver unattended (proposal-only: the agent is told to leave
   its changes in the working tree — it cannot commit or push, the lane has
   no write credential);
@@ -16,66 +22,62 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   (``completed`` | ``failed``), decoupled from the agent's own output so
   the workflow can still upload the candidate artifact ``if: always()``.
 
-CLI-only by construction: stdlib imports only, no forge package imports, no
-database — the lane runs forge's CODE, never forge's credentials or state.
+Brief transport (the dispatch-input size question, decided): the lane
+FETCHES its own brief content from the GitHub API — the approved plan is
+ALREADY on the issue as the forge plan comment (E3a posted it), so
+``--render-brief`` reads the issue body + that comment with the runner's
+read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`). No
+workflow_dispatch input ever carries plan text, so no input size limit
+binds. Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
+works as-is (the workflow owner may ship it however they like).
+
+Stdlib + the pure prompt builder only: no forge database, no forge
+credentials — the lane runs forge's CODE, never forge's state.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-
-#: The quality brief sections (the shared prompt structure — the GitLab
-#: templates carry the same static block around FORGE_PLAN).
-_BRIEF_SECTIONS = (
-    (
-        "Role",
-        "You are a staff engineer implementing an APPROVED plan. The plan "
-        "below was reviewed and authorized by a human — implement it "
-        "exactly; do not redesign it.",
-    ),
-    (
-        "Constraints",
-        "- Dependency policy and code style come from the repository (read "
-        "AGENTS.md / CLAUDE.md at the repo root if present and follow "
-        "them — project conventions win).\n"
-        "- Type hints and docstrings on all public functions.\n"
-        "- NEVER touch CI configuration (.github/, .gitlab-ci.yml), "
-        "infrastructure files, secrets, or anything outside the task scope.",
-    ),
-    (
-        "Quality bar",
-        "- Run the repository's own test suite if present and make it pass.\n"
-        "- Keep the diff minimal and focused on the plan.",
-    ),
-    (
-        "Output contract",
-        "- Leave ALL your changes in the working tree.\n"
-        "- Do NOT commit and do NOT push (this lane has no write "
-        "credential — the forge publisher collects and applies the diff "
-        "after validation).",
-    ),
+from forge.harnesses.prompt import (
+    TASK_PROMPT,
+    BriefContext,
+    render_brief as render_shared_brief,
 )
+
+#: Claude's scoped shell allowlist (same posture as the GitLab template:
+#: edits auto-accepted, shell limited to read-only git).
+_CLAUDE_ALLOWED_TOOLS = "Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+
+#: Drivers understood by this entry point (the shipped multi-harness set).
+DRIVERS = ("claude-code", "grok-build", "opencode")
 
 
 def render_brief(issue_text: str, plan_text: str) -> str:
-    """Render the quality brief: role, task, plan, constraints, contract."""
-    parts = ["# Implementation brief", ""]
-    for title, body in _BRIEF_SECTIONS:
-        parts.append(f"## {title}")
-        parts.append(body)
-        parts.append("")
-    parts.append("## Task (approved issue)")
-    parts.append(issue_text.strip() or "(empty)")
-    parts.append("")
-    parts.append("## Approved plan")
-    parts.append(plan_text.strip() or "(no plan text)")
-    return "\n".join(parts)
+    """Render the quality brief via the SHARED builder (single source).
+
+    Thin adapter over :func:`forge.harnesses.prompt.render_brief` in the
+    proposal-only ``ci_lane`` output contract; *issue_text* is the issue
+    body snapshot, *plan_text* the approved plan (verbatim). Conventions
+    files (AGENTS.md / CLAUDE.md) are detected in the current working
+    directory — the checkout the agent will work in.
+    """
+    return render_shared_brief(
+        BriefContext(
+            plan=plan_text,
+            issue_body=issue_text,
+            driver=os.environ.get("FORGE_DRIVER", ""),
+            model=os.environ.get("FORGE_HARNESS_MODEL", ""),
+        ),
+        lane="ci_lane",
+        repo_root=Path.cwd(),
+    )
 
 
 def fetch_issue_context(repo: str, issue_number: int, token: str) -> tuple[str, str]:
@@ -115,21 +117,6 @@ def fetch_issue_context(repo: str, issue_number: int, token: str) -> tuple[str, 
     return body, plan_text
 
 
-#: The task prompt: mirrors the GitLab lanes' unattended contract.
-_PROMPT_TEMPLATE = (
-    "Read {brief} first and implement the approved task it describes, "
-    "following its Role, Constraints, Quality bar, and Output contract "
-    "sections exactly. Work in the current repository."
-)
-
-#: Claude's scoped shell allowlist (same posture as the GitLab template:
-#: edits auto-accepted, shell limited to read-only git).
-_CLAUDE_ALLOWED_TOOLS = "Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
-
-#: Drivers understood by this entry point (the shipped multi-harness set).
-DRIVERS = ("claude-code", "grok-build", "opencode")
-
-
 def render_driver_script(
     driver: str,
     model: str,
@@ -155,13 +142,14 @@ def render_driver_script(
       model is config-owned here, not CLI-owned (mirror of the GitLab
       template, which routes it through opencode.json).
 
-    The script streams the driver's normalized event log into the job log
-    AND tees it to *events_file*; ``pipefail`` keeps the driver's exit code
-    so a nonzero agent exit classifies the run as failed WITHOUT aborting
-    the audit trail (the workflow uploads artifacts ``if: always()``).
+    The ``-p`` prompt is the shared SHORT pointer (:data:`TASK_PROMPT`) —
+    the brief file at *brief_path* carries the whole contract. The script
+    streams the driver's normalized event log into the job log AND tees it
+    to *events_file*; ``pipefail`` keeps the driver's exit code so a
+    nonzero agent exit classifies the run as failed WITHOUT aborting the
+    audit trail (the workflow uploads artifacts ``if: always()``).
     """
-    prompt = _PROMPT_TEMPLATE.format(brief=brief_path)
-    quoted_prompt = shlex.quote(prompt)
+    quoted_prompt = shlex.quote(TASK_PROMPT)
     events = shlex.quote(events_file)
 
     if driver == "claude-code":
@@ -274,7 +262,7 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point: resolve paths, run the driver, write usage + exit."""
+    """Entry point: provision the brief, run the driver, write usage + exit."""
     parser = argparse.ArgumentParser(
         prog="python -m forge.harness_entry",
         description="Run a coding-agent harness driver unattended (forge Actions lane).",
@@ -300,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     import os
 
     driver = (args.driver or os.environ.get("FORGE_DRIVER") or "").strip()
-    model = (args.model or os.environ.get("FORGE_MODEL") or "").strip()
+    model = (args.model or os.environ.get("FORGE_HARNESS_MODEL") or "").strip()
     brief = args.brief or os.environ.get("FORGE_BRIEF") or ".forge/brief.md"
     exit_file = Path(args.exit_file or os.environ.get("FORGE_EXIT_FILE") or ".forge/exit")
 
@@ -312,11 +300,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if status == "completed" else 1
 
     if args.render_brief:
-        import os as _os
-
-        repo = args.repo or _os.environ.get("GITHUB_REPOSITORY", "")
-        token = args.github_token or _os.environ.get("GITHUB_TOKEN", "")
-        issue_number = args.issue or int(_os.environ.get("FORGE_ISSUE_NUMBER") or 0)
+        repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")
+        token = args.github_token or os.environ.get("GITHUB_TOKEN", "")
+        issue_number = args.issue or int(os.environ.get("FORGE_ISSUE_NUMBER") or 0)
         if not (repo and issue_number and token):
             return _finish(
                 "failed",
