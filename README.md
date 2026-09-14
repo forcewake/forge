@@ -1,14 +1,11 @@
 # forge
 
-**forge** is an open-source agentic software factory sidecar for self-hosted
-[GitLab Community Edition](https://about.gitlab.com/install/ce-installations/).
-
-forge brings AI-assisted code review, pipeline debugging, security triage, and
-a chat assistant to GitLab CE — without requiring GitLab Premium/Ultimate or
-the Duo Agent Platform — and is growing into a software factory: an authorized
-issue becomes a branch with code, a green pipeline, and a Draft merge request
-ready for human review. You bring the model (any provider via
-[LiteLLM](https://docs.litellm.ai/)); forge runs on your own infrastructure.
+**forge** is an agentic software-factory sidecar for **self-hosted GitLab CE**
+and **GitHub**: an authorized issue becomes a plan, a human-approved branch
+with code, a green pipeline, and a Draft merge request — ready for human
+review. You bring the model (any provider via
+[LiteLLM](https://docs.litellm.ai/) or native harness CLIs); forge runs on
+your own infrastructure and never merges.
 
 forge is based on the open-source project
 [Codeward](https://github.com/Relrin/codeward). See [UPSTREAM.md](UPSTREAM.md)
@@ -17,57 +14,114 @@ license notices.
 
 ## The iron principle: the bot never merges
 
-forge proposes changes, drives the pipeline, and assembles evidence bound to a
-specific commit. It never merges, never pushes to a protected target branch,
-and never changes permissions. Review and merge are always performed by a
-human in GitLab. This is enforced by the executor's capabilities and GitLab
-permissions — not by prompt instructions. See
+forge proposes changes, drives the pipeline, and assembles evidence bound to
+a specific commit. It never merges, never pushes to a protected target
+branch, and never changes permissions. Review and merge are always performed
+by a human in GitLab/GitHub. This is enforced by the executor's capabilities
+and platform permissions — not by prompt instructions. See
 [ADR-0003](docs/adr/0003-no-merge-is-enforceable.md).
+
+## How a run works
+
+```
+issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
+  →  coding agent in an ephemeral CI runner (no write credentials)
+  →  trusted publisher validates the candidate  →  Draft MR / PR
+  →  pipeline + required checks  →  readonly LLM review
+  →  ready_for_human + evidence bound to the exact commit
+```
+
+- **Durable by design** ([ADR-0017](docs/adr/0017-durable-step-runtime.md)):
+  commands and steps live in Postgres; a crash at any transition or after
+  any external effect converges — proven by a failure-injection suite (two
+  workers, real Postgres, kill at six checkpoints).
+- **Proposal-only execution lane**
+  ([ADR-0016](docs/adr/0016-candidate-bundle-trusted-publisher.md)): coding
+  agents (Claude Code, Grok Build, opencode) run in ephemeral CI containers
+  with **no write credentials and no forge secrets**; their output is a
+  candidate artifact that a trusted publisher validates and applies.
+- **One trusted publisher** for every backend — builtin LLM ChangeSets and
+  CLI agents share the same validation, policy, and journal.
+- **Human gate** ([ADR-0018](docs/adr/0018-immutable-run-spec.md)): the plan
+  is frozen into an immutable RunSpec; the decision has a deadline; cancel
+  revokes the publication grant before it stops the runner.
+- **Quality contract**
+  ([ADR-0008](docs/adr/0008-quality-contract-instead-of-pipeline-status.md)):
+  pipeline success + required jobs green; failures classified code /
+  infrastructure / config / unknown — only *code* failures trigger the
+  bounded repair loop; unknown evidence never blames the code.
+
+## Providers
+
+| Capability | GitLab CE | GitHub |
+|---|---|---|
+| Commands (`/implement`, `/go`, `/cancel`, label trigger) | ✅ comments | ✅ comments + `forge` label |
+| Plan comment + human gate | ✅ | ✅ |
+| Harness execution (Claude Code / Grok Build / opencode) | ✅ project CI (docker executor) | ✅ GitHub Actions (`workflow_dispatch`) |
+| Builtin LLM implementer (no CI needed) | ✅ | ✅ |
+| Trusted publisher | Commits API | GraphQL `createCommitOnBranch` + `expectedHeadOid` CAS |
+| Draft MR / PR before CI | ✅ | ✅ |
+| Readonly LLM review | ✅ | ✅ |
+| Fork/`pull_request_target` flows | — | intentionally out of scope (first beta) |
+| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) |
+
+Architecture: four orthogonal adapters — source, execution, harness driver,
+model route ([ADR-0019](docs/adr/0019-source-execution-adapters.md)).
+Adding a provider is an adapter, not a second factory.
 
 ## Status
 
-forge is at **v0.1.0** — the M4 (release engineering) milestone: the reactive bot core
-(imported from Codeward, pinned at commit `fd63ec8`), the durable run loop
-live-accepted end-to-end with real LLM agents **and pluggable CI harness
-backends** (claude-code / opencode / grok executing in the target project's
-CI, with harness-backed repair), plus lab-validated failure-injection
-drills (provider outage, worker crash mid-run, job cancellation, duplicate
-commands, /go burst) — still pre-production, honestly listed below.
+**v0.5.0** — both providers live-verified end-to-end (plan → gate → agent →
+candidate → Draft MR/PR → review → ready_for_human), failure-injection
+proven durable runtime, AI-ready onboarding. **Pre-production**: expect
+breaking changes before 1.0. Honest gap list: budget reservation beyond the
+commit-cycle cap, redaction at every agent boundary, drift policies beyond
+block, packaging split. The
+[CHANGELOG](CHANGELOG.md) has the full history.
 
-Reactive bot core (as imported and rebranded):
+## Quick start
 
-- **Code review** — inline comments, severity ratings, incremental reviews on
-  push with automatic resolution of addressed threads
-- **Pipeline debugging** — root-cause analysis of CI failures
-- **Security triage** — triage of SAST/DAST/dependency/secret scan findings
-- **@mention chat** — ask the bot about merge requests, code, and issues
-- **MCP** — an MCP server mounted at `/mcp`, plus support for calling tools
-  from external MCP servers
-- **Model routing** — route to any provider through the LiteLLM proxy
+### 1. Clone and verify (no services needed)
 
-**Implemented: the durable run loop.** An authorized issue runs
-`@forge /implement` → plan → human `/go` gate → LLM implementation → atomic
-commit via the Commits API → Draft MR → CI watched by a reconciler → readonly
-LLM review → `ready_for_human` with evidence bound to the exact candidate SHA
-([ADR-0004](docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md),
-[ADR-0007](docs/adr/0007-draft-mr-before-required-ci.md)). The loop is
-durable (crash-safe transitions, journaled external writes, unknown-outcome
-blocking per [ADR-0005](docs/adr/0005-durable-execution-and-unknown-outcome.md)),
-enforces the ADR-0008 quality contract — pipeline success plus every required
-job succeeded, failures classified so only *code* failures trigger the
-bounded repair loop (`FORGE_MAX_COMMIT_CYCLES`) — and records every model
-call in the usage ledger ([ADR-0013](docs/adr/0013-budgets-and-usage-ledger-in-core.md)).
-The factory agents call the model through a thin LiteLLM HTTP client
-([ADR-0014](docs/adr/0014-llm-http-client-over-agno.md)); Agno stays on the
-reactive path only.
+```bash
+git clone https://github.com/forcewake/forge && cd forge
+uv sync
+set -o pipefail && .venv/bin/python -m pytest -q   # unit suite over fakes
+.venv/bin/ruff format . && .venv/bin/ruff check src tests
+```
 
-**Still pre-production.** Not yet done: budget enforcement beyond the
-commit-cycle cap (reserve/reconcile), redaction at every agent boundary,
-drift policies beyond block, and production hardening of the live-accepted
-slice. The
-[architecture decision records](docs/adr/0000-record-architecture-decisions.md)
-record what is decided; the gap between ADRs and running code is where work
-remains.
+### 2. Configure
+
+```bash
+cp .env.example .env   # then edit: GITLAB_URL/TOKEN or GitHub App values,
+                       # model key, DATABASE_URL (Postgres), REDIS_URL,
+                       # LITELLM_URL
+```
+
+### 3. Run the stack
+
+```bash
+# Postgres + Redis + LiteLLM (any way you like; podman example in docs)
+python -m forge.migrate                 # apply schema migrations
+uv run uvicorn forge.main:app --host 0.0.0.0 --port 8420   # app
+uv run python -m forge.worker                              # worker
+curl localhost:8420/health
+```
+
+### 4. Connect a project
+
+- **GitLab CE:** [docs/operations/onboarding.md](docs/operations/onboarding.md)
+  (webhook, bot PAT, harness template include, `forge doctor`).
+- **GitHub:** [docs/github-setup.md](docs/github-setup.md)
+  (GitHub App registration, webhook, secrets, harness workflow, label
+  trigger, `forge doctor`).
+
+### 5. First run
+
+Comment `/implement` on an issue. forge posts a plan; reply
+`@forge /go <run-id>` (or assign the `forge` label on GitHub). When the run
+reaches `ready_for_human`, the evidence comment carries everything a
+reviewer needs. The merge button stays yours.
 
 ## For AI agents
 
@@ -81,183 +135,28 @@ This repository is built to be worked on by coding agents:
   agent): [`forge-setup`](.claude/skills/forge-setup/SKILL.md),
   [`forge-lab`](.claude/skills/forge-lab/SKILL.md),
   [`forge-debug-run`](.claude/skills/forge-debug-run/SKILL.md),
-  [`forge-onboard-project`](.claude/skills/forge-onboard-project/SKILL.md).
+  [`forge-onboard-project`](.claude/skills/forge-onboard-project/SKILL.md),
+  [`forge-demo`](.claude/skills/forge-demo/SKILL.md).
 - **`forge doctor`** — the setup oracle: `uv run python -m forge.doctor
   [--project <id>] [--json]`; exit code 0 means the environment (or a
-  target project's onboarding) is complete. Read-only; never prints
-  secret values.
-
-The upstream multi-agent YAML flows (including the old `/implement`,
-issue → MR) are **not** part of forge's working functionality: the upstream
-flow engine has known defects and has been replaced by the typed, durable
-controller above ([ADR-0004](docs/adr/0004-controller-owns-lifecycle-implementer-proposes.md)).
-
-## Quick start
-
-forge is designed to run as a local Python service while its infrastructure
-dependencies (Redis, LiteLLM, and the Postgres that backs LiteLLM) run in
-Docker.
-
-Prerequisites:
-
-- Python (supported version pinned in `pyproject.toml`;
-  [uv](https://docs.astral.sh/uv/) provisions the interpreter)
-- [uv](https://docs.astral.sh/uv/)
-- Docker + Docker Compose (Redis, LiteLLM, LiteLLM's Postgres)
-- PostgreSQL for forge's own data — run a **separate** instance from
-  LiteLLM's database (SQLite works for a quick trial)
-- A GitLab CE instance and a bot Personal Access Token (`api` scope)
-
-```bash
-# 1. Clone
-git clone <this repository> && cd forge
-
-# 2. Configure
-cp .env.example .env
-cp litellm-config.example.yaml litellm-config.yaml
-# Edit .env -- set GITLAB_URL, GITLAB_TOKEN, GITLAB_WEBHOOK_SECRET,
-#              at least one model API key (e.g. OPENROUTER_API_KEY),
-#              LITELLM_URL=http://localhost:4000,
-#              REDIS_URL=redis://localhost:6379/0,
-#              DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/forge
-
-# 3. Start infrastructure (Redis + LiteLLM + its Postgres)
-docker compose up -d
-
-# 4. Install dependencies & run migrations
-uv sync
-make migrate
-
-# 5. Start the service (and, in another terminal, the worker)
-make run        # http://localhost:8420 with hot-reload
-make worker     # Redis-backed worker
-
-# 6. Register the GitLab webhook for a project
-make setup
-
-# 7. Verify
-curl http://localhost:8420/health
-```
-
-### Registering the GitLab webhook
-
-GitLab must be able to reach the forge service over HTTP.
-
-| Scenario | Solution |
-|----------|----------|
-| Same machine / LAN | `http://192.168.x.x:8420/webhook` |
-| Remote / cloud | Use a tunnel, e.g. `ngrok http 8420` |
-| Everything in Docker | Same Docker network |
-
-### Running everything in Docker (optional)
-
-The repository ships a full Docker profile that additionally starts the forge
-app and worker containers:
-
-```bash
-docker compose --profile full up --build -d
-```
-
-This is useful for production-style deployments. For day-to-day development,
-the local `uv`/`make run` workflow is faster and gives you hot-reload.
-
-## Configuration
-
-### Environment variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GITLAB_URL` | Yes | -- | GitLab instance URL |
-| `GITLAB_TOKEN` | Yes | -- | Bot Personal Access Token (`api` scope) |
-| `GITLAB_WEBHOOK_SECRET` | Yes | -- | Webhook validation secret |
-| `FORGE_BOT_USERNAME` | No | `forge-bot` | Bot's GitLab username |
-| `FORGE_MENTION_PATTERN` | No | `@forge` | Mention trigger pattern |
-| `FORGE_AGENTS_DIR` | No | `agents` | Directory with agent YAML definitions |
-| `FORGE_MCP_KEY` | No | -- | Bearer token required to call the `/mcp` mount |
-| `DATABASE_URL` | No | SQLite default | forge's own database (Postgres recommended) |
-| `LITELLM_URL` | No | `http://litellm:4000` | LiteLLM proxy URL; use `http://localhost:4000` when running locally |
-| `REDIS_URL` | No | -- | Redis URL; required for the worker |
-| `LOG_LEVEL` | No | `INFO` | Logging level |
-| `AGNO_TELEMETRY` | No | `false` | Agno framework telemetry (disabled by default) |
-
-### Service configuration (`forge.yml`)
-
-Service-level settings (model tiers, defaults, rate limits, token budgets,
-redaction, labels) live in `forge.yml`. See `forge.example.yml` for the full
-schema.
-
-### Project configuration (`.forge.yml`)
-
-Per-project overrides are placed in the repository root of each connected
-project:
-
-```yaml
-forge:
-  review_rules:
-    - "Follow the project style guide"
-  skip_paths:
-    - "*.lock"
-    - "vendor/**"
-  disabled_agents:
-    - security-triage
-```
-
-Project configuration can only tighten limits and pick from allowed options;
-it can never grant additional authority. See
-[ADR-0011](docs/adr/0011-config-never-delegates-security-downward.md).
-
-## Usage
-
-### @mention
-
-```
-@forge What does this function do?
-@forge Can you explain the changes in this MR?
-```
-
-### Slash commands
-
-```
-@forge /review     - Request a code review
-@forge /debug      - Diagnose a pipeline failure
-@forge /security   - Run security triage
-@forge /explain    - Explain the current diff
-@forge /help       - Show available commands
-```
-
-Code reviews and pipeline debugging also run automatically when merge requests
-are opened/updated or pipelines fail.
-
-## Development
-
-| Target | Purpose |
-|--------|---------|
-| `make run` | Start the forge web app with hot-reload |
-| `make worker` | Start the Redis-backed worker |
-| `make migrate` | Apply database migrations |
-| `make setup` | Register the GitLab webhook for a project |
-| `make test` | Run the test suite |
-| `make lint` | Lint with ruff |
-| `make fmt` | Format with ruff |
-| `make docker-up` / `make docker-down` | Start/stop the infrastructure stack |
+  target project's onboarding) is complete. Read-only; never prints secret
+  values.
 
 ## Documentation
 
-- [Architecture decision records](docs/adr/0000-record-architecture-decisions.md)
-  — the design of the factory controller: write backend and ChangeSet
-  contract, execution profiles, no-merge enforcement, the durable lifecycle,
-  reconciliation, snapshot isolation, Draft MR and CI ordering, quality
-  contracts, human gates, CE-compatible labels, layered configuration,
-  context/redaction boundaries, budgets and the usage ledger
-- [Threat model](docs/security/threat-model.md) — trust boundaries, key risks,
-  and their mitigations
-- [Operations runbooks](docs/operations/README.md) — planned
-- [UPSTREAM.md](UPSTREAM.md) — provenance and upstream tracking policy
+| Doc | Scope |
+|-----|-------|
+| [AGENTS.md](AGENTS.md) | agent entry point + repo conventions |
+| [docs/onboarding-prompt.md](docs/onboarding-prompt.md) | bootstrap prompt for coding agents |
+| [docs/github-setup.md](docs/github-setup.md) | GitHub App + project setup + FAQ |
+| [docs/faq.md](docs/faq.md) | frequently asked questions (both providers) |
+| [docs/harness-onboarding.md](docs/harness-onboarding.md) | harness CLIs: setup + triage |
+| [docs/operations/](docs/operations/) | backup/restore, upgrade, token rotation, retention |
+| [docs/adr/](docs/adr/) | architecture decisions (0000–0020) |
+| [docs/research/](docs/research/) | live API research (GitHub, Actions, harnesses) |
+| [demo/](demo/) | sales demo script + regeneration skill |
 
-## License
+## License & provenance
 
-forge is published under the BSD 3-Clause license. It is based on
-[Codeward](https://github.com/Relrin/codeward) and contains substantial
-modifications. See [LICENSE](LICENSE),
-[UPSTREAM.md](UPSTREAM.md), and
+BSD-3-Clause — see [LICENSE](LICENSE), [UPSTREAM.md](UPSTREAM.md),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
