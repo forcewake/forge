@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     FORGE_GITHUB_APP_ID: str = ""
     FORGE_GITHUB_PRIVATE_KEY: SecretStr | None = None
     FORGE_GITHUB_INSTALLATION_ID: str = ""
+    FORGE_GITHUB_BOT_LOGIN: str = "forcewake-forge[bot]"
     # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None

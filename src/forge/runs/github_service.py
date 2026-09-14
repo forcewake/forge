@@ -1230,8 +1230,8 @@ class GitHubRunService:
             "## Forge — a run is already active on this issue\n\n"
             f"Run `{run.id}` is **{run.status}** — a new `/implement` would fork the "
             "branch and Draft PR.\n\n"
-            f"- Approve it: `@forge /go {run.id}`\n"
-            f"- Cancel it first: `@forge /cancel {run.id}`"
+            f"- Approve it: `/go {run.id}`\n"
+            f"- Cancel it first: `/cancel {run.id}`"
         )
 
     def _approvers(self) -> list[str]:
@@ -1456,7 +1456,9 @@ class GitHubRunService:
             return f"issue {issue_number}"
 
     def _plan_comment(self, run_id: str, plan: str, digest: str) -> str:
-        mention = str(getattr(self._settings, "FORGE_MENTION_PATTERN", "@forge") or "@forge")
+        # On GitHub the App's bot login is forcewake-forge[bot]; the literal
+        # "@forge" mention links to an unrelated org. Bare commands suffice.
+        mention = ""
         approvers = self._approvers()
         # Mentions stay OUTSIDE code spans: GitHub does not linkify (or
         # notify) @usernames inside backticks either.

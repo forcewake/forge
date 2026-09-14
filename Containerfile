@@ -24,7 +24,7 @@ COPY alembic /app/alembic
 COPY alembic.ini /app/alembic.ini
 RUN uv sync --frozen --no-dev --extra postgres \
     && useradd -u 1000 -m forge \
-    && chown -R forge:forge /app/data /app/.cache
+    && chown -R forge:forge /app/data /app/.cache /app
 
 USER forge
 # Runtime does not invoke uv: the synced venv is used directly, so a
