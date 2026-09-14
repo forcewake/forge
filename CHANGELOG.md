@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-14
+
+### Added — GitHub path at parity (ADR-0019/0020, F32 completion)
+
+- **Plan + human gate on GitHub**: /implement → plan comment (digest +
+  approve instruction) → immutable RunSpec + pending decision with TTL →
+  `/go <run-id>` consumes it → publish → Draft PR → sha-bound readonly
+  review → ready_for_human. `/cancel` = cancel-as-revoke. One active run
+  per (repo, issue); uuid FlowRuns with provider identity (migration 008).
+- **GitHub Actions execution adapter** ([ADR-0020](docs/adr/0020-github-actions-executor.md)):
+  `/go` can dispatch the real coding-agent harness (Claude Code / Grok
+  Build / opencode) into the target repo's Actions runner — proposal-only
+  lane (no write credentials, push disabled), candidate artifacts
+  (diff + meta + usage) downloaded and applied by the trusted publisher.
+- **Shared quality-prompt builder**: one brief structure (role / task /
+  constraints / quality bar / lane-specific output contract) rendered for
+  all drivers; skills via AGENTS.md / CLAUDE.md conventions.
+- **Label trigger**: `issues.labeled` with FORGE_TRIGGER_LABEL (default
+  `forge`) starts runs like /implement.
+
+### Fixed — found live during GitHub verification
+
+- Wake-task identity mismatch double-executed run commands (two runs/PRs
+  per comment); known-identity-without-step no longer falls back to
+  direct execution.
+- Candidate meta-key drift (attempt_base_oid vs attempt_base) rejected
+  every Actions candidate.
+- GitHub-subject runs are no longer polled by the GitLab CI reconciler.
+- claude/opencode drivers install themselves in the Actions lane
+  (retrying preambles); claude gateway env (AUTH_TOKEN/BASE_URL)
+  passthrough.
+- Approver-list hygiene: FORGE_APPROVERS are provider logins — never share
+  the list across GitLab and GitHub identities.
+
+### Docs
+
+- README rewritten for the two-provider reality; docs/github-setup.md
+  (App registration → harness → FAQ); docs/faq.md.
+
 ## [0.4.0] - 2026-09-13
 
 ### Added — GitHub App adapter, same-repository slice (ADR-0019, F32)
