@@ -190,7 +190,27 @@ async def execute_run_command(
     GitHub webhook) dispatch to :mod:`forge.runs.github_service` — the
     FlowRun-backed GitHub gate path; RunService stays GitLab-bound until the
     v0.5 contracts extraction.
+
+    v0.7: ``security_triage`` commands dispatch to
+    :mod:`forge.findings.triage` BEFORE the gate machinery — findings are a
+    separate subsystem wired into the same durable step runtime (they never
+    touch RunService state).
     """
+    if metadata.get("command") == "security_triage":
+        from forge.findings.triage import execute_security_command
+
+        if metadata.get("provider") == "github":
+            await execute_security_command(settings, forge_config, session_factory, metadata)
+            return
+        async with GitLabClient(
+            base_url=settings.GITLAB_URL,
+            token=forge_token(settings),
+        ) as gitlab:
+            await execute_security_command(
+                settings, forge_config, session_factory, metadata, gitlab=gitlab
+            )
+        return
+
     if metadata.get("provider") == "github":
         from forge.runs.github_service import execute_github_run_command
 

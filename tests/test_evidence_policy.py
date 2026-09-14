@@ -219,8 +219,7 @@ class TestRepairContextCanary:
             fake_gitlab,
             branch_for(ISSUE_IID, run_id),
             first_sha,
-            "E AssertionError: widget count 0 != 1\n"
-            "export DEPLOY_TOKEN=glpat-CANARY-SHORT\n",
+            "E AssertionError: widget count 0 != 1\nexport DEPLOY_TOKEN=glpat-CANARY-SHORT\n",
         )
 
         await service.evaluate_waiting_ci()

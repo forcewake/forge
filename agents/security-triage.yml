@@ -27,6 +27,12 @@ context:
   needs_security_reports: true
   needs_diff: false
 
+# v0.7: the durable /security step feeds severity-sorted batches of up to
+# 50 findings per call; this raises the prompt cap accordingly (reactive
+# triggers keep the default 20 — settings merge per definition).
+settings:
+  max_findings: 50
+
 system_prompt: |
   You are a senior application security engineer triaging automated scan findings
   for the project {project_path}.

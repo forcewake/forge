@@ -28,6 +28,12 @@ Event routing for this slice:
   (ADR-0020 §4: the honest agent-UX fallback — a label trigger, not a
   partner-program listing). Admission still applies downstream: only
   FORGE_APPROVERS logins actually start runs.
+- ``pull_request`` ``opened``/``synchronize`` → the reactive review lane
+  (v0.7, docs/research/github-reactive.md F1): Draft PRs in tracked repos
+  are normalized to a ``review_pr`` command routed through the SAME durable
+  step path (inbox row + scheduled step in one transaction). Bot senders,
+  bot-authored PRs and forge's own ``forge/*`` branches are skipped — the
+  reactive reviewer never reviews forge's own output.
 - ``installation`` ``deleted``/``removed`` → the connection is disabled:
   logged and persisted as an inbox row (reconciliation hooks come with the
   v0.5 contracts extraction).
@@ -57,13 +63,25 @@ github_router = APIRouter()
 
 #: Commands served by the durable run loop — the same set the GitLab
 #: ingress routes (forge.gateway.router._RUN_COMMANDS); the normalized
-#: GitHub command lands on the same durable step path.
-_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel"})
+#: GitHub command lands on the same durable step path. ``/security`` (v0.7)
+#: is the provider-neutral triage step — comments on issues AND PRs route
+#: identically (``issue_is_pr`` is surfaced but does not change routing).
+_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
 
-_COMMAND_MAP = {"/implement": "start_run", "/go": "go", "/cancel": "cancel"}
+_COMMAND_MAP = {
+    "/implement": "start_run",
+    "/go": "go",
+    "/cancel": "cancel",
+    "/security": "security_triage",
+}
 
 #: installation webhook actions that mean "this connection is gone".
 _INSTALLATION_REMOVED_ACTIONS = frozenset({"deleted", "removed"})
+
+#: ``pull_request`` actions the reactive review lane reacts to (v0.7 F1):
+#: a new Draft PR, or new commits pushed to one. Everything else
+#: (``closed``, ``ready_for_review``, ``edited``, …) is inbox-only.
+_PR_REVIEW_ACTIONS = frozenset({"opened", "synchronize"})
 
 
 def verify_github_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
@@ -185,6 +203,81 @@ def normalize_labeled_event(
     }
 
 
+def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a ``pull_request`` payload into a reactive-review command.
+
+    Fires only for ``opened``/``synchronize`` on **Draft** PRs (the reactive
+    lane's v0.7 scope, research §8 F1) and never for forge's own output:
+    bot-authored PRs and the ``forge/`` head-branch prefix — E1's durable
+    flow publishes forge commits there — return None (inbox-only record).
+    The sender-type Bot guard lives at the routing site (it answers
+    ``skipped`` rather than recording).
+
+    The payload's ``before``/``after`` SHAs travel in the metadata so the
+    engine gets the synchronize delta without extra API reads (research
+    §1.4); a zero ``before`` (branch creation) is blanked to force a full
+    review. The delivery key is content-stable — ``pr:<n>:<action>:<after>``
+    — so a redelivered push collapses onto one inbox identity even when the
+    delivery GUID differs.
+    """
+    pull_request = payload.get("pull_request") or {}
+    if not pull_request:
+        return None
+    action = str(payload.get("action") or "")
+    if action not in _PR_REVIEW_ACTIONS:
+        return None
+    if not pull_request.get("draft"):
+        return None
+
+    head = pull_request.get("head") or {}
+    head_branch = str(head.get("ref") or "")
+    pr_author = pull_request.get("user") or {}
+    if str(pr_author.get("type") or "") == "Bot":
+        return None
+    if head_branch.startswith("forge/"):
+        # forge's own durable-flow branch: reviewing forge's own run output
+        # would self-trigger (research §6.2).
+        logger.info(
+            "Skipping forge-owned branch %s on reactive review",
+            head_branch,
+            extra={"event": "pull_request"},
+        )
+        return None
+
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+    number = int(pull_request.get("number") or 0)
+    after = str(payload.get("after") or head.get("sha") or "")
+    before = str(payload.get("before") or "")
+    if set(before) <= {"0"}:
+        before = ""  # branch creation — no delta exists
+    sender = payload.get("sender") or {}
+    delivery_key = f"pr:{number}:{action}:{after}"
+
+    return {
+        "command": "review_pr",
+        "provider": "github",
+        "connection_id": github_connection_id(
+            installation.get("id"), str(repository.get("full_name") or "")
+        ),
+        "project_id": int(repository.get("id") or 0),
+        "repo_full_name": str(repository.get("full_name") or ""),
+        "issue_number": number,
+        "pr_number": number,
+        "action": action,
+        "head_sha": after,
+        "after_sha": after,
+        "before_sha": before,
+        "head_branch": head_branch,
+        "sender_type": str(sender.get("type") or ""),
+        "pr_author_type": str(pr_author.get("type") or ""),
+        "author_username": str(sender.get("login") or ""),
+        "note_text": "",
+        "note_id": delivery_key,  # stable fast-path dedup + task identity
+        "delivery_key": delivery_key,
+    }
+
+
 @github_router.post("/webhook/github")
 async def github_webhook(
     request: Request,
@@ -288,6 +381,26 @@ async def _ingest_github_event(
         )
         return await _ingest_github_run_command(
             request, background_tasks, run_command, source_event_id, event=event
+        )
+
+    if event == "pull_request" and action in _PR_REVIEW_ACTIONS:
+        sender = payload.get("sender") or {}
+        if str(sender.get("type") or "") == "Bot":
+            # Recursion guard (research §6.2): App-token events DO fire
+            # webhooks — forge's own pushes must never re-trigger the
+            # reviewer.
+            logger.info("Skipping Bot-sent GitHub pull_request event", extra={"event": event})
+            return {"status": "skipped", "reason": "bot-loop"}
+        review_command = normalize_pull_request_event(payload)
+        if review_command is None:
+            return _record_inbox_only(
+                request, background_tasks, event, delivery, connection_id, project_id, payload
+            )
+        source_event_id = github_source_event_id(
+            connection_id, event, action, review_command["delivery_key"]
+        )
+        return await _ingest_github_run_command(
+            request, background_tasks, review_command, source_event_id, event=event
         )
 
     if event == "installation" and action in _INSTALLATION_REMOVED_ACTIONS:

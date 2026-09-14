@@ -26,8 +26,19 @@ GitHub → Settings → Developer settings → **GitHub Apps → New GitHub App*
 | Webhook ✓ Active | URL `https://<forge-host>/webhook/github` |
 | Webhook secret | generate (`openssl rand -hex 32`) — forge must get the same value |
 | Repository permissions | **Issues: Read & write**, **Contents: Read & write**, **Pull requests: Read & write**, **Actions: Read-only**, **Metadata: Read-only** |
-| Subscribe to events | **Issues**, **Issue comment**, **Meta** |
+| Subscribe to events | **Issues**, **Issue comment**, **Pull request**, **Meta** (Pull request drives the reactive PR review) |
 | Where can this App be installed | Only on this account |
+
+**Security findings (optional, `/security` triage):** forge's `/security`
+command pulls code-scanning, secret-scanning and Dependabot alerts. Grant
+the App **Code scanning alerts: Read & write**, **Secret scanning alerts:
+Read & write** and **Dependabot alerts: Read & write** — the write half is
+only needed if you enable `FORGE_SECURITY_REMOTE_DISMISS`; reads alone
+cover ingestion and triage. PAT/lab mode needs the classic `security_events`
+scope for code + secret scanning. Alert endpoints answer **403** on repos
+where Code Security / Secret Protection is not enabled (public repos are
+free; private ones need the paid SKU) — forge degrades to Dependabot-only
+for those repos (Dependabot alerts are free everywhere).
 
 Then:
 

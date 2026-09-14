@@ -36,10 +36,14 @@ class SecurityTriageAgent(ForgeAgent):
 
         # Security report findings
         has_reports = False
+        # v0.7: the durable /security step feeds severity-sorted batches of
+        # up to 50 findings; the definition may raise the prompt cap via
+        # settings.max_findings (default stays 20 for reactive triggers).
+        max_findings = int(self.definition.settings.get("max_findings", 20))
         for report in ctx.security_reports:
             if not isinstance(report, SecurityReport):
                 continue
-            prioritized = prioritize_findings(report.findings)
+            prioritized = prioritize_findings(report.findings, max_count=max_findings)
             if prioritized:
                 has_reports = True
                 parts.append(

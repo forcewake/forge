@@ -1504,8 +1504,18 @@ async def execute_github_run_command(
     Wired from :func:`forge.runs.service.execute_run_command`. The
     *stack_factory* hook exists for tests to run the service over a fake
     client + stub agents (no network, no model).
+
+    ``review_pr`` dispatches to the reactive review lane
+    (:mod:`forge.reactive.github_review`) — a separate lane beside the
+    durable run path below: no FlowRun, no RunSpec, one step in/one review
+    out. RunService/GitHubRunService state is untouched by it.
     """
     command = metadata.get("command")
+    if command == "review_pr":
+        from forge.reactive.github_review import execute_reactive_review
+
+        await execute_reactive_review(settings, forge_config, session_factory, metadata)
+        return
     if command not in {"start_run", "go", "cancel"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)
         return

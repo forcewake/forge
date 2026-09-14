@@ -60,6 +60,12 @@ _PER_PAGE = 100
 #: before ``expires_at`` so a call never dies mid-flight (research §8.1).
 _TOKEN_EXPIRY_MARGIN_SECONDS = 300
 
+#: Hard cap on every GitHub markdown body (issue comments, review bodies):
+#: MySQL mediumblob 262,144 bytes ÷ 4-byte max (github-reactive research §2).
+#: Oversized bodies fail with ``body is too long (maximum is 65536
+#: characters)`` — callers truncate with an overflow block before posting.
+GITHUB_BODY_MAX_CHARS = 65536
+
 
 class GitHubAPIError(Exception):
     """Raised when a GitHub API request (or GraphQL operation) fails."""
@@ -452,6 +458,23 @@ class GitHubClient:
         )
         return dict(response.json())
 
+    async def update_issue_comment(
+        self, owner: str, repo: str, comment_id: int, body: str
+    ) -> dict[str, Any]:
+        """Full-body replace of one issue/PR comment (sticky-comment PATCH).
+
+        The edit-in-place half of the ``<!-- forge:<kind>:<key> -->`` marker
+        convention (github-reactive research §3.3): the sticky comment is
+        found by its hidden marker and PATCHed instead of re-posted, so a
+        redelivery updates one comment rather than spawning duplicates.
+        """
+        response = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            json={"body": body},
+        )
+        return dict(response.json())
+
     # -- REST: git refs -----------------------------------------------------------
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
@@ -631,6 +654,74 @@ class GitHubClient:
             for entry in await self._paginated(f"/repos/{owner}/{repo}/pulls/{number}/files")
         ]
 
+    # -- REST: PR reviews (the reactive review engine, v0.7) ------------------------
+    #
+    # Ground truth: docs/research/github-reactive.md §1 (tagged there).
+
+    async def create_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        comments: list[dict[str, Any]] | None = None,
+        event: str | None = None,
+        commit_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit one PR review — summary body + inline comments, atomically.
+
+        ``POST /repos/{o}/{r}/pulls/{n}/reviews`` (research §1.1): *comments*
+        items carry ``path`` + ``line`` + ``side`` (``RIGHT`` for additions,
+        ``LEFT`` for deletions) and optionally ``start_line``/``start_side``
+        for multi-line ranges; *event* is ``APPROVE`` | ``REQUEST_CHANGES`` |
+        ``COMMENT`` (omitted → the review is created PENDING, never done
+        here). *commit_id* pins the review to the reviewed head SHA — the
+        incremental anchor :meth:`list_reviews` reads back (research §1.4).
+
+        Non-idempotent (retry=False): a lost response is reconciled by the
+        caller finding its own review at the head SHA, never replayed.
+        """
+        payload: dict[str, Any] = {"body": body}
+        if event is not None:
+            payload["event"] = event
+        if commit_id is not None:
+            payload["commit_id"] = commit_id
+        if comments:
+            payload["comments"] = [
+                {key: value for key, value in comment.items() if value is not None}
+                for comment in comments
+            ]
+        response = await self._post(
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            retry=False,
+            json=payload,
+        )
+        return dict(response.json())
+
+    async def list_reviews(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        """The PR's reviews, chronological (research §1.2).
+
+        Each review carries ``user``, ``state``, ``commit_id`` and
+        ``submitted_at`` — filtered by the bot identity, the latest own
+        ``commit_id`` is the incremental-review anchor.
+        """
+        return [
+            dict(review)
+            for review in await self._paginated(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews")
+        ]
+
+    async def get_compare(self, owner: str, repo: str, before: str, after: str) -> dict[str, Any]:
+        """The ``before...after`` comparison (research §1.4 / §2).
+
+        ``files[]`` mirrors the PR-files schema (filename/status/patch) with
+        the same truncation caveats (~300 files, oversized patches omitted) —
+        this is the synchronize delta's free diff surface, so the reactive
+        engine never needs a commit-list fallback to compute what changed.
+        """
+        encoded = f"{quote(before, safe='')}/{quote(after, safe='')}"
+        response = await self._get(f"/repos/{owner}/{repo}/compare/{encoded}")
+        return dict(response.json())
+
     # -- REST: verification reads ---------------------------------------------------
 
     async def list_check_runs_for_sha(
@@ -807,6 +898,139 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/actions/runs/{run_id}/cancel",
             retry=False,
         )
+
+    # -- REST: security alerts (findings ingestion; research ci-security-surface §3/§4) --
+    #
+    # Ground truth: docs/research/ci-security-surface.md §3.2 (field sets,
+    # 403-when-disabled) and §4.2 (dismissal enums — code scanning uses
+    # SPACES ("false positive"), secret scanning UNDERSCORES
+    # ("false_positive"); every dismiss reason is REQUIRED).
+
+    #: Valid code-scanning ``dismissed_reason`` values (§4.2 [documented]).
+    CODE_SCANNING_DISMISS_REASONS = frozenset({"false positive", "won't fix", "used in tests"})
+    #: Valid secret-scanning ``resolution`` values (§4.2 [documented]).
+    SECRET_SCANNING_RESOLUTIONS = frozenset(
+        {"false_positive", "wont_fix", "revoked", "used_in_tests"}
+    )
+    #: Valid dependabot ``dismissed_reason`` values (§4.2 [documented]) —
+    #: note there is no "false positive"; "inaccurate" is the closest match.
+    DEPENDABOT_DISMISS_REASONS = frozenset(
+        {"fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"}
+    )
+
+    async def list_code_scanning_alerts(
+        self, owner: str, repo: str, *, state: str = "open", ref: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Open code-scanning alerts (``security_events``/Code scanning read).
+
+        403 "GitHub Advanced Security is not enabled for this repository"
+        propagates as :class:`GitHubAPIError` — callers degrade per repo.
+        """
+        params: dict[str, Any] = {"state": state}
+        if ref is not None:
+            params["ref"] = ref
+        return [
+            dict(alert)
+            for alert in await self._paginated(
+                f"/repos/{owner}/{repo}/code-scanning/alerts", params
+            )
+        ]
+
+    async def dismiss_code_scanning_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        dismissed_reason: str,
+        dismissed_comment: str | None = None,
+    ) -> dict[str, Any]:
+        """Dismiss a code-scanning alert via PATCH (research §4.2).
+
+        ``dismissed_reason`` is REQUIRED and space-separated
+        (``"false positive"``); ``dismissed_comment`` is the audit trail
+        humans see in the UI — never dismiss without one.
+        """
+        if dismissed_reason not in self.CODE_SCANNING_DISMISS_REASONS:
+            raise ValueError(
+                f"dismissed_reason must be one of "
+                f"{sorted(self.CODE_SCANNING_DISMISS_REASONS)}, got {dismissed_reason!r}"
+            )
+        body: dict[str, Any] = {"state": "dismissed", "dismissed_reason": dismissed_reason}
+        if dismissed_comment is not None:
+            body["dismissed_comment"] = dismissed_comment
+        response = await self._request(
+            "PATCH", f"/repos/{owner}/{repo}/code-scanning/alerts/{number}", json=body
+        )
+        return dict(response.json())
+
+    async def list_secret_scanning_alerts(
+        self, owner: str, repo: str, *, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        """Open secret-scanning alerts (403 when Secret Protection is off)."""
+        return [
+            dict(alert)
+            for alert in await self._paginated(
+                f"/repos/{owner}/{repo}/secret-scanning/alerts", {"state": state}
+            )
+        ]
+
+    async def resolve_secret_scanning_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        resolution: str,
+        resolution_comment: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a secret-scanning alert — underscore enum (research §4.2)."""
+        if resolution not in self.SECRET_SCANNING_RESOLUTIONS:
+            raise ValueError(
+                f"resolution must be one of "
+                f"{sorted(self.SECRET_SCANNING_RESOLUTIONS)}, got {resolution!r}"
+            )
+        body: dict[str, Any] = {"state": "resolved", "resolution": resolution}
+        if resolution_comment is not None:
+            body["resolution_comment"] = resolution_comment
+        response = await self._request(
+            "PATCH", f"/repos/{owner}/{repo}/secret-scanning/alerts/{number}", json=body
+        )
+        return dict(response.json())
+
+    async def list_dependabot_alerts(
+        self, owner: str, repo: str, *, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        """Open Dependabot alerts (free for all repositories)."""
+        return [
+            dict(alert)
+            for alert in await self._paginated(
+                f"/repos/{owner}/{repo}/dependabot/alerts", {"state": state}
+            )
+        ]
+
+    async def dismiss_dependabot_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        dismissed_reason: str,
+        dismissed_comment: str | None = None,
+    ) -> dict[str, Any]:
+        """Dismiss a Dependabot alert (``inaccurate`` ≈ false positive)."""
+        if dismissed_reason not in self.DEPENDABOT_DISMISS_REASONS:
+            raise ValueError(
+                f"dismissed_reason must be one of "
+                f"{sorted(self.DEPENDABOT_DISMISS_REASONS)}, got {dismissed_reason!r}"
+            )
+        body: dict[str, Any] = {"state": "dismissed", "dismissed_reason": dismissed_reason}
+        if dismissed_comment is not None:
+            body["dismissed_comment"] = dismissed_comment
+        response = await self._request(
+            "PATCH", f"/repos/{owner}/{repo}/dependabot/alerts/{number}", json=body
+        )
+        return dict(response.json())
 
     # -- REST: raw content primitives (the reader builds on these) ------------------
 

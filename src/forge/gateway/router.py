@@ -33,20 +33,24 @@ router = APIRouter()
 router.include_router(github_router)
 
 #: Commands served by the durable run service (M1), not the legacy flow engine.
-_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel"})
+#: ``/security`` (v0.7) joins them — the durable triage step — and is the ONLY
+#: run command also accepted on MR notes (triage targets MRs, issues and PRs;
+#: /implement, /go and /cancel stay issue-bound).
+_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
-    """Detect note events that belong to the durable run loop (M1).
+    """Detect note events that belong to the durable run loop (M1 + v0.7).
 
     - ``<mention> /implement`` on an issue → ``start_run``.
     - ``<mention> /go <run-id>`` on an issue → ``handle_command_note``.
+    - ``<mention> /security`` on an issue **or MR** → ``security_triage``
+      (the provider-neutral durable triage step, v0.7).
 
     Respects ``FORGE_MENTION_PATTERN``. Returns the run_command metadata dict,
     or None when the event should take its legacy path.
     """
-    if not isinstance(event, NoteEvent) or event.issue is None:
-        # Gate notes are posted on issues; MR notes keep the legacy paths.
+    if not isinstance(event, NoteEvent):
         return None
 
     bot_username = getattr(settings, "FORGE_BOT_USERNAME", "forge-bot")
@@ -72,12 +76,21 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     if slash_command is None:
         return None
 
+    on_issue = event.issue is not None
+    if not on_issue and slash_command != "/security":
+        # Gate notes are posted on issues; MR notes keep the legacy paths —
+        # except /security, which is MR/issue/PR-neutral by contract.
+        return None
+
     common = {
         "project_id": event.project.id if event.project else 0,
-        "issue_iid": event.issue.iid,
+        "issue_iid": event.issue.iid if on_issue else None,
         "author_username": event.user.username if event.user else "",
         "author_user_id": event.user.id if event.user else 0,
     }
+    if slash_command == "/security":
+        common["mr_iid"] = event.merge_request.iid if not on_issue and event.merge_request else None
+        return {**common, "command": "security_triage", "note_text": note_text}
     if slash_command == "/implement":
         # M1 cutover: /implement takes the durable RunService path, not flows.
         return {**common, "command": "start_run"}

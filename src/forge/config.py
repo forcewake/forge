@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # GitLab username in FORGE_APPROVERS can never approve a GitHub run.
     FORGE_GITHUB_APPROVERS: str = ""
 
+    # Security findings (v0.7): when true, a /security verdict of "false
+    # positive" on a GITHUB finding also dismisses the remote alert via the
+    # alert PATCH APIs (research §4.2 enums, justification as the audit
+    # comment). Default false — forge records the verdict in its own triage
+    # store and leaves the provider alert untouched.
+    FORGE_SECURITY_REMOTE_DISMISS: bool = False
+
     # Evidence policy (F23): before CI-log-derived text enters a comment,
     # the run row or a repair brief, values matching these deny patterns
     # (literal substrings, comma-separated) are replaced with a

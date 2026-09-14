@@ -1,0 +1,27 @@
+{
+  "action": "opened",
+  "number": 7,
+  "pull_request": {
+    "number": 7,
+    "title": "Draft: add rate limiter",
+    "draft": true,
+    "state": "open",
+    "user": {"login": "alice", "id": 501, "type": "User"},
+    "head": {
+      "ref": "feature/rate-limiter",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "label": "acme:feature/rate-limiter"
+    },
+    "base": {"ref": "main", "sha": "1111111111111111111111111111111111111111"}
+  },
+  "before": "0000000000000000000000000000000000000000",
+  "after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "default_branch": "main"
+  },
+  "sender": {"login": "alice", "id": 501, "type": "User"},
+  "installation": {"id": 12345}
+}

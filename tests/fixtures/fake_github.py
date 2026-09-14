@@ -37,6 +37,17 @@ class FakeGitHub:
         # pr number -> list of PR file dicts (filename / patch), the reviewer's
         # diff surface
         self.pr_files: dict[int, list[dict]] = {}
+        # pr number -> list of review dicts, chronological (the incremental
+        # anchor: forge's own review commit_ids)
+        self.reviews: dict[int, list[dict]] = {}
+        # (before, after) -> compare dict {"files": [...]} — the synchronize
+        # delta surface
+        self.compares: dict[tuple[str, str], dict] = {}
+        # full_name -> issue/PR number -> list of comment dicts (the sticky
+        # progress-comment surface)
+        self.issue_comments: dict[str, dict[int, list[dict]]] = {}
+        # identity reviews/comments are authored with (the App's bot login)
+        self.reviewer_login: str = "forge-app[bot]"
         # sha -> list of check-run dicts
         self.check_runs: dict[str, list[dict]] = {}
         # list of workflow-run dicts (head_sha / name keyed filtering)
@@ -51,6 +62,14 @@ class FakeGitHub:
         self.job_logs: dict[int, str] = {}
         self.actions_jobs: dict[int, list[dict]] = {}
         self.cancelled_runs: list[int] = []
+        # Security alert surfaces (findings ingestion, ci-security-surface
+        # §3/§4): full_name -> list of alert dicts; the *_disabled knobs
+        # raise the documented 403 "feature not enabled" per repo.
+        self.code_scanning_alerts: dict[str, list[dict]] = {}
+        self.secret_scanning_alerts: dict[str, list[dict]] = {}
+        self.dependabot_alerts: dict[str, list[dict]] = {}
+        self.code_scanning_disabled: bool = False
+        self.secret_scanning_disabled: bool = False
         self.calls: list[tuple[str, tuple]] = []
         self._next_number = 100
         self._next_oid = 1
@@ -193,6 +212,67 @@ class FakeGitHub:
         """Seed the changed-file entries the reviewer reads for a PR."""
         self.pr_files[pr_number] = files
 
+    def seed_compare(self, before: str, after: str, files: list[dict]) -> dict:
+        """Seed a ``before...after`` comparison (the synchronize delta)."""
+        comparison = {"files": [dict(f) for f in files], "total_commits": 1}
+        self.compares[(before, after)] = comparison
+        return dict(comparison)
+
+    async def get_compare(self, owner: str, repo: str, before: str, after: str) -> dict:
+        self.calls.append(("get_compare", (owner, repo, before, after)))
+        comparison = self.compares.get((before, after))
+        if comparison is None:
+            raise GitHubAPIError(404, f"comparison {before[:8]}...{after[:8]} not found")
+        return json.loads(json.dumps(comparison))  # deep copy, dict-shape
+
+    # -- reviews (the reactive review engine surface, v0.7) -----------------
+
+    def seed_review(
+        self,
+        pr_number: int,
+        *,
+        commit_id: str,
+        login: str | None = None,
+        state: str = "COMMENT",
+        body: str = "",
+    ) -> dict:
+        """Seed an existing review (the incremental anchor of a prior run)."""
+        review = {
+            "id": self._number(),
+            "user": {"login": login or self.reviewer_login, "type": "Bot"},
+            "state": state,
+            "commit_id": commit_id,
+            "body": body,
+        }
+        self.reviews.setdefault(pr_number, []).append(review)
+        return dict(review)
+
+    async def list_reviews(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        self.calls.append(("list_reviews", (owner, repo, pr_number)))
+        return [dict(review) for review in self.reviews.get(pr_number, [])]
+
+    async def create_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        comments: list[dict] | None = None,
+        event: str | None = None,
+        commit_id: str | None = None,
+    ) -> dict:
+        self.calls.append(("create_review", (owner, repo, pr_number, event, commit_id)))
+        review = {
+            "id": self._number(),
+            "user": {"login": self.reviewer_login, "type": "Bot"},
+            "state": event or "PENDING",
+            "commit_id": commit_id,
+            "body": body,
+            "comments": [dict(comment) for comment in comments or []],
+        }
+        self.reviews.setdefault(pr_number, []).append(review)
+        return dict(review)
+
     async def get_pr_files(self, owner: str, repo: str, number: int) -> list[dict]:
         self.calls.append(("get_pr_files", (owner, repo, number)))
         return [dict(entry) for entry in self.pr_files.get(number, [])]
@@ -231,7 +311,29 @@ class FakeGitHub:
 
     async def create_issue_comment(self, owner: str, repo: str, number: int, body: str) -> dict:
         self.calls.append(("create_issue_comment", (owner, repo, number, body)))
-        return {"id": self._number(), "body": body}
+        comment = {
+            "id": self._number(),
+            "body": body,
+            "user": {"login": self.reviewer_login, "type": "Bot"},
+        }
+        self.issue_comments.setdefault(f"{owner}/{repo}", {}).setdefault(number, []).append(comment)
+        return dict(comment)
+
+    async def get_issue_comments(self, owner: str, repo: str, number: int) -> list[dict]:
+        self.calls.append(("get_issue_comments", (owner, repo, number)))
+        return [
+            dict(comment)
+            for comment in self.issue_comments.get(f"{owner}/{repo}", {}).get(number, [])
+        ]
+
+    async def update_issue_comment(self, owner: str, repo: str, comment_id: int, body: str) -> dict:
+        self.calls.append(("update_issue_comment", (owner, repo, comment_id)))
+        for comments in self.issue_comments.get(f"{owner}/{repo}", {}).values():
+            for comment in comments:
+                if comment["id"] == comment_id:
+                    comment["body"] = body
+                    return dict(comment)
+        raise GitHubAPIError(404, f"comment {comment_id} not found")
 
     # -- reader surface (contents API semantics) --------------------------------------------
 
@@ -437,6 +539,136 @@ class FakeGitHub:
         if run_id in {run["id"] for run in self.actions_runs if run["status"] == "completed"}:
             raise GitHubAPIError(409, "cannot cancel a completed run")
         self.cancelled_runs.append(run_id)
+
+    # -- security alerts (findings ingestion; ci-security-surface §3/§4) -------
+    #
+    # Mirrors the parsed alert-list endpoints and the PATCH-dismiss enums:
+    # invalid reasons raise 422-shaped GitHubAPIErrors exactly like GitHub.
+
+    async def list_code_scanning_alerts(
+        self, owner: str, repo: str, *, state: str = "open", ref: str | None = None
+    ) -> list[dict]:
+        self.calls.append(("list_code_scanning_alerts", (owner, repo, state, ref)))
+        if self.code_scanning_disabled:
+            raise GitHubAPIError(403, "code scanning is not enabled")
+        alerts = self.code_scanning_alerts.get(f"{owner}/{repo}", [])
+        return [dict(a) for a in alerts if a.get("state", "open") == state]
+
+    async def dismiss_code_scanning_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        dismissed_reason: str,
+        dismissed_comment: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            (
+                "dismiss_code_scanning_alert",
+                (owner, repo, number, dismissed_reason, dismissed_comment),
+            )
+        )
+        # GitHub requires the reason and validates the space-separated enum.
+        if dismissed_reason not in {"false positive", "won't fix", "used in tests"}:
+            raise GitHubAPIError(422, f"invalid dismissed_reason {dismissed_reason!r}")
+        alert = self._find_alert(
+            self.code_scanning_alerts.setdefault(f"{owner}/{repo}", []), number
+        )
+        alert.update(
+            {
+                "state": "dismissed",
+                "dismissed_reason": dismissed_reason,
+                "dismissed_comment": dismissed_comment,
+            }
+        )
+        return dict(alert)
+
+    async def list_secret_scanning_alerts(
+        self, owner: str, repo: str, *, state: str = "open"
+    ) -> list[dict]:
+        self.calls.append(("list_secret_scanning_alerts", (owner, repo, state)))
+        if self.secret_scanning_disabled:
+            raise GitHubAPIError(403, "secret scanning is not enabled")
+        alerts = self.secret_scanning_alerts.get(f"{owner}/{repo}", [])
+        return [dict(a) for a in alerts if a.get("state", "open") == state]
+
+    async def resolve_secret_scanning_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        resolution: str,
+        resolution_comment: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            (
+                "resolve_secret_scanning_alert",
+                (owner, repo, number, resolution, resolution_comment),
+            )
+        )
+        # Underscore enum (research §4.2) — space variants are rejected.
+        if resolution not in {"false_positive", "wont_fix", "revoked", "used_in_tests"}:
+            raise GitHubAPIError(422, f"invalid resolution {resolution!r}")
+        alert = self._find_alert(
+            self.secret_scanning_alerts.setdefault(f"{owner}/{repo}", []), number
+        )
+        alert.update(
+            {
+                "state": "resolved",
+                "resolution": resolution,
+                "resolution_comment": resolution_comment,
+            }
+        )
+        return dict(alert)
+
+    async def list_dependabot_alerts(
+        self, owner: str, repo: str, *, state: str = "open"
+    ) -> list[dict]:
+        self.calls.append(("list_dependabot_alerts", (owner, repo, state)))
+        alerts = self.dependabot_alerts.get(f"{owner}/{repo}", [])
+        return [dict(a) for a in alerts if a.get("state", "open") == state]
+
+    async def dismiss_dependabot_alert(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        dismissed_reason: str,
+        dismissed_comment: str | None = None,
+    ) -> dict:
+        self.calls.append(
+            (
+                "dismiss_dependabot_alert",
+                (owner, repo, number, dismissed_reason, dismissed_comment),
+            )
+        )
+        if dismissed_reason not in {
+            "fix_started",
+            "inaccurate",
+            "no_bandwidth",
+            "not_used",
+            "tolerable_risk",
+        }:
+            raise GitHubAPIError(422, f"invalid dismissed_reason {dismissed_reason!r}")
+        alert = self._find_alert(self.dependabot_alerts.setdefault(f"{owner}/{repo}", []), number)
+        alert.update(
+            {
+                "state": "dismissed",
+                "dismissed_reason": dismissed_reason,
+                "dismissed_comment": dismissed_comment,
+            }
+        )
+        return dict(alert)
+
+    @staticmethod
+    def _find_alert(alerts: list[dict], number: int) -> dict:
+        for alert in alerts:
+            if alert.get("number") == number:
+                return alert
+        raise GitHubAPIError(404, f"alert #{number} not found")
 
     # -- helpers ------------------------------------------------------------------------
 
