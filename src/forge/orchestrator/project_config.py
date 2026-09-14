@@ -5,11 +5,15 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from typing import TYPE_CHECKING
+
 import yaml
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from forge.gitlab.client import GitLabClient
+    from forge.integrations.github import GitHubRepositoryReader
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +59,7 @@ def _default_config() -> ProjectConfig:
 
 
 async def load_project_config(
-    client: GitLabClient,
+    client: GitLabClient | GitHubRepositoryReader,
     project_id: int,
     ref: str = "HEAD",
 ) -> ProjectConfig:
