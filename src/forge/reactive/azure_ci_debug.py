@@ -35,10 +35,11 @@ Azure DevOps ground truths:
 No budget is applied (no RunSpec on this lane): model usage lands in the
 ``llm_calls`` ledger like every other call (ADR-0013).
 
-AZ-2 wiring TODO: the gateway normalizer produces the step metadata
+The gateway normalizer produces the step metadata this executor consumes
 (``project``, ``repo``, ``build_id``, ``definition_id``, ``result``,
-``source_version``) and ``Settings`` gains ``FORGE_AZDO_*`` — read via
-``getattr`` with documented defaults until then.
+``source_version``); connection settings are the typed ``Settings``
+fields AZ-2 landed (``FORGE_AZDO_LANE_PIPELINE_ID`` /
+``FORGE_AZDO_BOT_NAME`` / ``FORGE_AZDO_ORG_URL`` / ``FORGE_AZDO_PAT``).
 """
 
 from __future__ import annotations
@@ -46,9 +47,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pydantic import SecretStr
-
 from forge.agents.models import PipelineDebugResult
+from forge.config import Settings
 from forge.gitlab.schemas import Job
 from forge.integrations.azure import AzureDevOpsClient, AzureDevOpsError
 from forge.reactive.ci_debug import (
@@ -88,7 +88,7 @@ def is_forge_lane_build(definition_id: int, lane_pipeline_id: int) -> bool:
 
 
 async def execute_azure_debug_ci_command(
-    settings: Any,
+    settings: Settings,
     forge_config: Any,
     session_factory: "async_sessionmaker[AsyncSession] | None",
     metadata: dict[str, Any],
@@ -109,7 +109,7 @@ async def execute_azure_debug_ci_command(
     result = str(metadata.get("result") or "")
     source_version = str(metadata.get("source_version") or "")
 
-    lane_pipeline_id = int(getattr(settings, "FORGE_AZDO_LANE_PIPELINE_ID", 0) or 0)
+    lane_pipeline_id = int(settings.FORGE_AZDO_LANE_PIPELINE_ID or 0)
 
     # -- guards (defense in depth; the ingress normalizer filters first) --
     if is_forge_lane_build(definition_id, lane_pipeline_id):
@@ -374,15 +374,15 @@ async def _upsert_debug_thread(
 
 
 # ----------------------------------------------------------------------
-# Settings plumbing (getattr until AZ-2 lands the Settings fields)
+# Settings plumbing (typed Settings fields, AZ-2)
 # ----------------------------------------------------------------------
 
 
-def _bot_identity(settings: Any) -> str:
-    return str(getattr(settings, "FORGE_AZDO_BOT_NAME", "") or "forge-bot")
+def _bot_identity(settings: Settings) -> str:
+    return str(settings.FORGE_AZDO_BOT_NAME or "forge-bot")
 
 
-def _matches_bot(settings: Any, identity: str) -> bool:
+def _matches_bot(settings: Settings, identity: str) -> bool:
     return bool(identity) and _identity_eq(identity, _bot_identity(settings))
 
 
@@ -390,10 +390,10 @@ def _identity_eq(left: str, right: str) -> bool:
     return left.strip().lower() == right.strip().lower()
 
 
-def _client_from_settings(settings: Any) -> AzureDevOpsClient:
-    pat = getattr(settings, "FORGE_AZDO_PAT", None)
-    token = pat.get_secret_value() if isinstance(pat, SecretStr) else str(pat or "")
+def _client_from_settings(settings: Settings) -> AzureDevOpsClient:
+    pat = settings.FORGE_AZDO_PAT
+    token = pat.get_secret_value() if pat is not None else ""
     return AzureDevOpsClient(
-        base_url=str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or ""),
+        base_url=settings.FORGE_AZDO_ORG_URL,
         token=token,
     )

@@ -44,11 +44,11 @@ No budget is applied (no RunSpec on this lane): model usage lands in the
 ``llm_calls`` ledger with driver completeness like every other call
 (ADR-0013).
 
-AZ-2 wiring TODO: the gateway normalizer produces the step metadata this
-engine consumes (``project``, ``repo``, ``pr_id``, ``head_sha``,
-``head_branch``, ``sender``, ``pr_author``) and ``Settings`` gains
-``FORGE_AZDO_BOT_NAME`` / ``FORGE_AZDO_ORG_URL`` / ``FORGE_AZDO_PAT`` —
-until then they are read via ``getattr`` with documented defaults.
+The gateway normalizer produces the step metadata this engine consumes
+(``project``, ``repo``, ``pr_id``, ``head_sha``, ``head_branch`` (full
+ref), ``sender``, ``pr_author``); connection settings are the typed
+``Settings`` fields AZ-2 landed (``FORGE_AZDO_BOT_NAME`` /
+``FORGE_AZDO_ORG_URL`` / ``FORGE_AZDO_PAT``).
 """
 
 from __future__ import annotations
@@ -58,8 +58,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from pydantic import SecretStr
-
+from forge.config import Settings
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError, truncate_chars
 from forge.factory.reviewer import REVIEWER_MAX_DIFF_CHARS, REVIEWER_MAX_INPUT_CHARS
 from forge.integrations.azure import AzureDevOpsClient, PrIteration
@@ -147,7 +146,12 @@ class AzureReactiveReviewer:
     read at the before/after SHAs.
     """
 
-    def __init__(self, llm: LLMClient, client: AzureDevOpsClient, settings: Any = None):
+    def __init__(
+        self,
+        llm: LLMClient,
+        client: AzureDevOpsClient,
+        settings: Settings | None = None,
+    ) -> None:
         self._llm = llm
         self._client = client
         self._settings = settings
@@ -317,7 +321,7 @@ class AzureReactiveReviewEngine:
 
     def __init__(
         self,
-        settings: Any,
+        settings: Settings,
         forge_config: Any,
         session_factory: "async_sessionmaker[AsyncSession] | None",
         *,
@@ -336,7 +340,7 @@ class AzureReactiveReviewEngine:
 
     @property
     def _bot_identity(self) -> str:
-        return str(getattr(self._settings, "FORGE_AZDO_BOT_NAME", "") or "forge-bot")
+        return str(self._settings.FORGE_AZDO_BOT_NAME or "forge-bot")
 
     async def run(self, metadata: dict[str, Any]) -> dict[str, Any]:
         """Execute one reactive review step; returns a small outcome record."""
@@ -747,18 +751,18 @@ def _render_summary(
 # ----------------------------------------------------------------------
 
 
-def _client_from_settings(settings: Any) -> AzureDevOpsClient:
-    """A client from the AZ-2 settings (``getattr`` until they exist)."""
-    pat = getattr(settings, "FORGE_AZDO_PAT", None)
-    token = pat.get_secret_value() if isinstance(pat, SecretStr) else str(pat or "")
+def _client_from_settings(settings: Settings) -> AzureDevOpsClient:
+    """A client from the AZ-2 Settings fields (ADR-0024 §2)."""
+    pat = settings.FORGE_AZDO_PAT
+    token = pat.get_secret_value() if pat is not None else ""
     return AzureDevOpsClient(
-        base_url=str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or ""),
+        base_url=settings.FORGE_AZDO_ORG_URL,
         token=token,
     )
 
 
 async def execute_azure_reactive_review(
-    settings: Any,
+    settings: Settings,
     forge_config: Any,
     session_factory: "async_sessionmaker[AsyncSession] | None",
     metadata: dict[str, Any],
@@ -767,9 +771,9 @@ async def execute_azure_reactive_review(
 ) -> dict[str, Any] | None:
     """Execute a ``review_pr`` step payload for provider ``azure_devops``.
 
-    Will be wired from the shared run-command executor's AzDO branch
-    (AZ-2); the *stack_factory* hook exists for tests to run the engine
-    over a fake client + fake LLM, mirroring
+    Wired from :func:`forge.runs.azure_service.execute_azure_run_command`;
+    the *stack_factory* hook exists for tests to run the engine over a fake
+    client + fake LLM, mirroring
     :func:`forge.reactive.github_review.execute_reactive_review`.
     """
     project = str(metadata.get("project") or "")
