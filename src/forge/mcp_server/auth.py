@@ -60,9 +60,7 @@ class McpAuthzError(Exception):
     def __init__(self, scope: str, principal_name: str) -> None:
         self.scope = scope
         self.principal_name = principal_name
-        super().__init__(
-            f"forbidden: principal {principal_name!r} lacks required scope {scope!r}"
-        )
+        super().__init__(f"forbidden: principal {principal_name!r} lacks required scope {scope!r}")
 
 
 @dataclass(frozen=True)
@@ -113,9 +111,7 @@ def parse_scoped_tokens(raw: str | None) -> dict[str, McpPrincipal]:
                 f"FORGE_MCP_SCOPED_TOKENS: unknown scopes {unknown} "
                 f"(valid: {', '.join(MCP_SCOPES)})"
             )
-        principals[token] = McpPrincipal(
-            name=_token_label(token), scopes=frozenset(scopes)
-        )
+        principals[token] = McpPrincipal(name=_token_label(token), scopes=frozenset(scopes))
     return principals
 
 

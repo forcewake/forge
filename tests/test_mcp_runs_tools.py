@@ -161,9 +161,7 @@ class TestRunSurface:
             [seeded_run("run-1"), seeded_run("run-2", status="planning")],
             with_spec=False,
         )
-        response = await call_tool(
-            client, "run_list", {"status": "planning"}, MASTER_KEY
-        )
+        response = await call_tool(client, "run_list", {"status": "planning"}, MASTER_KEY)
         text = result_text(response)
         assert "run-2" in text
         assert "run-1" not in text
@@ -182,9 +180,7 @@ class TestRunSurface:
 
     async def test_evidence_get_includes_steps(self, app, client: AsyncClient):
         await seed_db(app, [seeded_run()])
-        response = await call_tool(
-            client, "run_evidence_get", {"run_id": "run-1"}, MASTER_KEY
-        )
+        response = await call_tool(client, "run_evidence_get", {"run_id": "run-1"}, MASTER_KEY)
         text = result_text(response)
         assert "plan_summary" in text
 

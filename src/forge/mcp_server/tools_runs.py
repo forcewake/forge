@@ -197,9 +197,7 @@ def register_run_tools(mcp: FastMCP) -> None:
                     "name": step.step_name,
                     "status": step.status,
                     "attempt": step.attempt,
-                    "finished_at": (
-                        step.finished_at.isoformat() if step.finished_at else None
-                    ),
+                    "finished_at": (step.finished_at.isoformat() if step.finished_at else None),
                 }
                 for step in steps
             ],
