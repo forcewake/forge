@@ -15,12 +15,46 @@ from forge.runs.harness_selection import (
     advance_harness_fallback,
     compile_harness_selection,
     current_driver,
+    implementation_block,
     parse_preference,
     selection_from_spec_document,
     validate_preference,
 )
 
 LANES = {"claude-code", "grok-build", "opencode", "copilot"}
+
+
+class TestImplementationBlock:
+    """Brief §4: five fixed lines for the plan comment, gate-visible."""
+
+    def test_five_fixed_lines_with_model_and_chain(self):
+        selection = compile_harness_selection(
+            ["claude-code", "grok-build", "opencode"],
+            "ci_harness:claude-code",
+            LANES,
+            {"harness": "grok-build", "budget_class": "trivial", "reason": "docs one-liner"},
+        )
+        block = implementation_block(selection, model="glm-5.3-flash[1m]", commit_cycles=3)
+        assert block == (
+            "## Implementation\n"
+            "- Harness: **grok-build** · model glm-5.3-flash[1m]\n"
+            "- Fallbacks: opencode\n"
+            "- Budget class: trivial\n"
+            "- Commit cycles: 3\n"
+            "- Selection reason: docs one-liner\n"
+        )
+
+    def test_empty_fallbacks_read_none(self):
+        selection = compile_harness_selection([], "ci_harness", LANES, None)
+        block = implementation_block(selection, model="m", commit_cycles=3)
+        assert "- Fallbacks: none\n" in block
+        assert "- Selection reason: default\n" in block
+
+    def test_block_starts_with_the_implementation_heading(self):
+        selection = compile_harness_selection([], "ci_harness", LANES, None)
+        assert implementation_block(selection, model="", commit_cycles=1).startswith(
+            "## Implementation\n"
+        )
 
 
 class TestCompilerRules:

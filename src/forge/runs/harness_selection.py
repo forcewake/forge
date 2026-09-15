@@ -33,6 +33,7 @@ __all__ = [
     "advance_harness_fallback",
     "compile_harness_selection",
     "current_driver",
+    "implementation_block",
     "parse_preference",
     "resolve_preference",
     "selection_from_spec_document",
@@ -87,6 +88,31 @@ class HarnessSelection:
             "budget_class": self.budget_class,
             "selection_reason": self.reason,
         }
+
+
+def implementation_block(
+    selection: HarnessSelection,
+    *,
+    model: str,
+    commit_cycles: int,
+) -> str:
+    """The plan comment's gate-visible execution shape (brief §4).
+
+    Five fixed lines, rendered between the plan body and the ``/go``
+    footer: ``/go`` authorizes the execution shape, not just the plan text
+    (this strengthens ADR-0009 — today the harness is invisible at the
+    gate). ``Fallbacks:`` reads ``none`` when the frozen tail is empty.
+    """
+    model_note = f" · model {model}" if model else ""
+    fallback_note = ", ".join(selection.fallbacks) if selection.fallbacks else "none"
+    return (
+        "## Implementation\n"
+        f"- Harness: **{selection.harness}**{model_note}\n"
+        f"- Fallbacks: {fallback_note}\n"
+        f"- Budget class: {selection.budget_class}\n"
+        f"- Commit cycles: {commit_cycles}\n"
+        f"- Selection reason: {selection.reason}\n"
+    )
 
 
 def current_driver(backend: str | None) -> str:

@@ -168,6 +168,52 @@ class TestStartRun:
         assert run.plan_digest in body
         assert "@alice" in body  # approvers named in the instruction
 
+    async def test_plan_comment_carries_the_implementation_block(self, db, fake_gitlab):
+        """ADR-0023 §4: /go authorizes the execution shape — the five-line
+        Implementation block sits between the plan body and the /go footer."""
+        service = make_service(
+            db, fake_gitlab, settings=make_settings(FORGE_IMPLEMENTER_BACKEND="ci_harness")
+        )
+
+        run_id = await start_issue_run(service)
+
+        body = fake_gitlab.notes[0]["body"]
+        assert "## Implementation" in body
+        assert f"- Harness: **claude-code** · model {make_settings().FORGE_HARNESS_MODEL}" in body
+        assert "- Fallbacks: none\n" in body
+        assert "- Budget class: standard" in body
+        assert "- Commit cycles: 3" in body
+        assert "- Selection reason: default" in body
+        # Footer order: the block precedes the digest line and the /go footer.
+        assert body.index("## Implementation") < body.index("Plan digest")
+        assert body.index("## Implementation") < body.index(f"/go {run_id}")
+        assert body.index(f"/go {run_id}") < body.index("This is an automated message")
+
+    async def test_plan_comment_lists_the_frozen_fallback_chain(self, db, fake_gitlab, tmp_path):
+        config_path = tmp_path / "forge.yml"
+        config_path.write_text(
+            "forge:\n"
+            "  implement:\n"
+            "    harnesses:\n"
+            "      - claude-code\n"
+            "      - grok-build\n"
+            "      - opencode\n"
+        )
+        from forge.config import ForgeConfig
+
+        service = make_service(
+            db,
+            fake_gitlab,
+            settings=make_settings(FORGE_IMPLEMENTER_BACKEND="ci_harness"),
+            config=ForgeConfig(str(config_path)),
+        )
+
+        await start_issue_run(service)
+
+        body = fake_gitlab.notes[0]["body"]
+        assert "- Harness: **claude-code**" in body
+        assert "- Fallbacks: grok-build, opencode" in body
+
     async def test_plan_digest_is_sha256_of_plan(self, service, db):
         run_id = await start_issue_run(service)
         run = await get_run(db, run_id)

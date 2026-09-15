@@ -257,6 +257,25 @@ class TestImplement:
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []
 
+    async def test_plan_comment_carries_the_implementation_block(self, db, fake):
+        """ADR-0023 §4: the gate sees the execution shape — the five-line
+        Implementation block sits between the plan body and the /go footer."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        (body,) = comments(fake)
+        assert "## Implementation" in body
+        assert f"- Harness: **claude-code** · model {make_settings().FORGE_HARNESS_MODEL}" in body
+        assert "- Fallbacks: none" in body
+        assert "- Budget class: standard" in body
+        assert "- Commit cycles: 3" in body
+        assert "- Selection reason: default" in body
+        assert body.index("## Implementation") < body.index("Plan digest")
+        assert body.index("## Implementation") < body.index(f"/go {run_id}")
+
+        run = await get_run(db, run_id)
+        assert (run.evidence or {})["harness_selection"]["harness"] == "claude-code"
+
     async def test_non_approver_implement_is_denied_before_any_model_call(self, db, fake):
         service = make_service(db, fake, stack=make_stack(fake, planner=BoomPlanner()))
 

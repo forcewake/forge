@@ -86,6 +86,7 @@ from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
     compile_harness_selection,
+    implementation_block,
     resolve_preference,
     validate_preference,
 )
@@ -322,7 +323,7 @@ class GitHubRunService:
         await self._post_journaled_note(
             project_id,
             issue_number,
-            self._plan_comment(run_id, plan, digest),
+            self._plan_comment(run_id, plan, digest, harness_selection),
             run_id,
             "post_plan_note",
         )
@@ -1510,7 +1511,9 @@ class GitHubRunService:
             )
             return f"issue {issue_number}"
 
-    def _plan_comment(self, run_id: str, plan: str, digest: str) -> str:
+    def _plan_comment(
+        self, run_id: str, plan: str, digest: str, harness_selection: HarnessSelection
+    ) -> str:
         # On GitHub the App's bot login is forcewake-forge[bot]; the literal
         # "@forge" mention links to an unrelated org. Bare commands suffice.
         mention = ""
@@ -1521,9 +1524,17 @@ class GitHubRunService:
             ", ".join(f"@{name}" for name in approvers)
             or "none configured — set `FORGE_GITHUB_APPROVERS`"
         )
+        # ADR-0023 §4: the execution shape sits between the plan body and
+        # the command footer — /go authorizes it with the plan.
+        implementation = implementation_block(
+            harness_selection,
+            model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            commit_cycles=int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
+        )
         return (
             f"## Forge plan — run `{run_id[:8]}`\n\n"
             f"{plan}\n"
+            f"{implementation}\n"
             "---\n\n"
             f"**Plan digest:** `{digest}`\n\n"
             f"Approve this exact plan by commenting `{mention} /go {run_id}`.\n\n"
