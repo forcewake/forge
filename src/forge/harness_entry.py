@@ -131,16 +131,25 @@ def render_driver_script(
 
     - ``claude-code`` — headless print mode, stream-json events, no external
       settings (prompt-injection surface reduction), acceptEdits with a
-      git-only shell allowlist;
+      git-only shell allowlist PLUS the R5 mechanical deny: commit/push are
+      ``--disallowedTools`` (holds even under a permission escalation),
+      ``--permission-prompts none`` guarantees no interactive prompt, and
+      the vendor timeout budgets keep long tool calls from dying mid-run;
     - ``grok-build`` — the hardened npm preamble first: the wrapper declares
       its platform binary as an optionalDependency, so a flaky registry
       silently skips it and the CLI hangs forever at startup. Both packages
       are installed explicitly, with retries (verified live, template
-      comment); ``--always-approve`` is required or headless grok HANGS;
+      comment); ``--always-approve`` is required or headless grok HANGS.
+      ``--trust`` loads project rules headlessly and ``--deny`` rules beat
+      always-approve (R5: commit/push denied mechanically, not just asked);
     - ``opencode`` — ``run --auto`` (approves what the permission config
       does not deny; the ephemeral runner is the execution profile). The
-      model is config-owned here, not CLI-owned (mirror of the GitLab
-      template, which routes it through opencode.json).
+      permission map rides in via ``OPENCODE_CONFIG_CONTENT``: commit/push
+      denied mechanically, and the two "ask"-by-default keys
+      (``external_directory``, ``doom_loop``) are allowed so the headless
+      run cannot hang on a prompt (R5). The model is config-owned here, not
+      CLI-owned (mirror of the GitLab template, which routes it through
+      opencode.json).
 
     The ``-p`` prompt is the shared SHORT pointer (:data:`TASK_PROMPT`) —
     the brief file at *brief_path* carries the whole contract. The script
@@ -165,10 +174,18 @@ def render_driver_script(
         invocation = (
             f"claude -p {quoted_prompt}{model_flag} \\\n"
             f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS)} \\\n"
+            '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
+            "  --permission-prompts none \\\n"
             "  --permission-mode acceptEdits \\\n"
+            "  --max-turns 200 \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
         )
-        return preamble + f"{invocation} | tee -a {events}"
+        return (
+            "# Vendor timeout budgets (R5): long tool calls and API turns\n"
+            "# must not die at the client default mid-run.\n"
+            "export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000"
+            " BASH_MAX_TIMEOUT_MS=600000\n" + preamble + f"{invocation} | tee -a {events}"
+        )
 
     if driver == "grok-build":
         preamble = (
@@ -185,6 +202,8 @@ def render_driver_script(
         )
         invocation = (
             "grok --no-auto-update --always-approve --no-alt-screen \\\n"
+            "  --trust --max-turns 200 \\\n"
+            "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
             f"  -p {quoted_prompt} 2>&1"
@@ -200,8 +219,27 @@ def render_driver_script(
             "done\n"
             "opencode --version\n"
         )
+        permission_config = json.dumps(
+            {
+                "permission": {
+                    "bash": {
+                        "git commit *": "deny",
+                        "git push *": "deny",
+                        "*": "allow",
+                    },
+                    # "ask"-by-default keys hang a headless run (R5).
+                    "external_directory": "allow",
+                    "doom_loop": "allow",
+                }
+            }
+        )
         invocation = f"opencode run --auto {quoted_prompt} 2>&1"
-        return preamble + f"{invocation} | tee -a {events}"
+        return (
+            preamble + "# The mechanical deny rides in via the documented\n"
+            "# config-injection env (merges over global/project config).\n"
+            f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
+            f"{invocation} | tee -a {events}"
+        )
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 

@@ -26,6 +26,20 @@ HARNESS_TEMPLATES = (
 # infix.
 _WRITE_TOKEN_RE = re.compile(r"FORGE_BOT_(?!READ_TOKEN)TOKEN")
 
+# R5: the mechanical deny rules legitimately NAME the forbidden commands —
+# naming them is the enforcement. A violation is a line that carries the
+# command WITHOUT a deny marker on the same line (an actual invocation, as
+# opposed to a `--deny`/`--disallowedTools`/`"deny"` rule or a bare
+# `set-url --push` flag).
+_DENY_MARKER_RE = re.compile(r'--disallowedTools|--deny\b|"deny"')
+
+
+def _invocations_of(text: str, command: str) -> list[str]:
+    """Lines that reference *command* outside any deny-rule context."""
+    return [
+        line for line in text.splitlines() if command in line and not _DENY_MARKER_RE.search(line)
+    ]
+
 
 @pytest.fixture(params=HARNESS_TEMPLATES)
 def template_text(request) -> str:
@@ -41,11 +55,11 @@ def template_doc(request) -> dict:
 
 class TestNoWriteCapability:
     def test_no_git_push_anywhere(self, template_text):
-        assert "git push" not in template_text
+        assert _invocations_of(template_text, "git push") == []
 
     def test_no_git_commit_anywhere(self, template_text):
         # The lane stages and diffs; committing is the publisher's job.
-        assert "git commit" not in template_text
+        assert _invocations_of(template_text, "git commit") == []
 
     def test_no_write_token_variable(self, template_text):
         assert not _WRITE_TOKEN_RE.search(template_text)
@@ -101,6 +115,60 @@ class TestCandidateContract:
 class TestDriverPrompts:
     def test_driver_told_not_to_commit_or_push(self, template_text):
         assert "Do NOT commit and do NOT push" in template_text
+
+
+class TestMechanicalDeny:
+    """R5: "never commit/push" is enforced by the driver, not just asked.
+
+    Each shipped template must carry its driver's deny construct so the
+    contract holds even if the model disobeys the brief or a vendor default
+    changes.
+    """
+
+    def test_claude_disallowed_tools(self):
+        text = (TEMPLATES_DIR / "claude-code.gitlab-ci.yml").read_text()
+        assert "--disallowedTools" in text
+        assert "Bash(git commit:*)" in text and "Bash(git push:*)" in text
+
+    def test_grok_deny_rules(self):
+        text = (TEMPLATES_DIR / "grok.gitlab-ci.yml").read_text()
+        assert "--deny 'Bash(git commit:*)'" in text
+        assert "--deny 'Bash(git push:*)'" in text
+
+    def test_opencode_permission_map_deny(self):
+        text = (TEMPLATES_DIR / "opencode.gitlab-ci.yml").read_text()
+        assert '"git commit *": "deny"' in text
+        assert '"git push *": "deny"' in text
+
+    def test_opencode_headless_hang_sources_allowed(self):
+        # `external_directory` and `doom_loop` default to "ask" — an
+        # unattended lane that hits one of them hangs forever (R5).
+        text = (TEMPLATES_DIR / "opencode.gitlab-ci.yml").read_text()
+        assert '"external_directory": "allow"' in text
+        assert '"doom_loop": "allow"' in text
+
+    def test_claude_no_prompt_guarantee_and_turn_budget(self):
+        text = (TEMPLATES_DIR / "claude-code.gitlab-ci.yml").read_text()
+        assert "--permission-prompts none" in text
+        assert "--max-turns 200" in text
+        assert "API_TIMEOUT_MS" in text  # timeout budget (R5)
+
+    def test_grok_trust_and_turn_budget(self):
+        text = (TEMPLATES_DIR / "grok.gitlab-ci.yml").read_text()
+        assert "--trust" in text  # project rules load headlessly (R5)
+        assert "--max-turns 200" in text
+
+    def test_actions_lane_mirrors_the_gitlab_contract(self):
+        # forge.harness_entry renders the Actions-lane driver scripts; it
+        # must enforce the same mechanical deny posture.
+        entry = (
+            Path(__file__).resolve().parent.parent / "src" / "forge" / "harness_entry.py"
+        ).read_text()
+        assert "--disallowedTools" in entry
+        assert "Bash(git commit:*)" in entry
+        assert "--deny 'Bash(git commit:*)'" in entry
+        assert '"git commit *": "deny"' in entry
+        assert '"external_directory": "allow"' in entry
 
 
 class TestEventFilters:
