@@ -106,7 +106,7 @@ def parse_scoped_tokens(raw: str | None) -> dict[str, McpPrincipal]:
         if scopes == "*":
             scopes = list(MCP_SCOPES)
         if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-            raise ValueError(f"FORGE_MCP_SCOPED_TOKENS: scopes for a token must be a list")
+            raise ValueError("FORGE_MCP_SCOPED_TOKENS: scopes for a token must be a list")
         unknown = [s for s in scopes if s not in MCP_SCOPES]
         if unknown:
             raise ValueError(
