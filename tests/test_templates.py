@@ -213,6 +213,41 @@ class TestMcpProvisioning:
         assert "FORGE_HARNESS_MCP" in text
 
 
+class TestDriverFilter:
+    """ADR-0023 §7: every shipped GitLab template carries its driver filter
+    so a repo including MULTIPLE templates runs exactly one lane; a
+    single-driver repo (FORGE_HARNESS_DRIVER unset) behaves as before via
+    the `== ""` arm."""
+
+    DRIVER_IDS = {
+        "claude-code.gitlab-ci.yml": "claude-code",
+        "grok.gitlab-ci.yml": "grok-build",
+        "opencode.gitlab-ci.yml": "opencode",
+        "copilot.gitlab-ci.yml": "copilot",
+    }
+
+    def test_every_template_carries_its_own_filter(self, template_doc, request):
+        template = request.node.callspec.params["template_doc"]
+        expected = (
+            f'$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" '
+            f'|| $FORGE_HARNESS_DRIVER == "{self.DRIVER_IDS[template]}")'
+        )
+        assert template_doc["rules"] == [{"if": expected}]
+
+    def test_filter_keeps_the_forge_run_id_gate(self, template_doc):
+        rule_if = template_doc["rules"][0]["if"]
+        assert rule_if.startswith("$FORGE_RUN_ID && ")
+
+    def test_unset_driver_still_selects_every_template(self, template_text):
+        # Single-driver back-compat: the empty-driver arm of the rule.
+        assert '$FORGE_HARNESS_DRIVER == ""' in template_text
+
+    def test_filters_use_the_shipped_driver_ids_only(self):
+        from forge.runs.harness_selection import SHIPPED_DRIVERS
+
+        assert set(self.DRIVER_IDS.values()) == set(SHIPPED_DRIVERS)
+
+
 class TestEventFilters:
     def test_filters_emit_usage_receipts(self):
         for name in ("grok-events-filter.mjs", "claude-events-filter.mjs"):

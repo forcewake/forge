@@ -7,7 +7,9 @@
 #     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/claude-code.gitlab-ci.yml'
 #
 # The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
-# regular pipelines (MRs, pushes by humans) skip it via the rules block.
+# regular pipelines (MRs, pushes by humans) skip it via the rules block,
+# which also filters on $FORGE_HARNESS_DRIVER (ADR-0023 §7): a repo that
+# includes several forge templates runs exactly one lane (driver: claude-code).
 #
 # Required project CI variables (masked/protected per policy; forge stores
 # none of them — ADR-0015 §4):
@@ -37,7 +39,10 @@ forge-agent:
   image: node:22-bookworm
   timeout: 30m
   rules:
-    - if: '$FORGE_RUN_ID'
+    # ADR-0023 §7: a repo including MULTIPLE forge templates runs exactly
+    # one lane — the one whose driver matches $FORGE_HARNESS_DRIVER (set by
+    # the dispatch leg). Unset/empty keeps single-driver repos as before.
+    - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "claude-code")'
   variables:
     ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
     API_TIMEOUT_MS: "300000"
