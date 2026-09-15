@@ -19,6 +19,7 @@ HARNESS_TEMPLATES = (
     "grok.gitlab-ci.yml",
     "claude-code.gitlab-ci.yml",
     "opencode.gitlab-ci.yml",
+    "copilot.gitlab-ci.yml",
 )
 
 # A write token must never appear, but FORGE_BOT_READ_TOKEN (the read-only
@@ -140,6 +141,15 @@ class TestMechanicalDeny:
         assert '"git commit *": "deny"' in text
         assert '"git push *": "deny"' in text
 
+    def test_copilot_deny_tool_rules(self):
+        text = (TEMPLATES_DIR / "copilot.gitlab-ci.yml").read_text()
+        assert "--deny-tool 'shell(git commit)'" in text
+        assert "--deny-tool 'shell(git push)'" in text
+        # Scoped grants: reads, writes and read-only git only — everything
+        # else is auto-denied in -p mode (no prompt, no hang).
+        assert "--allow-tool 'read,write'" in text
+        assert "--allow-tool 'shell(git:*)'" in text
+
     def test_opencode_headless_hang_sources_allowed(self):
         # `external_directory` and `doom_loop` default to "ask" — an
         # unattended lane that hits one of them hangs forever (R5).
@@ -169,6 +179,8 @@ class TestMechanicalDeny:
         assert "--deny 'Bash(git commit:*)'" in entry
         assert '"git commit *": "deny"' in entry
         assert '"external_directory": "allow"' in entry
+        assert "--deny-tool 'shell(git commit)'" in entry
+        assert '"copilot"' in entry or "copilot" in entry
 
 
 class TestEventFilters:

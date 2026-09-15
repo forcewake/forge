@@ -1,0 +1,128 @@
+# forge implementer harness — GitHub Copilot CLI (ADR-0015/0016, R6)
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/copilot.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block.
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   COPILOT_GITHUB_TOKEN  a fine-grained PAT with the "Copilot Requests"
+#                      permission (classic ghp_ tokens are NOT supported;
+#                     Copilot CLI reads COPILOT_GITHUB_TOKEN, then GH_TOKEN,
+#                     then GITHUB_TOKEN). A Copilot subscription covers the
+#                     model spend — no per-provider API key needed.
+#   COPILOT_MODEL       OPTIONAL model override (copilot --model); when
+#                       unset the vendor default applies. Model names are
+#                       Copilot's own (e.g. claude-sonnet-4.5, gpt-5).
+#   FORGE_BOT_READ_TOKEN  OPTIONAL read-only PAT (repo read only). The
+#                      proposal-only lane (ADR-0016) must NEVER receive a
+#                      write token; when unset the lane keeps the runner's
+#                      default fetch credential only.
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Candidate contract (ADR-0016 §1, proposal-only): the job checks out the
+# frozen attempt base ($FORGE_ATTEMPT_BASE, detached), runs the driver
+# WITHOUT any commit/push capability, and uploads the working-tree delta as
+# CI artifacts:
+#   .forge/candidate.diff        git diff --binary --full-index vs the base
+#   .forge/candidate.meta.json   attempt base, driver, model, exit, usage
+# The last trace lines carry the machine-readable markers:
+#   FORGE_CANDIDATE:{"attempt_base": "<oid>", "artifact": "candidate.diff", "exit": "<completed|failed>"}
+#   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
+# forge downloads the artifacts and publishes via the trusted publisher;
+# claims in the trace are never trusted.
+
+forge-agent:
+  image: node:22-bookworm
+  timeout: 30m
+  rules:
+    - if: '$FORGE_RUN_ID'
+  before_script:
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit @github/copilot && break
+        echo "npm install of copilot failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+      copilot --version
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
+    # credential at most, and push is disabled by construction — the job has
+    # nothing to push even if the model tried.
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_READ_TOKEN:-forge:placeholder}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+    - git remote set-url --push origin FORBIDDEN
+    # .forge/ is a control directory: local-only, never staged, never
+    # committed (ADR-0016 §1 step 5).
+    - mkdir -p .forge
+    - mkdir -p .git/info && echo ".forge/" >> .git/info/exclude
+    # Check out the FROZEN attempt base (detached). The pipeline ref is the
+    # factory branch, whose head IS the attempt base in the proposal-only
+    # model — nothing else ever pushes to it.
+    - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
+    - git checkout --detach "$FORGE_ATTEMPT_BASE"
+  script:
+    # The task brief lives INSIDE the workspace: headless agents work in the
+    # project directory they were given. ADR-0012: context passes through
+    # GitLab CI variables, not forge-side state.
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # Headless harness run. -p completes the task and exits — no interactive
+    # session. Permission posture: scoped grants (reads, file writes, and
+    # read-only git) so nothing else can prompt; the mechanical deny on
+    # commit/push WINS over every allow rule, including saved approvals
+    # (documented Copilot CLI rule: deny > allow > allow-all). A nonzero
+    # exit does not abort the audit trail — the artifacts still upload
+    # (when: always) and forge classifies the run as failed. Copilot CLI
+    # emits no parseable usage receipt on stdout, so usage stays unknown
+    # (never zero).
+    - |
+      FORGE_DRIVER_EXIT="completed"
+      copilot -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
+        ${COPILOT_MODEL:+--model "$COPILOT_MODEL"} \
+        --allow-tool 'read,write' \
+        --allow-tool 'shell(git:*)' \
+        --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \
+        || FORGE_DRIVER_EXIT="failed"
+      export FORGE_DRIVER_EXIT
+    # The brief is context, not deliverable — never let it near the
+    # candidate.
+    - rm -f .forge/brief.md
+    # Stage the whole working tree and capture the candidate diff against
+    # the FROZEN attempt base. No commit, no push — the artifact is the
+    # deliverable.
+    - git add -A
+    - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
+    # Meta JSON: attempt base, driver id, model, exit classification; usage
+    # is null (no parseable stdout receipt) — unknown stays unknown, never
+    # zero (F22 lite).
+    - |
+      node -e '
+        const fs = require("fs");
+        fs.writeFileSync(".forge/candidate.meta.json", JSON.stringify({
+          attempt_base: process.env.FORGE_ATTEMPT_BASE || "",
+          driver: "copilot",
+          model: process.env.COPILOT_MODEL || "",
+          exit: process.env.FORGE_DRIVER_EXIT || "completed",
+          usage: null,
+        }));
+      '
+    # Machine-readable contract. FORGE_CANDIDATE points at the artifact the
+    # backend downloads; the legacy FORGE_RESULT line stays only for the
+    # v0.2 → v0.3 migration window and carries the attempt base — it is not
+    # a branch claim anymore.
+    - 'printf "FORGE_CANDIDATE:{\"attempt_base\": \"%s\", \"artifact\": \"candidate.diff\", \"exit\": \"%s\"}\n" "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"'
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n" "$FORGE_ATTEMPT_BASE"'
+  artifacts:
+    paths:
+      - .forge/candidate.diff
+      - .forge/candidate.meta.json
+    when: always
+    expire_in: 1 week

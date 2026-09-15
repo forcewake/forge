@@ -222,3 +222,42 @@ Context: forge's three GitLab templates (`ci/templates/{grok,claude-code,opencod
 Explicitly *not* recommended now: switching Claude to `--bare` (conflicts with conventions-file loading and [uncertain] whether `ANTHROPIC_AUTH_TOKEN` gateway auth satisfies it); grok `--permission-mode auto`/`dontAsk` as the default (documented as viable for CI, but it changes failure semantics mid-SDK-generation — revisit after `HarnessDriver` lands); OS-level Claude sandboxing in these images (bubblewrap/socat dependency + unprivileged-container friction outweighs the gain while lanes are already ephemeral, root-owned, egress-limited, and credential-free).
 
 Sources: forge `ci/templates/*.gitlab-ci.yml`, `ci/templates/forge-harness.github.yml`, `src/forge/harness_entry.py`, `src/forge/harnesses/prompt.py` [observed]; code.claude.com/docs/en/headless; code.claude.com/docs/en/cli-reference; github.com/xai-org/grok-build user-guide 14/22; docs.x.ai/build/cli/reference; opencode.ai/docs/permissions; opencode.ai/docs/cli; opencode.ai/docs/config; docs.z.ai/scenario-example/develop-tools/claude; platform.claude.com/docs/en/models/overview; code.claude.com/docs/en/settings; code.claude.com/docs/en/env-vars; code.claude.com/docs/en/sandboxing; docs.gitlab.com/ee/ci/caching; anthropic.com/engineering/effective-harnesses-for-long-running-agents.
+
+
+---
+
+## 8. Addendum (R6, 2026-09-15): GitHub Copilot CLI — research + adoption as the fourth driver
+
+Researched directly against docs.github.com (2026-09) for the `copilot`
+lane (`ci/templates/copilot.gitlab-ci.yml` + the `copilot` driver in
+`src/forge/harness_entry.py`).
+
+**Facts [documented]:**
+
+- Install: `npm install -g @github/copilot` (`brew install --cask copilot-cli` also exists — a cask, not a formula). Public preview Sep 2025; shares the agent runtime with the coding agent.
+- Headless: `copilot -p "<prompt>"` — completes the task and exits. The default (no `-p`) is the interactive session.
+- Auth: env token with documented precedence `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`; `copilot login --with-token` reads stdin. Supported: fine-grained PATs with the **"Copilot Requests"** permission, CLI-app OAuth, `gh` OAuth. **Classic `ghp_` tokens are NOT supported.** Env-var auth is the documented posture "most suitable for headless use such as automation."
+- Permissions: `--allow-tool` / `--deny-tool` accept tool kinds and patterns — `shell`, `shell(git:*)`, `shell(git commit)`, `read`, `write(path)`, `MCP_SERVER(tool)` — and combine across repeated flags. `--allow-all-tools` grants all tools; `--allow-all` / `--yolo` = all tools + paths + urls. **Deny always wins over allow, including against `--allow-all` and saved approvals** (`permissions-config.json`). `--available-tools` / `--excluded-tools` filter the tool surface itself (a denylist is ignored when an allowlist is set). Flags are session-scoped and never persisted.
+- Model: `--model` (interactive `/model`). Sessions: `--continue` / `/resume`; `COPILOT_HOME` relocates config.
+- Output: no documented stream-json stdout for `-p` runs (issue #52 open). `@github/copilot-sdk` drives sessions over JSON-RPC — overkill for a lane. Usage receipts are not parseable from stdout → the candidate meta's `usage` stays null (unknown ≠ zero, F22 lite).
+- CI posture [documented]: programmatic runs cannot answer approval prompts, so every tool the agent may use must be allowed up front or the call fails; sandboxing via `copilot --cloud` exists but is not applicable to ephemeral self-hosted runners.
+
+**forge lane posture:** scoped grants (`read,write` + `shell(git:*)`) so
+nothing else can prompt, with the mechanical
+`--deny-tool 'shell(git commit)' --deny-tool 'shell(git push)'` on top
+(deny-wins is the documented rule). Model routes do not map 1:1 onto
+Copilot model names, so the model is optional via `COPILOT_MODEL` (vendor
+default when unset) instead of the shared `FORGE_HARNESS_MODEL`. Auth via a
+masked+protected `COPILOT_GITHUB_TOKEN`. Contract tests: `copilot` joined
+`HARNESS_TEMPLATES`, `TestMechanicalDeny.test_copilot_deny_tool_rules`, and
+the Actions-lane mirror check.
+
+**Status of the §7 ranked list:** items 2 (mechanical deny), 3 (no-prompt
+flag), 4 (`--trust` + `--max-turns`), 6 (claude timeout budgets) and 9b
+(unconditional `NO_PROXY`) are APPLIED across all four templates and
+`harness_entry` (R5/R6 commits). Open: 1 (full version-pin matrix),
+5 (opencode `--format json` event stream), 7 (npm caches), 8 (RunSpec-sourced
+claude model pin + tier mapping), 9a/9c/9d (IS_SANDBOX comment, egress
+allowlist, rotation coverage), 10 (brief v2).
+
+Sources: docs.github.com/copilot/concepts/agents/about-copilot-cli; docs.github.com/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools; docs.github.com/copilot/reference/copilot-cli-reference/cli-command-reference; docs.github.com/copilot/how-tos/set-up/install-copilot-cli; github.blog/changelog/2025-09-25-github-copilot-cli-is-now-in-public-preview; npmjs.com/package/@github/copilot-sdk; github.com/github/copilot-cli/issues/52.

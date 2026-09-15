@@ -29,7 +29,7 @@ on:
         required: true
         type: string
       driver:
-        description: "harness driver: claude-code | grok-build | opencode"
+        description: "harness driver: claude-code | grok-build | opencode | copilot"
         required: true
         type: string
       model:
@@ -105,7 +105,7 @@ jobs:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
-          # HarnessDriver (claude-code | grok-build | opencode):
+          # HarnessDriver (claude-code | grok-build | opencode | copilot):
           #   - installs the pinned CLI (retry, platform binary check)
           #   - runs the agent unattended; the -p prompt is the SHORT
           #     pointer at .forge/brief.md (the shared brief IS the prompt)

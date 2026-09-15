@@ -282,6 +282,26 @@ Sources: agentclientprotocol.com/protocol/overview; /protocol/v1/schema; /get-st
 
 ---
 
+## 7. GitHub Copilot CLI
+
+### Install
+`npm install -g @github/copilot` (brew cask `copilot-cli`). Node-based; runs on `node:22-bookworm`.
+
+### Headless / programmatic invocation
+`copilot -p "<prompt>"` — completes the task and exits.
+
+### Auth (CI)
+Env token, precedence `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`. Fine-grained PAT with the "Copilot Requests" permission; classic `ghp_` tokens are NOT supported. `copilot login --with-token` reads stdin.
+
+### Permission / approval for unattended runs
+`--allow-tool` / `--deny-tool` with patterns (`shell(git:*)`, `write`, ...); `--allow-all-tools`; `--allow-all`/`--yolo`. Deny always wins over allow and saved approvals. Un-allowed tools fail in `-p` mode (no prompt).
+
+### Usage / token reporting
+No parseable stdout receipt (open issue #52); the SDK (`@github/copilot-sdk`) speaks JSON-RPC but is not a lane fit. forge records `usage: null` (unknown ≠ zero).
+
+### CI / containers & ToS
+Model spend rides on the Copilot subscription behind the PAT. Scoped grants + deny commit/push are the mechanical contract; see `docs/research/harness-config-best-practices.md` §8.
+
 ## Open questions / to verify against binaries
 1. Codex: current `--ask-for-approval` value set (`untrusted`/`on-failure` gone?); exit-code table; existence of a patch-file output in `codex-action@v1`; whether `item.updated` fires in `exec --json`.
 2. Claude: exact `canUseTool` argument shape (tool_name/input) and TS `permissionPrompts:'none'` semantics; `--setting-sources ''` vs `--bare` interaction; per-model cost breakdown field names in `total_cost_usd`.

@@ -115,6 +115,7 @@ repair with bounded LLM cycles; harness runs block instead).
 |---|---|---|---|
 | `ci/templates/opencode.gitlab-ci.yml` | opencode | OpenAI-compatible (`/chat/completions`) | validated live on GLM via z.ai coding endpoint; tool loops complete in tens of seconds |
 | `ci/templates/claude-code.gitlab-ci.yml` | claude code | Anthropic-compatible (`/v1/messages`) | validated for short prompts; long streaming turns can hit connection resets on some networks — stream-json events land in the trace for diagnosis |
+| `ci/templates/copilot.gitlab-ci.yml` | GitHub Copilot CLI | Copilot platform (subscription; fine-grained PAT with `Copilot Requests`) | headless `copilot -p`; scoped grants + deny-wins `--deny-tool` commit/push; model via optional `COPILOT_MODEL`; no parseable usage receipt (unknown ≠ zero) |
 
 ## GitHub Actions harness (E3b, ADR-0020)
 
@@ -168,7 +169,8 @@ job log *while the harness works*. The full-fidelity stream is kept at
 `/tmp/claude-events.jsonl` inside the job. A healthy run shows a steady flow
 of `tool:`/`say:`/`think:` lines; `API-ERROR retry N/M: ...` lines mean
 network/provider trouble. The same pattern generalizes to any headless
-harness that can stream machine-readable progress (opencode, copilot cli).
+harness that can stream machine-readable progress (opencode can; GitHub
+Copilot CLI currently has no documented stream-json for `-p` runs).
 
 **Timeouts (two layers).** GitLab kills the job at the template `timeout`
 (30m, first line of defence per ADR-0015 §6). Forge independently blocks the

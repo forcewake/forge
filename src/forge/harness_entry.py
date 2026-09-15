@@ -9,7 +9,8 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   both the Actions and the GitLab lanes) into ``.forge/brief.md``; the
   brief file the agent reads IS the prompt, and the per-CLI ``-p``
   invocation stays the short pointer :data:`forge.harnesses.prompt.TASK_PROMPT`;
-- it renders the per-driver invocation (claude-code | grok-build | opencode)
+- it renders the per-driver invocation (claude-code | grok-build |
+  opencode | copilot)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
   ``docs/research/harness-interfaces.md``) — per-CLI FLAGS live here, the
@@ -56,7 +57,7 @@ from forge.harnesses.prompt import (
 _CLAUDE_ALLOWED_TOOLS = "Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
 
 #: Drivers understood by this entry point (the shipped multi-harness set).
-DRIVERS = ("claude-code", "grok-build", "opencode")
+DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
 
 
 def render_brief(issue_text: str, plan_text: str) -> str:
@@ -150,6 +151,13 @@ def render_driver_script(
       run cannot hang on a prompt (R5). The model is config-owned here, not
       CLI-owned (mirror of the GitLab template, which routes it through
       opencode.json).
+    - ``copilot`` — GitHub Copilot CLI in ``-p`` mode (completes and exits):
+      scoped grants (``read,write`` + ``shell(git:*)``) so nothing else can
+      prompt, and the mechanical ``--deny-tool`` on commit/push — documented
+      Copilot rule: deny beats every allow, including ``--allow-all``.
+      Auth rides on ``COPILOT_GITHUB_TOKEN`` (fine-grained PAT with the
+      "Copilot Requests" permission); no parseable usage receipt, unknown
+      stays unknown.
 
     The ``-p`` prompt is the shared SHORT pointer (:data:`TASK_PROMPT`) —
     the brief file at *brief_path* carries the whole contract. The script
@@ -240,6 +248,25 @@ def render_driver_script(
             f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
             f"{invocation} | tee -a {events}"
         )
+
+    if driver == "copilot":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            "  npm install -g --no-fund --no-audit @github/copilot && break\n"
+            '  echo "npm install of copilot failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "copilot --version\n"
+        )
+        model_flag = f" --model {shlex.quote(model)}" if model else ""
+        invocation = (
+            f"copilot -p {quoted_prompt}{model_flag} \\\n"
+            "  --allow-tool 'read,write' \\\n"
+            "  --allow-tool 'shell(git:*)' \\\n"
+            "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \\\n"
+            "  2>&1"
+        )
+        return preamble + f"{invocation} | tee -a {events}"
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 
