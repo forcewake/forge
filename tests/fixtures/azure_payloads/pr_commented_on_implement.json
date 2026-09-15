@@ -1,0 +1,85 @@
+{
+  "id": "80808080-aaaa-bbbb-cccc-ddddeeee0007",
+  "eventType": "ms.vss-code.git-pullrequest-comment-event",
+  "publisherId": "tfs",
+  "message": {
+    "text": "Dev User has added a pull request comment",
+    "html": "Dev User has added a pull request comment",
+    "markdown": "Dev User has added a pull request comment"
+  },
+  "resource": {
+    "comment": {
+      "id": 302,
+      "parentCommentId": 0,
+      "author": {
+        "displayName": "Dev User",
+        "id": "cc33dd44-0000-0000-0000-0000000000cc",
+        "uniqueName": "dev@fabrikam.example",
+        "imageUrl": "https://dev.azure.com/fabrikam/_api/_common/identityImage?id=cc33dd44-0000-0000-0000-0000000000cc"
+      },
+      "content": "@forge /implement focus on the retry path",
+      "publishedDate": "2026-09-15T12:10:00.0000000Z",
+      "lastUpdatedDate": "2026-09-15T12:10:00.0000000Z",
+      "lastContentUpdatedDate": "2026-09-15T12:10:00.0000000Z",
+      "commentType": "text",
+      "_links": {
+        "self": {
+          "href": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/pullRequests/512/threads/77/comments/301"
+        },
+        "threads": {
+          "href": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/pullRequests/512/threads/77"
+        }
+      }
+    },
+    "pullRequest": {
+      "repository": {
+        "id": "1a2b3c4d-0000-0000-0000-000000000001",
+        "name": "core",
+        "project": {
+          "id": "9f8e7d6c-0000-0000-0000-000000000009",
+          "name": "Fabrikam"
+        },
+        "defaultBranch": "refs/heads/main"
+      },
+      "pullRequestId": 513,
+      "status": "active",
+      "createdBy": {
+        "id": "cc33dd44-0000-0000-0000-0000000000cc",
+        "displayName": "Dev User",
+        "uniqueName": "dev@fabrikam.example"
+      },
+      "title": "forge: WI-42 candidate (attempt 1)",
+      "sourceRefName": "refs/heads/dev/topic",
+      "targetRefName": "refs/heads/main",
+      "mergeStatus": "succeeded",
+      "lastMergeSourceCommit": {
+        "commitId": "e6b42d90a1c7583f0d8e4a6b29c17f5308da2b47",
+        "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/e6b42d90a1c7583f0d8e4a6b29c17f5308da2b47"
+      },
+      "lastMergeTargetCommit": {
+        "commitId": "5d1c8e2a9f34b70618cbe5d2904a73f16e0c8b52",
+        "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/5d1c8e2a9f34b70618cbe5d2904a73f16e0c8b52"
+      },
+      "lastMergeCommit": {
+        "commitId": "c94f2e6b08d13a57b9e0c4a827f36d1059be4d70",
+        "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/c94f2e6b08d13a57b9e0c4a827f36d1059be4d70"
+      }
+    }
+  },
+  "resourceVersion": "2.0",
+  "resourceContainers": {
+    "collection": {
+      "id": "cccc0000-0000-0000-0000-0000000000cc",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "account": {
+      "id": "aaaa0000-0000-0000-0000-0000000000aa",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "project": {
+      "id": "9f8e7d6c-0000-0000-0000-000000000009",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    }
+  },
+  "createdDate": "2026-09-15T15:00:00.0000000Z"
+}

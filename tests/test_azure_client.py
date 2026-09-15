@@ -64,6 +64,10 @@ EXPECTED_FIXTURES = {
     "thread_create_response.json",
     "push_response_stale_object_id.json",
     "build_timeline_failed.json",
+    # AZ-2 ingress fixtures (webhook normalization matrix).
+    "pr_commented_on_implement.json",
+    "workitem_commented_go.json",
+    "build_complete_succeeded.json",
 }
 
 
