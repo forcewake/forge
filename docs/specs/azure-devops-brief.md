@@ -22,11 +22,11 @@ shapes), live verification gated on the user's credentials.
 | Webhook envelope | `{ "eventType": "git.push", "publisherId": "tfs", "resource": {...}, "resourceContainers": {...}, "messages"/"detailedMessage": {text,html,markdown}, "createdDate": ... }`. Consumer `webHooks` / action `httpRequest`; **no HMAC** — auth = Basic username/password (HTTPS required) and/or custom headers. Subscriptions: `POST /{org}/_apis/hooks/subscriptions?api-version=7.1` with `{publisherId:"tfs", eventType, resourceVersion:"1.0", consumerId:"webHooks", consumerActionId:"httpRequest", publisherInputs:{...filters}, consumerInputs:{url, basicAuthUsername, basicAuthPassword, httpHeaders, resourceDetailsToSend:"all"}}`. |
 | Events consumed | `git.push`; `git.pullrequest.created`; `git.pullrequest.updated` (new commits, votes, status); `git.pullrequest.commented-on` (event id `ms.vss-code.git-pullrequest-comment-event`); `build.complete`; `workitem.commented` (event id `ms.vss-work.workitem-commented-event`). |
 | Git CAS | `POST /{project}/_apis/git/repositories/{repoId}/pushes?api-version=7.1` — body `{refUpdates:[{name:"refs/heads/x", oldObjectId}], commits:[{comment, changes:[{changeType: add|edit|delete, item:{path}, newContent:{content, contentType: rawtext\|base64encoded}}]}]}`. `oldObjectId` = expected parent (CAS); branch creation = `oldObjectId: "0000000000000000000000000000000000000000"`. Failure taxonomy `GitRefUpdateStatus`: `staleObjectId`, `forcePushRequired`, `createBranchPermissionRequired`, … → typed drift errors. `GET /refs?filter=heads/{branch}` reads branch heads. |
-| Draft PR | `POST .../pullrequests?api-version=7.1` `{sourceRefName, targetRefName, title, description, isDraft:true, workItems:[{id}]}` (work-item linking optional). PR object carries `pullRequestId`, `lastMergeCommit:{sourceCommit,targetCommit,commonCommit}`, `status`. |
+| Draft PR | `POST .../pullrequests?api-version=7.1` `{sourceRefName, targetRefName, title, description, isDraft:true, workItems:[{id}]}` (work-item linking optional). PR object carries `pullRequestId`, `status`, and `lastMergeCommit` as a PLAIN GitCommitRef (`commitId` only — the `{sourceCommit,targetCommit,commonCommit}` triple from the brief draft does NOT exist there). The three-way SHAs live on `GitPullRequestIteration` (`sourceRefCommit`/`targetRefCommit`/`commonRefCommit`, `GET .../pullRequests/{id}/iterations`) — the reactive review's before/after MUST go through iterations. |
 | PR comments | Threads: `POST .../pullRequests/{id}/threads` `{comments:[{parentCommentId:0, content, commentType:"text"}], status:"active", threadContext:{filePath, rightFileStart:{line,offset}, rightFileEnd:{...}}, pullRequestThreadContext:{changeTrackingId, iterationContext:{firstComparingIteration, secondComparingIteration}}}`; reply `POST .../threads/{threadId}/comments`; sticky progress = update thread status (`Update Thread`: `active`/`fixed`/`wontFix`/`closed`). List: `GET .../threads`. |
 | Plan comments | Work items: `POST /{project}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4&format=markdown` `{text}` (vso.work_write). Read: `GET .../comments` (batch). |
 | Pipelines dispatch | `POST /{project}/_apis/pipelines/{pipelineId}/runs?api-version=7.1` `{resources:{repositories:{self:{refName}}}, templateParameters:{run_id, attempt_base, driver, model, work_item_id}, variables:{...}}` → response carries the **run id** (`{id, state, result, url, web}`) — correlate directly. Poll `GET .../runs/{runId}`: `state: inProgress|completed`, `result: succeeded|failed|canceled|succeededWithIssues`. `previewRun: true` returns the compiled YAML (`finalYaml`) — useful for lane verification. Legacy builds API alternative: `POST /build/builds` with `definition.id` + `sourceBranch` + `templateParameters`. |
-| CI ↔ commit correlation | `GET /{project}/_apis/build/builds?api-version=7.1&repositoryId={repoId}&sourceVersion={sha}` (branch policies' "Build validation" decides PR mergeability — YAML `pr:` triggers are IGNORED for Azure Repos). Per-task granularity: `GET .../build/builds/{buildId}/timeline` (records: result `failed`, log URLs) → task logs `GET .../builds/{buildId}/logs/{logId}`. Artifacts: `GET /pipelines/{runId}/artifacts?artifactName=...` (download URL) or builds artifacts API. |
+| CI ↔ commit correlation | **`builds` has NO `sourceVersion` query param** (response field only): correlate via the `build.complete` webhook (carries `sourceVersion`) or `GET /build/builds?repositoryId=…&definitions=…&minFinishTime=…` + client-side match. runId == buildId [community]. Cancel: the Runs area has NO cancel — `PATCH /build/builds/{id}` `{"status":"cancelling"}`, poll to `result:canceled` (queued jobs may survive). Per-task granularity: `GET .../build/builds/{buildId}/timeline` (records: result `failed`, log ids) → `GET .../builds/{buildId}/logs/{logId}`. Artifacts: `GET /pipelines/{runId}/artifacts?$expand=signedContent` → expiring signed URL. (branch policies' "Build validation" decides PR mergeability — YAML `pr:` triggers are IGNORED for Azure Repos) |
 | Lane checkout | `checkout: self` then explicit `git fetch origin "$ATTEMPT_BASE_REF" && git checkout --detach "$ATTEMPT_BASE"` (YAML cannot pin a commit SHA in `resources...refName`); `persistCredentials: false` (default — the OAuth token is NOT left in git config); system access token NOT used (`System.AccessToken` never referenced); artifact: `publish: PipelineArtifact` task → `targetPath: .forge/candidate.diff` etc. `download: current` on later jobs. Agent: self-hosted docker/container jobs mirror the ADR-0002 execution profile; lane env vars = pipeline secret variables (`$(_SECRET)` macro) mapped into `env:`. |
 | Errors | `{"$id":"1","message":"TF400813: ..."}` / `TF401027`-style codes; 203 Non-Authoritative on some PAT-scope problems; 401 on bad Basic. |
 
@@ -89,15 +89,28 @@ Config (Settings): `FORGE_AZDO_ENABLED=False`, `FORGE_AZDO_ORG_URL`,
 
 | Event | Guard | Command |
 |---|---|---|
-| `workitem.commented` | comment by bot identity → skip (bot-loop) | `/implement`/`/go`/`/cancel`/`/security` → `start_run`/`go`/`cancel`/`security_triage` (same parser, provider `azure_devops`) |
+| `workitem.commented` | payload has NO comment id — text = `fields["System.History"]`, author = `System.ChangedBy`; delivery key `workitem:{id}:comment:{rev}`; bot-loop by identity | `/implement`/`/go`/`/cancel`/`/security` → `start_run`/`go`/`cancel`/`security_triage` (same parser, provider `azure_devops`) |
 | `git.pullrequest.commented-on` | bot-loop + forge/* branch guards | same command set on PRs |
 | `git.pullrequest.created/updated` | Bot sender, `forge/*` head branch | `review_pr` (reactive lane; incremental via `lastMergeCommit`) |
 | `build.complete` (`result=failed`) | forge's own lane runs skipped (`FORGE_AZDO_LANE_PIPELINE_ID`) | `debug_ci` (fork-safe: correlate `sourceVersion` → open PR) |
 | `git.push`, everything else | — | inbox-only |
 
-Delivery-key conventions: `comment:{id}`, `pr:{id}:{event}:{afterSha}`,
-`build:{buildId}:{result}` — re-deliveries collapse on the inbox unique
-index.
+Delivery-key conventions: `pr:{id}:comment:{commentId}` (PR comment events DO carry the comment),
+`pr:{id}:{event}:{afterSha}`, `build:{buildId}:{result}`,
+`workitem:{id}:comment:{rev}` — re-deliveries collapse on the inbox unique
+index. Route on `eventType` only: `publisherId` is unstable across API
+versions (`tfs` AND `azure-devops` appear in documented samples). Votes
+(numeric, for read-only display): approved=10, approvedWithSuggestions=5,
+none=0, waitingForAuthor=-5, rejected=-10. Thread creates take NUMERIC
+enums (`status:1`, `commentType:1`) and return strings; thread statuses
+also include `byDesign`. Policy type ids [documented]: build-validation
+`0609b952-1397-4640-95ec-e00a01b2c241`, min-reviewers
+`fa4e907d-c16b-4a4c-9dfa-4906e5d171dd`; policy evaluations use artifactId
+`vstfs:///CodeReview/CodeReviewId/{projectId}/{prId}`. Pipeline creation
+pointing at an existing yaml path works but is PREVIEW-only
+(`7.2-preview.1`) — onboarding may prefer manual creation + doctor check.
+WIT comments `7.1-preview.4` is a preview stripe (preview stripes are
+rejected ~12 weeks post-GA — pin GA stripes where they exist).
 
 ## 4. Milestones (sub-agent slices)
 
