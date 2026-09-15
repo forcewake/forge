@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from forge.gitlab.client import GitLabClient
+    from forge.integrations.azure import AzureRepositoryReader
     from forge.integrations.github import GitHubRepositoryReader
 
 
@@ -57,13 +58,16 @@ def _default_config() -> ProjectConfig:
 
 
 async def load_project_config(
-    client: GitLabClient | GitHubRepositoryReader,
+    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
     project_id: int,
     ref: str = "HEAD",
 ) -> ProjectConfig:
     """Load .forge.yml from a project's repo. Return defaults if not found.
 
-    Results are cached per project with a 5-minute TTL.
+    The client duck-types the shared ``get_file`` read surface, so GitLab,
+    GitHub and Azure DevOps (AZ-2 wiring of the AzureRepositoryReader,
+    ADR-0024) all load project config unchanged. Results are cached per
+    project with a 5-minute TTL.
     """
     now = time.monotonic()
     cached = _cache.get(project_id)

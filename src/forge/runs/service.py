@@ -216,7 +216,9 @@ async def execute_run_command(
     if metadata.get("command") == "security_triage":
         from forge.findings.triage import execute_security_command
 
-        if metadata.get("provider") == "github":
+        if metadata.get("provider") in ("github", "azure_devops"):
+            # Provider-neutral durable triage: no GitLab client on the
+            # non-GitLab paths (GitHub E3a; Azure DevOps ADR-0024).
             await execute_security_command(settings, forge_config, session_factory, metadata)
             return
         async with GitLabClient(
@@ -238,6 +240,15 @@ async def execute_run_command(
             await execute_debug_pipeline_command(
                 settings, forge_config, session_factory, metadata, gitlab=gitlab
             )
+        return
+
+    if metadata.get("provider") == "azure_devops":
+        # AZ-2 (ADR-0024): Azure DevOps-subject commands land on the
+        # FlowRun-backed AzureRunService gate path, mirroring the GitHub
+        # dispatch above.
+        from forge.runs.azure_service import execute_azure_run_command
+
+        await execute_azure_run_command(settings, forge_config, session_factory, metadata)
         return
 
     if metadata.get("provider") == "github":
