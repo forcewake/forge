@@ -16,7 +16,7 @@ dependencies = [
     "aiosqlite==0.22.1",
     "agno[litellm]==2.5.0",
     "tiktoken==0.12.0",
-    "redis==7.4.0",
+    "redis==8.1.0",
     "litellm<=1.82.0",
     "mcp==1.26.0",
     # GitHub App auth (ADR-0019 slice): JWT minting + RS256 signing.
