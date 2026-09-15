@@ -990,6 +990,85 @@ class AzureDevOpsClient:
         """Remove one subscription (offboarding / reprovision)."""
         await self._request("DELETE", f"/_apis/hooks/subscriptions/{subscription_id}")
 
+    # -- REST: AZ-3 additions (reactive review + debug + executor seams) ----------
+    # Everything below was added additively in AZ-3 (ADR-0024); the methods
+    # above are the AZ-1 surface and must not be modified.
+
+    async def get_pr_iteration_changes(
+        self,
+        project: str,
+        repo: str,
+        pr_id: int,
+        iteration_id: int,
+        *,
+        compare_to: int | None = None,
+        top: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """The file changes of one PR iteration (research §4.3).
+
+        ``GET .../pullRequests/{prId}/iterations/{iterationId}/changes`` —
+        *compare_to* pins ``$compareTo`` (the iteration to diff against;
+        omitted = the iteration's full change set). Returns the raw
+        ``changeEntries`` (``GitPullRequestChange``: ``changeType``,
+        ``item.path``, ``originalPath``) defensively — entries carry PATHS,
+        not patch content, so the reactive reviewer renders diffs itself
+        from item contents.
+        """
+        params: dict[str, Any] = {}
+        if compare_to is not None:
+            params["$compareTo"] = compare_to
+        if top is not None:
+            params["$top"] = top
+        response = await self._get(
+            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}"
+            f"/pullRequests/{pr_id}/iterations/{iteration_id}/changes",
+            params=params,
+        )
+        data = response.json()
+        entries = data.get("changeEntries") if isinstance(data, dict) else None
+        if entries is None:
+            value = data.get("value") if isinstance(data, dict) else data
+            entries = value
+        return [entry for entry in entries or [] if isinstance(entry, dict)]
+
+    async def list_pull_requests(
+        self, project: str, repo: str, *, status: str = "active", top: int = 50
+    ) -> list[dict[str, Any]]:
+        """The repository's pull requests, filtered (research §4.1).
+
+        ``GET .../pullrequests?searchCriteria.status={status}`` — the
+        client-side join key for the CI debug lane (a failed build's
+        ``sourceVersion`` matched against each PR's merge SHAs, research
+        §6.6). Returns the raw GitPullRequest payloads.
+        """
+        response = await self._get(
+            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/pullrequests",
+            params={"searchCriteria.status": status, "$top": top},
+        )
+        data = response.json()
+        value = data.get("value") if isinstance(data, dict) else data
+        return [pr for pr in value or [] if isinstance(pr, dict)]
+
+    async def download_run_artifact(
+        self, project: str, pipeline_id: int, run_id: int, artifact_name: str
+    ) -> bytes:
+        """One run artifact's zip bytes via its signed URL (research §6.3).
+
+        Composes :meth:`get_run_artifact_signed_url` with a plain GET. The
+        download deliberately carries NO Authorization header: the signed
+        URL may point at storage outside the Azure DevOps host, and forge
+        never sends its PAT to a third-party host. Callers must download
+        promptly — the signed URL expires (minutes, not hours).
+        """
+        url = await self.get_run_artifact_signed_url(project, pipeline_id, run_id, artifact_name)
+        response = await self._client.get(url)
+        if response.status_code >= 400:
+            raise AzureDevOpsError(
+                response.status_code,
+                f"artifact download failed for {artifact_name!r}: HTTP {response.status_code}",
+            )
+        return response.content
+
 
 def _commit_to_json(commit: CommitPayload) -> dict[str, Any]:
     """Map a :class:`CommitPayload` onto the push-API changes shape (§3.1)."""

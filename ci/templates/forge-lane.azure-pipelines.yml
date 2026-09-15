@@ -1,0 +1,169 @@
+# forge harness executor for Azure Pipelines (ADR-0024, milestone AZ-3)
+#
+# Human-applied to the TARGET Azure DevOps project at onboarding (mirrors
+# the GitLab/GitHub onboarding): this pipeline is what forge dispatches
+# when a run needs a coding agent. The agent runs in the project's
+# ephemeral pipeline agent — the lane has NO write credential and NO forge
+# secrets; its only output is the candidate artifact, which the forge
+# trusted publisher validates and publishes (push CAS + Draft PR).
+#
+# ONBOARDING CONTRACT (all human steps; forge never creates pipelines):
+#   1. Create a pipeline in the target project pointing at this YAML file
+#      (Pipelines -> New pipeline -> Azure Repos Git -> Existing YAML) and
+#      hand forge its numeric id as FORGE_AZDO_LANE_PIPELINE_ID.
+#   2. Provision the harness provider keys as pipeline SECRET variables on
+#      that pipeline — ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
+#      ANTHROPIC_BASE_URL / ZAI_API_KEY / XAI_API_KEY / COPILOT_GITHUB_TOKEN
+#      — and FORGE_HARNESS_MCP as a plain (non-secret) variable. The lane
+#      maps all of them; the driver uses what it needs.
+#   3. The lane NEVER gets forge credentials: no forge PAT, no webhook
+#      secret, no write token — and the build service's auto-injected
+#      access token is never referenced either. Nothing here can push.
+#
+# Dispatch-only (ADR-0024 §6): forge queues this lane via the Runs API
+# (POST /_apis/pipelines/{pipelineId}/runs) with templateParameters
+# {run_id, attempt_base, driver, model, work_item_id}. There is NO
+# triggers: section at all — Azure Repos IGNORES YAML pr: triggers (PR CI
+# is governed by branch policies, "Build validation", which is exactly the
+# quality contract's enforcement point), and a CI trigger would run the
+# lane outside forge's control.
+#
+# The driver step is rendered by forge's HarnessDriver.build_script() —
+# the template only provisions the lane.
+
+parameters:
+  # Typed queue-time parameters; REST-dispatched templateParameters arrive
+  # as strings, so everything is a string (research §6.2).
+  - name: run_id
+    type: string
+  - name: attempt_base
+    type: string
+  - name: driver
+    type: string
+  - name: model
+    type: string
+    default: ''
+  - name: work_item_id
+    type: string
+
+jobs:
+  - job: harness
+    # Pool: any agent pool works — the repo owner picks theirs (a
+    # self-hosted pool with a container job mirrors the ADR-0002 execution
+    # profile). The default below is the Microsoft-hosted agent.
+    pool:
+      vmImage: ubuntu-latest
+    timeoutInMinutes: 60
+    variables:
+      FORGE_RUN_ID: ${{ parameters.run_id }}
+      # The dispatched branch (predefined variable, full ref form): the
+      # lane fetches it belt-and-braces before pinning the attempt base.
+      FORGE_ATTEMPT_REF: $(Build.SourceBranch)
+      # The frozen attempt base comes from the queue-time PARAMETER — a
+      # pipeline YAML cannot pin a commit SHA in a resource ref.
+      FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}
+      FORGE_DRIVER: ${{ parameters.driver }}
+      FORGE_MODEL: ${{ parameters.model }}
+      FORGE_ISSUE_NUMBER: ${{ parameters.work_item_id }}
+      FORGE_BRIEF: .forge/brief.md
+      FORGE_EXIT_FILE: .forge/exit
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        # Explicit: no credential is persisted into .git/config — nothing
+        # actionable remains in the ephemeral workspace.
+        persistCredentials: false
+
+      - bash: git remote set-url --push origin FORBIDDEN
+        displayName: Disable push (proposal-only lane, ADR-0016/0024)
+
+      - bash: |
+          mkdir -p .forge
+          echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+        displayName: Forge control directory
+
+      # The attempt base arrives as a queue-time parameter (never a write
+      # credential, never the build service's auto token): fetch the
+      # dispatched branch best-effort, then detach at the frozen base the
+      # publisher will CAS against.
+      - bash: |
+          set -euo pipefail
+          git fetch origin "refs/heads/$(FORGE_ATTEMPT_REF)" || true
+          git checkout --detach "$FORGE_ATTEMPT_BASE"
+        displayName: Checkout the frozen attempt base (detached)
+
+      # The driver step NEVER fails the job: harness_entry always exits 0
+      # and writes .forge/exit — the candidate steps below run
+      # condition: always() and forge classifies the run from the
+      # artifact's meta exit (the Actions lane's audit-trail preservation).
+      - bash: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" && break
+            echo "pip install of forge failed (attempt $attempt), retrying..."
+            sleep $((attempt * 5))
+          done
+          # Brief transport (beta): the lane expects a pre-provisioned
+          # .forge/brief.md (harness_entry's parity path). Fetching the work
+          # item + forge plan comment would need a repo-owner-provisioned
+          # read token — the build service token stays unreferenced.
+          python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
+          exit 0
+        displayName: Run harness driver
+        env:
+          FORGE_DRIVER: $(FORGE_DRIVER)
+          FORGE_MODEL: $(FORGE_MODEL)
+          FORGE_HARNESS_MODEL: $(FORGE_MODEL)
+          FORGE_ISSUE_NUMBER: $(FORGE_ISSUE_NUMBER)
+          # MCP (ADR-0022): canonical mcpServers JSON from a pipeline
+          # VARIABLE (not secret — it references secrets by name); an empty
+          # value means strict isolation with no servers.
+          FORGE_HARNESS_MCP: $(FORGE_HARNESS_MCP)
+          # Harness keys = pipeline SECRET variables ($(...) macro; secrets
+          # are only surfaced when explicitly mapped like this).
+          ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+          ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
+          ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
+          ZAI_API_KEY: $(ZAI_API_KEY)
+          XAI_API_KEY: $(XAI_API_KEY)
+          COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
+
+      # Candidate capture — condition: always(): the audit trail survives
+      # failures (mirror of the Actions lane).
+      - bash: |
+          set -uo pipefail
+          git add -A
+          git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" \
+            > .forge/candidate.diff || true
+          python - <<'PY'
+          import json, os
+          usage = None
+          if os.path.exists(".forge/usage.json"):
+              try:
+                  with open(".forge/usage.json") as fh:
+                      usage = json.load(fh)
+              except Exception:
+                  usage = None
+          meta = {
+              "attempt_base": os.environ.get("FORGE_ATTEMPT_BASE", ""),
+              "run_id": os.environ.get("FORGE_RUN_ID", ""),
+              "driver": os.environ.get("FORGE_DRIVER", ""),
+              "model": os.environ.get("FORGE_MODEL", ""),
+              "exit": (open(".forge/exit").read().strip()
+                       if os.path.exists(".forge/exit") else "unknown"),
+              "usage": usage,
+              "completeness": "aggregate",
+          }
+          json.dump(meta, open(".forge/candidate.meta.json", "w"))
+          PY
+        displayName: Emit candidate artifact
+        condition: always()
+
+      # `publish` = the PublishPipelineArtifact task; the Pipelines Runs
+      # artifacts API hands forge an expiring signed URL serving the zip
+      # (research §6.3). Carries .forge/candidate.diff +
+      # .forge/candidate.meta.json (plus the forensic event/usage logs).
+      - publish: .forge
+        artifact: forge-candidate-${{ parameters.run_id }}
+        condition: always()
+        displayName: Publish candidate artifact
