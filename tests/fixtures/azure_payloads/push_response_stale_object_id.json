@@ -1,0 +1,14 @@
+{
+  "value": [
+    {
+      "repositoryId": "1a2b3c4d-0000-0000-0000-000000000001",
+      "name": "refs/heads/forge/wi-42",
+      "oldObjectId": "b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831",
+      "newObjectId": "e6b42d90a1c7583f0d8e4a6b29c17f5308da2b47",
+      "isLocked": false,
+      "updateStatus": "staleObjectId",
+      "success": false,
+      "customMessage": "The ref update failed because the old object id does not match the current tip."
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "3d3d3d3d-0000-0000-0000-00000000003d",
+  "changeId": 1,
+  "records": [
+    {
+      "id": "11110000-0000-0000-0000-000000000011",
+      "type": "Stage",
+      "name": "__default",
+      "state": "completed",
+      "result": "failed",
+      "order": 1,
+      "startTime": "2026-09-15T12:05:10.000Z",
+      "finishTime": "2026-09-15T12:11:42.000Z"
+    },
+    {
+      "id": "22220000-0000-0000-0000-000000000022",
+      "type": "Job",
+      "name": "forge-harness",
+      "state": "completed",
+      "result": "failed",
+      "order": 2,
+      "startTime": "2026-09-15T12:05:12.000Z",
+      "finishTime": "2026-09-15T12:11:40.000Z",
+      "log": {
+        "id": 3,
+        "type": "Container",
+        "url": "https://dev.azure.com/fabrikam/9f8e7d6c-0000-0000-0000-000000000009/_apis/build/builds/88231/logs/3"
+      }
+    },
+    {
+      "id": "33330000-0000-0000-0000-000000000033",
+      "type": "Task",
+      "identifier": "harness.ClaudeCodeDriver",
+      "name": "Driver: forge harness",
+      "state": "completed",
+      "result": "failed",
+      "order": 3,
+      "errorCount": 1,
+      "warningCount": 0,
+      "issues": [
+        {
+          "type": "error",
+          "message": "##[error]harness exit code 1: driver crashed after 12 steps"
+        }
+      ],
+      "startTime": "2026-09-15T12:05:20.000Z",
+      "finishTime": "2026-09-15T12:11:38.000Z",
+      "log": {
+        "id": 5,
+        "type": "Container",
+        "url": "https://dev.azure.com/fabrikam/9f8e7d6c-0000-0000-0000-000000000009/_apis/build/builds/88231/logs/5"
+      }
+    }
+  ],
+  "url": "https://dev.azure.com/fabrikam/9f8e7d6c-0000-0000-0000-000000000009/_apis/build/builds/88231/timeline"
+}

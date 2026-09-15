@@ -1,0 +1,45 @@
+{
+  "id": "a0a0a0a0-aaaa-bbbb-cccc-ddddeeee0005",
+  "eventType": "workitem.commented",
+  "publisherId": "tfs",
+  "scope": "all",
+  "message": {
+    "text": "Task #142 (Ship the flux capacitor) commented on by Dev User.",
+    "html": "Task #142 (Ship the flux capacitor) commented on by Dev User.",
+    "markdown": "Task #142 (Ship the flux capacitor) commented on by Dev User."
+  },
+  "resource": {
+    "id": 142,
+    "rev": 9,
+    "fields": {
+      "System.AreaPath": "Fabrikam",
+      "System.TeamProject": "Fabrikam",
+      "System.IterationPath": "Fabrikam\\Sprint 3",
+      "System.WorkItemType": "Task",
+      "System.State": "Approved",
+      "System.CreatedDate": "2026-09-01T09:00:00.000Z",
+      "System.CreatedBy": "Dev User",
+      "System.ChangedDate": "2026-09-15T13:00:00.000Z",
+      "System.ChangedBy": "dev@fabrikam.example",
+      "System.Title": "Ship the flux capacitor",
+      "System.History": "/implement please focus on the retry path"
+    },
+    "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/wit/workItems/142"
+  },
+  "resourceVersion": "1.0",
+  "resourceContainers": {
+    "collection": {
+      "id": "cccc0000-0000-0000-0000-0000000000cc",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "account": {
+      "id": "aaaa0000-0000-0000-0000-0000000000aa",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "project": {
+      "id": "9f8e7d6c-0000-0000-0000-000000000009",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    }
+  },
+  "createdDate": "2026-09-15T13:00:00.1000000Z"
+}

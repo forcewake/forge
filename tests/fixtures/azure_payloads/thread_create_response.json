@@ -1,0 +1,41 @@
+{
+  "pullRequestThreadContext": {
+    "changeTrackingId": 4,
+    "iterationContext": {
+      "firstComparingIteration": 2,
+      "secondComparingIteration": 3
+    }
+  },
+  "id": 77,
+  "publishedDate": "2026-09-15T14:00:00.000Z",
+  "lastUpdatedDate": "2026-09-15T14:00:00.000Z",
+  "comments": [
+    {
+      "id": 310,
+      "parentCommentId": 0,
+      "author": {
+        "id": "aa11bb22-0000-0000-0000-0000000000aa",
+        "displayName": "Forge Bot",
+        "uniqueName": "forge-bot@fabrikam.example",
+        "url": "https://dev.azure.com/fabrikam/_apis/identities/aa11bb22-0000-0000-0000-0000000000aa"
+      },
+      "content": "**forge review** — missing: retry guard swallows `TimeoutError` without re-raise (severity: must_fix)",
+      "publishedDate": "2026-09-15T14:00:00.000Z",
+      "lastUpdatedDate": "2026-09-15T14:00:00.000Z",
+      "commentType": "text"
+    }
+  ],
+  "status": "active",
+  "threadContext": {
+    "filePath": "/src/retry.py",
+    "rightFileStart": { "line": 42, "offset": 1 },
+    "rightFileEnd": { "line": 48, "offset": 20 }
+  },
+  "properties": {},
+  "isDeleted": false,
+  "_links": {
+    "self": {
+      "href": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/pullRequests/512/threads/77"
+    }
+  }
+}

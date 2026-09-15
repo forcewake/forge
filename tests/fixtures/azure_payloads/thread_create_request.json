@@ -1,0 +1,22 @@
+{
+  "comments": [
+    {
+      "parentCommentId": 0,
+      "content": "**forge review** — missing: retry guard swallows `TimeoutError` without re-raise (severity: must_fix)",
+      "commentType": 1
+    }
+  ],
+  "status": 1,
+  "threadContext": {
+    "filePath": "/src/retry.py",
+    "rightFileStart": { "line": 42, "offset": 1 },
+    "rightFileEnd": { "line": 48, "offset": 20 }
+  },
+  "pullRequestThreadContext": {
+    "changeTrackingId": 4,
+    "iterationContext": {
+      "firstComparingIteration": 2,
+      "secondComparingIteration": 3
+    }
+  }
+}

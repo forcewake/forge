@@ -1,0 +1,73 @@
+{
+  "id": "6f2f6f2f-1111-2222-3333-444455556666",
+  "eventType": "git.push",
+  "publisherId": "tfs",
+  "message": {
+    "text": "pushed a new branch forge/wi-42 to Fabrikam / core",
+    "html": "pushed a new branch forge/wi-42 to Fabrikam / core",
+    "markdown": "pushed a new branch forge/wi-42 to Fabrikam / core"
+  },
+  "detailedMessage": {
+    "text": "Forge Bot pushed a new branch forge/wi-42 to Fabrikam / core (commit 2f8a61c9)",
+    "html": "Forge Bot pushed a new branch forge/wi-42 to Fabrikam / core (commit 2f8a61c9)",
+    "markdown": "Forge Bot pushed a new branch forge/wi-42 to Fabrikam / core (commit 2f8a61c9)"
+  },
+  "resource": {
+    "commits": [
+      {
+        "commitId": "2f8a61c9e37b4d05a1f8c6e29b70d4135ea8c9f4",
+        "author": {
+          "name": "Forge Bot",
+          "email": "forge-bot@fabrikam.example",
+          "date": "2026-09-15T10:00:00Z"
+        },
+        "committer": {
+          "name": "Forge Bot",
+          "email": "forge-bot@fabrikam.example",
+          "date": "2026-09-15T10:00:00Z"
+        },
+        "comment": "forge: branch for WI-42",
+        "url": "https://dev.azure.com/fabrikam/Fabrikam/_git/core/commit/2f8a61c9e37b4d05a1f8c6e29b70d4135ea8c9f4"
+      }
+    ],
+    "refUpdates": [
+      {
+        "name": "refs/heads/forge/wi-42",
+        "oldObjectId": "0000000000000000000000000000000000000000",
+        "newObjectId": "2f8a61c9e37b4d05a1f8c6e29b70d4135ea8c9f4"
+      }
+    ],
+    "repository": {
+      "id": "1a2b3c4d-0000-0000-0000-000000000001",
+      "name": "core",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001",
+      "project": { "id": "9f8e7d6c-0000-0000-0000-000000000009", "name": "Fabrikam" },
+      "defaultBranch": "refs/heads/main",
+      "remoteUrl": "https://dev.azure.com/fabrikam/Fabrikam/_git/core"
+    },
+    "pushedBy": {
+      "id": "aa11bb22-0000-0000-0000-0000000000aa",
+      "displayName": "Forge Bot",
+      "uniqueName": "forge-bot@fabrikam.example"
+    },
+    "pushId": 1042,
+    "date": "2026-09-15T10:00:01.1000000Z",
+    "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/pushes/1042"
+  },
+  "resourceVersion": "1.0",
+  "resourceContainers": {
+    "collection": {
+      "id": "cccc0000-0000-0000-0000-0000000000cc",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "account": {
+      "id": "aaaa0000-0000-0000-0000-0000000000aa",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "project": {
+      "id": "9f8e7d6c-0000-0000-0000-000000000009",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    }
+  },
+  "createdDate": "2026-09-15T10:00:01.2000000Z"
+}

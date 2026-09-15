@@ -1,0 +1,68 @@
+{
+  "id": "6f2f6f2f-1111-2222-3333-444455557777",
+  "eventType": "git.push",
+  "publisherId": "tfs",
+  "message": {
+    "text": "Dev User pushed to forge/wi-42",
+    "html": "Dev User pushed to forge/wi-42",
+    "markdown": "Dev User pushed to forge/wi-42"
+  },
+  "resource": {
+    "commits": [
+      {
+        "commitId": "b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831",
+        "author": {
+          "name": "Dev User",
+          "email": "dev@fabrikam.example",
+          "date": "2026-09-15T11:00:00Z"
+        },
+        "committer": {
+          "name": "Dev User",
+          "email": "dev@fabrikam.example",
+          "date": "2026-09-15T11:00:00Z"
+        },
+        "comment": "address review: tighten guard",
+        "url": "https://dev.azure.com/fabrikam/Fabrikam/_git/core/commit/b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831"
+      }
+    ],
+    "refUpdates": [
+      {
+        "name": "refs/heads/forge/wi-42",
+        "oldObjectId": "2f8a61c9e37b4d05a1f8c6e29b70d4135ea8c9f4",
+        "newObjectId": "b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831"
+      }
+    ],
+    "repository": {
+      "id": "1a2b3c4d-0000-0000-0000-000000000001",
+      "name": "core",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001",
+      "project": { "id": "9f8e7d6c-0000-0000-0000-000000000009", "name": "Fabrikam" },
+      "defaultBranch": "refs/heads/main",
+      "remoteUrl": "https://dev.azure.com/fabrikam/Fabrikam/_git/core"
+    },
+    "pushedBy": {
+      "id": "bb22cc33-0000-0000-0000-0000000000bb",
+      "displayName": "Dev User",
+      "uniqueName": "dev@fabrikam.example"
+    },
+    "pushId": 1043,
+    "date": "2026-09-15T11:00:02.0000000Z",
+    "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/pushes/1043"
+  },
+  "resourceVersion": "1.0",
+  "resourceContainers": {
+    "collection": {
+      "id": "cccc0000-0000-0000-0000-0000000000cc",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "account": {
+      "id": "aaaa0000-0000-0000-0000-0000000000aa",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "project": {
+      "id": "9f8e7d6c-0000-0000-0000-000000000009",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    }
+  },
+  "createdDate": "2026-09-15T11:00:02.1000000Z"
+}

@@ -1,0 +1,73 @@
+{
+  "id": "70707070-aaaa-bbbb-cccc-ddddeeee0001",
+  "eventType": "git.pullrequest.created",
+  "publisherId": "tfs",
+  "message": {
+    "text": "Forge Bot created a pull request",
+    "html": "Forge Bot created a pull request",
+    "markdown": "Forge Bot created a pull request"
+  },
+  "resource": {
+    "pullRequestId": 512,
+    "status": "active",
+    "creationDate": "2026-09-15T10:05:00.0000000Z",
+    "title": "forge: WI-42 candidate (attempt 1)",
+    "description": "Draft candidate from attempt base 9c4e2a7f…",
+    "sourceRefName": "refs/heads/forge/wi-42",
+    "targetRefName": "refs/heads/main",
+    "mergeStatus": "succeeded",
+    "mergeId": "5e5e5e5e-0000-0000-0000-000000000005",
+    "lastMergeSourceCommit": {
+      "commitId": "b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831"
+    },
+    "lastMergeTargetCommit": {
+      "commitId": "5d1c8e2a9f34b70618cbe5d2904a73f16e0c8b52",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/5d1c8e2a9f34b70618cbe5d2904a73f16e0c8b52"
+    },
+    "lastMergeCommit": {
+      "commitId": "8a30c5f17e29b46d08fa3b5c192e7d40a6c9e518",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001/commits/8a30c5f17e29b46d08fa3b5c192e7d40a6c9e518"
+    },
+    "createdBy": {
+      "id": "aa11bb22-0000-0000-0000-0000000000aa",
+      "displayName": "Forge Bot",
+      "uniqueName": "forge-bot@fabrikam.example",
+      "imageUrl": "https://dev.azure.com/fabrikam/_api/_common/identityImage?id=aa11bb22-0000-0000-0000-0000000000aa"
+    },
+    "repository": {
+      "id": "1a2b3c4d-0000-0000-0000-000000000001",
+      "name": "core",
+      "url": "https://dev.azure.com/fabrikam/Fabrikam/_apis/git/repositories/1a2b3c4d-0000-0000-0000-000000000001",
+      "project": { "id": "9f8e7d6c-0000-0000-0000-000000000009", "name": "Fabrikam" },
+      "defaultBranch": "refs/heads/main",
+      "remoteUrl": "https://dev.azure.com/fabrikam/Fabrikam/_git/core"
+    },
+    "reviewers": [
+      {
+        "vote": 0,
+        "id": "cc33dd44-0000-0000-0000-0000000000cc",
+        "displayName": "Dev User",
+        "isContainer": false
+      }
+    ],
+    "supportsIterations": true,
+    "isDraft": true
+  },
+  "resourceVersion": "2.0",
+  "resourceContainers": {
+    "collection": {
+      "id": "cccc0000-0000-0000-0000-0000000000cc",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "account": {
+      "id": "aaaa0000-0000-0000-0000-0000000000aa",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    },
+    "project": {
+      "id": "9f8e7d6c-0000-0000-0000-000000000009",
+      "baseUrl": "https://dev.azure.com/fabrikam/"
+    }
+  },
+  "createdDate": "2026-09-15T10:05:00.5000000Z"
+}
