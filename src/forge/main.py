@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -82,9 +83,33 @@ async def lifespan(app: FastAPI):
         __version__,
         "sqlite" if "sqlite" in db_url else db_url.split("+")[0],
     )
+
+    # The mounted MCP streamable app's own lifespan never runs under a
+    # FastAPI mount — its session manager must be started (and stopped)
+    # here, or every /mcp request fails with "Task group is not
+    # initialized". The context is anyio-task-bound, so a dedicated holder
+    # task enters AND exits it; the lifespan merely signals shutdown.
+    mcp_session_task: asyncio.Task | None = None
+    mcp_shutdown = asyncio.Event()
+    if hasattr(app.state, "mcp_server"):
+        session_started = asyncio.Event()
+
+        async def _hold_mcp_session() -> None:
+            async with app.state.mcp_server.session_manager.run():
+                session_started.set()
+                await mcp_shutdown.wait()
+
+        mcp_session_task = asyncio.create_task(_hold_mcp_session())
+        await session_started.wait()
     yield
 
     # Shutdown
+    mcp_shutdown.set()
+    if mcp_session_task is not None:
+        try:
+            await mcp_session_task
+        except RuntimeError:
+            pass  # task-group teardown races the lifespan on hard stops
     if hasattr(app.state, "mcp_manager") and app.state.mcp_manager is not None:
         await app.state.mcp_manager.close_all()
     if app.state.redis_manager is not None:
@@ -113,12 +138,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(router)
 
     # Mount MCP server at /mcp — fail closed: only with an auth key, since
-    # its tools act with the privileged GitLab token. FORGE_MCP_ENABLED=false
+    # an unauthenticated endpoint is never exposed. Scoped principals
+    # (FORGE_MCP_SCOPED_TOKENS) get per-call scope enforcement on the run
+    # surface; FORGE_MCP_KEY stays the all-scope master. FORGE_MCP_ENABLED=false
     # opts out for deployments that front /mcp with their own auth.
     if settings.FORGE_MCP_ENABLED and settings.FORGE_MCP_KEY:
+        from forge.mcp_server.server import scoped_principals_from_settings
+
         mcp_server = create_mcp_server(settings)
         mcp_app = mcp_server.streamable_http_app()
-        mcp_app = MCPAuthMiddleware(mcp_app, settings.FORGE_MCP_KEY.get_secret_value())
+        mcp_app = MCPAuthMiddleware(
+            mcp_app,
+            settings.FORGE_MCP_KEY.get_secret_value(),
+            scoped_principals=scoped_principals_from_settings(settings),
+        )
         application.mount("/mcp", mcp_app)
         application.state.mcp_server = mcp_server
     else:

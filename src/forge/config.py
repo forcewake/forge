@@ -90,12 +90,21 @@ class Settings(BaseSettings):
     FORGE_API_READ_TOKEN: SecretStr | None = None
 
     # MCP server (optional). Fail closed: the MCP app is only mounted when
-    # FORGE_MCP_ENABLED is true AND FORGE_MCP_KEY is set — its tools act with
-    # the privileged GitLab token, so an unauthenticated endpoint is never
-    # exposed. Set FORGE_MCP_ENABLED=false only when the deployment fronts
-    # /mcp with its own authentication.
+    # FORGE_MCP_ENABLED is true AND FORGE_MCP_KEY is set — an unauthenticated
+    # endpoint is never exposed. Set FORGE_MCP_ENABLED=false only when the
+    # deployment fronts /mcp with its own authentication.
     FORGE_MCP_ENABLED: bool = True
     FORGE_MCP_KEY: SecretStr | None = None
+    # ADR-0021 §4: scoped MCP principals — JSON object token → scope list
+    # (closed set: forge:read, forge:runs:write, forge:approvals:write,
+    # forge:admin; "*" grants the full set). FORGE_MCP_KEY remains the
+    # all-scope master. Malformed JSON or unknown scopes fail startup.
+    FORGE_MCP_SCOPED_TOKENS: SecretStr | None = None
+    # Host headers the MCP endpoint accepts when mounted behind a proxy
+    # (comma-separated; e.g. "forge.example.com"). Empty keeps the SDK's
+    # localhost-only DNS-rebinding protection — a deployment MUST list its
+    # public host or /mcp answers 421 to every proxied request.
+    FORGE_MCP_ALLOWED_HOSTS: str = ""
     FORGE_GITHUB_TOKEN: SecretStr | None = None
 
     # Agno telemetry (disabled for self-hosted)

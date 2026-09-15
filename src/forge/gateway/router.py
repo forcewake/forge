@@ -343,8 +343,54 @@ async def _gather_metrics(request: Request) -> dict[str, Any]:
                 select(FlowRun.status, func.count()).group_by(FlowRun.status)
             )
             snapshot["runs_by_status"] = {status: count for status, count in rows.all()}
+        snapshot["delivery_ladder"] = _delivery_ladder(snapshot["runs_by_status"])
 
     return snapshot
+
+
+#: The acceptance ladder (ADR-0021 §5, F34): a run's CURRENT status mapped to
+#: the furthest ladder rung that status implies. Runs that regressed (a
+#: failed repair after CI) count only at their present rung — this is a
+#: gauge of where work packages stand, not a cumulative funnel; the
+#: merged-without-rework rung lives provider-side (the bot never merges) and
+#: is intentionally absent.
+_LADDER_RUNGS: tuple[str, ...] = (
+    "started",
+    "planned",
+    "gate_approved",
+    "candidate_published",
+    "ci_passed",
+    "ready_for_human",
+)
+
+#: furthest rung per lifecycle status (statuses below a rung's bar are
+#: omitted — they default to "started").
+_LADDER_BY_STATUS: dict[str, str] = {
+    "waiting_approval": "planned",
+    "proposing": "gate_approved",
+    "validating": "gate_approved",
+    "committing": "gate_approved",
+    "waiting_harness": "candidate_published",
+    "ensuring_draft_mr": "candidate_published",
+    "waiting_ci": "candidate_published",
+    "evaluating_ci": "candidate_published",
+    "reviewing": "ci_passed",
+    "ready_for_human": "ready_for_human",
+}
+
+
+def _delivery_ladder(runs_by_status: dict[str, int]) -> dict[str, int]:
+    """Bucket runs by the furthest ladder rung their status has reached.
+
+    Terminal failure states (``failed``/``blocked``/``cancelled``) and
+    in-flight early states count at ``started`` — the work package entered
+    the factory but has not (yet) cleared the gate.
+    """
+    ladder = {rung: 0 for rung in _LADDER_RUNGS}
+    for status, count in runs_by_status.items():
+        rung = _LADDER_BY_STATUS.get(status, "started")
+        ladder[rung] += count
+    return ladder
 
 
 @router.get("/metrics")
@@ -368,6 +414,8 @@ async def metrics(request: Request) -> JSONResponse:
             "workers_active": snapshot["workers_active"],
             "tasks_processed_1h": snapshot["tasks_processed_1h"],
             "tasks_failed_1h": snapshot["tasks_failed_1h"],
+            "runs_by_status": snapshot["runs_by_status"],
+            "delivery_ladder": snapshot.get("delivery_ladder", {}),
         }
     )
 
@@ -399,6 +447,13 @@ async def metrics_prometheus(request: Request) -> Response:
             "# HELP forge_runs_by_status Durable flow runs by lifecycle status.",
             "# TYPE forge_runs_by_status gauge",
             f'forge_runs_by_status{{status="{status}"}} {count}',
+        ]
+    for rung in _LADDER_RUNGS:
+        count = snapshot.get("delivery_ladder", {}).get(rung, 0)
+        lines += [
+            "# HELP forge_delivery_ladder Acceptance ladder: runs at-or-past each rung (F34).",
+            "# TYPE forge_delivery_ladder gauge",
+            f'forge_delivery_ladder{{stage="{rung}"}} {count}',
         ]
     lines += [
         "# HELP forge_tasks_processed_total Tasks processed (last hour window).",

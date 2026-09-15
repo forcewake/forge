@@ -9,6 +9,13 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from forge.gitlab.client import GitLabClient
+from forge.mcp_server.auth import (
+    McpPrincipal,
+    parse_scoped_tokens,
+    resolve_principal,
+    stash_principal,
+    stash_session_factory,
+)
 
 if TYPE_CHECKING:
     from forge.config import Settings
@@ -21,20 +28,36 @@ logger = logging.getLogger(__name__)
 
 
 class MCPAuthMiddleware:
-    """ASGI middleware that validates Bearer tokens on the MCP mount."""
+    """ASGI middleware that validates Bearer tokens on the MCP mount.
 
-    def __init__(self, app: ASGIApp, api_key: str) -> None:
+    Two token classes (ADR-0021 §4): the legacy master key (all scopes) and
+    per-token scoped principals from ``FORGE_MCP_SCOPED_TOKENS``. A valid
+    token's principal is stashed on the ASGI scope so tools can enforce
+    scopes per call; an invalid token is a flat 401.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        api_key: str,
+        scoped_principals: dict[str, McpPrincipal] | None = None,
+    ) -> None:
         self.app = app
         self.api_key = api_key
+        self.scoped_principals = scoped_principals or {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
             headers = dict(scope.get("headers", []))
             auth = headers.get(b"authorization", b"").decode()
-            if not auth.startswith("Bearer ") or auth[7:] != self.api_key:
+            token = auth[7:] if auth.startswith("Bearer ") else ""
+            principal = resolve_principal(token, self.api_key, self.scoped_principals)
+            if principal is None:
                 response = JSONResponse({"error": "Unauthorized"}, status_code=401)
                 await response(scope, receive, send)
                 return
+            stash_principal(scope, principal)
+            stash_session_factory(scope)
         await self.app(scope, receive, send)
 
 
@@ -76,9 +99,23 @@ async def gitlab_client_from(settings: Settings) -> AsyncIterator[GitLabClient]:
 
 def create_mcp_server(settings: Settings, redis_manager: RedisManager | None = None) -> FastMCP:
     """Create and configure the FastMCP server instance."""
+    # Behind a proxy the Host header is the public domain, not localhost —
+    # list it or the SDK's DNS-rebinding protection answers 421 to every
+    # proxied request (config: FORGE_MCP_ALLOWED_HOSTS).
+    allowed_hosts = [h.strip() for h in settings.FORGE_MCP_ALLOWED_HOSTS.split(",") if h.strip()]
+    transport_security = None
+    if allowed_hosts:
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=[f"https://{h}" for h in allowed_hosts],
+        )
     mcp = FastMCP(
         "Forge",
         stateless_http=True,
+        transport_security=transport_security,
     )
 
     # Attach forge-specific state so tools/resources/prompts can access it.
@@ -89,9 +126,17 @@ def create_mcp_server(settings: Settings, redis_manager: RedisManager | None = N
     from forge.mcp_server.prompts import register_prompts
     from forge.mcp_server.resources import register_resources
     from forge.mcp_server.tools import register_tools
+    from forge.mcp_server.tools_runs import register_run_tools
 
     register_tools(mcp)
+    register_run_tools(mcp)
     register_resources(mcp)
     register_prompts(mcp)
 
     return mcp
+
+
+def scoped_principals_from_settings(settings: Settings) -> dict[str, McpPrincipal]:
+    """Parse the scoped-token config (fail closed on a malformed config)."""
+    raw = settings.FORGE_MCP_SCOPED_TOKENS
+    return parse_scoped_tokens(raw.get_secret_value() if raw is not None else None)

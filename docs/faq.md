@@ -89,7 +89,13 @@ project CI variables/secrets. Forge's publisher token, database, and
 webhook secret never enter the lane, and the lane's git remote cannot push.
 
 **MCP endpoints?**
-Fail-closed: without `FORGE_MCP_KEY` the MCP server is not mounted.
+Fail-closed: without `FORGE_MCP_KEY` the MCP server is not mounted. The
+key is the all-scope master; per-token scoped principals
+(`FORGE_MCP_SCOPED_TOKENS`, e.g. a read-only `forge:read` bot token) are
+enforced per tool call and audited. The run-surface tools read forge's own
+durable state — they never act with forge's provider tokens. Mounted
+behind a proxy, list the public host in `FORGE_MCP_ALLOWED_HOSTS` or the
+SDK's DNS-rebinding protection answers 421.
 
 ## Ops
 
