@@ -1472,6 +1472,188 @@ async def test_reader_maps_work_item_with_string_created_by(
 
 
 # ---------------------------------------------------------------------------
+# AZ-4 additions: work-item patch/link, repo resolution, draft-PR dedupe
+# (research §4.6; additive to the frozen AZ-1/AZ-3 client surface)
+# ---------------------------------------------------------------------------
+
+
+WORK_ITEM_URL = f"{BASE}/{PROJECT}/_apis/wit/workItems/142"
+
+
+async def test_update_work_item_sends_the_json_patch_contract(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    ops = [{"op": "add", "path": "/fields/System.Title", "value": "renamed"}]
+    httpx_mock.add_response(url=azdo_url(WORK_ITEM_URL), json={"id": 142, "rev": 10})
+
+    result = await azdo.update_work_item(PROJECT, 142, ops)
+
+    assert result["rev"] == 10
+    (request,) = httpx_mock.get_requests()
+    assert request.method == "PATCH"
+    assert request.url.params["api-version"] == "7.1"
+    # The WIT PATCH only parses under the json-patch content type.
+    assert request.headers["content-type"] == "application/json-patch+json"
+    assert json.loads(request.content) == ops
+
+
+async def test_update_work_item_is_never_retried(httpx_mock: HTTPXMock, azdo: AzureDevOpsClient):
+    # A replayed relations/- add would duplicate the ArtifactLink — the
+    # mutation primitive is retry-less like the other writes.
+    httpx_mock.add_response(url=azdo_url(WORK_ITEM_URL), status_code=500, json={"message": "boom"})
+
+    with pytest.raises(AzureDevOpsError):
+        await azdo.update_work_item(PROJECT, 142, [])
+
+    assert len(httpx_mock.get_requests()) == 1
+
+
+async def test_link_work_item_to_pr_sends_the_artifact_link_patch(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    project_guid = "9f8e7d6c-0000-0000-0000-000000000009"
+    repo_guid = "1a2b3c4d-0000-0000-0000-000000000001"
+    httpx_mock.add_response(url=azdo_url(WORK_ITEM_URL), json={"id": 142})
+
+    await azdo.link_work_item_to_pr(PROJECT, 142, project_guid, repo_guid, 512)
+
+    (request,) = httpx_mock.get_requests()
+    (op,) = json.loads(request.content)
+    assert op["op"] == "add"
+    assert op["path"] == "/relations/-"
+    value = op["value"]
+    assert value["rel"] == "ArtifactLink"
+    # The exact artifactId template, %2F-separated, or the link renders
+    # one-way (research §4.6).
+    assert value["url"] == (f"vstfs:///Git/PullRequestId/{project_guid}%2F{repo_guid}%2F512")
+    # CASE-SENSITIVE: "Pull Request", not "pull request".
+    assert value["attributes"]["name"] == "Pull Request"
+
+
+async def test_list_repositories_returns_the_project_repos(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    httpx_mock.add_response(
+        url=azdo_url(f"{BASE}/{PROJECT}/_apis/git/repositories"),
+        json={
+            "value": [
+                {
+                    "id": "1a2b3c4d-0000-0000-0000-000000000001",
+                    "name": "core",
+                    "project": {"id": "9f8e7d6c-0000-0000-0000-000000000009", "name": PROJECT},
+                }
+            ],
+            "count": 1,
+        },
+    )
+
+    repositories = await azdo.list_repositories(PROJECT)
+
+    assert [repo["name"] for repo in repositories] == ["core"]
+    (request,) = httpx_mock.get_requests()
+    assert request.url.params["api-version"] == "7.1"
+
+
+async def test_list_repositories_accepts_a_bare_array(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    httpx_mock.add_response(
+        url=azdo_url(f"{BASE}/{PROJECT}/_apis/git/repositories"),
+        json=[{"id": "1a2b3c4d-0000-0000-0000-000000000001", "name": "core"}],
+    )
+
+    repositories = await azdo.list_repositories(PROJECT)
+
+    assert repositories[0]["name"] == "core"
+
+
+def _pr_payload(
+    pr_id: int,
+    *,
+    source_branch: str,
+    is_draft: bool,
+    created: str,
+) -> dict:
+    return {
+        "pullRequestId": pr_id,
+        "sourceRefName": source_branch,
+        "targetRefName": "refs/heads/main",
+        "isDraft": is_draft,
+        "status": "active",
+        "creationDate": created,
+    }
+
+
+async def test_find_draft_pr_by_head_returns_the_newest_draft_on_the_branch(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    httpx_mock.add_response(
+        url=azdo_url(
+            f"{REPO_PATH}/pullrequests",
+            **{"searchCriteria.status": "active", "$top": "50"},
+        ),
+        json={
+            "value": [
+                # An older draft on the same head...
+                _pr_payload(
+                    500,
+                    source_branch="refs/heads/forge/wi-42",
+                    is_draft=True,
+                    created="2026-09-14T10:00:00Z",
+                ),
+                # ...the NEWEST draft wins...
+                _pr_payload(
+                    512,
+                    source_branch="refs/heads/forge/wi-42",
+                    is_draft=True,
+                    created="2026-09-15T10:00:00Z",
+                ),
+                # ...non-draft and other-branch PRs never match.
+                _pr_payload(
+                    513,
+                    source_branch="refs/heads/forge/wi-42",
+                    is_draft=False,
+                    created="2026-09-15T11:00:00Z",
+                ),
+                _pr_payload(
+                    514,
+                    source_branch="refs/heads/dev/topic",
+                    is_draft=True,
+                    created="2026-09-15T12:00:00Z",
+                ),
+            ]
+        },
+    )
+
+    pr = await azdo.find_draft_pr_by_head(PROJECT, REPO, "forge/wi-42")
+
+    assert pr is not None and pr["pullRequestId"] == 512
+
+
+async def test_find_draft_pr_by_head_returns_none_without_a_draft(
+    httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+):
+    httpx_mock.add_response(
+        url=azdo_url(
+            f"{REPO_PATH}/pullrequests",
+            **{"searchCriteria.status": "active", "$top": "50"},
+        ),
+        json={
+            "value": [
+                _pr_payload(
+                    513,
+                    source_branch="refs/heads/forge/wi-42",
+                    is_draft=False,
+                    created="2026-09-15T11:00:00Z",
+                ),
+            ]
+        },
+    )
+
+    assert await azdo.find_draft_pr_by_head(PROJECT, REPO, "forge/wi-42") is None
+
+
+# ---------------------------------------------------------------------------
 # Fixture inventory + SHA chain consistency (research §10)
 # ---------------------------------------------------------------------------
 

@@ -1207,8 +1207,9 @@ class AzureRunService:
         The branch is cut at that exact commit (``oldObjectId`` = 40 zeros)
         and the push carries it as the CAS — any concurrent movement is
         rejected with ``staleObjectId`` under HTTP 200 and mapped to a drift
-        outcome (ADR-0024 §4). Draft PR creation is find-free (the AZ-1
-        client has no list-PRs surface) and therefore never replayed — the
+        outcome (ADR-0024 §4). Draft PR creation is find-by-head-first (the
+        AZ-4 dedupe: an open draft on the same source branch is adopted,
+        never duplicated) and the create itself is never replayed — the
         consume-once gate above is the exactly-once guard.
         """
         branch = azure_factory_branch(issue_number, run_id)
@@ -1282,7 +1283,10 @@ class AzureRunService:
         self, branch: str, base_branch: str, issue_number: int, run_id: str
     ) -> dict | None:
         """Open the Draft PR (isDraft — the only kind forge creates, ADR-0024
-        §5). A failed creation must not undo the commit; the caller records
+        §5). Find-by-head-first: an OPEN draft already on this source branch
+        (a previous leg's creation that the run row lost track of) is
+        adopted instead of forked — ``create_draft_pr`` is non-idempotent.
+        A failed creation must not undo the commit; the caller records
         the commit and the reconciler story owns PR re-ensurance."""
         title = f"forge: implement #{issue_number} (run {short_run_id(run_id)})"
         description = (
@@ -1291,6 +1295,16 @@ class AzureRunService:
             "*Merging is a human decision — forge never merges.*"
         )
         try:
+            existing = await self._stack.client.find_draft_pr_by_head(
+                self._project, self._repo, branch
+            )
+            if existing is not None:
+                logger.info(
+                    "Open draft PR %s already exists on %s — adopting it",
+                    existing.get("pullRequestId"),
+                    branch,
+                )
+                return existing
             return await self._stack.client.create_draft_pr(
                 self._project,
                 self._repo,
@@ -1796,7 +1810,7 @@ async def execute_azure_run_command(
     if "/" not in repo_full_name:
         # Work-item commands carry no repository (the payload has none) —
         # resolve the connection's target repo for the project.
-        repo_full_name = f"{project}/{await _resolve_repo_name(forge_config, project)}"
+        repo_full_name = f"{project}/{await _resolve_repo_name(settings, forge_config, project)}"
     project_name, _, repo_name = repo_full_name.partition("/")
     project_id = int(metadata.get("project_id") or 0)
     issue_number = int(metadata.get("issue_number") or 0)
@@ -1845,15 +1859,33 @@ async def execute_azure_run_command(
             await aclose()
 
 
-async def _resolve_repo_name(forge_config: ForgeConfig, project: str) -> str:
+async def _resolve_repo_name(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    project: str,
+    *,
+    client: AzureDevOpsClient | None = None,
+) -> str:
     """The target repo for repo-less work-item commands.
 
-    ``forge.yml``'s ``azure_devops.default_repos`` mapping (project → repo)
-    wins; the fallback is AzDO's default — the repository created with the
-    project shares its name. Resolution is validated by the first repo API
-    call the run makes; a wrong name fails the run visibly. The frozen AZ-1
-    client has no repositories-list surface — the proper fix is a
-    ``list_repositories`` client method (AZ-4 onboarding).
+    Resolution order, most-explicit first:
+
+    1. ``forge.yml``'s ``azure_devops.default_repos`` mapping (project →
+       repo, or the single ``default_repo``) — explicit human configuration
+       wins because the API cannot disambiguate a multi-repo project.
+    2. :meth:`~forge.integrations.azure.AzureDevOpsClient.list_repositories`
+       — exactly one repository in the project, or one named like the
+       project (AzDO's default-repository rule), resolves the name over the
+       API. The AZ-1 client had no repositories-list surface and guessed the
+       project name; this is that workaround's documented fix.
+    3. The project name — AzDO's default repository shares it. Still
+       validated by the first repo API call the run makes: a wrong name
+       fails the run visibly.
+
+    A repositories-list failure (unreachable org, unscoped PAT, no PAT on
+    the connection) degrades to the fallback — never fails the command.
+    *client* is the test seam; a real one is built (and closed) only when
+    the API leg is reached.
     """
     azdo_config = forge_config.get("azure_devops")
     if isinstance(azdo_config, dict):
@@ -1865,6 +1897,47 @@ async def _resolve_repo_name(forge_config: ForgeConfig, project: str) -> str:
         default = str(azdo_config.get("default_repo") or "").strip()
         if default:
             return default
+
+    try:
+        if client is None:
+            client = AzureDevOpsClient(
+                base_url=str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or ""),
+                token=azure_credentials_from_settings(settings),
+            )
+            owned_client = True
+        else:
+            owned_client = False
+    except ValueError:
+        # No usable PAT on the connection — nothing to resolve with.
+        return project
+    try:
+        repositories = await client.list_repositories(project)
+    except Exception:
+        logger.warning(
+            "Repository listing failed for project %s — falling back to the default name",
+            project,
+            exc_info=True,
+        )
+        return project
+    finally:
+        if owned_client:
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    names = [str(repo.get("name") or "") for repo in repositories if repo.get("name")]
+    if len(names) == 1:
+        return names[0]
+    if project in names:
+        return project  # AzDO's default repository — the API-verified form
+    if len(names) > 1:
+        logger.warning(
+            "Project %s has %d repositories and no azure_devops.default_repos mapping — "
+            "using the default name %r",
+            project,
+            len(names),
+            project,
+        )
     return project
 
 
@@ -1937,12 +2010,13 @@ def _pr_web_url(pr: dict | None) -> str | None:
 async def _link_work_item_to_pr(
     client: AzureDevOpsClient, project: str, work_item_id: int, pr: dict
 ) -> bool:
-    """Link the work item to the Draft PR via the WIT ArtifactLink PATCH.
+    """Link the work item to the Draft PR; a failure is evidence, never fatal.
 
-    The reliable programmatic link (research §4.6): a JSON-Patch add of an
-    ``ArtifactLink`` relation whose vstfs URL embeds the project/repository/
-    PR ids (``%2F``-separated). True when the PATCH succeeded — a failure is
-    the caller's evidence note, never a publish failure.
+    Thin wrapper over
+    :meth:`~forge.integrations.azure.AzureDevOpsClient.link_work_item_to_pr`
+    (the WIT ArtifactLink PATCH, research §4.6): extracts the
+    project/repository/PR ids off the created PR payload and maps the
+    outcome onto the publish evidence's ``work_item_linked`` flag.
     """
     repository = pr.get("repository") or {}
     project_ref = repository.get("project") or {}
@@ -1951,23 +2025,9 @@ async def _link_work_item_to_pr(
     pr_id = int(pr.get("pullRequestId") or 0)
     if not project_id_guid or not repository_id or not pr_id:
         return False
-    artifact_url = f"vstfs:///Git/PullRequestId/{project_id_guid}%2F{repository_id}%2F{pr_id}"
     try:
-        await client._request(  # noqa: SLF001 — thin helper over the frozen client's transport
-            "PATCH",
-            f"/{project}/_apis/wit/workItems/{work_item_id}",
-            headers={"Content-Type": "application/json-patch+json"},
-            json=[
-                {
-                    "op": "add",
-                    "path": "/relations/-",
-                    "value": {
-                        "rel": "ArtifactLink",
-                        "url": artifact_url,
-                        "attributes": {"name": "Pull Request"},
-                    },
-                }
-            ],
+        await client.link_work_item_to_pr(
+            project, work_item_id, project_id_guid, repository_id, pr_id
         )
     except AzureDevOpsError as exc:
         logger.warning("Work-item link PATCH failed for #%s → PR %s: %s", work_item_id, pr_id, exc)

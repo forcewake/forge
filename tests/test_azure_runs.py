@@ -30,6 +30,7 @@ from forge.durable import (
 )
 from forge.factory.llm import LLMError, LLMResult
 from forge.factory.reviewer import ReviewVerdict
+from forge.gateway.azure_webhook import normalize_workitem_comment
 from forge.integrations.azure import (
     AzureDevOpsDriftError,
     AzureDevOpsError,
@@ -47,6 +48,7 @@ from forge.runs.azure_service import (
     AzureRunService,
     azure_factory_branch,
     execute_azure_run_command,
+    _resolve_repo_name,
 )
 from forge.runs.stubs import StubImplementer, StubPlanner
 
@@ -106,6 +108,9 @@ class FakeAzureDevOps:
         self.work_item_comments: dict[int, list[str]] = {}
         self.work_item_links: list[dict] = []
         self.pull_requests: list[dict] = []
+        # The project's repositories as list_repositories returns them
+        # (None = the listing fails — the fallback path).
+        self.repositories: list[dict] | None = []
         self.pipeline_calls: list[dict] = []
         self.cancelled_builds: list[int] = []
         self.calls: list[tuple[str, tuple]] = []
@@ -147,7 +152,33 @@ class FakeAzureDevOps:
     def calls_of(self, name: str) -> list[tuple[str, tuple]]:
         return [call for call in self.calls if call[0] == name]
 
-    # -- work items -------------------------------------------------------------
+    # -- work items ---------------------------------------------------------
+
+    async def link_work_item_to_pr(
+        self, project: str, work_item_id: int, project_id: str, repo_id: str, pr_id: int
+    ) -> dict:
+        """The AZ-4 client method (the WIT ArtifactLink PATCH)."""
+        self.calls.append(
+            ("link_work_item_to_pr", (project, work_item_id, project_id, repo_id, pr_id))
+        )
+        self.work_item_links.append(
+            {
+                "method": "PATCH",
+                "path": f"/{project}/_apis/wit/workItems/{work_item_id}",
+                "body": [
+                    {
+                        "op": "add",
+                        "path": "/relations/-",
+                        "value": {
+                            "rel": "ArtifactLink",
+                            "url": f"vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pr_id}",
+                            "attributes": {"name": "Pull Request"},
+                        },
+                    }
+                ],
+            }
+        )
+        return {"id": work_item_id, "rev": 99}
 
     async def get_work_item(self, project: str, work_item_id: int) -> dict:
         self.calls.append(("get_work_item", (project, work_item_id)))
@@ -245,6 +276,7 @@ class FakeAzureDevOps:
             "pullRequestId": pr_id,
             "title": title,
             "description": description,
+            "creationDate": f"2026-09-15T10:0{self._next_pr % 10}:00.0000000Z",
             "sourceRefName": f"refs/heads/{source_branch}",
             "targetRefName": f"refs/heads/{target_branch}",
             "isDraft": True,
@@ -262,6 +294,31 @@ class FakeAzureDevOps:
         }
         self.pull_requests.append(pr)
         return pr
+
+    async def find_draft_pr_by_head(
+        self, project: str, repo: str, source_branch: str
+    ) -> dict | None:
+        self.calls.append(("find_draft_pr_by_head", (project, repo, source_branch)))
+        wanted = source_branch.removeprefix("refs/heads/")
+        matches = [
+            pr
+            for pr in self.pull_requests
+            if pr.get("isDraft") is True
+            and str(pr.get("sourceRefName") or "").removeprefix("refs/heads/") == wanted
+        ]
+        matches.sort(
+            key=lambda pr: (str(pr.get("creationDate") or ""), int(pr["pullRequestId"])),
+            reverse=True,
+        )
+        return matches[0] if matches else None
+
+    # -- repositories (the AZ-4 repo-resolution surface) -------------------------
+
+    async def list_repositories(self, project: str) -> list[dict]:
+        self.calls.append(("list_repositories", (project,)))
+        if self.repositories is None:
+            raise AzureDevOpsError(400, "TF400813: resource not available")
+        return self.repositories
 
     async def get_pr(self, project: str, repo: str, pr_id: int) -> dict:
         for pr in self.pull_requests:
@@ -349,13 +406,6 @@ class FakeAzureDevOps:
             "defaultBranch": "refs/heads/main",
             "project": {"id": PROJECT_GUID, "name": project},
         }
-
-    # -- the frozen client's private transport (work-item link PATCH) ------------
-
-    async def _request(self, method: str, path: str, **kwargs) -> dict:
-        self.calls.append(("_request", (method, path)))
-        self.work_item_links.append({"method": method, "path": path, "body": kwargs.get("json")})
-        return {}
 
 
 class StubAzureReviewer:
@@ -791,6 +841,45 @@ class TestGoBuiltin:
         run = await get_run(db, run_id)
         assert (run.evidence or {})["published_candidate"]["work_item_link"] is True
 
+    async def test_an_open_draft_on_the_branch_is_adopted_not_duplicated(self, db, fake):
+        """AZ-4 dedupe: create_draft_pr is non-idempotent — an open draft on
+        the run's own source branch (a previous leg's PR) is adopted, never
+        forked a second time."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        branch = azure_factory_branch(WORK_ITEM, run_id)
+        # A PR a previous publish leg created and the run row lost track of.
+        existing_pr = {
+            "pullRequestId": 4242,
+            "title": "forge: implement #142 (run earlier-leg)",
+            "creationDate": "2026-09-15T09:00:00.0000000Z",
+            "sourceRefName": f"refs/heads/{branch}",
+            "targetRefName": "refs/heads/main",
+            "isDraft": True,
+            "status": "active",
+            "repository": {
+                "id": REPO_GUID,
+                "name": REPO,
+                "project": {"id": PROJECT_GUID, "name": PROJECT},
+            },
+        }
+        fake.pull_requests.append(existing_pr)
+        clear_comments(fake)
+
+        await go(service, run_id)
+
+        assert fake.calls_of("create_draft_pr") == []
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.mr_iid == 4242
+        # The link still lands on the ADOPTED PR (its ids come off the payload).
+        (link,) = fake.work_item_links
+        assert (
+            link["body"][0]["value"]["url"]
+            == f"vstfs:///Git/PullRequestId/{PROJECT_GUID}%2F{REPO_GUID}%2F4242"
+        )
+        assert [pr["pullRequestId"] for pr in fake.pull_requests] == [4242]
+
     async def test_go_is_idempotent_on_redelivery(self, db, fake):
         service = make_service(db, fake)
         run_id = await start(service)
@@ -1224,6 +1313,95 @@ class TestDispatch:
         assert run.status == FlowStatus.WAITING_APPROVAL.value
         assert step.status == "succeeded"
         assert comments(fake)  # the plan comment went out
+
+
+# ----------------------------------------------------------------------
+# Repo resolution for repo-less work-item commands (AZ-4: list_repositories)
+# ----------------------------------------------------------------------
+
+
+class TestRepoResolution:
+    async def test_forge_yml_mapping_wins_before_any_api_call(self, fake, tmp_path):
+        config_path = tmp_path / "forge.yml"
+        config_path.write_text(
+            f"forge:\n  azure_devops:\n    default_repos:\n      {PROJECT}: {REPO}\n"
+        )
+
+        repo = await _resolve_repo_name(make_settings(), ForgeConfig(config_path), PROJECT)
+
+        assert repo == REPO
+        assert fake.calls_of("list_repositories") == []
+
+    async def test_single_repository_resolves_over_the_api(self, fake):
+        fake.repositories = [{"id": REPO_GUID, "name": REPO}]
+
+        repo = await _resolve_repo_name(
+            make_settings(FORGE_AZDO_PAT="pat-test"), ForgeConfig(), PROJECT, client=fake
+        )
+
+        assert repo == REPO
+        (call,) = fake.calls_of("list_repositories")
+        assert call[1] == (PROJECT,)
+
+    async def test_multi_repository_projects_prefer_the_default_name(self, fake):
+        """AzDO creates a repository named like the project — the API-verified
+        form of the old name-guessing fallback."""
+        fake.repositories = [
+            {"id": REPO_GUID, "name": REPO},
+            {"id": "b" * 8 + "-0000-0000-0000-000000000002", "name": PROJECT},
+        ]
+
+        repo = await _resolve_repo_name(
+            make_settings(FORGE_AZDO_PAT="pat-test"), ForgeConfig(), PROJECT, client=fake
+        )
+
+        assert repo == PROJECT
+
+    async def test_ambiguous_multi_repository_project_falls_back_with_the_default(self, fake):
+        fake.repositories = [{"name": "one"}, {"name": "two"}, {"name": "three"}]
+
+        repo = await _resolve_repo_name(
+            make_settings(FORGE_AZDO_PAT="pat-test"), ForgeConfig(), PROJECT, client=fake
+        )
+
+        assert repo == PROJECT
+
+    async def test_a_failed_listing_degrades_to_the_default_name(self, fake):
+        fake.repositories = None  # the fake raises on the listing
+
+        repo = await _resolve_repo_name(
+            make_settings(FORGE_AZDO_PAT="pat-test"), ForgeConfig(), PROJECT, client=fake
+        )
+
+        assert repo == PROJECT
+
+    async def test_no_pat_on_the_connection_skips_the_api_leg(self):
+        """make_settings() carries no FORGE_AZDO_PAT — resolution must degrade
+        to the default name instead of attempting a network call."""
+
+        repo = await _resolve_repo_name(make_settings(), ForgeConfig(), PROJECT)
+
+        assert repo == PROJECT
+
+    async def test_dispatch_resolves_through_the_repositories_list(self, db, fake, monkeypatch):
+        """The full dispatch: a repo-less work-item command resolves its repo
+        via the AZ-4 client surface, then plans against it."""
+        fake.repositories = [{"id": REPO_GUID, "name": REPO}]
+        monkeypatch.setattr("forge.runs.azure_service.AzureDevOpsClient", lambda **kwargs: fake)
+        payload = json.loads((FIXTURES / "workitem_commented_implement.json").read_bytes())
+        metadata = normalize_workitem_comment(payload)
+        assert metadata is not None and metadata["command"] == "start_run"
+
+        await execute_azure_run_command(
+            make_settings(FORGE_AZDO_PAT="pat-test"),
+            ForgeConfig(),
+            db,
+            metadata,
+            stack_factory=lambda project, repo: make_stack(fake),
+        )
+
+        (head_call,) = fake.calls_of("get_branch_head")
+        assert head_call[1] == (PROJECT, REPO, "main")
 
 
 # ----------------------------------------------------------------------

@@ -1069,6 +1069,104 @@ class AzureDevOpsClient:
             )
         return response.content
 
+    # -- REST: AZ-4 additions (work-item link, repo resolution, PR dedupe) --------
+    # Everything below was added additively in AZ-4 (ADR-0024); the methods
+    # above are the AZ-1/AZ-3 surface and must not be modified.
+
+    async def update_work_item(
+        self, project: str, work_item_id: int, patch_ops: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Apply a JSON-Patch to a work item (WIT PATCH, research §4.6).
+
+        ``PATCH /{project}/_apis/wit/workItems/{id}`` with
+        ``Content-Type: application/json-patch+json`` and *patch_ops* as the
+        raw json-patch operation list — the documented work-item mutation
+        surface (the only one forge uses: the ArtifactLink relation add).
+        Retry-less like the other writes: a replayed ``relations/-`` add
+        would duplicate the relation, so a lost response is reconciled by
+        re-reading the work item, never by resending.
+        """
+        response = await self._request(
+            "PATCH",
+            f"/{quote(project)}/_apis/wit/workItems/{work_item_id}",
+            headers={"Content-Type": "application/json-patch+json"},
+            json=patch_ops,
+            retry=False,
+        )
+        return dict(response.json())
+
+    async def link_work_item_to_pr(
+        self, project: str, work_item_id: int, project_id: str, repo_id: str, pr_id: int
+    ) -> dict[str, Any]:
+        """Link a work item to a PR via the WIT ArtifactLink PATCH (§4.6).
+
+        The reliable programmatic link — the PR-create body's
+        ``workItemRefs`` is unreliable (research correction #4): a
+        json-patch add of an ``ArtifactLink`` relation whose vstfs URL
+        embeds the project/repository/PR ids (``%2F``-separated) and whose
+        ``attributes.name`` is the CASE-SENSITIVE ``"Pull Request"`` — the
+        exact artifactId template or the link renders one-way. Non-idempotent
+        through :meth:`update_work_item`'s retry posture.
+        """
+        artifact_url = f"vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pr_id}"
+        return await self.update_work_item(
+            project,
+            work_item_id,
+            [
+                {
+                    "op": "add",
+                    "path": "/relations/-",
+                    "value": {
+                        "rel": "ArtifactLink",
+                        "url": artifact_url,
+                        "attributes": {"name": "Pull Request"},
+                    },
+                }
+            ],
+        )
+
+    async def list_repositories(self, project: str) -> list[dict[str, Any]]:
+        """The project's git repositories (``GET /{project}/_apis/git/repositories``).
+
+        Each payload carries ``id`` (GUID), ``name`` and the ``project``
+        ref — the resolution surface for repo-less work-item commands (the
+        documented replacement for the AZ-2 name-guessing fallback, which
+        assumed the default repository shares the project's name).
+        """
+        response = await self._get(f"/{quote(project)}/_apis/git/repositories")
+        data = response.json()
+        value = data.get("value") if isinstance(data, dict) else data
+        return [repo for repo in value or [] if isinstance(repo, dict)]
+
+    async def find_draft_pr_by_head(
+        self, project: str, repo: str, source_branch: str
+    ) -> dict[str, Any] | None:
+        """The newest OPEN Draft PR from *source_branch*, or None (research §4.1).
+
+        The find-by-head-first dedupe for PR creation: :meth:`create_draft_pr`
+        is non-idempotent, so callers look BEFORE they create and ADOPT the
+        existing open draft on the same source branch instead of forking a
+        second PR. Matches the active-PR list (client-side join — the list
+        API has no head-branch equality beyond ``searchCriteria``) on the
+        bare branch name (payloads carry full ``refs/heads/…`` refs);
+        newest first by creation date, id breaking ties. A 404/empty list is
+        a legitimate "none" here — listing is not the ambiguity-prone 404
+        of :meth:`get_pr`.
+        """
+        pulls = await self.list_pull_requests(project, repo, status="active")
+        wanted = source_branch.removeprefix("refs/heads/")
+        matches = [
+            pr
+            for pr in pulls
+            if bool(pr.get("isDraft"))
+            and str(pr.get("sourceRefName") or "").removeprefix("refs/heads/") == wanted
+        ]
+        matches.sort(
+            key=lambda pr: (str(pr.get("creationDate") or ""), int(pr.get("pullRequestId") or 0)),
+            reverse=True,
+        )
+        return matches[0] if matches else None
+
 
 def _commit_to_json(commit: CommitPayload) -> dict[str, Any]:
     """Map a :class:`CommitPayload` onto the push-API changes shape (§3.1)."""
