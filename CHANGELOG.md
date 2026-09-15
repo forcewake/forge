@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-15
+
+### Added — MCP modernization + delivery metrics + fourth harness (v0.8, ADR-0021)
+
+- **GitHub Copilot CLI as the fourth harness driver** (R6 research,
+  `docs/research/harness-config-best-practices.md` §8): proposal-only
+  `copilot` lane (`ci/templates/copilot.gitlab-ci.yml`) + Actions-lane
+  driver in `forge.harness_entry` — headless `copilot -p`, scoped grants
+  (`read,write` + `shell(git:*)`) with deny-wins `--deny-tool` on
+  commit/push, env-token auth (fine-grained PAT with "Copilot Requests";
+  classic `ghp_` unsupported), optional `COPILOT_MODEL` (RunSpec model
+  routes do not map onto Copilot model names), usage stays unknown.
+- **Scoped MCP run surface** (ADR-0021 §4 / R3 §8.1):
+  `FORGE_MCP_SCOPED_TOKENS` defines per-token principals over a closed
+  scope set (`forge:read`, `forge:runs:write`, `forge:approvals:write`,
+  `forge:admin`); `run_list` / `run_get` / `plan_get` / `run_evidence_get`
+  read durable state directly — the run surface never acts with forge's
+  provider tokens (platform-token passthrough killed for reads).
+  Per-call scope enforcement with model-actionable denials + an audit log
+  (`forge.mcp_server.audit`). Malformed config or unknown scopes fail
+  startup.
+- **Delivery ladder metrics (F34)**:
+  `forge_delivery_ladder{stage=started|planned|gate_approved|candidate_published|ci_passed|ready_for_human}`
+  gauges in `/metrics.prometheus` and JSON `/metrics` — where work
+  packages stand on the acceptance ladder (the merged rung lives
+  provider-side; the bot never merges).
+
+### Fixed
+
+- **The mounted MCP endpoint was broken in production twice over**: the
+  FastMCP session manager never ran under the FastAPI mount (every /mcp
+  request failed with "Task group is not initialized"), and the SDK's
+  DNS-rebinding Host check answered 421 to proxied requests.
+  `FORGE_MCP_ALLOWED_HOSTS` lists the public host behind a proxy.
+- Harness templates: repaired the YAML a NO_PROXY insert broke (dropped
+  list dash), restored the "Do NOT commit and do NOT push" contract
+  phrase; opencode config allows `external_directory`/`doom_loop`
+  ("ask"-by-default headless hang sources).
+- GitHub webhook payloads now captured under `FORGE_CAPTURE_DIR` (the
+  GitLab route captured; the GitHub one never did) — live routing gaps
+  are diagnosable from `data/captured/`.
+
+### Changed — R5 harness config hardening (research top-5, all lanes)
+
+- Mechanical commit/push deny in every driver (not just the brief):
+  Claude `--disallowedTools`, Grok `--deny` (survives
+  `--always-approve`), opencode permission-map denies, Copilot
+  `--deny-tool` — the contract holds even if the model disobeys.
+- Claude: `--permission-prompts none` (explicit no-prompt guarantee),
+  `--max-turns 200`, vendor timeout budgets (`API_TIMEOUT_MS`,
+  `BASH_*_TIMEOUT_MS`), retrying npm preamble with
+  `FORGE_CLAUDE_VERSION` pin.
+- Grok: `--trust` (project rules load headlessly) + `--max-turns 200`.
+- `NO_PROXY` declared unconditionally in every lane.
+- The Actions lane (`forge.harness_entry`) mirrors the full posture;
+  contract tests (`TestMechanicalDeny`) now REQUIRE the deny constructs.
+
 ## [0.7.0] - 2026-09-14
 
 ### Added — reactive parity + complex workloads (v0.7, ADR-0021)
@@ -56,6 +113,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real PAT-mode crash: GitHubStaticCredentials field/method collision).
 - New required `integration` CI job: the failure-injection exit-bar runs
   on real Postgres service containers.
+
+## [0.8.0] - 2026-09-15
+
+### Added — MCP modernization + delivery metrics + fourth harness (v0.8, ADR-0021)
+
+- **GitHub Copilot CLI as the fourth harness driver** (R6 research,
+  `docs/research/harness-config-best-practices.md` §8): proposal-only
+  `copilot` lane (`ci/templates/copilot.gitlab-ci.yml`) + Actions-lane
+  driver in `forge.harness_entry` — headless `copilot -p`, scoped grants
+  (`read,write` + `shell(git:*)`) with deny-wins `--deny-tool` on
+  commit/push, env-token auth (fine-grained PAT with "Copilot Requests";
+  classic `ghp_` unsupported), optional `COPILOT_MODEL` (RunSpec model
+  routes do not map onto Copilot model names), usage stays unknown.
+- **Scoped MCP run surface** (ADR-0021 §4 / R3 §8.1):
+  `FORGE_MCP_SCOPED_TOKENS` defines per-token principals over a closed
+  scope set (`forge:read`, `forge:runs:write`, `forge:approvals:write`,
+  `forge:admin`); `run_list` / `run_get` / `plan_get` / `run_evidence_get`
+  read durable state directly — the run surface never acts with forge's
+  provider tokens (platform-token passthrough killed for reads).
+  Per-call scope enforcement with model-actionable denials + an audit log
+  (`forge.mcp_server.audit`). Malformed config or unknown scopes fail
+  startup.
+- **Delivery ladder metrics (F34)**:
+  `forge_delivery_ladder{stage=started|planned|gate_approved|candidate_published|ci_passed|ready_for_human}`
+  gauges in `/metrics.prometheus` and JSON `/metrics` — where work
+  packages stand on the acceptance ladder (the merged rung lives
+  provider-side; the bot never merges).
+
+### Fixed
+
+- **The mounted MCP endpoint was broken in production twice over**: the
+  FastMCP session manager never ran under the FastAPI mount (every /mcp
+  request failed with "Task group is not initialized"), and the SDK's
+  DNS-rebinding Host check answered 421 to proxied requests.
+  `FORGE_MCP_ALLOWED_HOSTS` lists the public host behind a proxy.
+- Harness templates: repaired the YAML a NO_PROXY insert broke (dropped
+  list dash), restored the "Do NOT commit and do NOT push" contract
+  phrase; opencode config allows `external_directory`/`doom_loop`
+  ("ask"-by-default headless hang sources).
+- GitHub webhook payloads now captured under `FORGE_CAPTURE_DIR` (the
+  GitLab route captured; the GitHub one never did) — live routing gaps
+  are diagnosable from `data/captured/`.
+
+### Changed — R5 harness config hardening (research top-5, all lanes)
+
+- Mechanical commit/push deny in every driver (not just the brief):
+  Claude `--disallowedTools`, Grok `--deny` (survives
+  `--always-approve`), opencode permission-map denies, Copilot
+  `--deny-tool` — the contract holds even if the model disobeys.
+- Claude: `--permission-prompts none` (explicit no-prompt guarantee),
+  `--max-turns 200`, vendor timeout budgets (`API_TIMEOUT_MS`,
+  `BASH_*_TIMEOUT_MS`), retrying npm preamble with
+  `FORGE_CLAUDE_VERSION` pin.
+- Grok: `--trust` (project rules load headlessly) + `--max-turns 200`.
+- `NO_PROXY` declared unconditionally in every lane.
+- The Actions lane (`forge.harness_entry`) mirrors the full posture;
+  contract tests (`TestMechanicalDeny`) now REQUIRE the deny constructs.
 
 ## [0.7.0] - 2026-09-14
 

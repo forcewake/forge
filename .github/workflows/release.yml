@@ -1,0 +1,50 @@
+name: release
+
+# Publishes the release image to GHCR on a version tag:
+#   build (Containerfile) → smoke → push — one digest, same image.
+# Publishes only when FORGE_RELEASE_TOKEN (a PAT with write:packages) is
+# present as a repo/org secret; otherwise the job fails with the setup
+# instruction (the tag itself is the release; GHCR follows when the
+# secret lands).
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish-ghcr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — FORGE_RELEASE_TOKEN must exist (PAT with write:packages)
+        env:
+          TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::FORGE_RELEASE_TOKEN is not set. Create a PAT with write:packages, add it as the FORGE_RELEASE_TOKEN secret, then re-tag (or re-run this workflow)."
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build release image
+        run: |
+          docker build -f Containerfile -t forge:smoke .
+
+      - name: Smoke — the image imports, reports its version and migrates a fresh DB
+        run: |
+          docker run --rm forge:smoke python -c "import forge; assert forge.__version__, 'no version'"
+          docker run --rm forge:smoke python -m forge.migrate --help >/dev/null
+
+      - name: Push (tag + latest)
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}
+          docker tag forge:smoke "$IMAGE:${GITHUB_REF_NAME#v}"
+          docker tag forge:smoke "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_REF_NAME#v}"
+          docker push "$IMAGE:latest"

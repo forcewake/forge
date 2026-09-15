@@ -2,6 +2,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+
+import forge
 from httpx import AsyncClient
 
 
@@ -20,7 +22,7 @@ async def test_health_returns_ok_when_all_services_up(client: AsyncClient):
         data = response.json()
         assert response.status_code == 200
         assert data["status"] == "ok"
-        assert data["version"] == "0.7.0"
+        assert data["version"] == forge.__version__
         assert data["database"] == "ok"
         assert data["litellm"] == "ok"
 
