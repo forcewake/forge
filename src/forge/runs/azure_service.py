@@ -1795,7 +1795,9 @@ async def execute_azure_run_command(
     if command == "review_pr":
         from forge.reactive.azure_review import execute_azure_reactive_review
 
-        await execute_azure_reactive_review(settings, forge_config, session_factory, metadata)
+        await execute_azure_reactive_review(
+            settings, forge_config, session_factory, metadata, stack_factory=stack_factory
+        )
         return
     if command == "debug_ci":
         from forge.reactive.azure_ci_debug import execute_azure_debug_ci_command

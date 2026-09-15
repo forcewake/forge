@@ -464,7 +464,8 @@ class TestPRReviewEvents:
         assert payload["provider"] == "azure_devops"
         assert payload["pr_id"] == 512
         assert payload["action"] == "git.pullrequest.created"
-        assert payload["head_branch"] == "dev/topic"
+        # The review lane's contract: the FULL ref (the engine strips it).
+        assert payload["head_branch"] == "refs/heads/dev/topic"
         assert payload["after_sha"] == "b47e09d3c5a28f16e0d9a4c7138b52fa60e7d831"
         assert payload["before_sha"] == ""  # the delta comes from iterations
         assert payload["repo_full_name"] == "Fabrikam/core"

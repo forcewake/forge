@@ -332,7 +332,11 @@ def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | No
     if not pr_id:
         return None
 
-    head_branch = _strip_ref(resource.get("sourceRefName"))
+    # ``head_branch`` travels as the FULL ref — the reactive lane's contract
+    # (AZ-3 pinned: the engine strips ``refs/heads/`` itself). The forge/*
+    # guard keys off the bare form.
+    source_ref = str(resource.get("sourceRefName") or "")
+    head_branch = _strip_ref(source_ref)
     if head_branch.startswith("forge/"):
         logger.info(
             "Skipping forge-owned branch %s on reactive review",
@@ -369,7 +373,7 @@ def normalize_pull_request_event(payload: dict[str, Any]) -> dict[str, Any] | No
         # The before-SHA is not in the payload (research §2.3): the delta
         # comes from the iterations API — empty here, never invented.
         "before_sha": "",
-        "head_branch": head_branch,
+        "head_branch": source_ref,
         "pr_author": pr_author,
         "sender": pr_author,
         "author_username": pr_author,
