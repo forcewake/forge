@@ -163,6 +163,38 @@ class Settings(BaseSettings):
     # store and leaves the provider alert untouched.
     FORGE_SECURITY_REMOTE_DISMISS: bool = False
 
+    # --- Azure DevOps source adapter (ADR-0024, AZ-2) ------------------------
+    # Fail closed: the Azure DevOps webhook ingress is only mounted when
+    # enabled AND the webhook Basic credentials are set — Azure service hooks
+    # have NO HMAC signature (research §2.0); those credentials ARE the
+    # authenticator, so an uncredentialed endpoint is never exposed.
+    FORGE_AZDO_ENABLED: bool = False
+    # Services https://dev.azure.com/{org} or Server https://{instance}/{collection}.
+    FORGE_AZDO_ORG_URL: str = ""
+    # Forge's own service-account identity (PAT, Basic ":"+PAT — ADR-0024 §2).
+    FORGE_AZDO_PAT: SecretStr | None = None
+    # Ingress validation pair — constant-time compared against every
+    # delivery's Basic Authorization header. Either unset → ingress 503.
+    FORGE_AZDO_WEBHOOK_USERNAME: str = ""
+    FORGE_AZDO_WEBHOOK_PASSWORD: SecretStr | None = None
+
+    # Connection-scoped approvers (ADR-0018 §3, mirrors FORGE_GITHUB_APPROVERS):
+    # comma-separated Azure DevOps identities (uniqueName form) allowed to
+    # /implement and /go on the azure_devops path. Empty — fall back to
+    # FORGE_APPROVERS (backward compat). The lists never merge.
+    FORGE_AZDO_APPROVERS: str = ""
+
+    # Bot-loop guard: forge's own AzDO identity (uniqueName or displayName —
+    # its plan comments re-trigger workitem.commented). Forge-authored
+    # deliveries never act as triggers.
+    FORGE_AZDO_BOT_NAME: str = "forge-bot"
+
+    # ADR-0024 §6 execution adapter: the Azure Pipelines lane definition id
+    # (dispatch target). Empty/None → the builtin in-worker lane; when set,
+    # an approved /go dispatches the lane pipeline and parks the run in
+    # waiting_harness (the FORGE_GITHUB_HARNESS_WORKFLOW analog).
+    FORGE_AZDO_LANE_PIPELINE_ID: int | None = None
+
     # Evidence policy (F23): before CI-log-derived text enters a comment,
     # the run row or a repair brief, values matching these deny patterns
     # (literal substrings, comma-separated) are replaced with a

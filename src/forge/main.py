@@ -137,6 +137,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(router)
 
+    # Azure DevOps ingress (ADR-0024 AZ-2) is mounted unconditionally; the
+    # endpoint itself answers 503 unless FORGE_AZDO_ENABLED and the webhook
+    # Basic credentials are set — fail closed (Azure service hooks have no
+    # HMAC; the Basic pair IS the authenticator).
+    from forge.gateway.azure_webhook import azure_router
+
+    application.include_router(azure_router)
+
     # Mount MCP server at /mcp — fail closed: only with an auth key, since
     # an unauthenticated endpoint is never exposed. Scoped principals
     # (FORGE_MCP_SCOPED_TOKENS) get per-call scope enforcement on the run
