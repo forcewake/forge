@@ -413,3 +413,54 @@ class TestLabeledTrigger:
                 assert steps == []  # no run for an unrelated label
         finally:
             reset_engine()
+
+
+class TestPayloadCapture:
+    """FORGE_CAPTURE_DIR persists GitHub deliveries too (diagnosability).
+
+    Without a capture, a live routing gap is undiagnosable: the inbox row
+    records what WAS ingested, never why a delivery didn't route.
+    """
+
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        capture_dir = tmp_path / "captured"
+        application = create_app(
+            settings=github_settings(tmp_path, FORGE_CAPTURE_DIR=str(capture_dir))
+        )
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            application.state.capture_dir = capture_dir
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    async def test_pull_request_delivery_is_captured(self, app, client: AsyncClient):
+        body = load_payload("pull_request_synchronize.json")
+        headers = signed_headers(body)
+        headers["X-GitHub-Event"] = "pull_request"
+        response = await client.post("/webhook/github", content=body, headers=headers)
+        assert response.status_code == 202
+
+        records = list(app.state.capture_dir.glob("*pull_request*.json"))
+        assert len(records) == 1
+        record = json.loads(records[0].read_text())
+        assert record["x_github_event"] == "pull_request"
+        assert record["payload"]["action"] == "synchronize"
+        # The webhook secret must never appear in captured records.
+        assert GITHUB_WEBHOOK_SECRET not in json.dumps(record)
+
+    async def test_ping_is_captured(self, app, client: AsyncClient):
+        body = load_payload("ping.json")
+        headers = signed_headers(body)
+        headers["X-GitHub-Event"] = "ping"
+        response = await client.post("/webhook/github", content=body, headers=headers)
+        assert response.status_code == 200
+        assert list(app.state.capture_dir.glob("*ping*.json"))

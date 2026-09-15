@@ -393,6 +393,13 @@ async def github_webhook(
         extra={"event": event, "provider": "github"},
     )
 
+    # Raw-payload diagnostics: the GitHub ingress captures the same way the
+    # GitLab one does — without this, a live routing gap is undiagnosable
+    # (the inbox row alone says nothing about WHY a delivery didn't route).
+    from forge.gateway.router import _capture_webhook_payload
+
+    _capture_webhook_payload(settings, event, payload, header_field="x_github_event")
+
     if event == "ping":
         return {"status": "ok", "message": "pong"}
 

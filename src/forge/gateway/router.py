@@ -128,11 +128,18 @@ def _match_pipeline_debug(event: GitLabEvent, settings) -> dict[str, Any] | None
     }
 
 
-def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str, Any]) -> None:
+def _capture_webhook_payload(
+    settings: Any,
+    event_header: str,
+    payload: dict[str, Any],
+    *,
+    header_field: str = "x_gitlab_event",
+) -> None:
     """Persist a raw webhook payload for diagnostics (FORGE_CAPTURE_DIR).
 
     Stores the event header and payload only — never the webhook secret.
-    Failures to capture must never break ingestion.
+    Failures to capture must never break ingestion. *header_field* names the
+    record key for the event header (the GitHub ingress passes its own).
     """
     capture_dir = getattr(settings, "FORGE_CAPTURE_DIR", None)
     if not capture_dir:
@@ -145,7 +152,7 @@ def _capture_webhook_payload(settings: Any, event_header: str, payload: dict[str
         name = f"{stamp}-{safe_event}-{uuid4().hex[:6]}.json"
         record = {
             "captured_at": datetime.now(timezone.utc).isoformat(),
-            "x_gitlab_event": event_header,
+            header_field: event_header,
             "payload": payload,
         }
         target = path / name
