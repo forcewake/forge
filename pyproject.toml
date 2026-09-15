@@ -32,7 +32,7 @@ dev = [
     "pytest-httpx==0.36.0",
     "fakeredis>=2.26",
     "ruff==0.15.7",
-    "mypy==1.19.1",
+    "mypy==2.3.1",
     # Stubs for the `yaml` import in forge.config — keeps mypy clean without
     # per-module ignore comments (blocking typecheck, F29).
     "types-PyYAML>=6.0.12",
