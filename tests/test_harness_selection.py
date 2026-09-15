@@ -770,3 +770,75 @@ class TestGitHubFallbackFlow(_DbBase):
         assert run.status == "blocked"
         assert (run.status_reason or "").startswith("harness_code")
         assert len(fake.dispatch_inputs) == 1
+
+
+# ----------------------------------------------------------------------
+# Doctor per-driver lane checks (brief §8): variable NAMES only.
+# ----------------------------------------------------------------------
+
+
+class TestDoctorHarnessLanes:
+    @staticmethod
+    def _check(**setting_overrides):
+        from forge.doctor import check_harness_lanes
+
+        return check_harness_lanes(
+            fallback_settings(**setting_overrides),
+            {"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"},
+        )
+
+    @staticmethod
+    def _by_name(results):
+        return {r.name: r for r in results}
+
+    def test_full_chain_reports_per_driver_passes(self):
+        results = self._by_name(self._check())
+
+        assert results["project.harness.claude-code"].status == "pass"
+        assert "ANTHROPIC_AUTH_TOKEN" in results["project.harness.claude-code"].detail
+        # grok-build has no credentials in the project → warn, chain shrinks.
+        assert results["project.harness.grok-build"].status == "warn"
+        assert "FORGE_GROK_AUTH" in results["project.harness.grok-build"].detail
+        assert results["project.harness_chain"].detail == "[claude-code]"
+
+    def test_empty_chain_with_harness_backend_fails(self):
+        results = self._by_name(
+            self._check(
+                FORGE_HARNESS_PREFERENCE="grok-build",
+                FORGE_IMPLEMENTER_BACKEND="ci_harness:grok-build",
+            )
+        )
+
+        assert results["project.harness.grok-build"].status == "warn"
+        assert results["project.harness_chain"].status == "fail"
+
+    def test_empty_chain_with_builtin_backend_is_only_a_warning(self):
+        """Doctor must stay green for builtin projects that merely declare
+        a chain wider than today's lanes."""
+        results = self._by_name(
+            self._check(
+                FORGE_HARNESS_PREFERENCE="grok-build",
+                FORGE_IMPLEMENTER_BACKEND="builtin",
+            )
+        )
+
+        assert results["project.harness_chain"].status == "warn"
+
+    def test_contradictory_preference_is_reported_as_a_failure(self):
+        results = self._by_name(
+            self._check(
+                FORGE_HARNESS_PREFERENCE="grok-build",  # backend driver missing
+                FORGE_IMPLEMENTER_BACKEND="ci_harness:claude-code",
+            )
+        )
+
+        assert results["project.harness_preference"].status == "fail"
+        assert "tightens, never deselects" in results["project.harness_preference"].detail
+
+    def test_default_preference_is_the_backend_driver(self):
+        results = self._by_name(
+            self._check(FORGE_HARNESS_PREFERENCE="", FORGE_IMPLEMENTER_BACKEND="ci_harness")
+        )
+
+        assert "project.harness.claude-code" in results
+        assert results["project.harness_chain"].detail == "[claude-code]"

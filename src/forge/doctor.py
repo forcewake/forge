@@ -202,10 +202,98 @@ async def check_project(settings: Settings, project_id: int) -> list[CheckResult
                     "no active runner — CI jobs will hang in pending",
                 )
             )
+
+            # ADR-0023 §8: per-driver lane checks over the project's
+            # preference (variable names only), additive to the JSON output.
+            results.extend(check_harness_lanes(settings, names))
     except GitLabAPIError as exc:
         results.append(_result("project", False, "", _short(exc)))
     except Exception as exc:  # noqa: BLE001
         results.append(_result("project", False, "", _short(exc)))
+    return results
+
+
+def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[CheckResult]:
+    """ADR-0023 §8: per-driver lane checks over the project's preference.
+
+    Reports, for every preference entry, whether its required harness
+    credential variables are present (variable NAMES only — values are
+    never read, ADR-0015 §4), plus the compilable chain = preference ∩
+    lanes-with-creds. Missing credentials are a warning (the chain shrinks;
+    a lane without creds fails infrastructure at dispatch, which with the
+    fallback switch OFF blocks the run visibly) — a hard failure only when
+    the configured backend dispatches a harness and NOTHING is compilable.
+    """
+    from forge.config import ForgeConfig
+    from forge.runs.backends import is_harness_backend
+    from forge.runs.harness_selection import (
+        DRIVER_CREDENTIAL_VARS,
+        current_driver,
+        resolve_preference,
+        validate_preference,
+    )
+
+    backend = str(getattr(settings, "FORGE_IMPLEMENTER_BACKEND", "") or "").strip()
+    try:
+        preference = resolve_preference(ForgeConfig(), settings)
+        validate_preference(
+            preference, current_driver(backend) if is_harness_backend(backend) else None
+        )
+    except ValueError as exc:
+        # A contradictory preference is a config error the operator fixes —
+        # refuse to guess a chain from it (forge never silently repairs).
+        return [
+            _result("project.harness_preference", False, "", _short(exc)),
+        ]
+
+    if not preference:
+        preference = [current_driver(backend)]
+
+    results: list[CheckResult] = []
+    chain: list[str] = []
+    for driver in preference:
+        required = DRIVER_CREDENTIAL_VARS.get(driver, ())
+        missing = [name for name in required if name not in variable_names]
+        if missing:
+            results.append(
+                _result(
+                    f"project.harness.{driver}",
+                    None,
+                    "missing credential variable(s): "
+                    f"{', '.join(missing)} — lane unusable until onboarded",
+                    "",
+                )
+            )
+            continue
+        chain.append(driver)
+        present = (
+            f"credentials present: {', '.join(required)}" if required else "no credentials needed"
+        )
+        results.append(_result(f"project.harness.{driver}", True, present, ""))
+
+    if chain:
+        results.append(_result("project.harness_chain", True, "[" + ", ".join(chain) + "]", ""))
+    elif is_harness_backend(backend):
+        results.append(
+            _result(
+                "project.harness_chain",
+                False,
+                "",
+                "no preference driver has credentials — every dispatch fails infrastructure",
+            )
+        )
+    else:
+        # The builtin backend dispatches no harness: the chain is a
+        # declaration for later, not a broken lane today.
+        results.append(
+            _result(
+                "project.harness_chain",
+                None,
+                "empty chain (preference ∩ lanes-with-creds) — harmless while the "
+                "backend is builtin",
+                "",
+            )
+        )
     return results
 
 
