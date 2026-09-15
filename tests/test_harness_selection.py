@@ -202,6 +202,10 @@ class TestValidatePreference:
     def test_empty_list_is_always_valid(self):
         validate_preference([], "copilot")
 
+    def test_driver_check_is_skipped_for_the_builtin_backend(self):
+        """The builtin lane dispatches no harness — only the id set binds."""
+        validate_preference(["grok-build"], None)
+
     def test_shipped_driver_set_is_the_four_templates(self):
         assert SHIPPED_DRIVERS == {"claude-code", "grok-build", "opencode", "copilot"}
 

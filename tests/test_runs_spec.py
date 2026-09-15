@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from forge.config import Settings
+from forge.config import ForgeConfig, Settings
 from forge.durable import Controller, FlowRun, FlowStatus, GateApproval, RunSpec
 from forge.models.base import Base
 from forge.runs import RunService
@@ -173,7 +173,7 @@ class TestRunSpec:
         spec = await get_spec(db, run_id)
         assert spec is not None
         assert spec.run_id == run_id
-        assert spec.schema_version == 1
+        assert spec.schema_version == 2  # ADR-0023: harness selection in backend_config
         assert run.spec_digest == spec.digest
 
         document = spec.document
@@ -182,15 +182,28 @@ class TestRunSpec:
         assert document["plan_digest"] == run.plan_digest
         assert document["task_digest"] == task_digest_of(ISSUE_TITLE, ISSUE_DESC)
         assert document["policy_digest"] == service._policy_digest()
+        # ADR-0023: the frozen harness decision rides in backend_config —
+        # default preference ⇒ the configured backend's driver alone.
         assert document["backend_config"] == {
             "backend": "builtin",
             "model": make_settings().FORGE_HARNESS_MODEL,
             "target_branch": "main",
+            "harness": "claude-code",
+            "harness_fallbacks": [],
+            "budget_class": "standard",
+            "selection_reason": "default",
         }
         assert document["budgets"] == {"commit_cycles": 3, "harness_timeout": 1800}
 
         # The digest is the sha256 over the canonical (sorted-key) JSON.
         assert spec.digest == sha256_of_document(document)
+
+        # ADR-0023: the selection is also visible in the run's evidence at
+        # run start ("backend" stays the reconciler's backend-name string).
+        evidence = run.evidence or {}
+        assert evidence["backend"] == "builtin"
+        assert evidence["harness_selection"]["harness"] == "claude-code"
+        assert evidence["harness_selection"]["harness_fallbacks"] == []
 
     async def test_policy_digest_binds_effective_policy(self, service):
         settings = make_settings(FORGE_REQUIRED_JOBS="pytest", FORGE_TARGET_BRANCH="release")
@@ -201,10 +214,72 @@ class TestRunSpec:
             "required_jobs": ["pytest"],
             "implementer_backend": "builtin",
             "harness_model": settings.FORGE_HARNESS_MODEL,
+            "harness_preference": [],
+            "harness_fallback": False,
         }
         assert scoped._policy_digest() == sha256_of_document(document)
         # The default policy digest differs once any policy input moves.
         assert scoped._policy_digest() != service._policy_digest()
+
+    async def test_policy_digest_binds_the_harness_chain(self):
+        """ADR-0023 §3: changing the preference (or the fallback switch)
+        invalidates pending gates — the digest moves with the chain."""
+        plain = make_service(None, None)  # type: ignore[arg-type]
+        preferred = make_service(
+            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            settings=make_settings(FORGE_HARNESS_PREFERENCE="claude-code,grok-build"),
+        )
+        fallback_on = make_service(
+            None,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            settings=make_settings(FORGE_HARNESS_FALLBACK=True),
+        )
+        assert preferred._policy_digest() != plain._policy_digest()
+        assert fallback_on._policy_digest() != plain._policy_digest()
+
+    async def test_harness_preference_freezes_the_chain_into_the_spec(
+        self, fake_gitlab, db, tmp_path
+    ):
+        """A multi-entry preference (forge.yml `implement.harnesses`) freezes
+        the full chain (harness + fallbacks) into the RunSpec the gate
+        approves."""
+        from forge.runs.harness_selection import resolve_preference
+
+        config_path = tmp_path / "forge.yml"
+        config_path.write_text(
+            "forge:\n  implement:\n    harnesses:\n      - claude-code\n      - grok-build\n"
+        )
+        config = ForgeConfig(str(config_path))
+        assert resolve_preference(config, make_settings()) == ["claude-code", "grok-build"]
+
+        service = RunService(
+            session_factory=db,
+            gitlab=fake_gitlab,
+            settings=make_settings(FORGE_IMPLEMENTER_BACKEND="ci_harness"),
+            config=config,
+            writer_class=FakeWriter,
+            planner=StubPlanner(),
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
+        )
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        spec = await get_spec(db, run_id)
+        assert spec is not None
+        backend_config = spec.document["backend_config"]
+        assert backend_config["harness"] == "claude-code"
+        assert backend_config["harness_fallbacks"] == ["grok-build"]
+
+    async def test_preference_drift_after_start_changes_the_policy_digest(self, service, db):
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        gate = await get_gate(db, run_id)
+        before = service._policy_digest()
+
+        service._settings.FORGE_HARNESS_PREFERENCE = "claude-code,grok-build"
+
+        assert service._policy_digest() != before
+        assert gate.policy_digest == before  # the decision froze the old policy
 
     async def test_setting_drift_after_start_changes_the_policy_digest(self, service, db):
         run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")

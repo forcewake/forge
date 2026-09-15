@@ -82,6 +82,13 @@ from forge.repository import Change, ChangeSet, Operation, validate_changeset
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
+from forge.runs.harness_selection import (
+    SHIPPED_DRIVERS,
+    HarnessSelection,
+    compile_harness_selection,
+    resolve_preference,
+    validate_preference,
+)
 from forge.runs.publisher import spec_allowed_paths
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
@@ -265,6 +272,9 @@ class GitHubRunService:
         task_digest = task_digest_of(issue_title, issue_description)
         now = datetime.now(timezone.utc)
         base_sha = await self._read_base_sha()
+        # ADR-0023 §2: the harness decision is compiled at plan time and
+        # frozen into the RunSpec — part of what the gate approves.
+        harness_selection = self._compile_harness_selection()
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -272,10 +282,13 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             run.plan_digest = digest
             run.base_sha = base_sha
+            # The backend string flips to ci_harness at dispatch (ADR-0020);
+            # the frozen harness selection rides beside it (ADR-0023).
             run.evidence = _merge_evidence(
                 run.evidence,
                 {
                     "backend": "builtin",
+                    "harness_selection": harness_selection.as_document(),
                     "plan": {
                         "digest": digest,
                         "summary": self._plan_summary(plan),
@@ -292,6 +305,7 @@ class GitHubRunService:
                 plan_digest=digest,
                 task_digest=task_digest,
                 allowed_paths=path_scope,
+                harness_selection=harness_selection,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -1271,12 +1285,44 @@ class GitHubRunService:
             return raw.partition(":")[2].strip()
         return HARNESS_NAME
 
+    def _compile_harness_selection(self) -> HarnessSelection:
+        """ADR-0023 §2: preference ∩ lanes → the frozen harness decision.
+
+        The harness driver that will dispatch (``_harness_driver``) must stay
+        in the list (tighten-only, ADR-0015) when the Actions lane is
+        onboarded; the builtin lane dispatches no harness, so only the id
+        set is validated there. v0.9: the compilable lanes are the shipped
+        driver set — credential presence is declared by the preference and
+        doctor-verified (ADR-0011); a lane without creds fails
+        infrastructure at dispatch, which with the fallback switch OFF (the
+        default) blocks the run visibly.
+
+        TODO(ADR-0023 §5): pass the planner's structured proposal
+        ({"harness", "budget_class", "reason"}) from LLMPlanner.plan's
+        output once that surface exists — the integration point is the
+        ``planner.plan`` call in start_run (factory/planner.py returns plain
+        markdown today and is outside this change's scope). None keeps the
+        compiler defaults.
+        """
+        preference = resolve_preference(self._config, self._settings)
+        workflow = self._harness_workflow()
+        validate_preference(preference, self._harness_driver() if workflow else None)
+        return compile_harness_selection(
+            preference,
+            f"ci_harness:{self._harness_driver()}" if workflow else "builtin",
+            set(SHIPPED_DRIVERS),
+            None,
+        )
+
     def _policy_digest(self) -> str:
         """ADR-0009 + ADR-0018 §1: bind the effective execution policy.
 
         The harness workflow filename is part of the policy (ADR-0020 §3): a
         changed workflow invalidates approval like any other execution
-        profile change.
+        profile change. ADR-0023 §3: the preference list and the fallback
+        switch join too — changing either invalidates pending gates (the
+        per-run budget class and selection reason are bound via the RunSpec
+        digest instead).
         """
         document = {
             "approvers": self._approvers(),
@@ -1284,6 +1330,8 @@ class GitHubRunService:
             "required_jobs": self._required_jobs(),
             "implementer_backend": "ci_harness" if self._harness_workflow() else "builtin",
             "harness_model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            "harness_preference": resolve_preference(self._config, self._settings),
+            "harness_fallback": bool(getattr(self._settings, "FORGE_HARNESS_FALLBACK", False)),
         }
         workflow = self._harness_workflow()
         if workflow:
@@ -1300,6 +1348,7 @@ class GitHubRunService:
         plan_digest: str,
         task_digest: str,
         allowed_paths: list[str] | None = None,
+        harness_selection: HarnessSelection | None = None,
     ) -> dict:
         """The immutable RunSpec document frozen at plan acceptance (F14).
 
@@ -1309,16 +1358,22 @@ class GitHubRunService:
         document, so a spec change means a different harness run.
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
         runs; unscoped documents keep the pre-v0.7 shape and digest.
+
+        ADR-0023 §3: the harness decision (selected driver, fallback tail,
+        budget class, selection reason) freezes into backend_config too —
+        the ``driver`` key now names the compiled selection.
         """
+        selection = harness_selection or self._compile_harness_selection()
         workflow = self._harness_workflow()
         backend_config: dict = {
             "backend": "ci_harness" if workflow else "builtin",
             "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
             "target_branch": self._target_branch(),
+            **selection.as_document(),
         }
         if workflow:
             backend_config["harness_workflow"] = workflow
-            backend_config["driver"] = self._harness_driver()
+            backend_config["driver"] = selection.harness
         document: dict = {
             "subject": {
                 "provider": "github",

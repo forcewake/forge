@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     FORGE_HARNESS_TIMEOUT_SECONDS: int = 1800
     FORGE_HARNESS_MODEL: str = "glm-5.3-flash[1m]"
 
+    # ADR-0023 §1: comma-separated harness driver ids — the env form of the
+    # ordered preference list for lab/CI usage (the YAML form is
+    # ``implement.harnesses`` in forge.yml). Empty — the configured backend
+    # as a one-element list (byte-compatible with pre-ADR-0023 projects).
+    FORGE_HARNESS_PREFERENCE: str = ""
+
+    # ADR-0023 Decision 3: dispatch-time fallback down the frozen chain, OFF
+    # by default. When true, ONLY an infrastructure-classified harness
+    # failure BEFORE any candidate exists re-dispatches the chain's next
+    # entry (journaled in action_log); everything else fails visibly.
+    FORGE_HARNESS_FALLBACK: bool = False
+
     # ADR-0018 (F15): how long the pending plan decision — created when the
     # plan note is posted — stays consumable. After the deadline a `/go` is
     # refused: the plan is stale and must be re-planned and re-approved.
@@ -209,6 +221,11 @@ class ForgeConfig:
             "extra_patterns": [],
             "entropy_threshold": 4.5,
         },
+        # ADR-0023 §1: the ordered harness preference (tighten-only). Empty —
+        # the configured backend as a one-element list (byte-compatible).
+        "implement": {
+            "harnesses": [],
+        },
         "mcp_servers": {},
     }
 
@@ -258,6 +275,32 @@ class ForgeConfig:
     @property
     def redaction(self) -> dict[str, Any]:
         return self._data["redaction"]
+
+    @property
+    def implement(self) -> dict[str, Any]:
+        """The ``implement`` block: run scoping and the harness preference."""
+        return self._data["implement"]
+
+    @property
+    def harness_preference(self) -> list[str]:
+        """``implement.harnesses`` — the ordered driver list (ADR-0023 §1).
+
+        Ids are validated at compile time (``validate_preference``): only
+        shipped drivers, and the configured backend driver stays in the list
+        (tighten-only, ADR-0015) — a contradictory list is refused, never
+        silently repaired. The driver set itself lives in
+        :mod:`forge.runs.harness_selection` (importing it here would close an
+        import cycle through the runs package).
+        """
+        raw = self._data["implement"].get("harnesses") or []
+        if not isinstance(raw, list):
+            raise ValueError("implement.harnesses must be a list of driver ids")
+        seen: list[str] = []
+        for entry in raw:
+            driver = str(entry).strip()
+            if driver and driver not in seen:
+                seen.append(driver)
+        return seen
 
     @property
     def mcp_servers(self) -> dict[str, Any]:

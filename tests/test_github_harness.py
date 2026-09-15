@@ -245,6 +245,12 @@ class TestGoDispatchesHarness:
             "backend": "ci_harness",
             "model": MODEL,
             "target_branch": "main",
+            # ADR-0023: the frozen harness decision — default preference ⇒
+            # the configured driver alone, empty fallback tail.
+            "harness": "claude-code",
+            "harness_fallbacks": [],
+            "budget_class": "standard",
+            "selection_reason": "default",
             "harness_workflow": WORKFLOW,
             "driver": "claude-code",
         }

@@ -117,22 +117,26 @@ def parse_preference(raw: str | None) -> list[str]:
 def resolve_preference(config: ForgeConfig, settings: Settings) -> list[str]:
     """The project's ordered preference list (brief §1).
 
-    ``ForgeConfig.implement.harnesses`` (validated YAML form) wins; the
+    ``ForgeConfig.implement.harnesses`` (the YAML form) wins; the
     ``FORGE_HARNESS_PREFERENCE`` env form is the lab/CI alternative. Empty —
     the existing backend as a one-element list (byte-compatible).
     """
-    from_config = list(getattr(config, "harness_preference", lambda: [])())
+    from_config = list(config.harness_preference)
     if from_config:
         return from_config
     return parse_preference(str(getattr(settings, "FORGE_HARNESS_PREFERENCE", "") or ""))
 
 
-def validate_preference(preference: list[str], driver: str) -> None:
+def validate_preference(preference: list[str], driver: str | None = None) -> None:
     """Config-validation time checks (brief §1), tighten-only (ADR-0015).
 
-    Raises ``ValueError`` — a contradictory configuration is refused, never
-    silently repaired (the same posture as the backend factory's unknown
-    backend). An empty preference is always valid (the backend default).
+    Ids must be shipped drivers, always. When *driver* names the backend's
+    harness driver (``ci_harness[:<driver>]`` — the builtin backend passes
+    None, it dispatches no harness), the list must include it: the list
+    tightens, never deselects, the configured backend. Raises ``ValueError``
+    — a contradictory configuration is refused, never silently repaired
+    (the same posture as the backend factory's unknown backend). An empty
+    preference is always valid (the backend default).
     """
     unknown = [entry for entry in preference if entry not in SHIPPED_DRIVERS]
     if unknown:
@@ -141,7 +145,7 @@ def validate_preference(preference: list[str], driver: str) -> None:
             f"unknown harness driver(s) in implement.harnesses: {', '.join(unknown)} "
             f"(shipped: {shipped})"
         )
-    if preference and driver not in preference:
+    if preference and driver is not None and driver not in preference:
         raise ValueError(
             f"implement.harnesses must include the configured backend driver "
             f"{driver!r} — the list tightens, never deselects, the backend (ADR-0015)"

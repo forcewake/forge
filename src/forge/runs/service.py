@@ -91,6 +91,14 @@ from forge.runs.backends import (
     is_harness_backend,
 )
 from forge.runs.ci_contract import classify_failure
+from forge.runs.harness_selection import (
+    SHIPPED_DRIVERS,
+    HarnessSelection,
+    compile_harness_selection,
+    current_driver,
+    resolve_preference,
+    validate_preference,
+)
 from forge.runs.publisher import publish_candidate, spec_allowed_paths
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import VerificationProfile
@@ -102,7 +110,9 @@ logger = logging.getLogger(__name__)
 GATE_TTL_SECONDS = 3600
 
 #: ADR-0018 §1 (F14): schema version of the RunSpec document written here.
-RUN_SPEC_SCHEMA_VERSION = 1
+#: v2 (ADR-0023): backend_config carries the frozen harness selection —
+#: ``harness``, ``harness_fallbacks``, ``budget_class``, ``selection_reason``.
+RUN_SPEC_SCHEMA_VERSION = 2
 
 #: ADR-0017 §3: pre-CI states a crashed worker leaves a run in after the gate
 #: was consumed. A re-delivered or re-claimed ``/go`` command step does not
@@ -395,6 +405,9 @@ class RunService:
         digest = plan_digest_of(plan)
         task_digest = task_digest_of(issue_title, issue_description)
         now = datetime.now(timezone.utc)
+        # ADR-0023 §2: the harness decision is compiled at plan time and
+        # frozen into the RunSpec — part of what the gate approves.
+        harness_selection = self._compile_harness_selection()
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -403,11 +416,14 @@ class RunService:
             run.plan_digest = digest
             base_sha = run.base_sha = await self._read_base_sha(project_id)
             # ADR-0015: the backend choice is frozen at run start so the run
-            # survives restarts with the backend it was created with.
+            # survives restarts with the backend it was created with. The
+            # harness selection rides beside it (ADR-0023): "backend" stays
+            # the backend-name string the reconcilers dispatch on.
             run.evidence = _merge_evidence(
                 run.evidence,
                 {
                     "backend": self._backend_name(),
+                    "harness_selection": harness_selection.as_document(),
                     "plan": {
                         "digest": digest,
                         "summary": self._plan_summary(plan),
@@ -424,6 +440,7 @@ class RunService:
                 plan_digest=digest,
                 task_digest=task_digest,
                 allowed_paths=path_scope,
+                harness_selection=harness_selection,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -1955,18 +1972,53 @@ class RunService:
     def _target_branch(self) -> str:
         return getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main"
 
+    def _compile_harness_selection(self) -> HarnessSelection:
+        """ADR-0023 §2: preference ∩ lanes → the frozen harness decision.
+
+        The configured backend driver is always part of the list (tighten-
+        only, ADR-0015) — a contradictory preference is refused, never
+        silently repaired. v0.9: the compilable lanes are the shipped driver
+        set — credential presence is declared by the preference and
+        doctor-verified (ADR-0011); a lane without creds fails
+        infrastructure at dispatch, which with the fallback switch OFF (the
+        default) blocks the run visibly.
+
+        TODO(ADR-0023 §5): pass the planner's structured proposal
+        ({"harness", "budget_class", "reason"}) from LLMPlanner.plan's
+        output once that surface exists — the integration point is the
+        ``plan`` call in start_run (factory/planner.py returns plain
+        markdown today and is outside this change's scope). None keeps the
+        compiler defaults.
+        """
+        preference = resolve_preference(self._config, self._settings)
+        backend = self._backend_name()
+        validate_preference(
+            preference, current_driver(backend) if is_harness_backend(backend) else None
+        )
+        return compile_harness_selection(
+            preference,
+            backend,
+            set(SHIPPED_DRIVERS),
+            None,
+        )
+
     def _policy_digest(self) -> str:
         # ADR-0009 + ADR-0018 §1: the gate binds the effective execution
         # policy — canonical-JSON sha256 of the approvers, the target branch,
         # the required jobs, the implementer backend and the harness model.
         # A settings drift between approval and execution is detectable, not
-        # silent.
+        # silent. ADR-0023 §3: the harness preference list and the fallback
+        # switch join the digest — changing either invalidates pending gates
+        # exactly like plan drift (the per-run budget class and selection
+        # reason are bound via the RunSpec digest instead).
         document = {
             "approvers": self._approvers(),
             "target_branch": self._target_branch(),
             "required_jobs": self._required_jobs(),
             "implementer_backend": self._backend_name(),
             "harness_model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            "harness_preference": resolve_preference(self._config, self._settings),
+            "harness_fallback": bool(getattr(self._settings, "FORGE_HARNESS_FALLBACK", False)),
         }
         return canonical_json_digest(document)
 
@@ -1979,13 +2031,18 @@ class RunService:
         plan_digest: str,
         task_digest: str,
         allowed_paths: list[str] | None = None,
+        harness_selection: HarnessSelection | None = None,
     ) -> dict:
         """The immutable RunSpec document frozen at plan acceptance (F14).
 
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
         runs — an unscoped project's document is byte-identical to the
         pre-v0.7 shape, so its digest is unchanged.
+
+        ADR-0023 §3: ``backend_config`` also freezes the harness decision
+        (selected driver, fallback tail, budget class, selection reason).
         """
+        selection = harness_selection or self._compile_harness_selection()
         document: dict = {
             "subject": {"project_id": project_id, "issue_iid": issue_iid},
             "source_base_oid": base_sha or "",
@@ -1994,11 +2051,12 @@ class RunService:
             "policy_digest": self._policy_digest(),
             # ADR-0018: the resolved backend config travels with the spec —
             # live Settings may not silently change an approved run's
-            # execution.
+            # execution. ADR-0023: the frozen harness chain rides beside it.
             "backend_config": {
                 "backend": self._backend_name(),
                 "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
                 "target_branch": self._target_branch(),
+                **selection.as_document(),
             },
             "budgets": {
                 "commit_cycles": int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
