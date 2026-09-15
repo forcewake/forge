@@ -137,6 +137,7 @@ class TestStart:
             "FORGE_ISSUE_TITLE": "Add a widget",
             "FORGE_PLAN": "PLAN TEXT",
             "FORGE_HARNESS_MODEL": "glm-5.3-flash[1m]",
+            "FORGE_HARNESS_DRIVER": "claude-code",  # ADR-0023 §7 template filter
             "FORGE_ATTEMPT_BASE": BASE_SHA,  # ADR-0016 §4: frozen attempt base
         }
 

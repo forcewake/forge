@@ -394,3 +394,379 @@ class TestAdvanceHarnessFallback:
             )
             is None
         )
+
+
+# ----------------------------------------------------------------------
+# Dispatch-time fallback flows (brief §6) over the fake lanes — no network.
+# OFF by default; infrastructure-only; pre-candidate-only; journaled;
+# chain exhaustion fails visibly.
+# ----------------------------------------------------------------------
+
+ISSUE_IID = 7
+PROJECT_ID = 42
+ISSUE_TITLE = "Add a widget"
+ISSUE_DESC = "Widgets make the app better."
+BASE_SHA = "base-sha-1"
+
+
+def fallback_settings(**overrides):
+    from forge.config import Settings
+
+    values = dict(
+        GITLAB_URL="https://gitlab.test",
+        GITLAB_TOKEN="glpat-test",  # noqa: S105 — fake value for tests
+        GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
+        FORGE_APPROVERS="alice",
+        DATABASE_URL="sqlite+aiosqlite:///:memory:",
+        FORGE_IMPLEMENTER_BACKEND="ci_harness",
+        FORGE_HARNESS_PREFERENCE="claude-code,grok-build",
+        FORGE_HARNESS_FALLBACK=True,
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+class _DbBase:
+    @pytest.fixture()
+    async def db(self):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        from forge.models.base import Base
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        await engine.dispose()
+
+    @pytest.fixture()
+    def fake_gitlab(self):
+        from tests.fixtures.fake_gitlab import FakeGitLab
+
+        fake = FakeGitLab()
+        fake.seed_issue(ISSUE_IID, ISSUE_TITLE, ISSUE_DESC)
+        fake.seed_commit("main", BASE_SHA, "initial")
+        return fake
+
+    async def get_run(self, db, run_id):
+        from forge.durable import FlowRun
+
+        async with db() as session:
+            return await session.get(FlowRun, run_id)
+
+    async def fallback_actions(self, db, run_id):
+        from sqlalchemy import select
+
+        from forge.durable import ActionLog
+
+        async with db() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ActionLog).where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "harness_fallback",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                session.expunge(row)
+        return rows
+
+    @staticmethod
+    def seed_forge_agent_job(fake_gitlab, pipeline_id, *, status, failure_reason=None, log=None):
+        job: dict = {"id": 555, "name": "forge-agent", "status": status}
+        if failure_reason is not None:
+            job["failure_reason"] = failure_reason
+        fake_gitlab.set_pipeline_jobs(pipeline_id, [job])
+        if log is not None:
+            fake_gitlab.set_job_log(555, log)
+
+    @staticmethod
+    def driver_of(pipeline: dict) -> str:
+        by_key = {v["key"]: v["value"] for v in pipeline["variables"]}
+        return by_key["FORGE_HARNESS_DRIVER"]
+
+
+class TestGitLabFallbackFlow(_DbBase):
+    async def _start_and_go(self, db, fake_gitlab, *, settings) -> tuple[object, str]:
+        from forge.durable.identity import factory_branch
+        from forge.repository import ChangesetWriter
+        from forge.runs import RunService
+        from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
+
+        service = RunService(
+            session_factory=db,
+            gitlab=fake_gitlab,
+            settings=settings,
+            writer_class=ChangesetWriter,
+            planner=StubPlanner(),
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
+        )
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        run = await self.get_run(db, run_id)
+        assert run.status == "waiting_harness"
+        assert factory_branch(ISSUE_IID, run_id)
+        return service, run_id
+
+    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, db, fake_gitlab):
+        """The invariant: without FORGE_HARNESS_FALLBACK the run blocks —
+        exactly the pre-ADR-0023 semantics, one pipeline, no advance."""
+        service, run_id = await self._start_and_go(
+            db, fake_gitlab, settings=fallback_settings(FORGE_HARNESS_FALLBACK=False)
+        )
+        run = await self.get_run(db, run_id)
+        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
+        self.seed_forge_agent_job(
+            fake_gitlab, pipeline_id, status="failed", failure_reason="runner_system_failure"
+        )
+
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert run.status_reason.startswith("harness_infrastructure")
+        assert len(fake_gitlab.pipelines) == 1
+        assert await self.fallback_actions(db, run_id) == []
+
+    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, db, fake_gitlab):
+        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
+
+        run = await self.get_run(db, run_id)
+        (pipeline_1,) = fake_gitlab.pipelines
+        assert self.driver_of(pipeline_1) == "claude-code"  # the frozen head
+        self.seed_forge_agent_job(
+            fake_gitlab, pipeline_1["id"], status="failed", failure_reason="runner_system_failure"
+        )
+
+        await service.evaluate_waiting_harness()
+
+        # Still waiting — parked on the NEXT leg of the frozen chain, and
+        # the second pipeline carries the advanced driver.
+        run = await self.get_run(db, run_id)
+        assert run.status == "waiting_harness"
+        assert len(fake_gitlab.pipelines) == 2
+        assert self.driver_of(fake_gitlab.pipelines[-1]) == "grok-build"
+        assert run.evidence["harness_selection"]["harness"] == "grok-build"
+        assert run.evidence["harness_selection"]["harness_fallbacks"] == []
+        assert run.evidence["harness"]["driver"] == "grok-build"
+
+        # Every advance is journaled with the event/from/to/reason contract.
+        (action,) = await self.fallback_actions(db, run_id)
+        assert action.status == "succeeded"
+        assert action.remote_result == {
+            "event": "harness_fallback",
+            "from": "claude-code",
+            "to": "grok-build",
+            "reason": "harness job forge-agent failed (runner_system_failure)",
+        }
+
+    async def test_chain_exhaustion_fails_visibly(self, db, fake_gitlab):
+        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
+
+        run = await self.get_run(db, run_id)
+        (pipeline_1,) = fake_gitlab.pipelines
+        self.seed_forge_agent_job(
+            fake_gitlab, pipeline_1["id"], status="failed", failure_reason="runner_system_failure"
+        )
+        await service.evaluate_waiting_harness()
+
+        pipeline_2 = fake_gitlab.pipelines[-1]
+        self.seed_forge_agent_job(
+            fake_gitlab, pipeline_2["id"], status="failed", failure_reason="runner_system_failure"
+        )
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert run.status_reason.startswith("harness_infrastructure")
+        assert len(fake_gitlab.pipelines) == 2  # no third leg — chain done
+
+    async def test_code_failure_never_switches_even_when_enabled(self, db, fake_gitlab):
+        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
+        run = await self.get_run(db, run_id)
+        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
+        self.seed_forge_agent_job(
+            fake_gitlab,
+            pipeline_id,
+            status="failed",
+            failure_reason="script_failure",
+            log="AssertionError",
+        )
+
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert run.status_reason.startswith("harness_code")
+        assert len(fake_gitlab.pipelines) == 1
+
+    async def test_never_switches_once_a_candidate_exists(self, db, fake_gitlab):
+        """ADR-0016: one frozen attempt → one candidate → one producer."""
+        service, run_id = await self._start_and_go(db, fake_gitlab, settings=fallback_settings())
+        run = await self.get_run(db, run_id)
+        pipeline_id = int(run.evidence["harness"]["pipeline_id"])
+        from forge.durable import FlowRun
+
+        async with db() as session:
+            persisted = await session.get(FlowRun, run_id)
+            persisted.candidate_shas = ["candidate-sha"]  # a candidate exists
+            await session.commit()
+
+        self.seed_forge_agent_job(
+            fake_gitlab, pipeline_id, status="failed", failure_reason="runner_system_failure"
+        )
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert len(fake_gitlab.pipelines) == 1
+
+
+class TestGitHubFallbackFlow(_DbBase):
+    REPO = "acme/acme-widget"
+    WORKFLOW = "forge-harness.github.yml"
+    ISSUE = 42
+
+    @pytest.fixture()
+    def fake(self):
+        from tests.fixtures.fake_github import FakeGitHub
+
+        github = FakeGitHub()
+        github.seed_repo(self.REPO, {"src/app.py": "print('hi')\n"})
+        github.heads[self.REPO]["main"] = BASE_SHA
+        github.seed_issue(self.REPO, self.ISSUE, ISSUE_TITLE, ISSUE_DESC)
+        return github
+
+    async def _start_and_go(self, db, fake, *, settings) -> tuple[object, str]:
+        from forge.config import ForgeConfig
+        from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
+        from forge.runs.github_service import GitHubRunService
+        from forge.runs.stubs import StubImplementer, StubPlanner
+
+        flow = GitHubPublishFlow(fake, proposer=StubImplementer(), base_branch="main")
+        stack = GitHubAgents(
+            client=fake,
+            reader=fake,
+            planner=StubPlanner(),
+            implementer=StubImplementer(),
+            reviewer=None,  # never reached on the harness lane
+            flow=flow,
+        )
+        service = GitHubRunService(
+            db, settings, ForgeConfig(), stack=stack, repo_full_name=self.REPO
+        )
+        await service.start_run(
+            project_id=PROJECT_ID,
+            issue_number=self.ISSUE,
+            issue_title=ISSUE_TITLE,
+            issue_description=ISSUE_DESC,
+            author_username="alice",
+        )
+        await service.handle_go(
+            project_id=PROJECT_ID,
+            issue_number=self.ISSUE,
+            note_text=f"/go {(await self._only_run_id(db))}",
+            author_username="alice",
+        )
+        run_id = await self._only_run_id(db)
+        run = await self.get_run(db, run_id)
+        assert run.status == "waiting_harness"
+        return service, run_id
+
+    async def _only_run_id(self, db) -> str:
+        from sqlalchemy import select
+
+        from forge.durable import FlowRun
+
+        async with db() as session:
+            return (await session.execute(select(FlowRun.id))).scalars().one()
+
+    def _seed_actions_failure(self, fake, actions_run_id: int, *, log: str) -> None:
+        for run in fake.actions_runs:
+            if run["id"] == actions_run_id:
+                run.update(status="completed", conclusion="failure")
+        fake.seed_actions_jobs(
+            actions_run_id, [{"id": 9, "name": "harness", "conclusion": "failure"}]
+        )
+        fake.seed_job_log(9, log)
+
+    async def test_off_by_default_blocks_on_the_first_infrastructure_failure(self, db, fake):
+        service, run_id = await self._start_and_go(
+            db,
+            fake,
+            settings=fallback_settings(
+                FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW, FORGE_HARNESS_FALLBACK=False
+            ),
+        )
+        self._seed_actions_failure(fake, 501, log="Error: quota exceeded for this API key\n")
+
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert (run.status_reason or "").startswith("harness_infrastructure")
+        assert len(fake.dispatch_inputs) == 1
+        assert await self.fallback_actions(db, run_id) == []
+
+    async def test_infrastructure_failure_advances_down_the_frozen_chain(self, db, fake):
+        service, run_id = await self._start_and_go(
+            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
+        )
+        assert fake.dispatch_inputs[0]["inputs"]["driver"] == "claude-code"
+
+        self._seed_actions_failure(fake, 501, log="Error: quota exceeded for this API key\n")
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "waiting_harness"
+        assert len(fake.dispatch_inputs) == 2
+        assert fake.dispatch_inputs[1]["inputs"]["driver"] == "grok-build"
+        assert run.evidence["harness_selection"]["harness"] == "grok-build"
+        assert run.evidence["harness"]["driver"] == "grok-build"
+
+        (action,) = await self.fallback_actions(db, run_id)
+        assert action.status == "succeeded"
+        assert action.remote_result["event"] == "harness_fallback"
+        assert action.remote_result["from"] == "claude-code"
+        assert action.remote_result["to"] == "grok-build"
+
+    async def test_chain_exhaustion_fails_visibly(self, db, fake):
+        service, run_id = await self._start_and_go(
+            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
+        )
+        self._seed_actions_failure(fake, 501, log="Error: quota exceeded\n")
+        await service.evaluate_waiting_harness()
+
+        self._seed_actions_failure(fake, 502, log="Error: quota exceeded\n")
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert (run.status_reason or "").startswith("harness_infrastructure")
+        assert len(fake.dispatch_inputs) == 2
+
+    async def test_code_failure_never_switches_even_when_enabled(self, db, fake):
+        service, run_id = await self._start_and_go(
+            db, fake, settings=fallback_settings(FORGE_GITHUB_HARNESS_WORKFLOW=self.WORKFLOW)
+        )
+        self._seed_actions_failure(fake, 501, log="claude: the agent exited with code 1\n")
+
+        await service.evaluate_waiting_harness()
+
+        run = await self.get_run(db, run_id)
+        assert run.status == "blocked"
+        assert (run.status_reason or "").startswith("harness_code")
+        assert len(fake.dispatch_inputs) == 1

@@ -319,6 +319,9 @@ class CITharnessBackend:
             {"key": "FORGE_ISSUE_TITLE", "value": issue_title},
             {"key": "FORGE_PLAN", "value": plan},
             {"key": "FORGE_HARNESS_MODEL", "value": model},
+            # ADR-0023 §7: the per-template rules filter — a repo including
+            # MULTIPLE forge templates runs exactly one lane (this one).
+            {"key": "FORGE_HARNESS_DRIVER", "value": self._harness},
             # ADR-0016 §4: the lane works on the FROZEN attempt base —
             # cycle 1 builds on the approved source base, a repair on the
             # last verified candidate. No write credential is needed.
@@ -556,21 +559,25 @@ def build_backend(
     session_factory: async_sessionmaker[AsyncSession],
     writer: Any | None = None,
     implementer: Any | None = None,
+    driver: str | None = None,
 ) -> ImplementerBackend:
     """Construct the configured implementer backend (``FORGE_IMPLEMENTER_BACKEND``).
 
     Values: ``builtin`` (default) or ``ci_harness[:<harness>]`` — the harness
-    name defaults to ``claude-code``. Unknown values raise ``ValueError``
-    (a configuration error, not a runtime condition).
+    name defaults to ``claude-code``. *driver* (ADR-0023) overrides the
+    suffix-parsed harness: the dispatch leg runs the driver frozen in the
+    RunSpec, not whatever the setting says post-gate. Unknown values raise
+    ``ValueError`` (a configuration error, not a runtime condition).
     """
     raw = str(getattr(settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin").strip()
-    harness = HARNESS_NAME
-    if ":" in raw:
-        raw, _, suffix = raw.partition(":")
-        if suffix.strip():
-            harness = suffix.strip()
+    kind, _, suffix = raw.partition(":")
+    harness = suffix.strip() if suffix.strip() else HARNESS_NAME
+    # ADR-0023: an explicit driver (the RunSpec's frozen selection) wins —
+    # the dispatch leg runs the approved driver, never a live-setting one.
+    if driver and driver.strip():
+        harness = driver.strip()
 
-    if raw == "builtin":
+    if kind == "builtin":
         if implementer is None:
             raise ValueError("builtin backend requires an implementer agent")
         return BuiltinBackend(
@@ -579,7 +586,7 @@ def build_backend(
             session_factory=session_factory,
             settings=settings,
         )
-    if raw == "ci_harness":
+    if kind == "ci_harness":
         if writer is None:
             raise ValueError("ci_harness backend requires a ChangesetWriter")
         return CITharnessBackend(
@@ -588,4 +595,4 @@ def build_backend(
             settings=settings,
             harness=harness,
         )
-    raise ValueError(f"unknown FORGE_IMPLEMENTER_BACKEND {raw!r} (expected builtin | ci_harness)")
+    raise ValueError(f"unknown FORGE_IMPLEMENTER_BACKEND {kind!r} (expected builtin | ci_harness)")

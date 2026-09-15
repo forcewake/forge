@@ -94,10 +94,12 @@ from forge.runs.ci_contract import classify_failure
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
+    advance_harness_fallback,
     compile_harness_selection,
     current_driver,
     implementation_block,
     resolve_preference,
+    selection_from_spec_document,
     validate_preference,
 )
 from forge.runs.publisher import publish_candidate, spec_allowed_paths
@@ -990,6 +992,7 @@ class RunService:
         *,
         repair_context: str = "",
         repair_reason: str | None = None,
+        driver: str | None = None,
     ) -> None:
         """ci_harness leg (ADR-0015): start the harness job, park the run.
 
@@ -1000,10 +1003,16 @@ class RunService:
         wait is worker-free, like ``waiting_ci``. A repair delegation appends
         the bounded CI-failure context to the brief so the harness fixes its
         own candidate.
+
+        The dispatched driver is the one frozen in the RunSpec (ADR-0023
+        §6); *driver* overrides it for a fallback advance. Called for a
+        fallback the run is already ``waiting_harness`` — it stays parked,
+        only the handle moves (ADR-0004 has no waiting_harness self-loop).
         """
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             plan_summary, _ = self._plan_evidence(run)
+            already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
 
         brief = plan_summary
         if repair_context:
@@ -1013,8 +1022,10 @@ class RunService:
             )
 
         issue_title = await self._read_issue_title(project_id, run)
+        if driver is None:
+            driver = await self._frozen_harness_driver(run_id)
         try:
-            backend = self._harness_backend(project_id)
+            backend = self._harness_backend(project_id, driver=driver)
         except ValueError as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"backend_config: {exc}")
             return
@@ -1049,10 +1060,15 @@ class RunService:
                 },
             )
             action.correlation_id = f"pipeline-{pipeline_id}"
-            await controller.transition(
-                run_id, FlowStatus.WAITING_HARNESS, reason=f"harness pipeline {pipeline_id}"
-            )
-            run = await self._get_run(session, run_id)
+            if already_waiting:
+                # ADR-0023 §6 fallback advance: the run stays parked in
+                # waiting_harness; the fresh handle below is the only change.
+                run = await self._get_run(session, run_id)
+            else:
+                await controller.transition(
+                    run_id, FlowStatus.WAITING_HARNESS, reason=f"harness pipeline {pipeline_id}"
+                )
+                run = await self._get_run(session, run_id)
             # The durable handle: the reconciler restarts from exactly here.
             run.evidence = _merge_evidence(
                 run.evidence,
@@ -1062,30 +1078,53 @@ class RunService:
                         "pipeline_id": pipeline_id,
                         "job_id": handle_data.get("job_id"),
                         "branch": handle_data.get("branch"),
+                        # ADR-0023: the driver this leg actually dispatched.
+                        "driver": str(handle_data.get("harness") or driver or ""),
                     }
                 },
             )
             await session.commit()
 
         logger.info(
-            "Run %s delegated to harness backend (pipeline %d) — waiting_harness",
+            "Run %s delegated to harness backend (pipeline %d, driver %s) — waiting_harness",
             run_id[:8],
             pipeline_id,
+            driver or "configured",
         )
+
+    async def _frozen_harness_driver(self, run_id: str) -> str | None:
+        """The driver frozen at plan time (ADR-0023 §6), or None for a
+        pre-v2 RunSpec — None keeps the configured-backend default."""
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        selection = selection_from_spec_document(spec.document if spec is not None else None)
+        return selection.harness if selection is not None else None
 
     def _backend_name(self) -> str:
         """The configured implementer backend (ADR-0015), frozen per run."""
         raw = getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin"
         return str(raw).strip()
 
-    def _harness_backend(self, project_id: int):
-        """Construct the ci_harness backend for *project_id* (ADR-0015)."""
+    def _harness_backend(self, project_id: int, *, driver: str | None = None):
+        """Construct the ci_harness backend for *project_id* (ADR-0015).
+
+        *driver* (ADR-0023) pins the leg to the RunSpec's frozen selection.
+        """
         writer = self._writer_class(self._gitlab, self._session_factory, project_id)
         return build_backend(
             self._settings,
             gitlab=self._gitlab,
             session_factory=self._session_factory,
             writer=writer,
+            driver=driver,
         )
 
     async def _create_draft_mr(
@@ -1709,12 +1748,112 @@ class RunService:
 
         if outcome.status == "failed":
             kind = outcome.failure_kind or "code"
-            # Harness failures never enter the LLM repair loop (ADR-0015):
-            # blocked, with the harness-level classification in the reason.
+            # ADR-0023 §6: an opt-in, journaled advance down the frozen
+            # chain — only infrastructure, only pre-candidate, OFF by
+            # default. Everything else keeps the ADR-0015 semantics:
+            # harness failures never enter the LLM repair loop.
+            if await self._advance_harness_fallback(
+                run_id, project_id, failure_kind=kind, failure_reason=outcome.reason
+            ):
+                return
             await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
             return
 
         await self._adopt_harness_change(run_id, project_id, outcome)
+
+    async def _current_harness_selection(self, run_id: str) -> tuple[HarnessSelection | None, bool]:
+        """The run's current position in the frozen chain (ADR-0023 §6).
+
+        Returns (selection, candidate_exists). The RunSpec is immutable
+        (ADR-0018), so the runtime position lives in the run's
+        ``harness_selection`` evidence; pre-v2 runs (no frozen chain) have
+        none and never advance.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            candidate_exists = bool(run.candidate_shas)
+            fragment = dict((run.evidence or {}).get("harness_selection") or {})
+        selection: HarnessSelection | None
+        if fragment:
+            selection = selection_from_spec_document({"backend_config": fragment})
+            return selection, candidate_exists
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        selection = selection_from_spec_document(spec.document if spec is not None else None)
+        return selection, candidate_exists
+
+    async def _advance_harness_fallback(
+        self,
+        run_id: str,
+        project_id: int,
+        *,
+        failure_kind: str,
+        failure_reason: str,
+    ) -> bool:
+        """One dispatch-time fallback advance; True when the leg re-fired.
+
+        OFF by default (FORGE_HARNESS_FALLBACK); infrastructure-kind only;
+        only before any candidate exists (ADR-0016 single producer); only
+        down the chain frozen in the RunSpec. Every advance is journaled in
+        ``action_log`` and the run stays ``waiting_harness`` on the next
+        leg's handle.
+
+        TODO(F22): cancel + re-reserve the run budget per switch once
+        harness legs reserve at dispatch — today harness runs make no
+        forge-side model calls and only reconcile receipts
+        (``_record_harness_usage``), so there is no reservation to move.
+        """
+        if not bool(getattr(self._settings, "FORGE_HARNESS_FALLBACK", False)):
+            return False
+        if failure_kind != "infrastructure":
+            return False
+        selection, candidate_exists = await self._current_harness_selection(run_id)
+        if selection is None:
+            return False
+        nxt = advance_harness_fallback(
+            selection,
+            failed_driver=selection.harness,
+            failure_kind=failure_kind,
+            fallback_enabled=True,
+            candidate_exists=candidate_exists,
+        )
+        if nxt is None:
+            return False
+
+        # Intent-first journal, then the outcome record the audit trail
+        # reads: {"event","from","to","reason"} (ADR-0023 §6).
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(run_id, "harness_fallback")
+            await session.commit()
+        await self._complete_action(
+            action_id,
+            "succeeded",
+            {
+                "event": "harness_fallback",
+                "from": selection.harness,
+                "to": nxt.harness,
+                "reason": failure_reason,
+            },
+        )
+        await self._merge_run_evidence(run_id, {"harness_selection": nxt.as_document()})
+        logger.warning(
+            "Run %s harness fallback: %s -> %s (%s)",
+            run_id[:8],
+            selection.harness,
+            nxt.harness,
+            failure_reason,
+        )
+        await self._advance_harness(project_id, run_id, driver=nxt.harness)
+        return True
 
     async def _adopt_harness_change(
         self,
