@@ -51,6 +51,14 @@ from forge.harnesses.prompt import (
     BriefContext,
     render_brief as render_shared_brief,
 )
+from forge.harnesses.mcp import (
+    McpConfigError,
+    for_claude,
+    for_copilot,
+    for_grok,
+    for_opencode,
+    parse_servers,
+)
 
 #: Claude's scoped shell allowlist (same posture as the GitLab template:
 #: edits auto-accepted, shell limited to read-only git).
@@ -125,8 +133,16 @@ def render_driver_script(
     *,
     events_file: str = ".forge/events.jsonl",
     debug_log: str = ".forge/grok-debug.log",
+    mcp_servers: dict | None = None,
 ) -> str:
     """The bash script that provisions and invokes *driver* unattended.
+
+    *mcp_servers* (parsed ``FORGE_HARNESS_MCP``) is rendered per driver per
+    :mod:`forge.harnesses.mcp`: claude always runs with
+    ``--mcp-config <file> --strict-mcp-config`` (empty map = only the
+    repo's own MCP configs are locked out — injection-surface reduction);
+    grok/copilot get their config files written; opencode's servers ride
+    in the same ``OPENCODE_CONFIG_CONTENT`` as the permission map.
 
     Rendered per driver from the GitLab templates' contract:
 
@@ -168,6 +184,7 @@ def render_driver_script(
     """
     quoted_prompt = shlex.quote(TASK_PROMPT)
     events = shlex.quote(events_file)
+    servers = mcp_servers or {}
 
     if driver == "claude-code":
         preamble = (
@@ -178,21 +195,36 @@ def render_driver_script(
             "done\n"
             "claude --version\n"
         )
+        mcp_file = "/tmp/forge-mcp.json"
+        mcp_provision = (
+            "# MCP (ADR-0022): config ONLY from the CI variable — strict mode\n"
+            "# locks out the repo's own .mcp.json (injection surface).\n"
+            f"cat > {shlex.quote(mcp_file)} <<'FORGE_MCP_EOF'\n"
+            f"{for_claude(servers)}\n"
+            "FORGE_MCP_EOF\n"
+        )
+        mcp_tools = "".join(
+            f",{shlex.quote(f'mcp__{name}__*')},{shlex.quote(f'mcp__{name}')}" for name in servers
+        )
         model_flag = f" --model {shlex.quote(model)}" if model else ""
         invocation = (
             f"claude -p {quoted_prompt}{model_flag} \\\n"
-            f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS)} \\\n"
+            f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS + mcp_tools)} \\\n"
             '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
             "  --permission-prompts none \\\n"
             "  --permission-mode acceptEdits \\\n"
             "  --max-turns 200 \\\n"
+            f"  --mcp-config {shlex.quote(mcp_file)} --strict-mcp-config \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
         )
         return (
             "# Vendor timeout budgets (R5): long tool calls and API turns\n"
             "# must not die at the client default mid-run.\n"
             "export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000"
-            " BASH_MAX_TIMEOUT_MS=600000\n" + preamble + f"{invocation} | tee -a {events}"
+            " BASH_MAX_TIMEOUT_MS=600000\n"
+            + mcp_provision
+            + preamble
+            + f"{invocation} | tee -a {events}"
         )
 
     if driver == "grok-build":
@@ -208,6 +240,17 @@ def render_driver_script(
             "test -d /usr/local/lib/node_modules/@xai-official/grok-linux-x64\n"
             "grok --version\n"
         )
+        mcp_provision = (
+            (
+                "# MCP (ADR-0022): claude-shaped mcpServers in Grok's settings.\n"
+                "mkdir -p ~/.grok\n"
+                "cat > ~/.grok/settings.json <<'FORGE_MCP_EOF'\n"
+                f"{for_grok(servers)}\n"
+                "FORGE_MCP_EOF\n"
+            )
+            if servers
+            else ""
+        )
         invocation = (
             "grok --no-auto-update --always-approve --no-alt-screen \\\n"
             "  --trust --max-turns 200 \\\n"
@@ -216,7 +259,7 @@ def render_driver_script(
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
             f"  -p {quoted_prompt} 2>&1"
         )
-        return preamble + f"{invocation} | tee -a {events}"
+        return preamble + mcp_provision + f"{invocation} | tee -a {events}"
 
     if driver == "opencode":
         preamble = (
@@ -238,7 +281,9 @@ def render_driver_script(
                     # "ask"-by-default keys hang a headless run (R5).
                     "external_directory": "allow",
                     "doom_loop": "allow",
-                }
+                },
+                # MCP (ADR-0022): schema-translated (http -> remote).
+                **({"mcp": json.loads(for_opencode(servers))} if servers else {}),
             }
         )
         invocation = f"opencode run --auto {quoted_prompt} 2>&1"
@@ -258,15 +303,28 @@ def render_driver_script(
             "done\n"
             "copilot --version\n"
         )
+        mcp_provision = (
+            (
+                "# MCP (ADR-0022): documented Copilot CLI config location.\n"
+                "mkdir -p ~/.copilot\n"
+                "cat > ~/.copilot/mcp-config.json <<'FORGE_MCP_EOF'\n"
+                f"{for_copilot(servers)}\n"
+                "FORGE_MCP_EOF\n"
+            )
+            if servers
+            else ""
+        )
+        mcp_grants = "".join(f" --allow-tool {shlex.quote(name)}" for name in servers)
         model_flag = f" --model {shlex.quote(model)}" if model else ""
         invocation = (
             f"copilot -p {quoted_prompt}{model_flag} \\\n"
             "  --allow-tool 'read,write' \\\n"
             "  --allow-tool 'shell(git:*)' \\\n"
+            f"{mcp_grants}"
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \\\n"
             "  2>&1"
         )
-        return preamble + f"{invocation} | tee -a {events}"
+        return preamble + mcp_provision + f"{invocation} | tee -a {events}"
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 
@@ -364,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default=None, help="owner/name for --render-brief")
     parser.add_argument("--issue", type=int, default=None, help="issue number for --render-brief")
     parser.add_argument("--github-token", default=None, help="token for --render-brief")
+    parser.add_argument(
+        "--mcp",
+        default=None,
+        help="canonical mcpServers JSON (defaults to $FORGE_HARNESS_MCP)",
+    )
     args = parser.parse_args(argv)
 
     import os
@@ -403,8 +466,18 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(brief).is_file():
         return _finish("failed", f"harness_entry: brief file {brief!r} is missing")
 
+    mcp_raw = args.mcp if args.mcp is not None else os.environ.get("FORGE_HARNESS_MCP")
     try:
-        script = render_driver_script(driver, model, brief, events_file=args.events_file)
+        mcp_servers = parse_servers(mcp_raw)
+    except McpConfigError as exc:
+        # Fail-closed: a broken MCP config refuses the lane rather than
+        # silently running without the servers the task may depend on.
+        return _finish("failed", f"harness_entry: {exc}")
+
+    try:
+        script = render_driver_script(
+            driver, model, brief, events_file=args.events_file, mcp_servers=mcp_servers
+        )
     except ValueError as exc:
         return _finish("failed", f"harness_entry: {exc}")
 

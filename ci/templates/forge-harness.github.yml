@@ -103,6 +103,10 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # MCP (ADR-0022): canonical mcpServers JSON from a repo VARIABLE
+          # (not secret — it references secrets by ${VAR} name); an empty
+          # value means strict isolation with no servers.
+          FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):

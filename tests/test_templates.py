@@ -183,6 +183,36 @@ class TestMechanicalDeny:
         assert '"copilot"' in entry or "copilot" in entry
 
 
+class TestMcpProvisioning:
+    """ADR-0022: every lane consumes FORGE_HARNESS_MCP in its driver's own
+    dialect; claude's strict mode is the constant isolation baseline."""
+
+    def test_claude_strict_mcp_config_always_on(self):
+        text = (TEMPLATES_DIR / "claude-code.gitlab-ci.yml").read_text()
+        assert "FORGE_HARNESS_MCP" in text
+        assert "--mcp-config /tmp/forge-mcp.json --strict-mcp-config" in text
+        assert "mcp__${n}__*" in text  # per-server tool grants
+
+    def test_grok_writes_grok_settings(self):
+        text = (TEMPLATES_DIR / "grok.gitlab-ci.yml").read_text()
+        assert "FORGE_HARNESS_MCP" in text
+        assert ".grok/settings.json" in text
+
+    def test_copilot_writes_mcp_config(self):
+        text = (TEMPLATES_DIR / "copilot.gitlab-ci.yml").read_text()
+        assert "FORGE_HARNESS_MCP" in text
+        assert ".copilot/mcp-config.json" in text
+
+    def test_opencode_merges_translated_mcp(self):
+        text = (TEMPLATES_DIR / "opencode.gitlab-ci.yml").read_text()
+        assert "FORGE_HARNESS_MCP" in text
+        assert '"remote"' in text  # http -> remote translation
+
+    def test_actions_lane_passes_the_variable_through(self):
+        text = (TEMPLATES_DIR / "forge-harness.github.yml").read_text()
+        assert "FORGE_HARNESS_MCP" in text
+
+
 class TestEventFilters:
     def test_filters_emit_usage_receipts(self):
         for name in ("grok-events-filter.mjs", "claude-events-filter.mjs"):

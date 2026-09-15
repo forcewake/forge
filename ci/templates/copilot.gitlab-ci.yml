@@ -83,12 +83,25 @@ forge-agent:
     # (when: always) and forge classifies the run as failed. Copilot CLI
     # emits no parseable usage receipt on stdout, so usage stays unknown
     # (never zero).
+    # MCP (ADR-0022): optional servers from the FORGE_HARNESS_MCP CI
+    # variable land in Copilot CLI's documented config location; each
+    # configured server gets an explicit --allow-tool grant (scoped:
+    # everything not granted is auto-denied in -p mode).
+    - |
+      COPILOT_MCP_ARGS=""
+      if [ -n "$FORGE_HARNESS_MCP" ]; then
+        mkdir -p ~/.copilot
+        node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;require("fs").writeFileSync(process.env.HOME+"/.copilot/mcp-config.json",JSON.stringify({mcpServers:m},null,2))' "$FORGE_HARNESS_MCP"
+        for n in $(node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;console.log(Object.keys(m).join(" "))' "$FORGE_HARNESS_MCP"); do
+          COPILOT_MCP_ARGS="$COPILOT_MCP_ARGS --allow-tool $n"
+        done
+      fi
     - |
       FORGE_DRIVER_EXIT="completed"
       copilot -p "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
         ${COPILOT_MODEL:+--model "$COPILOT_MODEL"} \
         --allow-tool 'read,write' \
-        --allow-tool 'shell(git:*)' \
+        --allow-tool 'shell(git:*)'${COPILOT_MCP_ARGS} \
         --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \
         || FORGE_DRIVER_EXIT="failed"
       export FORGE_DRIVER_EXIT

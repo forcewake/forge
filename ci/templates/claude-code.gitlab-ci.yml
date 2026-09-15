@@ -94,13 +94,31 @@ forge-agent:
     - |
       FORGE_DRIVER_EXIT="completed"
       export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000 BASH_MAX_TIMEOUT_MS=600000
+      # MCP (ADR-0022): servers come ONLY from the FORGE_HARNESS_MCP CI
+      # variable (canonical mcpServers JSON; ${VAR} refs inside expand at
+      # runtime, so server keys stay in separate masked CI variables).
+      # --strict-mcp-config means ONLY this config loads — the repo's own
+      # .mcp.json is ignored (injection-surface reduction, same posture as
+      # --setting-sources ''). Each configured server gets its MCP tools
+      # granted explicitly; MCP tools can never circumvent the git
+      # deny rules or the FORBIDDEN push URL.
+      CLAUDE_TOOLS="Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+      if [ -n "$FORGE_HARNESS_MCP" ]; then
+        printf '%s' "$FORGE_HARNESS_MCP" > /tmp/forge-mcp.json
+        for n in $(node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;console.log(Object.keys(m).join("\n"))' "$FORGE_HARNESS_MCP"); do
+          CLAUDE_TOOLS="$CLAUDE_TOOLS,mcp__${n}__*,mcp__${n}"
+        done
+      else
+        echo '{"mcpServers":{}}' > /tmp/forge-mcp.json
+      fi
       claude -p "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
         --model "$ANTHROPIC_MODEL" \
-        --allowedTools "Bash(git status:*),Bash(git diff:*),Bash(git log:*)" \
+        --allowedTools "$CLAUDE_TOOLS" \
         --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \
         --permission-prompts none \
         --permission-mode acceptEdits \
         --max-turns 200 \
+        --mcp-config /tmp/forge-mcp.json --strict-mcp-config \
         --setting-sources '' --output-format stream-json --verbose 2>&1 \
         | tee /tmp/claude-events.jsonl \
         | node /tmp/filter.mjs \

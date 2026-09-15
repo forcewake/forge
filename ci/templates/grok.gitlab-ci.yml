@@ -102,6 +102,14 @@ forge-agent:
     # exit code through the filter; a nonzero exit does not abort the audit
     # trail — the artifacts still upload (when: always) and forge classifies
     # the run as failed.
+    # MCP (ADR-0022): optional servers from the FORGE_HARNESS_MCP CI
+    # variable (canonical mcpServers JSON) land in Grok's settings —
+    # claude-shaped http/sse entries pass through unchanged.
+    - |
+      if [ -n "$FORGE_HARNESS_MCP" ]; then
+        mkdir -p ~/.grok
+        node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;require("fs").writeFileSync(process.env.HOME+"/.grok/settings.json",JSON.stringify({mcpServers:m},null,2))' "$FORGE_HARNESS_MCP"
+      fi
     - |
       FORGE_DRIVER_EXIT="completed"
       grok --no-auto-update --always-approve --no-alt-screen \

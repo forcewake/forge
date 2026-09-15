@@ -85,6 +85,28 @@ forge-agent:
       }
       EOF
       sed -i "s/__MODEL__/${FORGE_HARNESS_MODEL}/g" ~/.config/opencode/opencode.json
+      # MCP (ADR-0022): optional servers from the FORGE_HARNESS_MCP CI
+      # variable (canonical mcpServers JSON), schema-translated:
+      # claude http -> opencode remote (Streamable HTTP), stdio -> local.
+      if [ -n "$FORGE_HARNESS_MCP" ]; then
+        node -e '
+          const fs = require("fs");
+          const p = process.env.HOME + "/.config/opencode/opencode.json";
+          const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+          let raw = JSON.parse(process.env.FORGE_HARNESS_MCP);
+          if (raw.mcpServers) raw = raw.mcpServers;
+          const mcp = {};
+          for (const [name, e] of Object.entries(raw)) {
+            if ((e.type ?? "http") === "stdio") {
+              mcp[name] = { type: "local", command: [e.command, ...(e.args || [])], ...(e.env ? { environment: e.env } : {}), enabled: true };
+            } else {
+              mcp[name] = { type: "remote", url: e.url, ...(e.headers ? { headers: e.headers } : {}), enabled: true };
+            }
+          }
+          cfg.mcp = mcp;
+          fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+        '
+      fi
   script:
     # The task brief lives INSIDE the workspace: opencode auto-rejects reads
     # outside the project directory in headless mode (external_directory).
