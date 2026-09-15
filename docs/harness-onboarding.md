@@ -109,6 +109,19 @@ harness backend, switching back to `builtin` is a deliberate operational
 decision, because repair loops and budgets behave differently (builtin runs
 repair with bounded LLM cycles; harness runs block instead).
 
+### Harness preference (ADR-0023)
+
+The scalar backend becomes an ordered, tighten-only preference list — in
+`forge.yml` (`implement.harnesses: [claude-code, grok-build]`) or via env
+(`FORGE_HARNESS_PREFERENCE=claude-code,grok-build`); empty keeps today's
+single-backend behavior. Forge compiles the chain against the lanes whose
+credentials the project onboarded (`forge doctor` reports the compilable
+chain per driver), freezes the selection + fallback tail into the RunSpec,
+and discloses it in the plan comment before `/go`. `FORGE_HARNESS_FALLBACK`
+(off by default) lets an infrastructure-classified lane failure before any
+candidate advance to the chain's next entry — journaled, never on code
+failures; `forge doctor --project` shows which drivers would compile.
+
 ## Available harness templates
 
 | Template | Harness | Provider protocol | Notes |

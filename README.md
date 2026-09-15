@@ -69,6 +69,30 @@ Architecture: four orthogonal adapters — source, execution, harness driver,
 model route ([ADR-0019](docs/adr/0019-source-execution-adapters.md)).
 Adding a provider is an adapter, not a second factory.
 
+## Harness selection (ADR-0023)
+
+Instead of one pinned implementer harness, a project declares an ordered
+preference (`forge.yml`):
+
+```yaml
+forge:
+  implement:
+    harnesses: [claude-code, grok-build]
+```
+
+(the env form is `FORGE_HARNESS_PREFERENCE=claude-code,grok-build`; empty —
+today's configured backend alone). At plan time forge compiles the chain
+against the lanes the project onboarded (`forge doctor` reports exactly
+that), freezes the selected harness + fallback tail + budget class into the
+RunSpec, and shows them in the plan comment's **Implementation** block — the
+`/go` approves the execution shape, not just the plan text. The planner may
+propose an entry of the list with a one-line reason; it can reorder, never
+extend. Dispatch sets `FORGE_HARNESS_DRIVER` (GitLab) / the `driver` input
+(Actions) so multi-template repos run exactly one lane. Dispatch-time
+fallback down the frozen chain exists, is **off by default**
+(`FORGE_HARNESS_FALLBACK=true`), fires only on infrastructure-classified
+failures before any candidate, and journals every advance.
+
 ## Status
 
 **v0.5.0** — both providers live-verified end-to-end (plan → gate → agent →
