@@ -12,7 +12,7 @@ dependencies = [
     "pydantic-settings==2.13.1",
     "pyyaml==6.0.3",
     "sqlalchemy[asyncio]==2.0.48",
-    "alembic==1.18.4",
+    "alembic==1.19.2",
     "aiosqlite==0.22.1",
     "agno[litellm]==2.5.0",
     "tiktoken==0.12.0",
