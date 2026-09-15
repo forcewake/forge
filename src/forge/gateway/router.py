@@ -84,7 +84,7 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
 
     common = {
         "project_id": event.project.id if event.project else 0,
-        "issue_iid": event.issue.iid if on_issue else None,
+        "issue_iid": event.issue.iid if event.issue is not None else None,
         "author_username": event.user.username if event.user else "",
         "author_user_id": event.user.id if event.user else 0,
     }
@@ -190,7 +190,13 @@ async def _ingest_run_command(
     settings = request.app.state.settings
     session_factory = getattr(request.app.state, "session_factory", None)
     queue = getattr(request.app.state, "task_queue", None)
-    note_id = event.object_attributes.id
+    # Only the two dispatchers above reach this ingest path — note events
+    # (run commands) and pipeline events (the CI debug lane), the two
+    # GitLabEvent models that carry ``object_attributes.id``.
+    if isinstance(event, (NoteEvent, PipelineEvent)):
+        note_id = event.object_attributes.id
+    else:  # pragma: no cover — the dispatchers guarantee the attribute
+        note_id = 0
     source_event_id = command_source_event_id(
         run_command["command"], run_command["project_id"], note_id
     )

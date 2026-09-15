@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import delete, select
 
 from forge.models.conversation import Conversation
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ class ConversationStore:
             stmt = delete(Conversation).where(Conversation.updated_at < cutoff)
             result = await session.execute(stmt)
             await session.commit()
-            count = result.rowcount  # type: ignore[assignment]
+            # DML executes as a CursorResult, whose ``rowcount`` the typed
+            # Result facade does not carry (mypy: attr-defined).
+            count = cast("CursorResult[Any]", result).rowcount
             logger.info("Cleaned up %d expired conversation(s)", count)
             return count

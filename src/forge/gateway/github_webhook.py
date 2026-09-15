@@ -545,7 +545,7 @@ def _record_inbox_only(
     payload: dict[str, Any],
     *,
     handler_result: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Persist a delivery as an inbox row (no side effects)."""
     session_factory = getattr(request.app.state, "session_factory", None)
     if session_factory is None:
