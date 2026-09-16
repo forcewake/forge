@@ -421,8 +421,18 @@ class TestGo:
 
         await go(service, run_id)
 
+        # R02: publication parks at waiting_ci — PR checks are an
+        # independent gate. This repo has NO CI configured (the fake returns
+        # no runs), so the verification pass continues as honestly
+        # unverified.
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+
+        await service.evaluate_waiting_ci_one(run_id)
+
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.evidence or {}).get("verification", {}).get("status") == "not_configured"
 
         # The decision was consumed exactly once.
         async with db() as session:
@@ -456,6 +466,9 @@ class TestGo:
         assert pr["html_url"] in evidence_notes[0]
         assert pr["head"]["sha"] in evidence_notes[0]
         assert "Actions checks" in evidence_notes[0]
+
+        # R02: the ready reason says unverified — no CI exists on the repo.
+        assert "unverified" in (run.status_reason or "")
 
         # The readonly review ran over the PR diff and is bound to the sha.
         (review_call,) = reviewer.calls
@@ -492,6 +505,11 @@ class TestGo:
         await go(service, run_id)  # re-delivered /go
 
         assert len(fake.calls_of("create_commit_on_branch")) == commits_after_first
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # parked for verification
+
+        await service.evaluate_waiting_ci_one(run_id)
+
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
 

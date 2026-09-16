@@ -262,10 +262,18 @@ class TestGoDispatchesHarness:
 
         await go(service, run_id)
 
+        # R02: the builtin publish parks at waiting_ci like every lane —
+        # no dispatch happened, and the verification pass (no CI configured
+        # → unverified) takes it the rest of the way.
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status == FlowStatus.WAITING_CI.value
         assert fake.dispatch_inputs == []  # no dispatch on the builtin lane
         assert fake.calls_of("create_commit_on_branch") != []
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
 
     async def test_dispatch_failure_fails_the_run_without_a_second_dispatch(self, db, fake):
         service = make_service(db, fake)
@@ -303,6 +311,11 @@ class TestReconcile:
         clear_comments(fake)
 
         await service.evaluate_waiting_harness()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # R02: parked for checks
+
+        await service.evaluate_waiting_ci_one(run_id)  # no CI → unverified
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
@@ -452,6 +465,11 @@ class TestReconcile:
         await service.evaluate_waiting_harness()
 
         run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # R02: parked for checks
+
+        await service.evaluate_waiting_ci_one(run_id)  # no CI → unverified
+
+        run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
         assert run.evidence["harness"]["run_id"] == 77  # discovery persisted
 
@@ -497,6 +515,15 @@ class TestWorkerReconcilerPass:
         clear_comments(fake)
 
         await evaluate_github_waiting_harness(
+            make_settings(), ForgeConfig(), db, stack_factory=lambda o, r: make_stack(fake)
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # R02: parked for checks
+
+        from forge.runs.github_service import evaluate_github_waiting_ci
+
+        await evaluate_github_waiting_ci(
             make_settings(), ForgeConfig(), db, stack_factory=lambda o, r: make_stack(fake)
         )
 

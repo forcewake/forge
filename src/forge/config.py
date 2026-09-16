@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     FORGE_GITHUB_PRIVATE_KEY: SecretStr | None = None
     FORGE_GITHUB_INSTALLATION_ID: str = ""
     FORGE_GITHUB_BOT_LOGIN: str = "forcewake-forge[bot]"
+    # R02: bounded wait for PR checks on the candidate sha before a
+    # waiting_ci run is declared verification_timeout.
+    FORGE_VERIFICATION_TIMEOUT_SECONDS: int = 1800
     # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None

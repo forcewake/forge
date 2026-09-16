@@ -701,19 +701,9 @@ class GitHubRunService:
                 reason=f"Draft PR #{outcome.pr_number} for {commit_oid[:8]}",
             )
             await session.commit()
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
-            await session.commit()
-
-        await self._review_and_ready(
-            run_id,
-            project_id=project_id,
-            issue_number=issue_number,
-            pr_number=outcome.pr_number,
-            candidate_sha=commit_oid,
-            base_sha=base_sha,
-        )
+        # R02: STOP at waiting_ci. PR checks are an independent verification
+        # gate — the GitHub harness reconciler polls this run and only a
+        # verified (or honestly unverified) run continues to review.
 
     # ------------------------------------------------------------------
     # Harness leg (E3b, ADR-0020): dispatch → waiting_harness → reconcile
@@ -1128,7 +1118,6 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
             plan_digest = run.plan_digest or ""
-            base_sha = run.base_sha or ""
         if revoked:
             await self._merge_run_evidence(
                 run_id,
@@ -1289,18 +1278,138 @@ class GitHubRunService:
                 reason=f"Draft PR #{publish_outcome.pr_number} for {commit_oid[:8]}",
             )
             await session.commit()
+        # R02: STOP at waiting_ci. PR checks are an independent verification
+        # gate — the GitHub harness reconciler polls this run and only a
+        # verified (or honestly unverified) run continues to review.
+
+    async def evaluate_waiting_ci_one(self, run_id: str, now=None) -> None:
+        """One verification pass over a waiting_ci run (R02).
+
+        The candidate's PR checks are an independent gate: pending → keep
+        waiting (bounded); any failure → ADR-0008 classification (repair if
+        budget remains, else blocked); all green → review; NO checks at all
+        → review as honestly **unverified** (evidence records it; the ready
+        reason says so — never presented as verified).
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            if run.status != FlowStatus.WAITING_CI.value:
+                return  # cancelled/advanced elsewhere — superseded, never revived
+            candidate_shas = list(run.candidate_shas or [])
+            candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
+            issue_number = run.issue_iid or 0
+
+        if not candidate_sha:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
+            )
+            return
+
+        try:
+            runs = await self._stack.client.list_workflow_runs_for_sha(
+                self._owner, self._repo, candidate_sha
+            )
+        except Exception:
+            logger.exception("Checks read failed for %s — keeping it waiting", run_id[:8])
+            return
+        # The harness lane itself is execution, not verification — exclude it.
+        harness_workflow = str(
+            getattr(self._settings, "FORGE_GITHUB_HARNESS_WORKFLOW", "") or ""
+        ).strip()
+        checks = [r for r in runs if not (harness_workflow and r.get("name") == harness_workflow)]
+
+        if not checks:
+            # No independent CI configured on this repo — proceed to review
+            # as honestly unverified (R02: never presented as verified).
+            await self._merge_run_evidence(
+                run_id,
+                {"verification": {"status": "not_configured", "candidate_sha": candidate_sha}},
+            )
+            logger.info(
+                "No CI checks configured for %s — review as unverified", run_id[:8]
+            )
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                await controller.transition(
+                    run_id,
+                    FlowStatus.EVALUATING_CI,
+                    reason="no CI configured — unverified",
+                )
+                await session.commit()
+            await self._review_and_ready(
+                run_id,
+                project_id=run.project_id,
+                issue_number=issue_number,
+                pr_number=run.mr_iid or 0,
+                candidate_sha=candidate_sha,
+                base_sha=run.base_sha or "",
+                verified=False,
+            )
+            return
+
+        pending = [c for c in checks if (c.get("status") or "") != "completed"]
+        failed = [
+            c
+            for c in checks
+            if (c.get("conclusion") or "") in ("failure", "timed_out", "action_required", "cancelled")
+        ]
+        if pending:
+            # Deadline: verification must converge (R17 — bounded waiting).
+            deadline = int(
+                getattr(self._settings, 'FORGE_VERIFICATION_TIMEOUT_SECONDS', 1800) or 1800
+            )
+            started = run.updated_at  # the WAITING_CI transition moment
+            if started is not None and (now - started).total_seconds() > deadline:
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, "verification_timeout: checks did not conclude"
+                )
+            return
+
+        if failed:
+            # ADR-0008: an independent check failure blames the change, not
+            # the environment. Harness-side repair from a PR verification
+            # failure is a follow-up (needs GitHubRunService._begin_repair);
+            # an honest blocked state beats a fake ready.
+            names = ", ".join(sorted({c.get("name") or "check" for c in failed}))
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"quality_contract: checks failed ({names}) — merge is a human decision",
+            )
+            return
+
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "verification": {
+                    "status": "passed",
+                    "candidate_sha": candidate_sha,
+                    "checks": [
+                        {"name": c.get("name"), "conclusion": c.get("conclusion")}
+                        for c in checks
+                    ],
+                }
+            },
+        )
         async with self._session_factory() as session:
             controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
+            await controller.transition(
+                run_id,
+                FlowStatus.EVALUATING_CI,
+                reason="PR checks passed",
+            )
             await session.commit()
-
         await self._review_and_ready(
             run_id,
-            project_id=project_id,
+            project_id=run.project_id,
             issue_number=issue_number,
-            pr_number=publish_outcome.pr_number,
-            candidate_sha=commit_oid,
-            base_sha=base_sha,
+            pr_number=run.mr_iid or 0,
+            candidate_sha=candidate_sha,
+            base_sha=run.base_sha or "",
+            verified=True,
         )
 
     async def _review_and_ready(
@@ -1312,8 +1421,13 @@ class GitHubRunService:
         pr_number: int | None,
         candidate_sha: str,
         base_sha: str,
+        verified: bool = True,
     ) -> None:
-        """No required checks enforced → reviewing → ready_for_human."""
+        """Reviewing → ready_for_human.
+
+        `verified=False` (no independent CI configured) is honest: the run
+        still reaches the human, but the reason and evidence say
+        `unverified` instead of implying checks passed (R02)."""
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(
@@ -1367,10 +1481,16 @@ class GitHubRunService:
             )
             return
 
-        reason = (
-            "review raised concerns — merge is a human decision"
-            if verdict == "concerns"
-            else "merge is a human decision"
+        verified = bool(verified)
+        reason = " · ".join(
+            part
+            for part in (
+                "unverified — no CI configured" if not verified else None,
+                "review raised concerns — merge is a human decision"
+                if verdict == "concerns"
+                else "merge is a human decision",
+            )
+            if part
         )
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -1888,6 +2008,60 @@ def _admission_denied_comment(run_id: str, actor: str) -> str:
     )
 
 
+async def evaluate_github_waiting_ci(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One verification pass over every GitHub run parked in `waiting_ci`.
+
+    The twin of `evaluate_github_waiting_harness` for the R02 gate: PR
+    checks on the candidate sha decide whether the run continues to review
+    (verified, or honestly unverified when no CI exists) or blocks.
+    """
+    from sqlalchemy import select
+
+    from forge.durable.controller import FlowStatus
+    from forge.durable.models import FlowRun
+
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731
+            settings, session_factory, o, r
+        )
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "github",
+                        FlowRun.status == FlowStatus.WAITING_CI.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for run in runs:
+        repo_full_name = str(run.github_repo_full_name or "").strip()
+        if "/" not in repo_full_name:
+            logger.warning("GitHub waiting_ci run %s without repo identity", run.id[:8])
+            continue
+        owner, repo = repo_full_name.split("/", 1)
+        service = GitHubRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(owner, repo),
+            repo_full_name=repo_full_name,
+        )
+        try:
+            await service.evaluate_waiting_ci_one(run.id)
+        except Exception:
+            logger.exception("GitHub verification reconcile failed for run %s", run.id[:8])
+
+
 async def run_github_harness_reconciler(
     settings: Settings,
     forge_config: ForgeConfig,
@@ -1926,6 +2100,12 @@ async def run_github_harness_reconciler(
         except Exception:
             # A failed pass must never kill the reconciler task.
             logger.exception("GitHub harness reconciler pass failed")
+        try:
+            await evaluate_github_waiting_ci(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub verification reconciler pass failed")
 
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
