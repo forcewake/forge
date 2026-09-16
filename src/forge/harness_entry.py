@@ -629,12 +629,9 @@ def main(argv: list[str] | None = None) -> int:
         import urllib.request
 
         urllib.request.urlretrieve(filter_url, "/tmp/harness-log-filter.mjs")
-        os.environ["FORGE_FILTER_PIPE"] = (
-            f'node /tmp/harness-log-filter.mjs "{driver}"'
-        )
+        os.environ["FORGE_FILTER_PIPE"] = f'node /tmp/harness-log-filter.mjs "{driver}"'
     except Exception as exc:
-        print(f"harness_entry: log filter unavailable ({exc}) — raw output",
-              file=sys.stderr)
+        print(f"harness_entry: log filter unavailable ({exc}) — raw output", file=sys.stderr)
         os.environ["FORGE_FILTER_PIPE"] = "cat"
 
     completed = subprocess.run(  # noqa: S603, S602 — fixed argv, lane-local script

@@ -256,8 +256,12 @@ class TestEventFilters:
         assert 'completeness: "aggregate"' in text  # JS object-literal form
 
     def test_all_lanes_reference_the_universal_filter(self):
-        for name in ("grok.gitlab-ci.yml", "claude-code.gitlab-ci.yml",
-                     "opencode.gitlab-ci.yml", "copilot.gitlab-ci.yml"):
+        for name in (
+            "grok.gitlab-ci.yml",
+            "claude-code.gitlab-ci.yml",
+            "opencode.gitlab-ci.yml",
+            "copilot.gitlab-ci.yml",
+        ):
             text = (TEMPLATES_DIR / name).read_text()
             assert "harness-log-filter.mjs" in text, name
 
