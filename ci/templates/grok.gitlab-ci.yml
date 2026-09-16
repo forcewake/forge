@@ -122,6 +122,8 @@ forge-agent:
         --trust --max-turns 200 \
         --allow 'Bash(uv run pytest:*)' --allow 'Bash(pytest:*)' \
         --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \
+        --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \
+        --allow 'Bash(pip install:*)' \
         --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \
         --output-format streaming-json \
         --debug-file .forge/grok-debug.log \

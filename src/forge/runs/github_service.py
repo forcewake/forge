@@ -1280,6 +1280,19 @@ class GitHubRunService:
             entries = bundle.materialize(base_contents)
         except Exception as exc:
             reason = getattr(exc, "reason", None) or "materialize_failed"
+            # R02/ADR-0008: a broken candidate blames the change — bounded
+            # repair re-dispatches the lane in the SAME branch with the
+            # failure context (LIVE-found: patch_does_not_apply on a
+            # transient authoritative read). Cycles exhausted → honest
+            # blocked, the preserved artifact keeps the work.
+            if await self._begin_repair(
+                run_id,
+                project_id=run.project_id,
+                issue_number=run.issue_iid or 0,
+                failure_kind="code",
+                failure_reason=f"candidate invalid: {reason}",
+            ):
+                return
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, f"harness_candidate_invalid: {reason}: {exc}"
             )

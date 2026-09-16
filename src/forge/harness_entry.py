@@ -76,19 +76,20 @@ from forge.harnesses.mcp import (
 # EVERY segment of a compound command to be allowed, and exploration
 # commands (ls|grep|head) otherwise deny the whole pipeline. Writes stay
 # denied: commit/push are --disallowedTools and the push URL is FORBIDDEN.
+# The quality bar demands the agent RUN the tests (ADR-0008). The
+# allowlist carries the commands the lane actually provides: hosted
+# runners expose python3/python (no .venv, no uv — LIVE-found) plus
+# read-only exploration utils (Claude Code requires every segment of a
+# compound command to be allowed). Writes stay denied: commit/push are
+# --disallowedTools and the push URL is FORBIDDEN; the ephemeral lane
+# holds no credentials beyond the model key.
 _CLAUDE_ALLOWED_TOOLS = (
-    "Bash(git status:*),Bash(git diff:*),Bash(git log:*),"
+    "Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git -C * diff:*),"
     "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
-    "Bash(python3 -m pytest:*),Bash(python3 -m pytest),"
-    "Bash(python -m pytest:*),Bash(python -m pytest),Bash(pytest:*)"
-    "Bash(python3 -m ruff:*),Bash(python -m ruff:*),Bash(ruff:*),"
-    "Bash(python3 -m mypy:*),Bash(python -m mypy:*),"
-    "Bash(pip install pytest*),Bash(pip install ruff*),Bash(pip install mypy*),"
-    "Bash(uv run pytest:*),Bash(uv run pytest),"
-    "Bash(uv run ruff:*),Bash(uv run mypy:*),Bash(uv sync),"
-    "Bash(.venv/bin/python -m pytest:*),Bash(.venv/bin/python -m pytest)"
+    "Bash(python3:*)"
+    "Bash(python:*)"
+    "Bash(pip install:*),Bash(pip list),Bash(pip show:*)"
 )
-
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
 
@@ -368,6 +369,10 @@ def render_driver_script(
             "  --trust --max-turns 200 \\\n"
             "  --allow 'Bash(uv run pytest:*)' --allow 'Bash(pytest:*)' \\\n"
             "  --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \\\n"
+            "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
+            "  --allow 'Bash(pip install:*)' \\\n"
+            "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
+            "  --allow 'Bash(pip install:*)' \\\n"
             "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"

@@ -202,6 +202,10 @@ async function runClaude(rl) {
           stats.tools += 1;
           const hint = hintFrom(b.input);
           pendingClaude.set(b.id, `${b.name} ${hint}`.trim());
+          // LIVE stream: the flat 🔧 line shows the agent started the tool.
+          // The collapsed group (with the ✅/❌ result as its title) is
+          // emitted when the result lands — so the collapsed log shows one
+          // RESULT line per tool, and expanding it reveals the full output.
           if (!scope) openToolGroup(`${b.name} ${hint}`);
           else glyphLine("🔧", `⟲ ${b.name} ${hint}`);
         } else if (b.type === "text") {
@@ -219,15 +223,16 @@ async function runClaude(rl) {
         if (b.type !== "tool_result") continue;
         const hint = pendingClaude.get(b.tool_use_id) || "tool";
         pendingClaude.delete(b.tool_use_id);
+        // The result line + full output land INSIDE the group opened at
+        // tool_use — collapsed shows the 🔧 start line, expanded the output.
         if (b.is_error) {
           stats.toolsErr += 1;
-          const full = oneLine(firstText(b.content));
-          if (full) emit(cap(full, 4000)); // expanded view: the real output
+          emit(cap(oneLine(firstText(b.content)), 4000));
           closeToolGroup("❌", hint, cap(firstText(b.content), 120));
         } else {
           stats.toolsOk += 1;
           const full = oneLine(firstText(b.content));
-          if (full) emit(cap(full, 4000)); // expanded view: the real output
+          if (full) emit(cap(full, 4000));
           closeToolGroup("✅", hint, `${kfmt(resultSize(b.content))}B`);
         }
       }

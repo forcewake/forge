@@ -91,6 +91,11 @@ jobs:
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
         run: |
           pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"
+          # The brief's quality bar tells the agent to run the tests — the
+          # lane must carry the tooling for that (LIVE-found: bare hosted
+          # python has no pytest, and the agent burned turns on denied
+          # attempts to check).
+          pip install pytest "ruff>=0.4" || true
           python -m forge.harness_entry --render-brief
 
       - name: Run harness driver
