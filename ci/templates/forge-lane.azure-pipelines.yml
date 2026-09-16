@@ -131,7 +131,7 @@ jobs:
           # The junk literal is assembled from parts: AzDO's macro scanner
           # would substitute the real secret into a whole $(NAME) pattern,
           # making the guard compare the value against itself.
-          _junk='$('''FORGE_AZDO_READ''_TOKEN)'
+          _junk="$(printf '$(%s)' 'FORGE_AZDO_READ_TOKEN')"
           case "${FORGE_AZDO_READ_TOKEN:-}" in
             '' | "$_junk") ;;
             *)
