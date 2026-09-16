@@ -417,6 +417,11 @@ class RunBudget(Base):
     #: Actuals recorded from provider receipts / harness usage evidence.
     consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Unresolved usage liability: holds released against an UNKNOWN receipt
+    #: keep their estimate here, so an unknown spend never reopens hard-budget
+    #: capacity as zero spend (never counted into ``consumed_*`` — ADR-0013).
+    unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow

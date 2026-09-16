@@ -13,11 +13,20 @@ previously loaded ORM object — so a burst of parallel attempts cannot
 overshoot a limit between measurement points (no read-modify-write races,
 portable across SQLite and Postgres).
 
-Unknown usage is never counted as zero: an unknown token figure leaves the
-consumed counters untouched (the hold is released), and the completeness fact
-travels on the ``llm_calls`` ledger row the caller writes. A refusal to grant
-a reservation marks the budget ``exhausted`` — a budget that cannot satisfy a
-reservation must not keep accepting work.
+A reservation is granted only when the budget's *exposure* — recorded
+actuals + outstanding holds + unresolved liability — plus the request still
+fits the limit (``consumed + reserved + unresolved + requested <= limit``);
+spend that was already made or already committed counts against the grant
+even before the hold is settled.
+
+Unknown usage is never counted as zero (ADR-0013): an unknown figure leaves
+the consumed counters untouched, and the hold it releases stands as
+*unresolved usage liability* (``RunBudget.unresolved_calls`` /
+``unresolved_tokens``) — an unknown receipt must not reopen hard-budget
+capacity as zero spend. The completeness fact itself travels on the
+``llm_calls`` ledger row the caller writes. A refusal to grant a reservation
+marks the budget ``exhausted`` — a budget that cannot satisfy a reservation
+must not keep accepting work.
 
 Wiring (ADR-0018 §5): RunService opens the budget when the RunSpec carries
 limits — :func:`open_budget_from_spec` in the same session that freezes the
@@ -34,7 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import ColumnElement, and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -81,13 +90,18 @@ def _known_token_total(usage: Any) -> int | None:
 
     ``input_tokens`` is the inclusive figure (cached tokens ride inside it —
     ADR-0013 normalization), so ``cached_input_tokens`` is never added on top.
-    Nothing known → ``None`` (unknown stays unknown, never zero).
+    A negative part is a malformed figure, not a credit — it counts as
+    unknown. Nothing known → ``None`` (unknown stays unknown, never zero).
     """
     parts = (
         getattr(usage, "input_tokens", None),
         getattr(usage, "output_tokens", None),
     )
-    known = [part for part in parts if isinstance(part, int) and not isinstance(part, bool)]
+    known = [
+        part
+        for part in parts
+        if isinstance(part, int) and not isinstance(part, bool) and part >= 0
+    ]
     if not known:
         return None
     return sum(known)
@@ -97,6 +111,18 @@ def _limit_or_none(value: object) -> int | None:
     """A usable positive budget limit, or ``None`` (absent/invalid = unset)."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
+    return value
+
+
+def _quantity(value: object, name: str) -> int:
+    """Validate a counter move: a non-negative int (a bool is not a count).
+
+    A negative hold would *free* reservable capacity and a negative actual
+    would un-spend recorded usage — both are ledger corruption, not budget
+    accounting, so they are rejected before any UPDATE runs.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
     return value
 
 
@@ -210,14 +236,26 @@ async def reserve(
 
     One atomic conditional UPDATE: the grant happens only when the budget is
     still ``open`` AND both (possibly unlimited) dimensions can absorb the
-    request — the counters in the predicate are the row's CURRENT values, so
-    *budget*'s in-memory snapshot is never trusted. A refused reservation
-    marks an ``open`` budget ``exhausted`` (it cannot serve the standard
-    reservation shape; ``closed``/``exhausted`` budgets just refuse).
+    request *on top of the exposure it already carries* — recorded actuals,
+    outstanding holds and unresolved liability together — with the counters
+    in the predicate being the row's CURRENT values, so *budget*'s in-memory
+    snapshot is never trusted. A refused reservation marks an ``open`` budget
+    ``exhausted`` (it cannot serve the standard reservation shape;
+    ``closed``/``exhausted`` budgets just refuse).
 
     The grant is audited as a ``budget_reservations`` row whose ``released``
     flag is what makes :func:`reconcile_actual` exactly-once.
     """
+    hold_calls = _quantity(calls, "calls")
+    hold_tokens = _quantity(tokens, "tokens")
+    # Exposure: everything the budget already owes on each axis, whatever
+    # form it takes — spent, held for an in-flight dispatch, or unknown.
+    exposure_calls = (
+        RunBudget.consumed_calls + RunBudget.reserved_calls + RunBudget.unresolved_calls
+    )
+    exposure_tokens = (
+        RunBudget.consumed_tokens + RunBudget.reserved_tokens + RunBudget.unresolved_tokens
+    )
     granted = await session.execute(
         update(RunBudget)
         .where(
@@ -225,23 +263,23 @@ async def reserve(
             RunBudget.status == "open",
             or_(
                 RunBudget.max_calls.is_(None),
-                RunBudget.reserved_calls + calls <= RunBudget.max_calls,
+                exposure_calls + hold_calls <= RunBudget.max_calls,
             ),
             or_(
                 RunBudget.max_tokens.is_(None),
-                RunBudget.reserved_tokens + tokens <= RunBudget.max_tokens,
+                exposure_tokens + hold_tokens <= RunBudget.max_tokens,
             ),
         )
         .values(
-            reserved_calls=RunBudget.reserved_calls + calls,
-            reserved_tokens=RunBudget.reserved_tokens + tokens,
+            reserved_calls=RunBudget.reserved_calls + hold_calls,
+            reserved_tokens=RunBudget.reserved_tokens + hold_tokens,
             updated_at=_utcnow(),
         )
     )
     # rowcount is the UPDATE's matched-row count; SQLAlchemy 2.0 stubs only
     # type it on CursorResult, so access it via the runtime attr.
     if granted.rowcount != 1:  # type: ignore[attr-defined]
-        # Refused: either already not open (nothing to do), or the limits
+        # Refused: either already not open (nothing to do), or the exposure
         # cannot absorb the request — durably mark the budget exhausted.
         await session.execute(
             update(RunBudget)
@@ -254,8 +292,8 @@ async def reserve(
     row = BudgetReservation(
         run_budget_id=budget.id,
         attempt_id=attempt_id,
-        reserved_calls=calls,
-        reserved_tokens=tokens,
+        reserved_calls=hold_calls,
+        reserved_tokens=hold_tokens,
     )
     session.add(row)
     await session.flush()
@@ -268,6 +306,25 @@ async def reserve(
     )
 
 
+def _released_hold(column: ColumnElement[int], hold: int) -> ColumnElement[int]:
+    """The reserved counter's post-release value: the hold comes out, floor 0.
+
+    The floor is defensive — holds are only ever granted against the live
+    row — but a late or duplicate settlement must never drive it negative.
+    """
+    return case((column >= hold, column - hold), else_=0)
+
+
+def _unknown_liability(column: ColumnElement[int], hold: int) -> ColumnElement[int]:
+    """The part of a released hold that stands as unresolved usage liability.
+
+    Settling against an UNKNOWN figure cannot replace the hold with an
+    actual, so what the hold released stays owed on the budget — otherwise
+    the unknown receipt would reopen hard-budget capacity as zero spend.
+    """
+    return case((column >= hold, hold), else_=column)
+
+
 async def reconcile_actual(
     session: AsyncSession,
     reservation: Reservation,
@@ -278,13 +335,20 @@ async def reconcile_actual(
     """Settle a reservation against the provider's actual usage.
 
     Releases the hold (reserved −) and records the actuals (consumed +) in
-    one conditional UPDATE; unknown dimensions add nothing — never zero
-    (ADR-0013). An under-reservation still records the full actuals, and the
-    budget is marked ``exhausted`` when the recorded actuals reach or
+    one conditional UPDATE. A known actual replaces its hold — in full, even
+    when it overshoots the hold (the under-reservation policy); an unknown
+    figure adds nothing and is never counted as zero (ADR-0013): the hold it
+    releases moves to the unresolved liability counters instead, so the
+    budget does not reopen capacity the dispatch may already have burned.
+    The budget is marked ``exhausted`` when the recorded actuals reach or
     overshoot a limit (a fully-spent budget has nothing left to grant).
     Exactly-once via the reservation's ``released`` flip: a re-run after a
     crash cannot double-apply the move.
     """
+    if actual_calls is not None:
+        actual_calls = _quantity(actual_calls, "actual_calls")
+    if actual_tokens is not None:
+        actual_tokens = _quantity(actual_tokens, "actual_tokens")
     flip = await session.execute(
         update(BudgetReservation)
         .where(BudgetReservation.id == reservation.id, BudgetReservation.released.is_(False))
@@ -296,30 +360,25 @@ async def reconcile_actual(
         # Already reconciled (crash-retry) — the counters were moved once.
         return await session.get(RunBudget, reservation.run_budget_id)
 
-    await session.execute(
-        update(RunBudget)
-        .where(RunBudget.id == reservation.run_budget_id)
-        .values(
-            # Never let a hold drive a counter negative (defensive: holds are
-            # only ever granted against the live row).
-            reserved_calls=case(
-                (
-                    RunBudget.reserved_calls >= reservation.reserved_calls,
-                    RunBudget.reserved_calls - reservation.reserved_calls,
-                ),
-                else_=0,
-            ),
-            reserved_tokens=case(
-                (
-                    RunBudget.reserved_tokens >= reservation.reserved_tokens,
-                    RunBudget.reserved_tokens - reservation.reserved_tokens,
-                ),
-                else_=0,
-            ),
-            consumed_calls=RunBudget.consumed_calls + (actual_calls or 0),
-            consumed_tokens=RunBudget.consumed_tokens + (actual_tokens or 0),
-            updated_at=_utcnow(),
+    moves: dict[Any, Any] = {
+        "reserved_calls": _released_hold(RunBudget.reserved_calls, reservation.reserved_calls),
+        "reserved_tokens": _released_hold(RunBudget.reserved_tokens, reservation.reserved_tokens),
+        "consumed_calls": RunBudget.consumed_calls + (actual_calls or 0),
+        "consumed_tokens": RunBudget.consumed_tokens + (actual_tokens or 0),
+        "unresolved_calls": RunBudget.unresolved_calls,
+        "unresolved_tokens": RunBudget.unresolved_tokens,
+        "updated_at": _utcnow(),
+    }
+    if actual_calls is None:
+        moves["unresolved_calls"] = moves["unresolved_calls"] + _unknown_liability(
+            RunBudget.reserved_calls, reservation.reserved_calls
         )
+    if actual_tokens is None:
+        moves["unresolved_tokens"] = moves["unresolved_tokens"] + _unknown_liability(
+            RunBudget.reserved_tokens, reservation.reserved_tokens
+        )
+    await session.execute(
+        update(RunBudget).where(RunBudget.id == reservation.run_budget_id).values(moves)
     )
     return await _exhaust_if_over(session, reservation.run_budget_id)
 
