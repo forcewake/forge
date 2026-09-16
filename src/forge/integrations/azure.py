@@ -1433,4 +1433,3 @@ def _map_identity(identity: dict[str, Any]) -> UserInfo:
             "email": unique_name or None,
         }
     )
-
