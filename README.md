@@ -199,6 +199,12 @@ posts a plan; reply with `/go <run-id>` (or assign the `forge` label on
 GitHub). When the run reaches `ready_for_human`, the evidence comment
 carries everything a reviewer needs. The merge button stays yours.
 
+## Dogfooding
+
+forge is developed **through forge**: issues on this repo run the full loop
+(`/implement` → gate → agent in Actions → Draft PR) — see
+[docs/reference/dogfooding.md](docs/reference/dogfooding.md).
+
 ## For AI agents
 
 This repository is built to be worked on by coding agents:

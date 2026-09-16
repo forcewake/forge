@@ -36,6 +36,11 @@ Start at the [main README](../README.md); this index maps the docs tree.
 | [Token rotation](operations/token-rotation.md) | every credential forge and the lanes touch |
 | [Audit retention](operations/audit-retention.md) | evidence, action log, captures |
 
+## Dogfooding
+
+[forge is developed through forge](reference/dogfooding.md): the loop, what
+is wired on this repo, and the ground rules.
+
 ## Reference
 
 | Tree | Covers |
