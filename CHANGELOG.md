@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-16
+
+### Added — task-aware harness selection (ADR-0023) + Azure DevOps adapter beta (ADR-0024)
+
+- **Task-aware harness selection**: the implementer harness is no longer a
+  single pin. `.forge.yml` / `FORGE_HARNESS_PREFERENCE` carry an ordered
+  preference list; a pure compiler freezes `backend_config{harness,
+  harness_fallbacks, budget_class, selection_reason}` into the immutable
+  RunSpec (schema v2, bound by the policy digest — changing the chain
+  invalidates pending gates). The plan comment gains an "Implementation"
+  block, so `/go` authorizes the execution shape, not just the plan.
+  Dispatch-time fallback is opt-in, off by default, infrastructure-only,
+  journaled, and bounded to the frozen chain. All four GitLab templates
+  gained driver-filter rules so multi-driver repos run exactly one lane;
+  `forge doctor` reports the compilable chain. Research:
+  docs/research/harness-selection.md.
+- **Azure DevOps adapter (beta)** — the third provider, same iron
+  contract: `/implement` on a work item or PR comment → plan as a
+  work-item comment → `/go` → harness lane in Azure Pipelines
+  (dispatch-only proposal-only lane, candidate artifact) → trusted
+  publisher via the native CAS (`oldObjectId`) → Draft PR → branch-policy
+  CI → reactive review via PR iterations (sticky marker thread, inline
+  findings) → `ready_for_human`; build failures → durable debug lane.
+  Fail-closed service-hooks ingress (Basic credentials, constant-time;
+  no HMAC exists), connection-scoped approvers, identity-enforced
+  no-merge. `forge doctor` AzDO checks; docs/azure-setup.md runbook with
+  the live-verification checklist. Live verification pending a user PAT
+  (tests: 190+ new across client/ingress/service/executor/lanes/joins).
+  Research: docs/research/azure-devops.md (12 payload fixtures; three
+  documented-API contradictions found and corrected before implementation).
+
+### Fixed
+
+- Pre-existing mypy errors in gateway/stores; stale uv.lock; three
+  ruff-format violations in the MCP modules.
+
 ## [0.8.0] - 2026-09-15
 
 ### Added — MCP modernization + delivery metrics + fourth harness (v0.8, ADR-0021)
@@ -113,6 +149,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real PAT-mode crash: GitHubStaticCredentials field/method collision).
 - New required `integration` CI job: the failure-injection exit-bar runs
   on real Postgres service containers.
+
+## [0.9.0] - 2026-09-16
+
+### Added — task-aware harness selection (ADR-0023) + Azure DevOps adapter beta (ADR-0024)
+
+- **Task-aware harness selection**: the implementer harness is no longer a
+  single pin. `.forge.yml` / `FORGE_HARNESS_PREFERENCE` carry an ordered
+  preference list; a pure compiler freezes `backend_config{harness,
+  harness_fallbacks, budget_class, selection_reason}` into the immutable
+  RunSpec (schema v2, bound by the policy digest — changing the chain
+  invalidates pending gates). The plan comment gains an "Implementation"
+  block, so `/go` authorizes the execution shape, not just the plan.
+  Dispatch-time fallback is opt-in, off by default, infrastructure-only,
+  journaled, and bounded to the frozen chain. All four GitLab templates
+  gained driver-filter rules so multi-driver repos run exactly one lane;
+  `forge doctor` reports the compilable chain. Research:
+  docs/research/harness-selection.md.
+- **Azure DevOps adapter (beta)** — the third provider, same iron
+  contract: `/implement` on a work item or PR comment → plan as a
+  work-item comment → `/go` → harness lane in Azure Pipelines
+  (dispatch-only proposal-only lane, candidate artifact) → trusted
+  publisher via the native CAS (`oldObjectId`) → Draft PR → branch-policy
+  CI → reactive review via PR iterations (sticky marker thread, inline
+  findings) → `ready_for_human`; build failures → durable debug lane.
+  Fail-closed service-hooks ingress (Basic credentials, constant-time;
+  no HMAC exists), connection-scoped approvers, identity-enforced
+  no-merge. `forge doctor` AzDO checks; docs/azure-setup.md runbook with
+  the live-verification checklist. Live verification pending a user PAT
+  (tests: 190+ new across client/ingress/service/executor/lanes/joins).
+  Research: docs/research/azure-devops.md (12 payload fixtures; three
+  documented-API contradictions found and corrected before implementation).
+
+### Fixed
+
+- Pre-existing mypy errors in gateway/stores; stale uv.lock; three
+  ruff-format violations in the MCP modules.
 
 ## [0.8.0] - 2026-09-15
 

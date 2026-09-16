@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from starlette.datastructures import MutableMapping
 from starlette.requests import Request
 
 #: Closed scope set (R3 §8.1 authz matrix). ``forge:admin`` is reserved for
@@ -134,15 +135,16 @@ def resolve_principal(
     return None
 
 
-def stash_principal(scope: dict, principal: McpPrincipal) -> None:
+def stash_principal(scope: MutableMapping[str, Any], principal: McpPrincipal) -> None:
     scope[_PRINCIPAL_SCOPE_KEY] = principal
 
 
-def stash_session_factory(scope: dict) -> None:
+def stash_session_factory(scope: MutableMapping[str, Any]) -> None:
     """Copy the parent app's session factory onto the ASGI scope."""
     parent_app = scope.get("app")
-    scope[SESSION_FACTORY_SCOPE_KEY] = getattr(parent_app, "state", None) and (
-        parent_app.state.session_factory
+    state = getattr(parent_app, "state", None)
+    scope[SESSION_FACTORY_SCOPE_KEY] = (
+        getattr(state, "session_factory", None) if state is not None else None
     )
 
 
