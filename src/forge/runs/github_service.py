@@ -974,9 +974,18 @@ class GitHubRunService:
                                     f"[▶ watch the run live](https://github.com/{self._repo_full_name}/actions/runs/{handle.run_id})",
                                 ),
                             )
+                            # run_id is re-pinned: `harness` is the stale
+                            # pre-discovery snapshot, and merging it back
+                            # would resurrect run_id=None over the fresh id.
                             await self._merge_run_evidence(
                                 run_id,
-                                {"harness": {**harness, "ack_url_pending": False}},
+                                {
+                                    "harness": {
+                                        **harness,
+                                        "run_id": handle.run_id,
+                                        "ack_url_pending": False,
+                                    }
+                                },
                             )
                         except Exception:
                             logger.warning(
