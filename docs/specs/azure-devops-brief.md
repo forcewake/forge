@@ -73,7 +73,7 @@ ci/templates/forge-lane.azure-pipelines.yml  proposal-only lane (dispatch-only v
                                      pinned ref + python -m forge.harness_entry (same contract as
                                      the Actions lane); publish .forge/candidate.diff + meta,
                                      condition: always())
-docs/azure-setup.md                  PAT scopes, service account, service-hooks provisioning
+docs/getting-started/azure-devops.md                  PAT scopes, service account, service-hooks provisioning
                                      (via forge or by hand), pipeline creation pointing at the lane
                                      yaml, variable groups for harness keys, branch policy
                                      (Build validation) for the quality contract, doctor gates
@@ -126,7 +126,7 @@ rejected ~12 weeks post-GA — pin GA stripes where they exist).
   harness dispatch in `/go`, waiting_harness reconcile, reactive review +
   debug lanes, tests. Gate: full suite green + template contract tests
   extended to the new lane (proposal-only invariants).
-- **AZ-4 (docs + onboarding)** — `docs/azure-setup.md`, doctor checks
+- **AZ-4 (docs + onboarding)** — `docs/getting-started/azure-devops.md`, doctor checks
   (PAT identity, scopes via cheap API probes, webhook reachability,
   lane pipeline existence, harness variables NAMES), README parity
   matrix, runbook for the user's live verification. Gate: doctor --json

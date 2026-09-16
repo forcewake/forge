@@ -11,15 +11,15 @@ Start at the [main README](../README.md); this index maps the docs tree.
 
 | Guide | Covers |
 |---|---|
-| [GitLab CE project onboarding](operations/onboarding.md) | execution profile, bot identity, webhook, CI variables, harness include, `forge doctor` |
-| [GitHub setup](github-setup.md) | GitHub App registration, webhook, secrets, harness workflow, label trigger |
-| [Azure DevOps setup](azure-setup.md) | service account + PAT scopes, service hooks, lane pipeline, branch policy, live-verification checklist |
+| [GitLab CE project onboarding](getting-started/gitlab.md) | execution profile, bot identity, webhook, CI variables, harness include, `forge doctor` |
+| [GitHub setup](getting-started/github.md) | GitHub App registration, webhook, secrets, harness workflow, label trigger |
+| [Azure DevOps setup](getting-started/azure-devops.md) | service account + PAT scopes, service hooks, lane pipeline, branch policy, live-verification checklist |
 
 ## Harnesses (coding agents in your CI)
 
 | Doc | Covers |
 |---|---|
-| [Harness onboarding](harness-onboarding.md) | shared setup: includes, common variables, MCP servers, how a run flows, writing the task, triage |
+| [Harness onboarding](harnesses/onboarding.md) | shared setup: includes, common variables, MCP servers, how a run flows, writing the task, triage |
 | [Multi-harness & auto-selection](harnesses/README.md) | the preference list, the compiler, the gate's Implementation block, fallback |
 | [Claude Code](harnesses/claude-code.md) | variables, flags, MCP dialect, receipts, gotchas |
 | [Grok Build](harnesses/grok-build.md) | subscription auth rotation, the npm hang fix, deny rules |
@@ -45,8 +45,8 @@ Start at the [main README](../README.md); this index maps the docs tree.
 | [Specs](specs/) | stage briefs and contracts the milestones were built from |
 | [Security](security/threat-model.md) | the threat model |
 | [Reviews](reviews/) | external review passes and their dispositions |
-| [FAQ](faq.md) | short answers, all providers |
-| [Onboarding prompt](onboarding-prompt.md) | copy-paste bootstrap for coding agents working ON forge |
+| [FAQ](reference/faq.md) | short answers, all providers |
+| [Onboarding prompt](reference/onboarding-prompt.md) | copy-paste bootstrap for coding agents working ON forge |
 
 ## Design pillars (one line each, full story in the ADRs)
 

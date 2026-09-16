@@ -15,7 +15,7 @@ as the only output, and usage receipts where the vendor provides them
 
 Shared setup (include lines, common variables, the MCP variable, runner
 profile, how a run flows, monitoring/triage):
-**[harness-onboarding.md](../harness-onboarding.md)**.
+**[harness-onboarding.md](onboarding.md)**.
 
 ## Multi-harness with auto-selection ([ADR-0023](../adr/0023-dynamic-harness-selection.md))
 

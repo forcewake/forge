@@ -1,11 +1,11 @@
 # Operations
 
 Runbooks for running forge against a GitLab CE instance. Start with
-[onboarding.md](onboarding.md); everything else supports the day after.
+[onboarding.md](../getting-started/gitlab.md); everything else supports the day after.
 
 | Runbook | Scope | Status |
 |---------|-------|--------|
-| [Project onboarding and doctor](onboarding.md) | Execution-profile approval, bot identity and permissions, webhook, CI variables, harness template include, `doctor` gates | Written (v0.1.0) |
+| [Project onboarding and doctor](../getting-started/gitlab.md) | Execution-profile approval, bot identity and permissions, webhook, CI variables, harness template include, `doctor` gates | Written (v0.1.0) |
 | [Backup and restore](backup-restore.md) | Postgres dumps, what is (and is not) in a backup, restore order, reconciler behavior after restore | Written (v0.1.0) |
 | [Upgrade](upgrade.md) | Migrations before code, deploy/rollback ordering between app and worker, mixed-version rules | Written (v0.1.0) |
 | [Token rotation](token-rotation.md) | Bot PAT, webhook secret, model keys — rotation clocks and no-lost-run order | Written (v0.1.0) |
@@ -17,5 +17,5 @@ Runbooks for running forge against a GitLab CE instance. Start with
   — the design these runbooks operate
 - [Threat model](../security/threat-model.md) — trust boundaries and risks
   the operational procedures must preserve
-- [Harness onboarding](../harness-onboarding.md) — harness-specific setup
+- [Harness onboarding](../harnesses/onboarding.md) — harness-specific setup
   and triage

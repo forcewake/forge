@@ -50,7 +50,7 @@ claude -p "<task pointer>" \
 `mcp__<name>__*` + `mcp__<name>` tool grants are appended to the
 allowlist. `${VAR}` references inside the config expand at runtime —
 server keys stay in separate masked variables. See
-[harness-onboarding §2b](../harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022).
+[harness-onboarding §2b](onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022).
 
 ## Usage receipts
 

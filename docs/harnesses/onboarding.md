@@ -29,7 +29,7 @@ stay in GitLab (ADR-0015 §4):
 
 | Variable | Purpose |
 | --- | --- |
-| per-driver credentials | see each driver's doc: [claude-code](harnesses/claude-code.md) · [grok-build](harnesses/grok-build.md) · [opencode](harnesses/opencode.md) · [copilot-cli](harnesses/copilot-cli.md) |
+| per-driver credentials | see each driver's doc: [claude-code](claude-code.md) · [grok-build](grok-build.md) · [opencode](opencode.md) · [copilot-cli](copilot-cli.md) |
 | `FORGE_BOT_READ_TOKEN` | OPTIONAL read-only PAT (repo read only). The proposal-only lane (ADR-0016) must NEVER receive a write token — the trusted publisher is the only writer. When unset, the lane fetches with the runner credential; push is disabled by construction (`git remote set-url --push origin FORBIDDEN`). |
 
 Forge itself only sends non-secret run variables with the pipeline trigger:
@@ -126,7 +126,7 @@ failures; `forge doctor --project` shows which drivers would compile.
 One project CI variable — canonical JSON in the Claude `mcpServers` shape —
 provisions MCP servers for EVERY driver. Live-verified with Context7 and
 Microsoft Learn on GitLab CI (claude-code + opencode; see
-[research/mcp-lane-live-evidence.md](research/mcp-lane-live-evidence.md)).
+[research/mcp-lane-live-evidence.md](../research/mcp-lane-live-evidence.md)).
 
 ```json
 {
@@ -220,13 +220,13 @@ repo has an AGENTS.md, keep it current — the brief embeds it verbatim.
 
 | Template | Harness | Driver doc (variables, flags, gotchas, triage) |
 |---|---|---|
-| `ci/templates/claude-code.gitlab-ci.yml` | claude-code | [harnesses/claude-code.md](harnesses/claude-code.md) |
-| `ci/templates/grok.gitlab-ci.yml` | grok-build | [harnesses/grok-build.md](harnesses/grok-build.md) |
-| `ci/templates/opencode.gitlab-ci.yml` | opencode | [harnesses/opencode.md](harnesses/opencode.md) |
-| `ci/templates/copilot.gitlab-ci.yml` | copilot | [harnesses/copilot-cli.md](harnesses/copilot-cli.md) |
+| `ci/templates/claude-code.gitlab-ci.yml` | claude-code | [harnesses/claude-code.md](claude-code.md) |
+| `ci/templates/grok.gitlab-ci.yml` | grok-build | [harnesses/grok-build.md](grok-build.md) |
+| `ci/templates/opencode.gitlab-ci.yml` | opencode | [harnesses/opencode.md](opencode.md) |
+| `ci/templates/copilot.gitlab-ci.yml` | copilot | [harnesses/copilot-cli.md](copilot-cli.md) |
 
 Multi-harness selection (the ordered preference list, the compiler, the
-Implementation block, fallback): **[harnesses/README.md](harnesses/README.md)**.
+Implementation block, fallback): **[harnesses/README.md](README.md)**.
 
 Every template carries a driver filter (`$FORGE_HARNESS_DRIVER`): a repo
 that includes several forge templates still runs exactly one lane per run —

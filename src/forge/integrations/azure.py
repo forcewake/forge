@@ -1070,6 +1070,14 @@ class AzureDevOpsClient:
             )
         return response.content
 
+    async def get_commit(self, project: str, repo: str, commit_id: str) -> dict[str, Any]:
+        """One commit's metadata (includes ``treeId`` — the trees API
+        rejects commit SHAs directly, LIVE-found in the ADR-0024 lab)."""
+        response = await self._get(
+            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/commits/{quote(commit_id)}",
+        )
+        return dict(response.json())
+
     # -- REST: AZ-4 additions (work-item link, repo resolution, PR dedupe) --------
     # Everything below was added additively in AZ-4 (ADR-0024); the methods
     # above are the AZ-1/AZ-3 surface and must not be modified.
@@ -1426,10 +1434,3 @@ def _map_identity(identity: dict[str, Any]) -> UserInfo:
         }
     )
 
-    async def get_commit(self, project: str, repo: str, commit_id: str) -> dict[str, Any]:
-        """One commit's metadata (includes ``treeId`` — the trees API
-        rejects commit SHAs directly, LIVE-found in the ADR-0024 lab)."""
-        response = await self._get(
-            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/commits/{quote(commit_id)}",
-        )
-        return dict(response.json())

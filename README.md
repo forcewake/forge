@@ -1,5 +1,9 @@
 # forge
 
+[![CI](https://github.com/forcewake/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/forcewake/forge/actions/workflows/ci.yml)
+[![Release](https://github.com/forcewake/forge/actions/workflows/release.yml/badge.svg)](https://github.com/forcewake/forge/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/tag/forcewake/forge?label=release&sort=semver)](https://github.com/forcewake/forge/releases)
+
 **forge** is an agentic software factory for **GitLab CE**, **GitHub**, and
 **Azure DevOps**: an authorized issue becomes a plan, a human-approved branch
 with code, a green pipeline, and a Draft merge request — ready for human
@@ -55,9 +59,9 @@ issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
 
 ## Providers
 
-Setup guides: [GitLab CE](docs/operations/onboarding.md) ·
-[GitHub](docs/github-setup.md) ·
-[Azure DevOps](docs/azure-setup.md).
+Setup guides: [GitLab CE](docs/getting-started/gitlab.md) ·
+[GitHub](docs/getting-started/github.md) ·
+[Azure DevOps](docs/getting-started/azure-devops.md).
 
 | Capability | GitLab CE | GitHub | Azure DevOps |
 |---|---|---|---|
@@ -179,12 +183,12 @@ curl localhost:8420/health
 
 ### 4. Connect a project
 
-- **GitLab CE:** [docs/operations/onboarding.md](docs/operations/onboarding.md)
+- **GitLab CE:** [docs/getting-started/gitlab.md](docs/getting-started/gitlab.md)
   (webhook, bot PAT, harness template include, `forge doctor`).
-- **GitHub:** [docs/github-setup.md](docs/github-setup.md)
+- **GitHub:** [docs/getting-started/github.md](docs/getting-started/github.md)
   (GitHub App registration, webhook, secrets, harness workflow, label
   trigger, `forge doctor`).
-- **Azure DevOps:** [docs/azure-setup.md](docs/azure-setup.md)
+- **Azure DevOps:** [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md)
   (service account + PAT scopes, service hooks, lane pipeline, branch
   policy, live-verification checklist).
 
@@ -201,7 +205,7 @@ This repository is built to be worked on by coding agents:
 
 - **[AGENTS.md](AGENTS.md)** — the agent entry point: rules, repo map,
   gotchas, verification gates.
-- **[docs/onboarding-prompt.md](docs/onboarding-prompt.md)** — a
+- **[docs/onboarding-prompt.md](docs/reference/onboarding-prompt.md)** — a
   copy-paste prompt that takes a fresh clone to a verified dev environment.
 - **[.claude/skills/](.claude/skills/)** — task playbooks (readable by any
   agent): [`forge-setup`](.claude/skills/forge-setup/SKILL.md),
@@ -225,11 +229,11 @@ The full index lives at **[docs/README.md](docs/README.md)**. Highlights:
 | [docs/harnesses/grok-build.md](docs/harnesses/grok-build.md) | Grok Build: auth rotation, the npm hang fix, deny rules |
 | [docs/harnesses/opencode.md](docs/harnesses/opencode.md) | opencode: injected permission map, MCP translation |
 | [docs/harnesses/copilot-cli.md](docs/harnesses/copilot-cli.md) | Copilot CLI: fine-grained PAT, scoped grants |
-| [docs/harness-onboarding.md](docs/harness-onboarding.md) | shared harness setup: includes, MCP servers, writing the task |
-| [docs/operations/onboarding.md](docs/operations/onboarding.md) | GitLab CE project onboarding |
-| [docs/github-setup.md](docs/github-setup.md) | GitHub App + project setup |
-| [docs/azure-setup.md](docs/azure-setup.md) | Azure DevOps setup + the live-verification checklist |
-| [docs/faq.md](docs/faq.md) | frequently asked questions (all providers) |
+| [docs/harnesses/onboarding.md](docs/harnesses/onboarding.md) | shared harness setup: includes, MCP servers, writing the task |
+| [docs/getting-started/gitlab.md](docs/getting-started/gitlab.md) | GitLab CE project onboarding |
+| [docs/getting-started/github.md](docs/getting-started/github.md) | GitHub App + project setup |
+| [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md) | Azure DevOps setup + the live-verification checklist |
+| [docs/faq.md](docs/reference/faq.md) | frequently asked questions (all providers) |
 | [docs/adr/](docs/adr/) | architecture decisions (0000–0024) |
 | [demo/](demo/) | sales demo script + regeneration skill |
 

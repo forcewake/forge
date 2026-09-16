@@ -79,7 +79,7 @@ Restart forge. The GitHub ingress is **fail-closed**: without
    (or `ANTHROPIC_AUTH_TOKEN` for gateway providers), `ZAI_API_KEY`,
    `XAI_API_KEY`. The lane never receives forge's publisher token.
 3. **Harness workflow** — commit
-   [ci/templates/forge-harness.github.yml](../ci/templates/forge-harness.github.yml)
+   [ci/templates/forge-harness.github.yml](../../ci/templates/forge-harness.github.yml)
    to the repo as `.github/workflows/forge-harness.yml`. Replace the
    `<PINNED_REF>` in the template's `pip install` with a ref you trust
    (a tag or a full SHA — pin it; this is the lane's supply chain).
@@ -134,7 +134,7 @@ Update both to the same release.
 Optional repo **variable** `FORGE_HARNESS_MCP` (Settings → Secrets and
 variables → Actions → **Variables**) provisions MCP servers for the lane —
 copy-paste examples in
-[harness-onboarding §2b](harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022).
+[harness-onboarding §2b](../harnesses/onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022).
 Per-driver provider env is injected from repo Actions secrets
 (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ZAI_API_KEY`, `XAI_API_KEY`).
 Some gateways need `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` instead of
@@ -146,6 +146,6 @@ Yes — runs are durable; `waiting_approval` / `waiting_harness` /
 
 **Can forge merge?**
 No. By capability and platform permissions — see
-[ADR-0003](adr/0003-no-merge-is-enforceable.md). The publisher token is
+[ADR-0003](../adr/0003-no-merge-is-enforceable.md). The publisher token is
 scoped to branch writes on `forge/*` branches; the target branch is
 protected by YOUR settings.

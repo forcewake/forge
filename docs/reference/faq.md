@@ -1,10 +1,10 @@
 # FAQ — forge on GitLab CE, GitHub and Azure DevOps
 
 Short answers with pointers. Setup guides:
-[GitLab project onboarding](operations/onboarding.md) ·
-[GitHub setup](github-setup.md) ·
-[Azure DevOps setup](azure-setup.md) · harness details:
-[harness-onboarding](harness-onboarding.md).
+[GitLab project onboarding](../getting-started/gitlab.md) ·
+[GitHub setup](../getting-started/github.md) ·
+[Azure DevOps setup](../getting-started/azure-devops.md) · harness details:
+[harness-onboarding](../harnesses/onboarding.md).
 
 ## Runs and lifecycle
 
@@ -23,7 +23,7 @@ FIRST, then stops the runner — a late agent result cannot become a commit.
 Who may start/consume runs is your `FORGE_APPROVERS` list. Use
 provider-specific logins: a GitLab username and a GitHub login are
 different identities even for the same human
-([ADR-0018](adr/0018-immutable-run-spec.md) — identity is
+([ADR-0018](../adr/0018-immutable-run-spec.md) — identity is
 connection-scoped).
 
 **What about Azure DevOps?**
@@ -36,14 +36,14 @@ completes. Approvers are AzDO identities (`uniqueName`, e.g.
 is your Build-validation branch policy (YAML `pr:` triggers are ignored).
 The loop is fully contract-tested; live verification against a real org
 is pending — setup and the verification checklist:
-[azure-setup](azure-setup.md), decision record:
-[ADR-0024](adr/0024-azure-devops-adapter.md).
+[azure-setup](../getting-started/azure-devops.md), decision record:
+[ADR-0024](../adr/0024-azure-devops-adapter.md).
 
 **A run is stuck in `waiting_approval` / `waiting_harness` / `waiting_ci`.**
 Those waits are durable by design. Deadlines exist (`decision` TTL,
 `FORGE_HARNESS_TIMEOUT_SECONDS`, `FORGE_CI_WAIT_SECONDS`) and block the run
 with a reason when they fire. Triage:
-[forge-debug-run skill](../.claude/skills/forge-debug-run/SKILL.md).
+[forge-debug-run skill](../../.claude/skills/forge-debug-run/SKILL.md).
 
 **The worker crashed mid-run. Did I lose anything?**
 No. Commands and steps are persisted in Postgres before anything executes;
@@ -94,7 +94,7 @@ ledger.
 
 **Can forge merge my code?**
 No — enforced by the bot's capabilities and platform permissions
-([ADR-0003](adr/0003-no-merge-is-enforceable.md)). Keep the publisher token
+([ADR-0003](../adr/0003-no-merge-is-enforceable.md)). Keep the publisher token
 scoped to `forge/*` branches and the target branch protected.
 
 **Does the agent see my secrets?**
@@ -115,11 +115,11 @@ SDK's DNS-rebinding protection answers 421.
 
 **How do I upgrade?**
 Migrations first, then app+worker on the new image — full ordering and
-rollback in [upgrade](operations/upgrade.md).
+rollback in [upgrade](../operations/upgrade.md).
 
 **Where are backups?**
 You own them: `pg_dump` of forge's Postgres (runs, gates, ledger) —
-[backup/restore](operations/backup-restore.md). Redis is transient.
+[backup/restore](../operations/backup-restore.md). Redis is transient.
 
 **Green CI isn't required?**
 It is, by the quality contract: pipeline success + every required job

@@ -679,7 +679,7 @@ class TestLaneTemplateContract:
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
         # the env mapping must carry the parameter explicitly (live-found:
         # job variables are macro-expanded, never exported as env)
-        assert 'FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}' in text
+        assert "FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}" in text
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
         # The base comes from the queue-time parameter, echoed to an env var.
         assert "FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}" in text

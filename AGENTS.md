@@ -3,7 +3,7 @@
 Instructions for AI coding agents (Claude Code, opencode, Grok Build, Codex,
 Cursor, ...) working in this repository. Humans benefit too.
 
-**Ready-to-use bootstrap prompt for your agent: [docs/onboarding-prompt.md](docs/onboarding-prompt.md).**
+**Ready-to-use bootstrap prompt for your agent: [docs/reference/onboarding-prompt.md](docs/reference/onboarding-prompt.md).**
 Task-specific playbooks live in `.claude/skills/` (any agent can read them as
 markdown): [setup](.claude/skills/forge-setup/SKILL.md),
 [lab](.claude/skills/forge-lab/SKILL.md),

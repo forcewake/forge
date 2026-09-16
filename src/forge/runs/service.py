@@ -1738,8 +1738,7 @@ class RunService:
         # reconcilers (runs/github_service.py / runs/azure_service.py) —
         # the GitLab CI backend cannot read an Actions/Pipelines handle.
         if getattr(run, "provider", "gitlab") in ("github", "azure_devops") or (
-            '"provider": "github"' in (handle or "")
-            or "azure_pipelines" in (handle or "")
+            '"provider": "github"' in (handle or "") or "azure_pipelines" in (handle or "")
         ):
             return
 

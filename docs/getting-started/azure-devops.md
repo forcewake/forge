@@ -7,8 +7,8 @@ live" checklist at the bottom and the first live run.
 
 **Status (honest beta):** the AzDO adapter is contract-tested end to end
 against the recorded payload shapes
-([ADR-0024](adr/0024-azure-devops-adapter.md),
-[research](research/azure-devops.md)) — the lane, the gate machinery, the
+([ADR-0024](../adr/0024-azure-devops-adapter.md),
+[research](../research/azure-devops.md)) — the lane, the gate machinery, the
 reactive lanes and the joins all run in the unit suite. **Live
 verification against a real organization is still pending** a
 user-provided PAT + org (the checklist at the bottom lists exactly what
@@ -43,8 +43,8 @@ least-privilege scopes:
 
 Never grant more: **no "Approve and vote" permission, no PR Complete** —
 the no-merge guarantee is enforced by this identity shape, not by prompts
-([ADR-0003](adr/0003-no-merge-is-enforceable.md),
-[ADR-0024](adr/0024-azure-devops-adapter.md) §5). Forge authenticates as
+([ADR-0003](../adr/0003-no-merge-is-enforceable.md),
+[ADR-0024](../adr/0024-azure-devops-adapter.md) §5). Forge authenticates as
 `Authorization: Basic base64(":" + PAT)` — empty username, colon prefix.
 Entra ID / service-principal auth is the documented production upgrade
 path (the client already takes a token-provider callable).
@@ -98,7 +98,7 @@ lane has no write credential and no forge secret; its only output is the
 candidate artifact forge validates and publishes.
 
 1. Commit
-   [ci/templates/forge-lane.azure-pipelines.yml](../ci/templates/forge-lane.azure-pipelines.yml)
+   [ci/templates/forge-lane.azure-pipelines.yml](../../ci/templates/forge-lane.azure-pipelines.yml)
    into the target repo (path of your choice, e.g. `/ci/forge-lane.yml`).
    Replace the `<PINNED_REF>` in its `pip install` with a ref you trust
    (a tag or full SHA — this is the lane's supply chain).
@@ -113,7 +113,7 @@ candidate artifact forge validates and publishes.
    `ANTHROPIC_AUTH_TOKEN` for gateway providers), `ZAI_API_KEY`,
    `XAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, and `FORGE_HARNESS_MCP` as a
    plain variable (copy-paste examples:
-   [harness-onboarding §2b](harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022)). Optional brief transport: `FORGE_AZDO_READ_TOKEN`
+   [harness-onboarding §2b](../harnesses/onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022)). Optional brief transport: `FORGE_AZDO_READ_TOKEN`
    (your OWN read-only work-item PAT — never forge's PAT) plus
    `FORGE_AZDO_ORG_URL` / `FORGE_AZDO_BOT_NAME`; without them the lane
    uses a pre-provisioned `.forge/brief.md`.
@@ -207,7 +207,7 @@ once on YOUR organization and record what you see:
 
 **Why doesn't forge vote or complete the PR?**
 It can't: the service account is shaped so Approve/Complete is not
-granted ([ADR-0003](adr/0003-no-merge-is-enforceable.md)). Review
+granted ([ADR-0003](../adr/0003-no-merge-is-enforceable.md)). Review
 findings are Active/Closed PR threads; merging is a human decision.
 
 **The webhook returns 401 for every delivery.**
@@ -224,5 +224,5 @@ the usual culprit.
 
 **Can forge merge?**
 No. Same contract as every provider — see
-[ADR-0003](adr/0003-no-merge-is-enforceable.md) and the scope table in
+[ADR-0003](../adr/0003-no-merge-is-enforceable.md) and the scope table in
 step 1.

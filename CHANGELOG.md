@@ -525,7 +525,7 @@ against a real GitLab CE, plus the reactive bot core inherited from
   webhook, CI variable names, active runner). Human and `--json` output;
   exit code 0 = ready. Never prints secret values.
 - AI-ready onboarding: [AGENTS.md](AGENTS.md),
-  [onboarding prompt](docs/onboarding-prompt.md), agent skills
+  [onboarding prompt](docs/reference/onboarding-prompt.md), agent skills
   (`.claude/skills/`), and operational runbooks under
   [docs/operations/](docs/operations/).
 - Lab-validated failure drills: provider outage, worker crash mid-run,

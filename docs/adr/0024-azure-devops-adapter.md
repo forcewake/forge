@@ -107,7 +107,7 @@ truths verified against learn.microsoft.com REST references, 2026-09).
 - AZ-1 client + reader + contract tests → AZ-2 ingress + run service →
   AZ-3 executor + lane template + reactive/debug lanes → AZ-4 docs,
   doctor, live verification (needs a user-provided PAT and organization —
-  runbook in `docs/azure-setup.md`). Live verification gates the release
+  runbook in `docs/getting-started/azure-devops.md`). Live verification gates the release
   exactly like the GitHub slice did.
 - Rejected: adopting the stale `azure-devops` Python SDK; webhook
   validation by payload shape only (no authenticator); auto-approving or
