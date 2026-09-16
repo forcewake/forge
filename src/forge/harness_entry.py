@@ -47,6 +47,7 @@ import os
 import re
 import shlex
 import subprocess
+from typing import Any
 import sys
 from html import unescape
 from pathlib import Path
@@ -104,7 +105,7 @@ def fetch_issue_context(repo: str, issue_number: int, token: str) -> tuple[str, 
     import json
     import urllib.request
 
-    def _get(url: str) -> object:
+    def _get(url: str) -> Any:
         request = urllib.request.Request(
             url,
             headers={
@@ -183,7 +184,7 @@ def fetch_workitem(
     import base64
     import urllib.request
 
-    def _get(url: str) -> object:
+    def _get(url: str) -> Any:
         encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
         request = urllib.request.Request(
             url,
@@ -441,7 +442,11 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
             return None
         return value
 
-    sums = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None}
+    sums: dict[str, int | None] = {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+    }
     end_usage: dict | None = None
 
     for line in event_log.splitlines():
@@ -455,13 +460,14 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
         if not isinstance(event, dict):
             continue
         etype = event.get("type")
-        payload = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        raw_usage = event.get("usage")
+        payload: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
         if driver == "grok-build" and etype == "end":
             # The run aggregate — wins over the per-response receipts.
             end_usage = payload or {}
             continue
         if driver == "claude-code" and etype == "result":
-            source = payload  # per-turn receipt on the terminal result
+            source = payload  # per-turn receipt on the result
         elif driver == "grok-build" and etype == "usage":
             source = payload  # per-response boundary receipt
         else:
@@ -476,10 +482,11 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
                 sums[mapped] = (sums[mapped] or 0) + value
 
     if driver == "grok-build" and end_usage is not None:
+        end: dict[str, Any] = end_usage
         sums = {
-            "input_tokens": _token(end_usage.get("input_tokens")),
-            "cached_input_tokens": _token(end_usage.get("cache_read_input_tokens")),
-            "output_tokens": _token(end_usage.get("output_tokens")),
+            "input_tokens": _token(end.get("input_tokens")),
+            "cached_input_tokens": _token(end.get("cache_read_input_tokens")),
+            "output_tokens": _token(end.get("output_tokens")),
         }
 
     if all(value is None for value in sums.values()):
@@ -590,6 +597,11 @@ def main(argv: list[str] | None = None) -> int:
         return _finish("failed", f"harness_entry: brief file {brief!r} is missing")
 
     mcp_raw = args.mcp if args.mcp is not None else os.environ.get("FORGE_HARNESS_MCP")
+    if mcp_raw is not None and mcp_raw.startswith("$(") and mcp_raw.endswith(")"):
+        # AzDO lane reality (LIVE-found, ADR-0024): an UNDEFINED pipeline
+        # variable reaches the process as its literal "$(NAME)" — treat it
+        # as unset instead of failing the fail-closed parse on junk.
+        mcp_raw = None
     try:
         mcp_servers = parse_servers(mcp_raw)
     except McpConfigError as exc:

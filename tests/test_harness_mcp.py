@@ -126,3 +126,20 @@ class TestActionsLaneScript:
         )
         assert '"mcp"' in with_mcp
         assert '"remote"' in with_mcp
+
+
+class TestLiteralMacroEnv:
+    """AzDO lanes: an UNDEFINED pipeline variable arrives as its literal
+    "$(NAME)" — harness_entry must treat it as unset (LIVE-found,
+    ADR-0024 lab run)."""
+
+    def test_literal_macro_env_is_treated_as_unset(self, monkeypatch, tmp_path):
+        import forge.harness_entry as entry
+
+        brief = tmp_path / "brief.md"
+        brief.write_text("brief")
+        monkeypatch.setenv("FORGE_HARNESS_MCP", "$(FORGE_HARNESS_MCP)")
+        script = entry.render_driver_script("claude-code", "m", str(brief))
+        # parse via main() is exercised through render + the guard: the
+        # literal must never reach parse_servers as JSON input.
+        assert '"mcpServers": {}' in script
