@@ -51,17 +51,6 @@ parameters:
   - name: work_item_id
     type: string
 
-# Empty yaml-level defaults: an UNDEFINED AzDO variable expands its
-# $(macro) to the literal text (LIVE-found in the ADR-0024 lab run — the
-# brief-fetch built a "$(FORGE_AZDO_ORG_URL)..." URL), so every optional
-# input must be DEFINED here; the pipeline's own variables (settings UI)
-# provide the real values.
-variables:
-  FORGE_AZDO_ORG_URL: ''
-  FORGE_AZDO_BOT_NAME: 'forge-bot'
-  FORGE_AZDO_READ_TOKEN: ''
-  FORGE_HARNESS_MCP: ''
-
 jobs:
   - job: harness
     # Pool: any agent pool works — the repo owner picks theirs (a
@@ -137,10 +126,15 @@ jobs:
           # is YOURS, never forge's), the lane fetches the work item + the
           # approved plan comment itself; a failed fetch falls back to the
           # pre-provisioned .forge/brief.md.
-          if [ -n "${FORGE_AZDO_READ_TOKEN:-}" ]; then
-            python -m forge.harness_entry --render-brief-azure \
-              || echo "brief fetch failed — falling back to .forge/brief.md"
-          fi
+          # An UNDEFINED AzDO variable expands its $(macro) to the literal
+          # text (LIVE-found in the ADR-0024 lab run) — treat that as unset.
+          case "${FORGE_AZDO_READ_TOKEN:-}" in
+            '' | '$(FORGE_AZDO_READ_TOKEN)') ;;
+            *)
+              python -m forge.harness_entry --render-brief-azure \
+                || echo "brief fetch failed — falling back to .forge/brief.md"
+              ;;
+          esac
           python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
           exit 0
         displayName: Run harness driver
