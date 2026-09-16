@@ -153,6 +153,27 @@ class TestSkills:
 # ----------------------------------------------------------------------
 
 
+class TestWorkingMethod:
+    """Turn-economy discipline (LIVE: 130 calls where ~40 suffice)."""
+
+    def test_turn_budget_discipline_is_always_present(self):
+        brief = render_brief(make_context())
+
+        assert "## Working method" in brief
+        assert "~60 calls" in brief
+        assert "read the relevant range of the file ONCE" in brief
+        assert "NARROWEST relevant test subset" in brief
+
+    def test_codegraph_section_only_when_policy_enabled(self):
+        off = render_brief(make_context())
+        on = render_brief(make_context(), policy=BriefPolicy(codegraph=True))
+
+        assert "codegraph" not in off
+        assert "## Code navigation — codegraph MCP" in on
+        assert "mcp__codegraph__*" in on
+        assert "codegraph_explore" in on
+
+
 class TestLaneContract:
     def test_ci_lane_is_proposal_only(self):
         brief = render_brief(make_context(), lane="ci_lane")

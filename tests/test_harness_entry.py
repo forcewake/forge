@@ -141,6 +141,27 @@ class TestRenderBrief:
         assert "`AGENTS.md`" in with_agents
         assert "read" in with_agents and "follow" in with_agents
 
+    def test_codegraph_section_follows_the_mcp_variable(self, tmp_path: Path, monkeypatch):
+        """Single source of truth: the same ``FORGE_HARNESS_MCP`` variable
+        that provisions the server in the driver turns on the brief's
+        codegraph direction. Broken JSON degrades to "off", never raises."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("FORGE_HARNESS_MCP", raising=False)
+
+        off = render_brief("body", "plan")
+        assert "codegraph" not in off
+
+        monkeypatch.setenv(
+            "FORGE_HARNESS_MCP",
+            '{"codegraph": {"type": "stdio", "command": "codegraph", "args": ["serve", "--mcp"]}}',
+        )
+        on = render_brief("body", "plan")
+        assert "## Code navigation — codegraph MCP" in on
+
+        monkeypatch.setenv("FORGE_HARNESS_MCP", "not-json{")
+        broken = render_brief("body", "plan")
+        assert "codegraph" not in broken
+
     def test_render_brief_mode_fetches_issue_and_plan_and_writes_the_brief(
         self, tmp_path: Path, monkeypatch
     ):

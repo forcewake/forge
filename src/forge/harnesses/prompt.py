@@ -46,6 +46,32 @@ _DENIED_PATHS = (
     ".forge/** (forge's control directory — never a deliverable)",
 )
 
+#: Turn-economy discipline. LIVE-measured (run b6bbbd66, 2026-09-16): 130
+#: tool calls where a staff engineer spends ~40; model latency dominates
+#: the lane wall time and re-reads (service.py 11×) are the main burn.
+_WORKING_METHOD = (
+    "## Working method (turn budget)\n\n"
+    "Every tool call costs a full model round trip; budget yourself to "
+    "~60 calls for the whole task.\n"
+    "- Locate before reading: grep for the symbol, then read the relevant "
+    "range of the file ONCE. Never re-read a file you have already read — "
+    "if you feel the urge, write down what you know instead.\n"
+    "- The approved plan names the files it touches — start there, do not "
+    "re-derive the codebase layout from scratch.\n"
+    "- Iterate against the NARROWEST relevant test subset; run the full "
+    "suite once at the end, not per edit.\n"
+    "- Prefer compound commands (allowlisted) over one action per call."
+)
+
+_CODEGRAPH_SECTION = (
+    "## Code navigation — codegraph MCP (available in this lane)\n\n"
+    "A pre-indexed code graph is mounted as MCP server `codegraph` (tool "
+    "`mcp__codegraph__*`, primary: `codegraph_explore`). Before grep/read "
+    "crawling, ask it: symbol definitions, callers/callees, impact of a "
+    "change — one call answers what would otherwise take a dozen greps. "
+    "Fall back to grep/Read only for the exact text you are about to edit."
+)
+
 _OUTPUT_CONTRACT_CI = (
     "## Output contract — proposal-only CI lane (binding)\n\n"
     "- Do **NOT** commit and do **NOT** push. You have no write credential "
@@ -89,6 +115,9 @@ class BriefPolicy:
     )
     #: Language reminder appended to the style constraints.
     language: str = "the repository's language"
+    #: The lane carries the codegraph MCP server (ADR-0022 variable);
+    #: the brief then directs the agent to it before grep/read crawling.
+    codegraph: bool = False
 
 
 def _skill_instruction(references: list[str]) -> str:
@@ -153,6 +182,9 @@ def render_brief(
     output_contract = _OUTPUT_CONTRACT_CI if lane == "ci_lane" else _OUTPUT_CONTRACT_DEV
     if lane not in ("ci_lane", "dev"):
         raise ValueError(f"unknown lane {lane!r} (expected 'ci_lane' | 'dev')")
+    method_sections = _WORKING_METHOD + "\n\n"
+    if policy.codegraph:
+        method_sections += _CODEGRAPH_SECTION + "\n\n"
 
     return (
         "# forge implementation brief\n\n"
@@ -182,5 +214,5 @@ def render_brief(
         "finish. A candidate that breaks the existing tests is rejected.\n"
         f"{skills_line}\n"
         "- Read before writing: inspect the files the plan touches before "
-        "editing them.\n\n" + output_contract + "\n"
+        "editing them.\n\n" + method_sections + output_contract + "\n"
     )

@@ -55,6 +55,7 @@ from pathlib import Path
 from forge.harnesses.prompt import (
     TASK_PROMPT,
     BriefContext,
+    BriefPolicy,
     render_brief as render_shared_brief,
 )
 from forge.harnesses.mcp import (
@@ -101,8 +102,15 @@ def render_brief(issue_text: str, plan_text: str) -> str:
     proposal-only ``ci_lane`` output contract; *issue_text* is the issue
     body snapshot, *plan_text* the approved plan (verbatim). Conventions
     files (AGENTS.md / CLAUDE.md) are detected in the current working
-    directory — the checkout the agent will work in.
+    directory — the checkout the agent will work in. When the ADR-0022
+    ``FORGE_HARNESS_MCP`` variable carries the ``codegraph`` server, the
+    brief also directs the agent to the code-graph tools (single source of
+    truth: the same variable that provisions the server in the driver).
     """
+    try:
+        mcp_names = set(parse_servers(os.environ.get("FORGE_HARNESS_MCP")))
+    except McpConfigError:
+        mcp_names = set()
     return render_shared_brief(
         BriefContext(
             plan=plan_text,
@@ -112,6 +120,7 @@ def render_brief(issue_text: str, plan_text: str) -> str:
         ),
         lane="ci_lane",
         repo_root=Path.cwd(),
+        policy=BriefPolicy(codegraph="codegraph" in mcp_names),
     )
 
 

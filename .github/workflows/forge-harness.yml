@@ -49,6 +49,11 @@ on:
         description: "issue whose forge plan comment carries the approved plan"
         required: true
         type: string
+      repair_context:
+        description: "bounded verification-failure context (repair re-dispatch)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: forge-${{ inputs.run_id }}
@@ -78,7 +83,11 @@ jobs:
         run: git remote set-url --push origin FORBIDDEN
 
       - name: Forge control directory
-        run: mkdir -p .forge && echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+        run: |
+          mkdir -p .forge && echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+          # codegraph's SQLite graph DB must never reach the candidate diff
+          # (same fail-closed publisher posture as .forge/).
+          echo ".codegraph/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -96,8 +105,25 @@ jobs:
           # shared prompt builder. Nothing is written to the repository.
           GITHUB_TOKEN: ${{ github.token }}
           FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          # Bounded verification-failure context on a repair re-dispatch
+          # (empty on cycle 1).
+          FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
+          # Same source the driver reads: when it carries the `codegraph`
+          # server, the brief names its tools AND this step indexes the
+          # repo for it (pinned; telemetry off; local exclude above).
+          FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
         run: |
           pip install "forge @ git+https://github.com/forcewake/forge@main"
+          # The brief's quality bar tells the agent to run the tests — the
+          # lane must carry the tooling for that (LIVE-found: bare hosted
+          # python has no pytest, and the agent burned turns on denied
+          # attempts to check).
+          pip install pytest "ruff>=0.4" || true
+          if echo "$FORGE_HARNESS_MCP" | grep -q codegraph; then
+            npm install -g --no-fund --no-audit @colbymchenry/codegraph@1.6.0
+            codegraph telemetry off
+            timeout 300 codegraph init
+          fi
           python -m forge.harness_entry --render-brief
 
       - name: Run harness driver
@@ -129,6 +155,9 @@ jobs:
       - name: Emit candidate artifact
         if: always()
         run: |
+          # Belt and braces for the local exclude: the graph DB (and its
+          # watcher state) is lane infrastructure, never a deliverable.
+          rm -rf .codegraph
           git add -A
           git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
             > .forge/candidate.diff || true
