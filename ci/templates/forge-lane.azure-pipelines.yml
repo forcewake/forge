@@ -128,8 +128,12 @@ jobs:
           # pre-provisioned .forge/brief.md.
           # An UNDEFINED AzDO variable expands its $(macro) to the literal
           # text (LIVE-found in the ADR-0024 lab run) — treat that as unset.
+          # The junk literal is assembled from parts: AzDO's macro scanner
+          # would substitute the real secret into a whole $(NAME) pattern,
+          # making the guard compare the value against itself.
+          _junk='$('''FORGE_AZDO_READ''_TOKEN)'
           case "${FORGE_AZDO_READ_TOKEN:-}" in
-            '' | '$(FORGE_AZDO_READ_TOKEN)') ;;
+            '' | "$_junk") ;;
             *)
               python -m forge.harness_entry --render-brief-azure \
                 || echo "brief fetch failed — falling back to .forge/brief.md"
