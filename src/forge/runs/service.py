@@ -1734,11 +1734,12 @@ class RunService:
             )
             return
 
-        # GitHub-subject runs are polled by the GitHub harness reconciler
-        # (runs/github_service.py) — the GitLab CI backend cannot read an
-        # Actions handle (its pipeline_id contract does not apply).
-        if getattr(run, "provider", "gitlab") == "github" or '"provider": "github"' in (
-            handle or ""
+        # GitHub/Azure-subject runs are polled by their own harness
+        # reconcilers (runs/github_service.py / runs/azure_service.py) —
+        # the GitLab CI backend cannot read an Actions/Pipelines handle.
+        if getattr(run, "provider", "gitlab") in ("github", "azure_devops") or (
+            '"provider": "github"' in (handle or "")
+            or "azure_pipelines" in (handle or "")
         ):
             return
 

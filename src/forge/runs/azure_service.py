@@ -46,6 +46,7 @@ are journaled intent-first in ``action_log``.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import re
@@ -87,6 +88,10 @@ from forge.factory.reviewer import (
     ReviewVerdict,
 )
 from forge.factory.implementer import LLMImplementer
+from forge.execution.azure_pipelines import (
+    AzurePipelinesExecutor,
+    AzurePipelinesHandle as ExecutorHandle,
+)
 from forge.integrations.azure import (
     AzureDevOpsClient,
     AzureDevOpsDriftError,
@@ -98,10 +103,11 @@ from forge.integrations.azure import (
     PipelineRun,
 )
 from forge.orchestrator.project_config import ProjectConfig, load_project_config
-from forge.repository import ChangeSet, Operation
+from forge.repository import Change, ChangeSet, Operation
 from forge.runs.admission import approvers_for, check_admission
-from forge.runs.backends import HARNESS_NAME
+from forge.runs.backends import HARNESS_NAME, is_harness_backend
 from forge.runs.candidate import attempt_base_for
+from forge.repository.changeset import validate_changeset
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
@@ -1393,6 +1399,210 @@ class AzureRunService:
         logger.info("Azure DevOps run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
 
     # ------------------------------------------------------------------
+    # Pipelines lane adoption (the AZ-3 reconciler's drive end)
+    # ------------------------------------------------------------------
+
+    async def evaluate_waiting_harness_one(self, run_id: str, now: datetime | None = None) -> None:
+        """Poll one waiting_harness run through its journaled lane handle.
+
+        The twin of ``GitHubRunService._evaluate_harness_one``: a
+        dispatched-but-uncorrelated handle is re-discovered first
+        (ADR-0005), a running lane keeps waiting on the durable deadline,
+        an infrastructure/code failure blocks ``harness_{kind}`` (the
+        frozen-chain fallback is a follow-up on this provider), and a
+        succeeded lane hands its candidate bundle to the SAME trusted
+        publication tail the builtin path uses.
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            evidence = dict(run.evidence or {})
+            project_id = run.project_id
+            issue_number = run.issue_iid or 0
+
+        if evidence.get("backend") and not is_harness_backend(str(evidence["backend"])):
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness on a non-harness backend"
+            )
+            return
+        raw_handle = str((evidence.get("harness") or {}).get("handle") or "")
+        if not raw_handle:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "waiting_harness without harness handle"
+            )
+            return
+        journaled = AzurePipelinesHandle.from_json(raw_handle)
+        executor = AzurePipelinesExecutor(self._stack.client, self._settings)
+
+        # The journal speaks the service-handle dialect (AZ-2); the executor
+        # speaks the execution-handle one (AZ-3). Convert at the boundary;
+        # the run id adopted from discovery journals back in the service
+        # dialect so the on-disk contract stays stable.
+        def _to_executor(h: AzurePipelinesHandle) -> ExecutorHandle:
+            return ExecutorHandle(
+                provider="azure_devops",
+                project=h.project,
+                repo_id=h.repo,
+                pipeline_id=h.pipeline_id,
+                run_id=h.run_id,
+                branch=f"refs/heads/{h.branch}",
+                attempt_base_sha=h.attempt_base,
+                run_spec_digest=h.run_spec_digest,
+                driver=h.driver,
+                model="",
+                work_item_id="",
+                forge_run_id=h.forge_run_id,
+                started_at=h.started_at,
+            )
+
+        try:
+            if not journaled.run_id:
+                discovered = await executor.reconcile_launch(_to_executor(journaled))
+                if discovered.run_id:
+                    journaled = journaled.with_run_id(discovered.run_id)
+                    await self._merge_run_evidence(
+                        run_id,
+                        {
+                            "harness": {
+                                **(evidence.get("harness") or {}),
+                                "handle": journaled.to_json(),
+                                "run_id": journaled.run_id,
+                            }
+                        },
+                    )
+                else:
+                    return  # discovery retries next tick; the deadline decides
+            outcome = await executor.poll(_to_executor(journaled), now=now)
+        except Exception:
+            logger.exception(
+                "Pipelines harness poll failed for run %s — keeping it waiting", run_id[:8]
+            )
+            return
+
+        if outcome.status == "running":
+            return  # keep waiting — the durable deadline decides the rest
+
+        if outcome.status == "failed":
+            kind = outcome.failure_kind or "code"
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            return
+
+        await self._publish_harness_candidate(run_id, project_id, issue_number, outcome, journaled)
+
+    async def _publish_harness_candidate(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        outcome: Any,
+        handle: AzurePipelinesHandle,
+    ) -> None:
+        """Well-formed candidate bundle → trusted CAS publish → PR → review.
+
+        The bundle crosses the SAME boundary as the builtin path
+        (ADR-0016 §2): strict materialization against the authoritative
+        attempt-base contents (via the repository reader), spec-scope
+        validation, then ONE branch-CAS push through ``_publish_changeset``
+        — which also posts the evidence comment and runs review →
+        ready_for_human.
+        """
+        bundle = outcome.bundle
+        if bundle is None:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
+            )
+            return
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
+        if revoked:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled",
+                        "attempt_base": bundle.attempt_base_oid,
+                    }
+                },
+            )
+            logger.info(
+                "Run %s cancelled — Pipelines candidate on %s recorded as superseded",
+                run_id[:8],
+                bundle.attempt_base_oid[:8],
+            )
+            return
+
+        await self._transition(
+            run_id,
+            FlowStatus.COMMITTING,
+            reason=f"publishing Pipelines candidate on {bundle.attempt_base_oid[:8]}",
+        )
+
+        # Authoritative full-content reads at the attempt base for modify
+        # entries (the same strict materialization the GitHub lane uses).
+        base_contents: dict[str, str] = {}
+        try:
+            for path in dict.fromkeys(bundle.paths):
+                try:
+                    base_contents[path] = await self._stack.reader.read_text(
+                        path, ref=bundle.attempt_base_oid
+                    )
+                except Exception:
+                    continue
+            entries = bundle.materialize(base_contents)
+        except Exception as exc:
+            reason = getattr(exc, "reason", None) or "materialize_failed"
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"harness_candidate_invalid: {reason}: {exc}"
+            )
+            return
+
+        branch = azure_factory_branch(issue_number, run_id)
+        changeset = ChangeSet(
+            branch=branch,
+            commit_message=(f"forge: implement {issue_number or 0} (run {short_run_id(run_id)})"),
+            changes=[
+                Change(
+                    path=entry.path,
+                    operation=Operation.UPDATE
+                    if entry.operation == "modify"
+                    else Operation.CREATE
+                    if entry.operation == "create"
+                    else Operation.DELETE,
+                    content=entry.new_content,
+                )
+                for entry in entries
+            ],
+            attempt_base_oid=bundle.attempt_base_oid,
+        )
+        violations = validate_changeset(
+            changeset,
+            base_contents,
+            allowed_paths=await self._read_spec_allowed_paths(run_id),
+        )
+        if violations:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
+            )
+            return
+
+        publish_outcome = await self._publish_changeset(
+            run_id,
+            issue_number=issue_number,
+            changeset=changeset,
+            base_branch=self._target_branch(),
+            expected_head=bundle.attempt_base_oid,
+        )
+        if not publish_outcome.ok:
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"harness_publish_failed: {publish_outcome.reason or 'unknown'}",
+            )
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -1457,6 +1667,23 @@ class AzureRunService:
     def _required_jobs(self) -> list[str]:
         raw = getattr(self._settings, "FORGE_REQUIRED_JOBS", "") or ""
         return [name.strip() for name in raw.split(",") if name.strip()]
+
+    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
+        """The frozen RunSpec's allowed_paths scope (v0.7 monorepo scoping)."""
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if spec is None:
+            return []
+        document = spec.document if isinstance(spec.document, dict) else {}
+        return [str(g) for g in (document.get("allowed_paths") or [])]
 
     def _target_branch(self) -> str:
         return str(getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
@@ -2081,3 +2308,123 @@ __all__ = [
     "build_azure_agents",
     "execute_azure_run_command",
 ]
+
+
+async def run_azure_harness_reconciler(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    interval_seconds: float = 15,
+    shutdown_event: asyncio.Event | None = None,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+) -> None:
+    """Periodic tick driving the Pipelines lane to convergence.
+
+    The twin of :func:`forge.runs.github_service.run_github_harness_reconciler`:
+    a plain asyncio task for the worker's ``asyncio.gather``. Exits
+    immediately when the Azure adapter is disabled, carries no credentials,
+    or has no lane pipeline — a deployment that never dispatches lanes
+    never pays for it.
+    """
+    import asyncio
+
+    if not bool(getattr(settings, "FORGE_AZDO_ENABLED", False)):
+        return
+    if not str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or "").strip():
+        return
+    try:
+        azure_credentials_from_settings(settings)
+    except ValueError:
+        logger.info("Azure credentials not configured — harness reconciler not started")
+        return
+    if not getattr(settings, "FORGE_AZDO_LANE_PIPELINE_ID", None):
+        return
+
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+
+    shutdown_event = shutdown_event or asyncio.Event()
+    logger.info("Azure DevOps harness reconciler started (interval=%ss)", interval_seconds)
+    while not shutdown_event.is_set():
+        try:
+            await evaluate_azure_waiting_harness(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            # A failed pass must never kill the reconciler task.
+            logger.exception("Azure DevOps harness reconciler pass failed")
+
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+    logger.info("Azure DevOps harness reconciler stopped")
+
+
+async def evaluate_azure_waiting_harness(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+) -> None:
+    """One reconcile pass over every ``waiting_harness`` AzDO run.
+
+    Each run's journaled :class:`AzurePipelinesHandle` carries its own
+    project/repo, so the pass groups runs by subject and drives each
+    through its own service instance (the poll needs the client only —
+    the LLM stack is built lazily by the publisher path on adoption).
+    """
+    from sqlalchemy import select
+
+    from forge.durable.controller import FlowStatus
+    from forge.durable.models import FlowRun
+
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "azure_devops",
+                        FlowRun.status == FlowStatus.WAITING_HARNESS.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for run in runs:
+        run_id = run.id
+        # The journaled handle is the subject identity — the dispatch leg
+        # pins project/repo on it; the column is the legacy fallback.
+        handle_raw = str(((run.evidence or {}).get("harness") or {}).get("handle") or "")
+        repo = ""
+        try:
+            if handle_raw:
+                parsed = AzurePipelinesHandle.from_json(handle_raw)
+                repo = f"{parsed.project}/{parsed.repo}"
+        except Exception:
+            repo = ""
+        repo = repo or str(run.github_repo_full_name or "").strip()
+        if "/" not in repo:
+            logger.warning("AzDO waiting_harness run %s without repo identity", run_id[:8])
+            continue
+        project, repo_name = repo.split("/", 1)
+        service = AzureRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(project, repo_name),
+            repo_full_name=repo,
+        )
+        try:
+            await service.evaluate_waiting_harness_one(run_id)
+        except Exception:
+            logger.exception("AzDO harness reconcile failed for run %s", run_id[:8])
