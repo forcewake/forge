@@ -41,6 +41,7 @@ If forge runs on a LAN address, the GitLab admin setting
 | `FORGE_BOT_READ_TOKEN` | optional; masked; READ-ONLY PAT (repo read). Never put a write token in the lane (ADR-0016) — the trusted publisher is the only writer |
 | harness credential | `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`, or `ZAI_API_KEY`, or `FORGE_GROK_AUTH` — exactly the backend chosen below |
 | `FORGE_HARNESS_HTTPS_PROXY` | optional; only when the runner network throttles AI streams |
+| `FORGE_HARNESS_MCP` | optional; MCP servers for the lane (JSON, ADR-0022) — see [harness-onboarding §2b](../harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022) for a copy-paste Context7 + Microsoft Learn example |
 
 Never store forge's own admin token in the project.
 

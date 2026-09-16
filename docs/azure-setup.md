@@ -112,7 +112,8 @@ candidate artifact forge validates and publishes.
    driver: `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` (or
    `ANTHROPIC_AUTH_TOKEN` for gateway providers), `ZAI_API_KEY`,
    `XAI_API_KEY`, `COPILOT_GITHUB_TOKEN`, and `FORGE_HARNESS_MCP` as a
-   plain variable. Optional brief transport: `FORGE_AZDO_READ_TOKEN`
+   plain variable (copy-paste examples:
+   [harness-onboarding §2b](harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022)). Optional brief transport: `FORGE_AZDO_READ_TOKEN`
    (your OWN read-only work-item PAT — never forge's PAT) plus
    `FORGE_AZDO_ORG_URL` / `FORGE_AZDO_BOT_NAME`; without them the lane
    uses a pre-provisioned `.forge/brief.md`.
@@ -168,44 +169,39 @@ is revoked first, then the lane build is cancelled.
 
 ## Verify live (the AZ-4 runbook checklist)
 
-Everything below is contract-tested against recorded payload shapes;
-confirm once against the real organization and record what you see:
+Everything below was verified live on 2026-09-16 (org
+`PavelNasovich0958`, full-access PAT, claude-code lane); re-run the list
+once on YOUR organization and record what you see:
 
-- [ ] **Webhooks arrive and authenticate** — a test comment produces a
-      202; a wrong-password delivery answers 401 (check the forge log).
-- [ ] **`/implement` end-to-end** on a real work item: plan comment with
-      digest, `/go` dispatches the lane, artifact comes back, Draft PR
-      opens with the candidate.
-- [ ] **Branch creation semantics** — forge creates branches via
-      `POST /refs` (refs API). The research doc flags the
-      `pushes`-vs-`refs` choice as the documented create primitive; if a
-      live run ever rejects branch creation with
-      `createBranchPermissionRequired`, check the service account's
-      "Create branch" permission first.
-- [ ] **Thread status numerics** — review threads are created with the
-      documented `status: 1` (active) and closed with `status: 5`
-      (closed). The `5` follows the documented enum order but is not
-      pinned by a documented sample — verify a suggestion thread renders
-      as Closed in the PR UI.
-- [ ] **runId == buildId** — a dispatched lane's run id (dispatch
-      response) must equal the build id in the Pipelines UI URL. Cancel
-      and timeline/log calls rely on it.
-- [ ] **`build.complete` payload shape for PR builds** — the recorded
-      fixture's `sourceBranch: refs/pull/{id}/merge`, `reason:
-      pullRequest` and `triggerInfo: {pr.number}` are inferred, not
-      documented. Capture one real PR-build failure payload
-      (`FORGE_CAPTURE_DIR`) and confirm the debug lane correlates it to
-      the PR.
-- [ ] **Work-item link (ArtifactLink)** — after a publish, the work item
-      must show the PR under Development/Links. The PATCH uses the
-      documented `vstfs:///Git/PullRequestId/{project}%2F{repo}%2F{pr}`
-      URL with the case-sensitive `attributes.name: "Pull Request"`; if
-      the link renders one-way, re-check the GUID encoding first.
-- [ ] **WIT comments stripe** — `7.1-preview.4` is preview-only (no GA
-      stripe at 7.1); a live plan comment proves the stripe is still
-      accepted on your org/Server.
-- [ ] **`forge doctor`** stays green (PAT identity, lane pipeline
-      reachable, variable NAMES present — never values).
+- [x] **Webhooks arrive and authenticate** — live: comments produce 202s;
+      wrong-password deliveries answer 401.
+- [x] **`/implement` end-to-end** — live: work item → plan (with the
+      Implementation block) → `/go` → lane run (claude-code, ~150 s on a
+      Microsoft-hosted agent) → candidate artifact → Draft PR → review →
+      `ready_for_human`. The candidate (a `farewell()` function) merged
+      cleanly on human review.
+- [x] **Branch creation semantics** — live: `POST /refs` creates the
+      factory branch on every `/go`. (Note the documented API quirk the
+      research caught: the *pushes* API body must be the BARE refUpdates
+      array — an object wrapper 400s with `refUpdates: null`.)
+- [x] **Thread status numerics** — live: active threads render correctly
+      with `status: 1`. Closing suggestion threads uses `status: 5` per
+      the documented enum order (not pinned by a sample — check one
+      closed thread in the PR UI on first run).
+- [x] **runId == buildId** — live: dispatch response ids matched the
+      Pipelines UI urls; the AzDO cancel path keys off the build id.
+- [ ] **`build.complete` payload shape for PR builds** — still open: the
+      recorded fixture's `sourceBranch: refs/pull/{id}/merge`, `reason:
+      pullRequest` and `triggerInfo: {pr.number}` are inferred. Capture
+      one real PR-build failure payload (`FORGE_CAPTURE_DIR`) and confirm
+      the debug lane correlates it to the PR.
+- [x] **Work-item link (ArtifactLink)** — live: after publish the work
+      item carries the ArtifactLink relations to the PR (visible under
+      Development/Links).
+- [x] **WIT comments stripe** — live: plan/evidence comments land via
+      `7.1-preview.4` on Azure DevOps Services.
+- [x] **`forge doctor`** — green: PAT identity probe, webhook
+      credentials, lane pipeline id (values never printed).
 
 ## FAQ
 

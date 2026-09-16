@@ -29,8 +29,10 @@ stay in GitLab (ADR-0015 §4):
 
 | Variable | Purpose |
 | --- | --- |
-| `ANTHROPIC_AUTH_TOKEN` | API key the harness uses (never forge's own key) |
-| `ANTHROPIC_BASE_URL` | Harness API endpoint (self-hosted gateway/proxy) |
+| `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` | claude-code: API key + endpoint (a gateway such as z.ai works; never forge's own key) |
+| `ZAI_API_KEY` | opencode: key for the OpenAI-compatible endpoint configured in the lane |
+| `FORGE_GROK_AUTH` | grok-build: the `~/.grok/auth.json` bundle (subscription auth). Refresh tokens ROTATE on every refresh — re-copy from a local `grok login` before runs |
+| `COPILOT_GITHUB_TOKEN` (+ optional `COPILOT_MODEL`) | copilot: fine-grained PAT with the "Copilot Requests" permission (classic `ghp_` tokens are NOT supported) |
 | `FORGE_BOT_READ_TOKEN` | OPTIONAL read-only PAT (repo read only). The proposal-only lane (ADR-0016) must NEVER receive a write token — the trusted publisher is the only writer. When unset, the lane fetches with the runner credential; push is disabled by construction (`git remote set-url --push origin FORBIDDEN`). |
 
 Forge itself only sends non-secret run variables with the pipeline trigger:
@@ -122,13 +124,113 @@ and discloses it in the plan comment before `/go`. `FORGE_HARNESS_FALLBACK`
 candidate advance to the chain's next entry — journaled, never on code
 failures; `forge doctor --project` shows which drivers would compile.
 
+## 2b. MCP servers in the lane (`FORGE_HARNESS_MCP`, ADR-0022)
+
+One project CI variable — canonical JSON in the Claude `mcpServers` shape —
+provisions MCP servers for EVERY driver. Live-verified with Context7 and
+Microsoft Learn on GitLab CI (claude-code + opencode; see
+[research/mcp-lane-live-evidence.md](research/mcp-lane-live-evidence.md)).
+
+```json
+{
+  "context7": {"type": "http", "url": "https://mcp.context7.com/mcp"},
+  "learn": {"type": "http", "url": "https://learn.microsoft.com/api/mcp"}
+}
+```
+
+Set it per CI system:
+
+- **GitLab:** project CI variable `FORGE_HARNESS_MCP` (plain — no secrets
+  inside; masked not needed).
+- **GitHub:** repo **variable** `FORGE_HARNESS_MCP` (Settings → Secrets and
+  variables → Actions → Variables) — the harness workflow passes it via
+  `vars.FORGE_HARNESS_MCP`.
+- **Azure DevOps:** pipeline **plain** variable `FORGE_HARNESS_MCP`
+  (or in the linked variable group).
+
+What each driver does with it (the same JSON, rendered per dialect):
+
+| Driver | Mechanism | Tool grants |
+|---|---|---|
+| claude-code | `--mcp-config` + `--strict-mcp-config` (ALWAYS on — a repo's own `.mcp.json` is never loaded) | `mcp__<server>__*` per server |
+| grok-build | `mcpServers` in `~/.grok/settings.json` | settings-native |
+| copilot | `~/.copilot/mcp-config.json` | explicit `--allow-tool <server>` |
+| opencode | `mcp` key, schema-translated (`http` → `remote`, `stdio` → `local`) | config-native |
+
+Rules of the road:
+
+- **Secrets stay in separate masked variables.** `${VAR}` references inside
+  the JSON expand driver-side at runtime, so a paid MCP server's key is
+  `{"headers": {"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"}}` with
+  `CONTEXT7_API_KEY` as its own masked CI variable.
+- **Strict isolation is constant.** Claude always runs
+  `--strict-mcp-config`: with no `FORGE_HARNESS_MCP` the lane still locks
+  out the repository's own `.mcp.json` (prompt-injection surface).
+- **A malformed config fails the lane closed** — the run refuses with a
+  clear reason rather than silently executing without the servers the plan
+  may depend on.
+- MCP grants never weaken the mechanical deny: commit/push rules and the
+  FORBIDDEN push URL hold regardless.
+
+## Writing the task: what the agent actually reads
+
+The harness does not see your issue raw. forge renders a **shared brief**
+(`.forge/brief.md`, the same builder for the GitLab and Actions/Azure
+lanes — `src/forge/harnesses/prompt.py`) with fixed sections:
+
+1. **Role** — senior engineer on THIS repo, working in an ephemeral CI lane.
+2. **Task** — the approved plan verbatim + the issue body snapshot.
+3. **Constraints** — proposal-only: no commit, no push, no touching
+   `.forge/`, stay inside `implement.paths` when scoped.
+4. **Conventions** — the repo's `AGENTS.md` / `CLAUDE.md` / `.cursorrules`
+   are detected and embedded; the brief directs the agent to load project
+   skills from them.
+5. **Quality bar** — run the relevant tests; match existing style; the
+   review is diff-vs-plan.
+6. **Output contract** — leave ALL changes in the working tree; the
+   candidate is collected by forge, never committed by the agent.
+
+Write `/implement` tasks so this brief lands well:
+
+```text
+# weak
+/implement
+
+# good: the plan stage turns this into acceptance-checkable steps
+/implement
+Add a farewell(name) function to src/greeter.py mirroring greet()'s
+conventions (strip + validate). Raise ValueError on empty input.
+Cover both cases in tests/test_greeter.py.
+```
+
+What the human sees at the gate — the plan comment carries an
+**Implementation** block, so `/go` approves the execution shape too:
+
+```markdown
+## Implementation
+- Harness: **claude-code** · model glm-5.3-flash[1m]
+- Fallbacks: grok-build
+- Budget class: standard
+- Commit cycles: 3
+- Selection reason: planner selection
+```
+
+Useful task-writing habits: name exact files and behaviors (the planner
+copies them into steps); state the negative cases you want tested; if the
+repo has an AGENTS.md, keep it current — the brief embeds it verbatim.
+
 ## Available harness templates
 
 | Template | Harness | Provider protocol | Notes |
 |---|---|---|---|
 | `ci/templates/opencode.gitlab-ci.yml` | opencode | OpenAI-compatible (`/chat/completions`) | validated live on GLM via z.ai coding endpoint; tool loops complete in tens of seconds |
+| `ci/templates/grok.gitlab-ci.yml` | grok-build | xAI subscription (`FORGE_GROK_AUTH`) | `--trust` + `--max-turns 200` + deny-rules; hardened npm preamble (platform binary) required or headless grok hangs |
 | `ci/templates/claude-code.gitlab-ci.yml` | claude code | Anthropic-compatible (`/v1/messages`) | validated for short prompts; long streaming turns can hit connection resets on some networks — stream-json events land in the trace for diagnosis |
 | `ci/templates/copilot.gitlab-ci.yml` | GitHub Copilot CLI | Copilot platform (subscription; fine-grained PAT with `Copilot Requests`) | headless `copilot -p`; scoped grants + deny-wins `--deny-tool` commit/push; model via optional `COPILOT_MODEL`; no parseable usage receipt (unknown ≠ zero) |
+
+Every template carries a driver filter (`$FORGE_HARNESS_DRIVER`): a repo
+that includes several forge templates still runs exactly one lane per run —
+the driver forge dispatches (from the frozen harness chain, ADR-0023).
 
 ## GitHub Actions harness (E3b, ADR-0020)
 

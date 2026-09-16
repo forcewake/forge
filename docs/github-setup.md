@@ -131,6 +131,10 @@ input `attempt_base_oid` arrived empty (executor/template version drift).
 Update both to the same release.
 
 **Claude (or another CLI) can't reach its provider.**
+Optional repo **variable** `FORGE_HARNESS_MCP` (Settings → Secrets and
+variables → Actions → **Variables**) provisions MCP servers for the lane —
+copy-paste examples in
+[harness-onboarding §2b](harness-onboarding.md#2b-mcp-servers-in-the-lane-forge_harness_mcp-adr-0022).
 Per-driver provider env is injected from repo Actions secrets
 (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ZAI_API_KEY`, `XAI_API_KEY`).
 Some gateways need `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` instead of
