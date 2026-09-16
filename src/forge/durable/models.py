@@ -386,6 +386,8 @@ class RunBudget(Base):
     reconciles the hold against actuals afterwards. All counter moves are
     single conditional UPDATEs against the row — never read-modify-write —
     so parallel attempts cannot overshoot a limit between measurement points.
+    Exposure is ``consumed + reserved + unresolved``: budget already spent,
+    or spent with an unreported amount, is never grantable again.
 
     A ``NULL`` limit means unlimited on that dimension; the consumed counters
     keep recording actuals regardless of status, so failed and exhausted runs
@@ -417,6 +419,10 @@ class RunBudget(Base):
     #: Actuals recorded from provider receipts / harness usage evidence.
     consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Usage a receipt failed to report (unknown ≠ zero, ADR-0013) — parked
+    #: here so it keeps fencing capacity instead of reading as spendable.
+    unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
