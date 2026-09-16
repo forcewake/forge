@@ -1366,6 +1366,11 @@ class RunService:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
             issue_iid = run.issue_iid
+            # R03 slice: non-GitLab runs are driven by their own reconcilers
+            # (github_service / azure_service) — the GitLab drift check would
+            # 404 against a foreign provider.
+            if getattr(run, "provider", "gitlab") != "gitlab":
+                return
             candidate_shas = list(run.candidate_shas or [])
             mr_iid = run.mr_iid
             plan_digest = run.plan_digest or ""
