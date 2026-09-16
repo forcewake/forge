@@ -55,6 +55,10 @@ issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
 
 ## Providers
 
+Setup guides: [GitLab CE](docs/operations/onboarding.md) ·
+[GitHub](docs/github-setup.md) ·
+[Azure DevOps](docs/azure-setup.md).
+
 | Capability | GitLab CE | GitHub | Azure DevOps |
 |---|---|---|---|
 | Commands (`/implement`, `/go`, `/cancel`) | ✅ comments | ✅ comments + `forge` label | ✅ work-item + PR comments |
@@ -80,16 +84,19 @@ Every driver implements the same proposal-only contract — mechanical
 commit/push deny (driver-native rules, not just the brief), scoped tool
 grants, candidate artifact handoff, usage receipts where the vendor
 provides them (unknown ≠ zero), and optional MCP servers
-(`FORGE_HARNESS_MCP`, [ADR-0022](docs/adr/0022-harness-mcp-integration.md):
+(`FORGE_HARNESS_MCP`; [ADR-0022](docs/adr/0022-harness-mcp-integration.md)).
+Per-driver setup guides: [docs/harnesses/](docs/harnesses/README.md).
 
 | Driver | Headless posture | Notes |
 |---|---|---|
-| **Claude Code** | `-p` + stream-json, `--strict-mcp-config` | live-verified on all three providers |
-| **Grok Build** | `--always-approve` + deny rules, hardened npm preamble | platform-binary hang workaround |
-| **opencode** | permission map via injected config | schema-translated MCP |
-| **GitHub Copilot CLI** | `-p` + deny-wins tool rules | subscription auth (fine-grained PAT) |
+| **[Claude Code](docs/harnesses/claude-code.md)** | `-p` + stream-json, `--strict-mcp-config` | live-verified on all three providers |
+| **[Grok Build](docs/harnesses/grok-build.md)** | `--always-approve` + deny rules, hardened npm preamble | platform-binary hang workaround |
+| **[opencode](docs/harnesses/opencode.md)** | permission map via injected config | schema-translated MCP |
+| **[GitHub Copilot CLI](docs/harnesses/copilot-cli.md)** | `-p` + deny-wins tool rules | subscription auth (fine-grained PAT) |
 
-## Task-aware harness selection ([ADR-0023](docs/adr/0023-dynamic-harness-selection.md))
+## Task-aware harness selection
+([full guide](docs/harnesses/README.md) ·
+[ADR-0023](docs/adr/0023-dynamic-harness-selection.md))
 
 Instead of one pinned implementer, a project declares an ordered preference:
 
