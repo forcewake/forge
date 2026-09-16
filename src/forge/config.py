@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     # R02: bounded wait for PR checks on the candidate sha before a
     # waiting_ci run is declared verification_timeout.
     FORGE_VERIFICATION_TIMEOUT_SECONDS: int = 1800
+    # A just-opened PR's checks need a few seconds to register; before this
+    # grace elapses the verifier keeps waiting instead of concluding
+    # "no CI configured" (live-found race on the dogfood cycle).
+    FORGE_VERIFICATION_GRACE_SECONDS: int = 120
     # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None

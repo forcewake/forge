@@ -55,6 +55,7 @@ def make_settings(**overrides) -> Settings:
         FORGE_IMPLEMENTER_BACKEND="builtin",
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
+        FORGE_HARNESS_TIMEOUT_SECONDS=1800,  # hermetic: dev .env sets 5400
     )
     values.update(overrides)
     return Settings(**values)

@@ -9,7 +9,7 @@ classification and the worker-side reconciler tick, all over
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -53,7 +53,7 @@ def make_settings(**overrides) -> Settings:
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_HARNESS_MODEL=MODEL,
-        FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
+        FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,        FORGE_VERIFICATION_GRACE_SECONDS=0,  # hermetic: grace needs a sleep
     )
     values.update(overrides)
     return Settings(**values)
@@ -270,7 +270,9 @@ class TestGoDispatchesHarness:
         assert fake.dispatch_inputs == []  # no dispatch on the builtin lane
         assert fake.calls_of("create_commit_on_branch") != []
 
-        await service.evaluate_waiting_ci_one(run_id)
+        await service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=180)
+        )  # past the grace → honest unverified
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
@@ -315,7 +317,9 @@ class TestReconcile:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.WAITING_CI.value  # R02: parked for checks
 
-        await service.evaluate_waiting_ci_one(run_id)  # no CI → unverified
+        await service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=180)
+        )  # past the grace → honest unverified
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
@@ -467,7 +471,9 @@ class TestReconcile:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.WAITING_CI.value  # R02: parked for checks
 
-        await service.evaluate_waiting_ci_one(run_id)  # no CI → unverified
+        await service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=180)
+        )  # past the grace → honest unverified
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
@@ -523,9 +529,15 @@ class TestWorkerReconcilerPass:
 
         from forge.runs.github_service import evaluate_github_waiting_ci
 
+        from datetime import timedelta as _td
+
         await evaluate_github_waiting_ci(
-            make_settings(), ForgeConfig(), db, stack_factory=lambda o, r: make_stack(fake)
-        )
+            make_settings(),
+            ForgeConfig(),
+            db,
+            stack_factory=lambda o, r: make_stack(fake),
+            now=datetime.now(timezone.utc) + _td(seconds=180),
+        )  # past the grace → honest unverified
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value  # driven to the end

@@ -1369,7 +1369,13 @@ class GitHubRunService:
             # before ci.yml had started and wrongly concluded no-CI). Hold
             # the run for a grace window before declaring not_configured.
             started = run.updated_at
-            grace = int(getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", 120) or 120)
+            # `or 120` would turn a deliberate 0 into the default — check None only.
+            _raw = getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", None)
+            grace = 120 if _raw is None else int(_raw)
+            
+            started = as_aware_utc(started) if started is not None else None
+            now = as_aware_utc(now)
+            print(f"DEBUG grace: elapsed={(now - started).total_seconds() if started else None} grace={grace}")
             if started is not None and (now - started).total_seconds() < grace:
                 return  # keep waiting — checks may still register
             # No independent CI configured on this repo — proceed to review
@@ -2066,6 +2072,7 @@ async def evaluate_github_waiting_ci(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """One verification pass over every GitHub run parked in `waiting_ci`.
 
@@ -2109,7 +2116,7 @@ async def evaluate_github_waiting_ci(
             repo_full_name=repo_full_name,
         )
         try:
-            await service.evaluate_waiting_ci_one(run.id)
+            await service.evaluate_waiting_ci_one(run.id, now=now)
         except Exception:
             logger.exception("GitHub verification reconcile failed for run %s", run.id[:8])
 

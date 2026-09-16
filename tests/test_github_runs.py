@@ -52,8 +52,11 @@ def make_settings(**overrides) -> Settings:
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         # Hermetic against the dev .env (dogfood lanes on): these tests
-        # exercise the BUILTIN publish path — no harness workflow.
+        # exercise the BUILTIN publish path — no harness workflow. The
+        # verification grace is zeroed so the not_configured path is
+        # reachable without sleeping.
         FORGE_GITHUB_HARNESS_WORKFLOW="",
+        FORGE_VERIFICATION_GRACE_SECONDS=0,
     )
     values.update(overrides)
     return Settings(**values)
