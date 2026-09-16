@@ -1601,6 +1601,69 @@ class AzureRunService:
                 FlowStatus.BLOCKED,
                 f"harness_publish_failed: {publish_outcome.reason or 'unknown'}",
             )
+            return
+
+        # The publication tail — the SAME walk the builtin leg runs after
+        # _publish_changeset: state walk, candidate evidence, the work-item
+        # evidence comment, then review → ready_for_human.
+        commit_oid = publish_outcome.commit_oid or ""
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(
+                run_id,
+                FlowStatus.ENSURING_DRAFT_MR,
+                reason=f"Draft PR #{publish_outcome.pr_id}",
+            )
+            run = await self._get_run(session, run_id)
+            run.mr_iid = publish_outcome.pr_id
+            run.candidate_shas = list(run.candidate_shas or []) + [commit_oid]
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "published_candidate": {
+                        "sha": commit_oid,
+                        "base": publish_outcome.expected_head_oid,
+                        "branch": publish_outcome.branch,
+                        "pr_id": publish_outcome.pr_id,
+                        "pr_url": publish_outcome.pr_url,
+                        "work_item_link": publish_outcome.work_item_linked,
+                        "lane_run_id": handle.run_id,
+                    }
+                },
+            )
+            await session.commit()
+
+        plan_digest = run.plan_digest or ""
+        base_sha = run.base_sha or ""
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            self._evidence_comment(publish_outcome, plan_digest),
+            run_id,
+            "post_evidence_note",
+        )
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(
+                run_id,
+                FlowStatus.WAITING_CI,
+                reason=f"Draft PR #{publish_outcome.pr_id} for {commit_oid[:8]}",
+            )
+            await session.commit()
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
+            await session.commit()
+
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            pr_id=publish_outcome.pr_id,
+            candidate_sha=commit_oid,
+            base_sha=base_sha,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
