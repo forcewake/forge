@@ -1,0 +1,158 @@
+# forge harness lane — DOGFOODING (ADR-0020/0022)
+#
+# This repo is developed THROUGH forge itself: an issue comment /implement
+# (or the "forge" label) plans the work, a human /go consumes the gate, and
+# this dispatch-only workflow runs the coding agent in an ephemeral runner.
+# The lane has NO write credential and NO forge secret; its only output is
+# the candidate artifact the trusted publisher validates and pushes as a
+# Draft PR. The PINNED_REF below tracks main — this repo IS the product.
+# forge harness executor for GitHub Actions (ADR-0016/0019, Stage E3b)
+#
+# Human-applied to the TARGET repository at onboarding (mirrors the GitLab
+# onboarding): this workflow is what forge dispatches when a run needs a
+# coding agent. The agent runs in GitHub's ephemeral runner — the lane has
+# NO write credentials and NO forge secrets; its only output is the
+# candidate artifact, which the forge trusted publisher validates and
+# publishes (create_commit_on_branch + Draft PR).
+#
+# Dispatched by forge via workflow_dispatch with inputs:
+#   run_id, attempt_base_oid, driver, model, issue_number
+#   (see forge.execution.github_actions; the plan/issue TEXT is fetched by
+#   the lane from the issue + forge plan comment — no input size limits)
+#
+# The driver step is rendered by forge's HarnessDriver.build_script()
+# (Stage D) — the template only provisions the lane.
+
+name: forge-harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "forge run id"
+        required: true
+        type: string
+      attempt_base_oid:
+        description: "frozen attempt base (detached checkout)"
+        required: true
+        type: string
+      driver:
+        description: "harness driver: claude-code | grok-build | opencode | copilot"
+        required: true
+        type: string
+      model:
+        description: "model route from the approved RunSpec"
+        required: false
+        default: ""
+        type: string
+      issue_number:
+        description: "issue whose forge plan comment carries the approved plan"
+        required: true
+        type: string
+
+concurrency:
+  group: forge-${{ inputs.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # READ-ONLY: the lane fetches the issue body + the forge plan comment
+    # to render .forge/brief.md (forge.harness_entry --render-brief). No
+    # write permission is granted — the candidate travels as an artifact.
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout target at the frozen attempt base (detached)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.attempt_base_oid }}
+          fetch-depth: 0
+          # No credentials are configured for push; persist-credentials is
+          # disabled so nothing actionable remains in .git/config.
+          persist-credentials: false
+
+      - name: Disable push (proposal-only lane, ADR-0016)
+        run: git remote set-url --push origin FORBIDDEN
+
+      - name: Forge control directory
+        run: mkdir -p .forge && echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # The lane receives ONLY harness credentials, injected as secrets by
+      # the repo owner (never forge's publisher token):
+      #   FORGE_CLAUDE_OAUTH / ANTHROPIC_API_KEY / ZAI_API_KEY / XAI_API_KEY
+      # per driver — set explicitly in repo Actions secrets.
+      - name: Render the implementation brief
+        env:
+          # Read-only runner token: fetches the issue body + the forge plan
+          # comment (the APPROVED plan) and renders .forge/brief.md via the
+          # shared prompt builder. Nothing is written to the repository.
+          GITHUB_TOKEN: ${{ github.token }}
+          FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          pip install "forge @ git+https://github.com/forcewake/forge@main"
+          python -m forge.harness_entry --render-brief
+
+      - name: Run harness driver
+        env:
+          FORGE_DRIVER: ${{ inputs.driver }}
+          FORGE_MODEL: ${{ inputs.model }}
+          FORGE_BRIEF: .forge/brief.md
+          FORGE_EXIT_FILE: .forge/exit
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # MCP (ADR-0022): canonical mcpServers JSON from a repo VARIABLE
+          # (not secret — it references secrets by ${VAR} name); an empty
+          # value means strict isolation with no servers.
+          FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
+        run: |
+          # Driver provisioning + invocation is rendered by forge's
+          # HarnessDriver (claude-code | grok-build | opencode | copilot):
+          #   - installs the pinned CLI (retry, platform binary check)
+          #   - runs the agent unattended; the -p prompt is the SHORT
+          #     pointer at .forge/brief.md (the shared brief IS the prompt)
+          #   - streams normalized events into the job log
+          #   - writes .forge/exit (completed|failed) — file presence is
+          #     decoupled from agent exit status
+          python -m forge.harness_entry
+
+      - name: Emit candidate artifact
+        if: always()
+        run: |
+          git add -A
+          git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
+            > .forge/candidate.diff || true
+          python - <<'PY'
+          import json, os
+          meta = {
+              "attempt_base_oid": "${{ inputs.attempt_base_oid }}",
+              "run_id": "${{ inputs.run_id }}",
+              "driver": "${{ inputs.driver }}",
+              "model": "${{ inputs.model }}",
+              "exit": (open(".forge/exit").read().strip()
+                       if os.path.exists(".forge/exit") else "unknown"),
+              "completeness": "aggregate",
+          }
+          json.dump(meta, open(".forge/candidate.meta.json", "w"))
+          PY
+
+      - name: Upload candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-candidate-${{ inputs.run_id }}
+          path: |
+            .forge/candidate.diff
+            .forge/candidate.meta.json
+          if-no-files-found: error
+          retention-days: 7
