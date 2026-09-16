@@ -1372,10 +1372,12 @@ class GitHubRunService:
             # `or 120` would turn a deliberate 0 into the default — check None only.
             _raw = getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", None)
             grace = 120 if _raw is None else int(_raw)
-            
+
             started = as_aware_utc(started) if started is not None else None
             now = as_aware_utc(now)
-            print(f"DEBUG grace: elapsed={(now - started).total_seconds() if started else None} grace={grace}")
+            print(
+                f"DEBUG grace: elapsed={(now - started).total_seconds() if started else None} grace={grace}"
+            )
             if started is not None and (now - started).total_seconds() < grace:
                 return  # keep waiting — checks may still register
             # No independent CI configured on this repo — proceed to review
