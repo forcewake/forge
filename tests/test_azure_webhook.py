@@ -752,3 +752,25 @@ class TestPayloadCapture:
         assert record["payload"]["eventType"] == "workitem.commented"
         # The webhook password must never appear in captured records.
         assert WEBHOOK_PASSWORD not in json.dumps(record)
+
+
+class TestIdentityName:
+    """Live-found (ADR-0024 lab): bare-string identities arrive as
+    "Display Name <user@domain>" — the uniqueName is the stable form."""
+
+    def test_bracketed_string_yields_uniquename(self):
+        from forge.gateway.azure_webhook import identity_name
+
+        assert (
+            identity_name("Pavel Nasovich <Pavel_Nasovich@epam.com>") == "Pavel_Nasovich@epam.com"
+        )
+
+    def test_identityref_wins_uniquename(self):
+        from forge.gateway.azure_webhook import identity_name
+
+        assert identity_name({"displayName": "Pavel", "uniqueName": "p@x.io"}) == "p@x.io"
+
+    def test_bare_display_name_passes_through(self):
+        from forge.gateway.azure_webhook import identity_name
+
+        assert identity_name("Pavel Nasovich") == "Pavel Nasovich"

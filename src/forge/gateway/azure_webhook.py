@@ -174,12 +174,21 @@ def identity_name(value: Any) -> str:
     """Normalize an Azure identity field to its stable name (research §2.8).
 
     Webhook fields carry either an IdentityRef object (``uniqueName`` wins,
-    ``displayName`` falls back) or a bare display-name string. The bot-loop
-    guard and admission both consume this normalized form.
+    ``displayName`` falls back) or a bare string. AzDO renders bare-string
+    identities as ``"Display Name <user@domain>"`` (live: System.ChangedBy
+    on workitem.commented) — the uniqueName inside the angle brackets is
+    the stable identity and is what admission/bot-loop consume. A bare
+    display name without brackets passes through.
     """
     if isinstance(value, dict):
         return str(value.get("uniqueName") or value.get("displayName") or "")
-    return str(value or "")
+    text = str(value or "").strip()
+    import re
+
+    bracketed = re.fullmatch(r".*<([^<>]+)>", text)
+    if bracketed:
+        return bracketed.group(1).strip()
+    return text
 
 
 def is_bot_identity(author: str, bot_name: str) -> bool:
