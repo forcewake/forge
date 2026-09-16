@@ -848,26 +848,27 @@ class GitHubRunService:
             "copilot": "GitHub Copilot CLI",
         }.get(correlated.driver, correlated.driver)
         watching = f"[▶ watch the run live]({actions_url})" if actions_url else "run id pending"
-        ack_note_id = await self._post_journaled_note(
-            project_id,
-            issue_number,
-            (
-                f"## 🔨 Run `{run_id[:8]}` taken into work\n\n"
-                f"- Agent: **{driver_doc}** in GitHub Actions\n"
-                f"- Branch: `{branch}`\n"
-                f"- {watching}\n\n"
-                "The full-fidelity log stays in the job; this issue gets the "
-                "evidence comment when the run reaches a verdict.\n\n"
-                "*This is an automated message.*"
-            ),
-            run_id,
-            "taken_in_work_note",
+        ack_body = (
+            f"## 🔨 Run `{run_id[:8]}` taken into work\n\n"
+            f"- Agent: **{driver_doc}** in GitHub Actions\n"
+            f"- Branch: `{branch}`\n"
+            f"- {watching}\n\n"
+            "The full-fidelity log stays in the job; this issue gets the "
+            "evidence comment when the run reaches a verdict.\n\n"
+            "*This is an automated message.*"
         )
-        if ack_note_id is not None:
-            # deep-merge INTO the existing harness fragment — a shallow
-            # patch would wipe workflow/run_id/branch from the evidence.
+        ack_note_id = await self._post_journaled_note(
+            project_id, issue_number, ack_body, run_id, "taken_in_work_note"
+        )
+        if ack_note_id is not None and not actions_url:
+            # Dispatch still uncorrelated: remember the note so the
+            # reconciler can upgrade it with the watch link after discovery
+            # (deep-merge INTO the existing harness fragment — a shallow
+            # patch would wipe workflow/run_id/branch from the evidence).
             harness_fragment = dict((run.evidence or {}).get("harness") or {})
-            harness_fragment.update(ack_note_id=ack_note_id, ack_url_pending=True)
+            harness_fragment.update(
+                ack_note_id=ack_note_id, ack_url_pending=True, ack_body=ack_body
+            )
             await self._merge_run_evidence(run_id, {"harness": harness_fragment})
 
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
@@ -959,6 +960,30 @@ class GitHubRunService:
                             }
                         },
                     )
+                    # Upgrade the taken-in-work ack with the watch link once
+                    # the dispatch response is correlated (R02 UX slice).
+                    harness = dict((evidence.get("harness") or {}))
+                    if harness.get("ack_url_pending") and harness.get("ack_note_id"):
+                        try:
+                            await self._stack.client.update_issue_comment(
+                                self._owner,
+                                self._repo,
+                                int(harness["ack_note_id"]),
+                                (evidence.get("harness") or {}).get("ack_body", "").replace(
+                                    "run id pending",
+                                    f"[▶ watch the run live](https://github.com/{self._repo_full_name}/actions/runs/{handle.run_id})",
+                                ),
+                            )
+                            await self._merge_run_evidence(
+                                run_id,
+                                {"harness": {**harness, "ack_url_pending": False}},
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Ack comment upgrade failed for %s — non-fatal",
+                                run_id[:8],
+                                exc_info=True,
+                            )
                 else:
                     return  # discovery retries next tick; the deadline decides
             outcome = await executor.poll(handle, now=now)
