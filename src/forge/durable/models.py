@@ -417,6 +417,11 @@ class RunBudget(Base):
     #: Actuals recorded from provider receipts / harness usage evidence.
     consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Exposure whose true figure never became known (unknown is never zero,
+    #: ADR-0013): a settled hold with unknown usage moves here from
+    #: ``reserved_*`` instead of reopening spendable headroom as zero spend.
+    unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow

@@ -11,13 +11,17 @@ Every counter move is a single conditional UPDATE against the ``run_budgets``
 row — the current counters are read inside the UPDATE predicate, never from a
 previously loaded ORM object — so a burst of parallel attempts cannot
 overshoot a limit between measurement points (no read-modify-write races,
-portable across SQLite and Postgres).
+portable across SQLite and Postgres). The predicate enforces the *reservable
+exposure*: on every limited axis ``consumed + outstanding reserved +
+unresolved liability + requested <= limit``.
 
-Unknown usage is never counted as zero: an unknown token figure leaves the
-consumed counters untouched (the hold is released), and the completeness fact
-travels on the ``llm_calls`` ledger row the caller writes. A refusal to grant
-a reservation marks the budget ``exhausted`` — a budget that cannot satisfy a
-reservation must not keep accepting work.
+Unknown usage is never counted as zero (ADR-0013): a settled hold whose usage
+figure stayed unknown moves into the ``unresolved_*`` liability counters — it
+keeps counting against the reservable exposure instead of reopening headroom
+as zero spend — and the completeness fact travels on the ``llm_calls`` ledger
+row the caller writes. A refusal to grant a reservation marks the budget
+``exhausted`` — a budget that cannot satisfy a reservation must not keep
+accepting work.
 
 Wiring (ADR-0018 §5): RunService opens the budget when the RunSpec carries
 limits — :func:`open_budget_from_spec` in the same session that freezes the
@@ -81,13 +85,20 @@ def _known_token_total(usage: Any) -> int | None:
 
     ``input_tokens`` is the inclusive figure (cached tokens ride inside it —
     ADR-0013 normalization), so ``cached_input_tokens`` is never added on top.
-    Nothing known → ``None`` (unknown stays unknown, never zero).
+    A negative figure is garbage — providers never report negative usage, and
+    letting one through would *credit* headroom — so it is dropped like an
+    unknown part. Nothing known → ``None`` (unknown stays unknown, never
+    zero).
     """
     parts = (
         getattr(usage, "input_tokens", None),
         getattr(usage, "output_tokens", None),
     )
-    known = [part for part in parts if isinstance(part, int) and not isinstance(part, bool)]
+    known = [
+        part
+        for part in parts
+        if isinstance(part, int) and not isinstance(part, bool) and part >= 0
+    ]
     if not known:
         return None
     return sum(known)
@@ -97,6 +108,18 @@ def _limit_or_none(value: object) -> int | None:
     """A usable positive budget limit, or ``None`` (absent/invalid = unset)."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
+    return value
+
+
+def _non_negative_int(value: object, name: str) -> int:
+    """Validate a caller-supplied counter move; ``ValueError`` on garbage.
+
+    A negative or non-integer move would *grow* headroom (a negative request
+    credits capacity the budget never had) or corrupt the arithmetic inside
+    the conditional UPDATE, so it is rejected before any row is touched.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative int, got {value!r}")
     return value
 
 
@@ -209,15 +232,20 @@ async def reserve(
     """Reserve calls/tokens before a dispatch; ``None`` = refused.
 
     One atomic conditional UPDATE: the grant happens only when the budget is
-    still ``open`` AND both (possibly unlimited) dimensions can absorb the
+    still ``open`` AND every (possibly unlimited) dimension can absorb the
     request — the counters in the predicate are the row's CURRENT values, so
-    *budget*'s in-memory snapshot is never trusted. A refused reservation
-    marks an ``open`` budget ``exhausted`` (it cannot serve the standard
-    reservation shape; ``closed``/``exhausted`` budgets just refuse).
+    *budget*'s in-memory snapshot is never trusted. Spent actuals consume the
+    limit just like outstanding holds do: a request is granted only while
+    ``consumed + reserved + unresolved + requested <= limit`` on each limited
+    axis. A refused reservation marks an ``open`` budget ``exhausted`` (it
+    cannot serve the standard reservation shape; ``closed``/``exhausted``
+    budgets just refuse).
 
     The grant is audited as a ``budget_reservations`` row whose ``released``
     flag is what makes :func:`reconcile_actual` exactly-once.
     """
+    _non_negative_int(calls, "calls")
+    _non_negative_int(tokens, "tokens")
     granted = await session.execute(
         update(RunBudget)
         .where(
@@ -225,11 +253,19 @@ async def reserve(
             RunBudget.status == "open",
             or_(
                 RunBudget.max_calls.is_(None),
-                RunBudget.reserved_calls + calls <= RunBudget.max_calls,
+                RunBudget.consumed_calls
+                + RunBudget.reserved_calls
+                + RunBudget.unresolved_calls
+                + calls
+                <= RunBudget.max_calls,
             ),
             or_(
                 RunBudget.max_tokens.is_(None),
-                RunBudget.reserved_tokens + tokens <= RunBudget.max_tokens,
+                RunBudget.consumed_tokens
+                + RunBudget.reserved_tokens
+                + RunBudget.unresolved_tokens
+                + tokens
+                <= RunBudget.max_tokens,
             ),
         )
         .values(
@@ -278,13 +314,21 @@ async def reconcile_actual(
     """Settle a reservation against the provider's actual usage.
 
     Releases the hold (reserved −) and records the actuals (consumed +) in
-    one conditional UPDATE; unknown dimensions add nothing — never zero
-    (ADR-0013). An under-reservation still records the full actuals, and the
-    budget is marked ``exhausted`` when the recorded actuals reach or
-    overshoot a limit (a fully-spent budget has nothing left to grant).
-    Exactly-once via the reservation's ``released`` flip: a re-run after a
-    crash cannot double-apply the move.
+    one conditional UPDATE. An axis whose actual stayed unknown moves its hold
+    into the ``unresolved_*`` liability counters instead: the exposure that
+    dispatch had already been granted never reopens as spendable headroom and
+    is never zero-credited (unknown ≠ zero, ADR-0013). Known actuals may
+    undershoot the hold (headroom returns) or overshoot it — an
+    under-reservation still records the full actuals, and the budget is
+    marked ``exhausted`` when the recorded actuals reach or overshoot a limit
+    (a fully-spent budget has nothing left to grant). Exactly-once via the
+    reservation's ``released`` flip: a re-run after a crash cannot
+    double-apply the move.
     """
+    if actual_calls is not None:
+        _non_negative_int(actual_calls, "actual_calls")
+    if actual_tokens is not None:
+        _non_negative_int(actual_tokens, "actual_tokens")
     flip = await session.execute(
         update(BudgetReservation)
         .where(BudgetReservation.id == reservation.id, BudgetReservation.released.is_(False))
@@ -318,6 +362,13 @@ async def reconcile_actual(
             ),
             consumed_calls=RunBudget.consumed_calls + (actual_calls or 0),
             consumed_tokens=RunBudget.consumed_tokens + (actual_tokens or 0),
+            # An unknown actual keeps its hold on the books as unresolved
+            # liability (magnitude = the hold that dispatch was granted): the
+            # headroom it guarded does not reopen as if the spend were zero.
+            unresolved_calls=RunBudget.unresolved_calls
+            + (reservation.reserved_calls if actual_calls is None else 0),
+            unresolved_tokens=RunBudget.unresolved_tokens
+            + (reservation.reserved_tokens if actual_tokens is None else 0),
             updated_at=_utcnow(),
         )
     )
@@ -382,9 +433,11 @@ async def reconcile_harness_receipt(
     (cached rides inside the inclusive input — never added on top). Unknown
     tokens leave the token counter untouched (unknown ≠ zero); the
     completeness fact rides the ``llm_calls`` ledger row the caller writes.
-    Actuals are recorded on ``exhausted`` budgets too; only a ``closed``
-    budget ignores receipts. Returns the refreshed budget, or ``None`` when
-    the run has none (or it is closed).
+    The receipt books no unresolved liability — it carries no hold, and it
+    grants nothing, so it cannot reopen capacity either. Actuals are recorded
+    on ``exhausted`` budgets too; only a ``closed`` budget ignores receipts.
+    Returns the refreshed budget, or ``None`` when the run has none (or it is
+    closed).
     """
     budget = await budget_for_run(session, run_id)
     if budget is None or budget.status == "closed":
