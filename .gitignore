@@ -44,3 +44,6 @@ htmlcov/
 litellm-config.yaml
 demo/production/
 .secrets/
+
+# forge control directory (lane-local state, never tracked)
+.forge/
