@@ -969,7 +969,9 @@ class GitHubRunService:
                                 self._owner,
                                 self._repo,
                                 int(harness["ack_note_id"]),
-                                (evidence.get("harness") or {}).get("ack_body", "").replace(
+                                (evidence.get("harness") or {})
+                                .get("ack_body", "")
+                                .replace(
                                     "run id pending",
                                     f"[▶ watch the run live](https://github.com/{self._repo_full_name}/actions/runs/{handle.run_id})",
                                 ),
