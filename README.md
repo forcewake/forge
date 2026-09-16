@@ -209,18 +209,21 @@ This repository is built to be worked on by coding agents:
 
 ## Documentation
 
+The full index lives at **[docs/README.md](docs/README.md)**. Highlights:
+
 | Doc | Scope |
 |-----|-------|
-| [AGENTS.md](AGENTS.md) | agent entry point + repo conventions |
-| [docs/onboarding-prompt.md](docs/onboarding-prompt.md) | bootstrap prompt for coding agents |
+| [docs/harnesses/](docs/harnesses/README.md) | the four drivers + multi-harness auto-selection (how it works, fallback, rejected alternatives) |
+| [docs/harnesses/claude-code.md](docs/harnesses/claude-code.md) | Claude Code: variables, flags, MCP, gotchas |
+| [docs/harnesses/grok-build.md](docs/harnesses/grok-build.md) | Grok Build: auth rotation, the npm hang fix, deny rules |
+| [docs/harnesses/opencode.md](docs/harnesses/opencode.md) | opencode: injected permission map, MCP translation |
+| [docs/harnesses/copilot-cli.md](docs/harnesses/copilot-cli.md) | Copilot CLI: fine-grained PAT, scoped grants |
+| [docs/harness-onboarding.md](docs/harness-onboarding.md) | shared harness setup: includes, MCP servers, writing the task |
 | [docs/operations/onboarding.md](docs/operations/onboarding.md) | GitLab CE project onboarding |
 | [docs/github-setup.md](docs/github-setup.md) | GitHub App + project setup |
-| [docs/azure-setup.md](docs/azure-setup.md) | Azure DevOps: PAT scopes, service hooks, lane, branch policy |
+| [docs/azure-setup.md](docs/azure-setup.md) | Azure DevOps setup + the live-verification checklist |
 | [docs/faq.md](docs/faq.md) | frequently asked questions (all providers) |
-| [docs/harness-onboarding.md](docs/harness-onboarding.md) | harness CLIs: setup + triage |
-| [docs/operations/](docs/operations/) | backup/restore, upgrade, token rotation, retention |
 | [docs/adr/](docs/adr/) | architecture decisions (0000–0024) |
-| [docs/research/](docs/research/) | live API research (GitHub, Actions, Azure DevOps, harnesses, MCP) |
 | [demo/](demo/) | sales demo script + regeneration skill |
 
 ## License

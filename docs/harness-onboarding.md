@@ -29,10 +29,7 @@ stay in GitLab (ADR-0015 §4):
 
 | Variable | Purpose |
 | --- | --- |
-| `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` | claude-code: API key + endpoint (a gateway such as z.ai works; never forge's own key) |
-| `ZAI_API_KEY` | opencode: key for the OpenAI-compatible endpoint configured in the lane |
-| `FORGE_GROK_AUTH` | grok-build: the `~/.grok/auth.json` bundle (subscription auth). Refresh tokens ROTATE on every refresh — re-copy from a local `grok login` before runs |
-| `COPILOT_GITHUB_TOKEN` (+ optional `COPILOT_MODEL`) | copilot: fine-grained PAT with the "Copilot Requests" permission (classic `ghp_` tokens are NOT supported) |
+| per-driver credentials | see each driver's doc: [claude-code](harnesses/claude-code.md) · [grok-build](harnesses/grok-build.md) · [opencode](harnesses/opencode.md) · [copilot-cli](harnesses/copilot-cli.md) |
 | `FORGE_BOT_READ_TOKEN` | OPTIONAL read-only PAT (repo read only). The proposal-only lane (ADR-0016) must NEVER receive a write token — the trusted publisher is the only writer. When unset, the lane fetches with the runner credential; push is disabled by construction (`git remote set-url --push origin FORBIDDEN`). |
 
 Forge itself only sends non-secret run variables with the pipeline trigger:
@@ -221,12 +218,15 @@ repo has an AGENTS.md, keep it current — the brief embeds it verbatim.
 
 ## Available harness templates
 
-| Template | Harness | Provider protocol | Notes |
-|---|---|---|---|
-| `ci/templates/opencode.gitlab-ci.yml` | opencode | OpenAI-compatible (`/chat/completions`) | validated live on GLM via z.ai coding endpoint; tool loops complete in tens of seconds |
-| `ci/templates/grok.gitlab-ci.yml` | grok-build | xAI subscription (`FORGE_GROK_AUTH`) | `--trust` + `--max-turns 200` + deny-rules; hardened npm preamble (platform binary) required or headless grok hangs |
-| `ci/templates/claude-code.gitlab-ci.yml` | claude code | Anthropic-compatible (`/v1/messages`) | validated for short prompts; long streaming turns can hit connection resets on some networks — stream-json events land in the trace for diagnosis |
-| `ci/templates/copilot.gitlab-ci.yml` | GitHub Copilot CLI | Copilot platform (subscription; fine-grained PAT with `Copilot Requests`) | headless `copilot -p`; scoped grants + deny-wins `--deny-tool` commit/push; model via optional `COPILOT_MODEL`; no parseable usage receipt (unknown ≠ zero) |
+| Template | Harness | Driver doc (variables, flags, gotchas, triage) |
+|---|---|---|
+| `ci/templates/claude-code.gitlab-ci.yml` | claude-code | [harnesses/claude-code.md](harnesses/claude-code.md) |
+| `ci/templates/grok.gitlab-ci.yml` | grok-build | [harnesses/grok-build.md](harnesses/grok-build.md) |
+| `ci/templates/opencode.gitlab-ci.yml` | opencode | [harnesses/opencode.md](harnesses/opencode.md) |
+| `ci/templates/copilot.gitlab-ci.yml` | copilot | [harnesses/copilot-cli.md](harnesses/copilot-cli.md) |
+
+Multi-harness selection (the ordered preference list, the compiler, the
+Implementation block, fallback): **[harnesses/README.md](harnesses/README.md)**.
 
 Every template carries a driver filter (`$FORGE_HARNESS_DRIVER`): a repo
 that includes several forge templates still runs exactly one lane per run —

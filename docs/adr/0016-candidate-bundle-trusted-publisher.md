@@ -1,7 +1,7 @@
 # ADR-0016: CandidateBundle and the trusted publisher
 
 Status: accepted (2026-09-13)
-Context: external review of v0.1.0 ([review](../../reviews/2026-09-13-v0.1.0/)), findings F01–F04, F07, F20, F21.
+Context: external review of v0.1.0 ([review](../reviews/2026-09-13-v0.1.0/)), findings F01–F04, F07, F20, F21.
 
 ## Decision
 

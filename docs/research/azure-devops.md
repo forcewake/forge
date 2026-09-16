@@ -1229,7 +1229,7 @@ forge may subscribe once unfiltered and diff via the API — see §2.3.)
   "publisherId": "tfs",
   "message": { "text": "Dev User has added a pull request comment",
                "html": "Dev User has <a href=\"…/pullrequest/512?discussionId=77\">added</a> a pull request comment",
-               "markdown": "Dev User has [added](…/pullrequest/512?discussionId=77) a pull request comment" },
+               "markdown": "Dev User has [added](https://dev.azure.com/org/project/_git/repo/pullrequest/512) a pull request comment" },
   "resource": {
     "comment": {
       "id": 301,

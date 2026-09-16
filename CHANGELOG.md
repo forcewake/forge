@@ -494,7 +494,7 @@ against a real GitLab CE, plus the reactive bot core inherited from
   a one-active-run-per-issue guard.
 - ChangeSet model with exact-match replacement and deterministic
   materialization; Commits API writer with exact-SHA correlation
-  ([ADR-0001](docs/adr/0001-changesets-exact-replacements.md)).
+  ([ADR-0001](docs/adr/0001-commits-api-write-backend-changeset-contract.md)).
 - Quality contract
   ([ADR-0008](docs/adr/0008-quality-contract-instead-of-pipeline-status.md)):
   pipeline success + every required job succeeded; failures classified

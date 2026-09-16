@@ -2,7 +2,7 @@
 
 Goal: connect a GitLab project to forge so runs can be dispatched, with the
 execution profile approved by a human **before** the first run
-([ADR-0002](../adr/0002-ci-as-execution-profile-rce.md)). Machine-checkable
+([ADR-0002](../adr/0002-ci-execution-environment-explicit-execution-profiles.md)). Machine-checkable
 version: `python -m forge.doctor --project <id>` until it exits 0.
 
 ## 1. Approve the execution profile (human decision)
