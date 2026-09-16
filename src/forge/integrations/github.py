@@ -447,6 +447,17 @@ class GitHubClient:
         raw = await self._paginated(f"/repos/{owner}/{repo}/issues/{number}/comments")
         return [dict(item) for item in raw]
 
+    async def update_issue_comment(
+        self, owner: str, repo: str, comment_id: int, body: str
+    ) -> None:
+        """Edit one issue comment in place (the taken-in-work ack gains its
+        watch link once the Actions run id is discovered)."""
+        await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            json={"body": body},
+        )
+
     async def create_issue_comment(
         self, owner: str, repo: str, number: int, body: str
     ) -> dict[str, Any]:

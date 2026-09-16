@@ -19,7 +19,9 @@ import { createInterface } from "node:readline";
 import { appendFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-const driver = (process.argv[2] || process.env.FORGE_LOG_DRIVER || "").trim();
+const driver = (process.argv[2] || process.env.FORGE_LOG_DRIVER || "")
+  .replace(/^["']|["']$/g, "")
+  .trim();
 const usageFile = process.env.FORGE_USAGE_FILE || ".forge/usage.json";
 const eventsFile = process.env.FORGE_EVENTS_FILE || "";
 

@@ -848,7 +848,7 @@ class GitHubRunService:
             "copilot": "GitHub Copilot CLI",
         }.get(correlated.driver, correlated.driver)
         watching = f"[▶ watch the run live]({actions_url})" if actions_url else "run id pending"
-        await self._post_journaled_note(
+        ack_note_id = await self._post_journaled_note(
             project_id,
             issue_number,
             (
@@ -863,6 +863,12 @@ class GitHubRunService:
             run_id,
             "taken_in_work_note",
         )
+        if ack_note_id is not None:
+            # deep-merge INTO the existing harness fragment — a shallow
+            # patch would wipe workflow/run_id/branch from the evidence.
+            harness_fragment = dict((run.evidence or {}).get("harness") or {})
+            harness_fragment.update(ack_note_id=ack_note_id, ack_url_pending=True)
+            await self._merge_run_evidence(run_id, {"harness": harness_fragment})
 
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
         """The driver frozen at plan time (ADR-0023 §6), or None for a
@@ -1857,8 +1863,11 @@ class GitHubRunService:
 
     async def _post_journaled_note(
         self, project_id: int, issue_number: int, body: str, run_id: str, kind: str
-    ) -> None:
-        """Post an issue comment with intent/outcome journaling (ADR-0005)."""
+    ) -> int | None:
+        """Post an issue comment with intent/outcome journaling (ADR-0005).
+
+        Returns the created note id (the taken-in-work ack stores it so the
+        reconciler can upgrade the comment with the watch link)."""
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(
@@ -1874,6 +1883,7 @@ class GitHubRunService:
             raise
         note_id = note.get("id") if isinstance(note, dict) else getattr(note, "id", None)
         await self._complete_action(action_id, "succeeded", {"note_id": note_id})
+        return note_id
 
     async def _complete_action(self, action_id: int, status: str, remote_result=None) -> None:
         async with self._session_factory() as session:
