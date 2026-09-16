@@ -726,6 +726,28 @@ class TestLaneTemplateContract:
         assert "exit 0" in driver["bash"]  # the audit trail is the artifact
         assert 'pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"' in text
 
+    def test_brief_transport_is_opt_in_via_the_owners_read_token(self):
+        """With FORGE_AZDO_READ_TOKEN set the lane fetches its own brief
+        (--render-brief-azure) BEFORE the driver; a failed fetch falls back
+        to the pre-provisioned .forge/brief.md. The token is the repo
+        owner's read-only PAT — never forge's (the PAT test above)."""
+        text = TEMPLATE_PATH.read_text()
+        steps = lane_steps()
+
+        driver = next(step for step in steps if step.get("displayName") == "Run harness driver")
+        assert "--render-brief-azure" in driver["bash"]
+        assert "FORGE_AZDO_READ_TOKEN" in driver["bash"]  # the opt-in condition
+        assert "falling back to .forge/brief.md" in driver["bash"]
+        assert driver["bash"].index("--render-brief-azure") < driver["bash"].index(
+            "python -m forge.harness_entry || echo"
+        )
+        # The WIT GETs are routed by mapped env, not hardcoded values —
+        # the project rides on the predefined System.TeamProject variable.
+        assert "FORGE_AZDO_READ_TOKEN: $(FORGE_AZDO_READ_TOKEN)" in text
+        assert "FORGE_AZDO_ORG_URL: $(FORGE_AZDO_ORG_URL)" in text
+        assert "FORGE_AZDO_PROJECT: $(System.TeamProject)" in text
+        assert "FORGE_AZDO_BOT_NAME: $(FORGE_AZDO_BOT_NAME)" in text
+
     def test_harness_provider_keys_mapped_from_secret_variables(self):
         text = TEMPLATE_PATH.read_text()
 

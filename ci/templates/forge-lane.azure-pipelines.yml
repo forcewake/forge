@@ -16,7 +16,12 @@
 #      ANTHROPIC_BASE_URL / ZAI_API_KEY / XAI_API_KEY / COPILOT_GITHUB_TOKEN
 #      — and FORGE_HARNESS_MCP as a plain (non-secret) variable. The lane
 #      maps all of them; the driver uses what it needs.
-#   3. The lane NEVER gets forge credentials: no forge PAT, no webhook
+#   3. OPTIONAL brief transport: provision FORGE_AZDO_READ_TOKEN (a READ-
+#      ONLY work-item PAT of YOURS, vso.work read — never forge's PAT) as
+#      a pipeline secret, and the lane fetches the work item + the forge
+#      plan comment itself before the driver. Without it the lane uses the
+#      pre-provisioned .forge/brief.md as-is.
+#   4. The lane NEVER gets forge credentials: no forge PAT, no webhook
 #      secret, no write token — and the build service's auto-injected
 #      access token is never referenced either. Nothing here can push.
 #
@@ -103,10 +108,15 @@ jobs:
             echo "pip install of forge failed (attempt $attempt), retrying..."
             sleep $((attempt * 5))
           done
-          # Brief transport (beta): the lane expects a pre-provisioned
-          # .forge/brief.md (harness_entry's parity path). Fetching the work
-          # item + forge plan comment would need a repo-owner-provisioned
-          # read token — the build service token stays unreferenced.
+          # Brief transport: when the repo owner provisions a READ-ONLY
+          # work-item token (FORGE_AZDO_READ_TOKEN — a pipeline secret that
+          # is YOURS, never forge's), the lane fetches the work item + the
+          # approved plan comment itself; a failed fetch falls back to the
+          # pre-provisioned .forge/brief.md.
+          if [ -n "${FORGE_AZDO_READ_TOKEN:-}" ]; then
+            python -m forge.harness_entry --render-brief-azure \
+              || echo "brief fetch failed — falling back to .forge/brief.md"
+          fi
           python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
           exit 0
         displayName: Run harness driver
@@ -115,6 +125,13 @@ jobs:
           FORGE_MODEL: $(FORGE_MODEL)
           FORGE_HARNESS_MODEL: $(FORGE_MODEL)
           FORGE_ISSUE_NUMBER: $(FORGE_ISSUE_NUMBER)
+          # Brief-transport inputs (all optional): the read token is the
+          # owner's own read-only PAT; the org URL and project name route
+          # the two WIT GETs (System.TeamProject is a predefined variable).
+          FORGE_AZDO_READ_TOKEN: $(FORGE_AZDO_READ_TOKEN)
+          FORGE_AZDO_ORG_URL: $(FORGE_AZDO_ORG_URL)
+          FORGE_AZDO_PROJECT: $(System.TeamProject)
+          FORGE_AZDO_BOT_NAME: $(FORGE_AZDO_BOT_NAME)
           # MCP (ADR-0022): canonical mcpServers JSON from a pipeline
           # VARIABLE (not secret — it references secrets by name); an empty
           # value means strict isolation with no servers.

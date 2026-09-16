@@ -24,12 +24,15 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   the workflow can still upload the candidate artifact ``if: always()``.
 
 Brief transport (the dispatch-input size question, decided): the lane
-FETCHES its own brief content from the GitHub API — the approved plan is
-ALREADY on the issue as the forge plan comment (E3a posted it), so
-``--render-brief`` reads the issue body + that comment with the runner's
-read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`). No
-workflow_dispatch input ever carries plan text, so no input size limit
-binds. Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
+FETCHES its own brief content from the forge API — the approved plan is
+ALREADY posted as the plan comment (E3a/AZ-2 posted it), so
+``--render-brief`` reads the GitHub issue body + that comment with the
+runner's read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`), and
+``--render-brief-azure`` reads the Azure DevOps work item + its plan
+comment with a repo-owner-provisioned read-only token
+(:func:`fetch_workitem`, FORGE_AZDO_READ_TOKEN — never forge's PAT). No
+dispatch input ever carries plan text, so no input size limit binds.
+Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
 works as-is (the workflow owner may ship it however they like).
 
 Stdlib + the pure prompt builder only: no forge database, no forge
@@ -41,9 +44,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+from html import unescape
 from pathlib import Path
 
 from forge.harnesses.prompt import (
@@ -121,6 +126,93 @@ def fetch_issue_context(repo: str, issue_number: int, token: str) -> tuple[str, 
         author = (comment.get("user") or {}).get("login", "")
         text = str(comment.get("body") or "")
         if author in ("forge", "forcewake-forge") and "plan" in text.lower():
+            plan_text = text
+            break
+    return body, plan_text
+
+
+#: Work items read at GA 7.1; WIT comments only exist as the
+#: ``7.1-preview.4`` stripe (docs/research/azure-devops.md §1.3/§5.1).
+_AZDO_WIT_API_VERSION = "7.1"
+_AZDO_COMMENTS_API_VERSION = "7.1-preview.4"
+
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def _strip_html(html: str) -> str:
+    """Defensive HTML → text: tags out, entities unescaped, whitespace
+    collapsed (work-item fields are HTML; it never belongs in a prompt)."""
+    text = _HTML_TAG_RE.sub(" ", html or "")
+    return " ".join(unescape(text).split())
+
+
+def _is_bot_identity(identity: str, bot_name: str) -> bool:
+    """Case-insensitive identity match (``uniqueName``, its local part, or a
+    bare display name) — the same tolerance the gateway's bot-loop guard
+    uses for AzDO identities."""
+    left = (identity or "").strip().lower()
+    bot = (bot_name or "").strip().lower()
+    if not left or not bot:
+        return False
+    return left == bot or left.split("@", 1)[0] == bot
+
+
+def fetch_workitem(
+    org_url: str,
+    project: str,
+    work_item_id: int,
+    token: str,
+    *,
+    bot_name: str = "forge-bot",
+) -> tuple[str, str]:
+    """Fetch (work-item body, forge plan comment) from Azure DevOps.
+
+    The AzDO brief transport, mirroring :func:`fetch_issue_context`:
+    stdlib only (the lane runs forge's code without forge's dependencies),
+    Basic auth ``":" + token`` — empty username, colon prefix
+    (docs/research/azure-devops.md §1.2). The work item is read at
+    ``api-version=7.1``, its comments at the ``7.1-preview.4`` stripe with
+    ``format=markdown`` (the only stripe that family has at 7.1).
+
+    ``System.Description`` is HTML and is stripped defensively; the body
+    is the title plus the description (both live in separate fields, unlike
+    GitHub's single issue body). The plan comment is the latest comment by
+    the bot identity that contains the plan heading — the SAME heuristic
+    as :func:`fetch_issue_context`.
+    """
+    import base64
+    import urllib.request
+
+    def _get(url: str) -> object:
+        encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Basic {encoded}",
+                "Accept": "application/json",
+                "User-Agent": "forge-harness-entry",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+
+    base = f"{org_url.rstrip('/')}/{project}/_apis/wit/workItems/{work_item_id}"
+    item = _get(f"{base}?api-version={_AZDO_WIT_API_VERSION}")
+    fields = item.get("fields") if isinstance(item, dict) else {}
+    fields = fields if isinstance(fields, dict) else {}
+    title = str(fields.get("System.Title") or "")
+    description = _strip_html(str(fields.get("System.Description") or ""))
+    body = f"{title}\n\n{description}".strip()
+
+    comments = _get(f"{base}/comments?api-version={_AZDO_COMMENTS_API_VERSION}&format=markdown")
+    entries = comments.get("comments") if isinstance(comments, dict) else comments
+    plan_text = ""
+    for comment in reversed(entries if isinstance(entries, list) else []):
+        author = comment.get("createdBy") if isinstance(comment, dict) else {}
+        author = author if isinstance(author, dict) else {}
+        identity = str(author.get("uniqueName") or author.get("displayName") or "")
+        text = str(comment.get("text") or "") if isinstance(comment, dict) else ""
+        if _is_bot_identity(identity, bot_name) and "plan" in text.lower():
             plan_text = text
             break
     return body, plan_text
@@ -423,6 +515,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issue", type=int, default=None, help="issue number for --render-brief")
     parser.add_argument("--github-token", default=None, help="token for --render-brief")
     parser.add_argument(
+        "--render-brief-azure",
+        action="store_true",
+        help="fetch work item + forge plan from Azure DevOps and render the quality brief",
+    )
+    parser.add_argument(
+        "--org-url", default=None, help="org/collection URL for --render-brief-azure"
+    )
+    parser.add_argument("--project", default=None, help="AzDO project for --render-brief-azure")
+    parser.add_argument(
+        "--read-token", default=None, help="read-only work-item token for --render-brief-azure"
+    )
+    parser.add_argument(
         "--mcp",
         default=None,
         help="canonical mcpServers JSON (defaults to $FORGE_HARNESS_MCP)",
@@ -455,6 +559,25 @@ def main(argv: list[str] | None = None) -> int:
                 "harness_entry: --render-brief needs --repo/--issue/GITHUB_TOKEN",
             )
         body, plan = fetch_issue_context(repo, issue_number, token)
+        brief_path = Path(args.brief or ".forge/brief.md")
+        brief_path.parent.mkdir(parents=True, exist_ok=True)
+        brief_path.write_text(render_brief(body, plan))
+        print(f"harness_entry: brief rendered at {brief_path}")
+        return 0
+
+    if args.render_brief_azure:
+        org_url = args.org_url or os.environ.get("FORGE_AZDO_ORG_URL", "")
+        project = args.project or os.environ.get("FORGE_AZDO_PROJECT", "")
+        token = args.read_token or os.environ.get("FORGE_AZDO_READ_TOKEN", "")
+        bot_name = os.environ.get("FORGE_AZDO_BOT_NAME", "forge-bot")
+        issue_number = args.issue or int(os.environ.get("FORGE_ISSUE_NUMBER") or 0)
+        if not (org_url and project and issue_number and token):
+            return _finish(
+                "failed",
+                "harness_entry: --render-brief-azure needs --org-url/--project/"
+                "--issue/FORGE_AZDO_READ_TOKEN",
+            )
+        body, plan = fetch_workitem(org_url, project, issue_number, token, bot_name=bot_name)
         brief_path = Path(args.brief or ".forge/brief.md")
         brief_path.parent.mkdir(parents=True, exist_ok=True)
         brief_path.write_text(render_brief(body, plan))
