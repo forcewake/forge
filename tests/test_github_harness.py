@@ -53,7 +53,8 @@ def make_settings(**overrides) -> Settings:
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_HARNESS_MODEL=MODEL,
-        FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,        FORGE_VERIFICATION_GRACE_SECONDS=0,  # hermetic: grace needs a sleep
+        FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
+        FORGE_VERIFICATION_GRACE_SECONDS=0,  # hermetic: grace needs a sleep
     )
     values.update(overrides)
     return Settings(**values)
