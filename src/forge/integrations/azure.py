@@ -1425,3 +1425,11 @@ def _map_identity(identity: dict[str, Any]) -> UserInfo:
             "email": unique_name or None,
         }
     )
+
+    async def get_commit(self, project: str, repo: str, commit_id: str) -> dict[str, Any]:
+        """One commit's metadata (includes ``treeId`` — the trees API
+        rejects commit SHAs directly, LIVE-found in the ADR-0024 lab)."""
+        response = await self._get(
+            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/commits/{quote(commit_id)}",
+        )
+        return dict(response.json())

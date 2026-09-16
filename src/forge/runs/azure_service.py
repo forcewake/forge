@@ -394,7 +394,19 @@ class AzurePRReviewer:
 
     async def _tree_entries(self, project: str, repo: str, sha: str) -> dict[str, str]:
         """path -> objectId for every blob at *sha* (refuses truncated trees)."""
-        data = await self._client.get_tree(project, repo, sha, recursive=True)
+        # LIVE-found (ADR-0024 lab): the trees API rejects a COMMIT sha
+        # ("Expected a Tree, but objectId … resolved to a Commit") — resolve
+        # commit -> treeId first.
+        try:
+            data = await self._client.get_tree(project, repo, sha, recursive=True)
+        except AzureDevOpsError as exc:
+            if "resolved to a Commit" not in str(exc):
+                raise
+            commit = await self._client.get_commit(project, repo, sha)
+            tree_id = str((commit or {}).get("treeId") or "")
+            if not tree_id:
+                raise
+            data = await self._client.get_tree(project, repo, tree_id, recursive=True)
         if isinstance(data, dict) and data.get("truncated"):
             raise AzureDevOpsError(
                 200, f"tree listing at {sha!r} is truncated — refusing a partial diff"
