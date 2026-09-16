@@ -297,6 +297,72 @@ def check_harness_lanes(settings: Settings, variable_names: set[str]) -> list[Ch
     return results
 
 
+async def check_azure_devops(settings: Settings) -> list[CheckResult]:
+    """Azure DevOps adapter checks (WARN-level when the adapter is off)."""
+    # getattr-guards: the check must tolerate stub settings objects the
+    # same way the optional GitHub checks do.
+    if not getattr(settings, "FORGE_AZDO_ENABLED", False):
+        return [_result("azdo.enabled", None, "disabled (FORGE_AZDO_ENABLED=false)", "")]
+
+    results: list[CheckResult] = []
+    org_url = str(getattr(settings, "FORGE_AZDO_ORG_URL", "") or "").rstrip("/")
+    pat = getattr(settings, "FORGE_AZDO_PAT", None)
+    if not org_url or pat is None:
+        results.append(
+            _result("azdo.credentials", False, "", "FORGE_AZDO_ORG_URL / FORGE_AZDO_PAT not set")
+        )
+        return results
+
+    # Cheap authenticated probe: a project list also proves the PAT is not
+    # scope-trapped (scope problems surface as 203 Non-Authoritative).
+    import base64
+
+    auth = base64.b64encode(f":{pat.get_secret_value()}".encode()).decode()
+    try:
+        resp = await httpx.AsyncClient(timeout=15).get(
+            f"{org_url}/_apis/projects",
+            params={"api-version": "7.1", "$top": "1"},
+            headers={"Authorization": f"Basic {auth}"},
+        )
+        if resp.status_code == 200:
+            results.append(_result("azdo.pat", True, f"authenticated against {org_url}", ""))
+        elif resp.status_code in (401, 203):
+            results.append(
+                _result(
+                    "azdo.pat",
+                    False,
+                    "",
+                    f"HTTP {resp.status_code} — check the PAT (expiry, org scope, encoding)",
+                )
+            )
+        else:
+            results.append(_result("azdo.pat", False, "", f"HTTP {resp.status_code}"))
+    except Exception as exc:  # noqa: BLE001
+        results.append(_result("azdo.pat", False, "", _short(exc)))
+
+    webhook_ready = bool(getattr(settings, "FORGE_AZDO_WEBHOOK_USERNAME", "")) and bool(
+        getattr(settings, "FORGE_AZDO_WEBHOOK_PASSWORD", None)
+    )
+    results.append(
+        _result(
+            "azdo.webhook_credentials",
+            webhook_ready,
+            "Basic credentials configured for ingress validation",
+            "FORGE_AZDO_WEBHOOK_USERNAME / FORGE_AZDO_WEBHOOK_PASSWORD not set — "
+            "the ingress answers 503",
+        )
+    )
+    results.append(
+        _result(
+            "azdo.lane_pipeline",
+            getattr(settings, "FORGE_AZDO_LANE_PIPELINE_ID", None) is not None,
+            f"lane pipeline id {getattr(settings, 'FORGE_AZDO_LANE_PIPELINE_ID', None)}",
+            "FORGE_AZDO_LANE_PIPELINE_ID not set — /go runs the builtin lane only",
+        )
+    )
+    return results
+
+
 def _short(exc: Exception) -> str:
     text = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
     return text[:200]
@@ -314,6 +380,7 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     results.append(await check_redis(settings))
     results.append(await check_database(settings))
     results.append(await check_litellm(settings))
+    results.extend(await check_azure_devops(settings))
     if project_id is not None:
         results.extend(await check_project(settings, project_id))
     return results
