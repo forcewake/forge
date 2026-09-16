@@ -3,7 +3,7 @@
 Short answers with pointers. Setup guides:
 [GitLab project onboarding](operations/onboarding.md) ·
 [GitHub setup](github-setup.md) ·
-[Azure DevOps setup (beta)](azure-setup.md) · harness details:
+[Azure DevOps setup](azure-setup.md) · harness details:
 [harness-onboarding](harness-onboarding.md).
 
 ## Runs and lifecycle
@@ -27,7 +27,7 @@ different identities even for the same human
 connection-scoped).
 
 **What about Azure DevOps?**
-It works as a third adapter (beta): `/implement` on a work item, the plan
+It works as a third adapter: `/implement` on a work item, the plan
 as a work-item comment, `/go` dispatches the harness into YOUR Azure
 Pipelines, the candidate comes back as a pipeline artifact and is
 published as a Draft PR via the Push API — forge never votes or

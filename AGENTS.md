@@ -12,10 +12,10 @@ markdown): [setup](.claude/skills/forge-setup/SKILL.md),
 
 ## What forge is
 
-An agentic software-factory sidecar for self-hosted GitLab CE: an authorized
-issue (`@forge /implement`) becomes a factory branch with code, a green
-pipeline, and a Draft MR — **the bot never merges**. Enforced by
-capabilities and GitLab permissions, never by prompts
+An agentic software factory for GitLab CE, GitHub, and Azure DevOps: an
+authorized issue (`/implement`) becomes a factory branch with code, a green
+pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
+capabilities and platform permissions, never by prompts
 ([ADR-0003](docs/adr/0003-no-merge-is-enforceable.md)).
 
 ## Non-negotiable rules for agents
