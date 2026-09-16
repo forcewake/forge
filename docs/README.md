@@ -45,7 +45,7 @@ is wired on this repo, and the ground rules.
 
 | Tree | Covers |
 |---|---|
-| [ADR](adr/) | architecture decisions 0000–0024 (the "why") |
+| [ADR](adr/) | architecture decisions 0000–0025 (the "why") |
 | [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md) |
 | [Specs](specs/) | stage briefs and contracts the milestones were built from |
 | [Security](security/threat-model.md) | the threat model |

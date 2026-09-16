@@ -102,12 +102,15 @@ forge-agent:
         done
       fi
     - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
+    - export FORGE_LOG_PLATFORM=gitlab
     - |
       FORGE_DRIVER_EXIT="completed"
       copilot -p Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
         ${COPILOT_MODEL:+--model "$COPILOT_MODEL"} \
         --allow-tool 'read,write' \
-        --allow-tool 'shell(git:*)'${COPILOT_MCP_ARGS} \
+        --allow-tool 'shell(git:*)' \
+        --allow-tool 'shell(uv run pytest:*)' --allow-tool 'shell(pytest:*)' \
+        --allow-tool 'shell(uv run ruff:*)' --allow-tool 'shell(uv run mypy:*)'${COPILOT_MCP_ARGS} \
         --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1 \
         | tee .forge/events.jsonl \
         | node /tmp/filter.mjs copilot \

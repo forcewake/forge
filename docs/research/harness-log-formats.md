@@ -352,3 +352,22 @@ the RAW tee'd file while the job log gets only the grammar lines.
    in CLI JSON output.
 4. copilot: `-p`-mode sessionId discovery under `~/.copilot/session-state/` and
    whether `events.jsonl` appears before process exit (tail-ability).
+
+
+---
+
+## Postscript (2026-09-16, ADR-0025): collapse markers per platform
+
+The grammar above is preserved verbatim; the shipping filter
+(`ci/templates/harness-log-filter.mjs`) additionally wraps each tool call
+in a platform-native collapsible group so the collapsed job log shows one
+line per tool call and the expanded view carries the full tool output:
+
+- GitHub Actions: `::group::<title>` / `::endgroup::` [documented workflow commands].
+- GitLab CI: `\x1b[0Ksection_start:<epoch>:<id>[collapsed=true]\r\x1b[0K<title>` /
+  `\x1b[0Ksection_end:<epoch>:<id>\r\x1b[0K` — epoch seconds, id `[A-Za-z0-9_.-]`
+  [documented custom collapsible sections].
+- Azure DevOps: no log-section commands [documented] — flat grammar lines.
+
+Platform is per lane (`FORGE_LOG_PLATFORM` = actions | gitlab | azdo | flat).
+Sources: docs.github.com/actions/monitoring-and-troubleshooting-workflows/enabling-debug-logging (workflow commands); docs.gitlab.com/ci/jobs/job_logs/#custom-collapsible-sections; learn.microsoft.com/en-us/azure/devops/pipelines/scripts/logging-commands (no section support).

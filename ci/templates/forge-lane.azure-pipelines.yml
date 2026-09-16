@@ -50,6 +50,9 @@ parameters:
     default: ''
   - name: work_item_id
     type: string
+  - name: repair_context
+    type: string
+    default: ''
 
 jobs:
   - job: harness
@@ -147,6 +150,8 @@ jobs:
           FORGE_MODEL: $(FORGE_MODEL)
           FORGE_HARNESS_MODEL: $(FORGE_MODEL)
           FORGE_ISSUE_NUMBER: $(FORGE_ISSUE_NUMBER)
+          FORGE_REPAIR_CONTEXT: $(repair_context)
+          FORGE_LOG_PLATFORM: azdo
           # Brief-transport inputs (all optional): the read token is the
           # owner's own read-only PAT; the org URL and project name route
           # the two WIT GETs (System.TeamProject is a predefined variable).

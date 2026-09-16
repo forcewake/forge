@@ -654,6 +654,7 @@ class TestLaneTemplateContract:
             "driver",
             "model",
             "work_item_id",
+            "repair_context",
         }
         assert all(spec["type"] == "string" for spec in parameters.values())
 

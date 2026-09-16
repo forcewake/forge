@@ -771,12 +771,10 @@ class GitHubRunService:
                     # comment (fetched read-only) — it needs the issue
                     # number, never the plan TEXT (no input size limits).
                     "issue_number": str(issue_number),
-                    **(
-                        # Bounded verification-failure context (check names +
-                        # reason) on a repair re-dispatch; cycle 1 dispatches
-                        # the same shape as always.
-                        {"repair_context": repair_context[:2000]} if repair_context else {}
-                    ),
+                    # Bounded verification-failure context (check names +
+                    # reason) on a repair re-dispatch; cycle 1 dispatches
+                    # the same shape as always.
+                    **({"repair_context": repair_context[:2000]} if repair_context else {}),
                 },
             )
         except Exception as exc:
@@ -934,9 +932,7 @@ class GitHubRunService:
             ):
                 return False
             next_cycle = (run.commit_cycle or 1) + 1
-            max_cycles = int(
-                getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3
-            )
+            max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
             if next_cycle > max_cycles:
                 await self._to_terminal(
                     run_id,

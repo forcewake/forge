@@ -90,6 +90,7 @@ forge-agent:
     # where). The filter also aggregates usage receipts into
     # .forge/usage.json for candidate.meta.json.
     - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
+    - export FORGE_LOG_PLATFORM=gitlab
     - set -o pipefail
     # Optional: route harness API traffic through a proxy. Some runner
     # networks throttle long-lived streaming responses from AI providers to
@@ -119,6 +120,8 @@ forge-agent:
       FORGE_DRIVER_EXIT="completed"
       grok --no-auto-update --always-approve --no-alt-screen \
         --trust --max-turns 200 \
+        --allow 'Bash(uv run pytest:*)' --allow 'Bash(pytest:*)' \
+        --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \
         --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \
         --output-format streaming-json \
         --debug-file .forge/grok-debug.log \

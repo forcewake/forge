@@ -126,6 +126,7 @@ forge-agent:
     # failed. opencode emits no parseable usage receipt on stdout, so the
     # usage stays unknown (never zero).
     - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
+    - export FORGE_LOG_PLATFORM=gitlab
     - |
       FORGE_DRIVER_EXIT="completed"
       opencode run --auto --format json "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." 2>&1 \

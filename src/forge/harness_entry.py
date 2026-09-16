@@ -68,7 +68,16 @@ from forge.harnesses.mcp import (
 
 #: Claude's scoped shell allowlist (same posture as the GitLab template:
 #: edits auto-accepted, shell limited to read-only git).
-_CLAUDE_ALLOWED_TOOLS = "Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+# The quality bar demands the agent RUN the tests (ADR-0008): the
+# allowlist carries the repo's own test/lint commands, scoped to the
+# in-repo venv + uv. Anything else is auto-denied (no prompts headless).
+_CLAUDE_ALLOWED_TOOLS = (
+    "Bash(git status:*),Bash(git diff:*),Bash(git log:*),"
+    "Bash(.venv/bin/python -m pytest:*),Bash(.venv/bin/python -m pytest),"
+    "Bash(uv run pytest:*),Bash(uv run pytest),Bash(pytest:*)"
+    "Bash(uv run ruff:*),Bash(.venv/bin/ruff:*),Bash(uv run mypy:*),"
+    "Bash(python -m pytest:*),Bash(uv sync)"
+)
 
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
@@ -347,6 +356,8 @@ def render_driver_script(
         invocation = (
             "grok --no-auto-update --always-approve --no-alt-screen \\\n"
             "  --trust --max-turns 200 \\\n"
+            "  --allow 'Bash(uv run pytest:*)' --allow 'Bash(pytest:*)' \\\n"
+            "  --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \\\n"
             "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
@@ -413,9 +424,12 @@ def render_driver_script(
             f"copilot -p {quoted_prompt}{model_flag} \\\n"
             "  --allow-tool 'read,write' \\\n"
             "  --allow-tool 'shell(git:*)' \\\n"
+            "  --allow-tool 'shell(uv run pytest:*)' \\\n"
+            "  --allow-tool 'shell(pytest:*)' \\\n"
+            "  --allow-tool 'shell(uv run ruff:*)' \\\n"
+            "  --allow-tool 'shell(uv run mypy:*)' \\\n"
             f"{mcp_grants}"
-            "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \\\n"
-            "  2>&1"
+            "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )
         return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
 

@@ -1061,6 +1061,7 @@ class AzureRunService:
         project_id: int,
         issue_number: int,
         driver: str | None = None,
+        repair_context: str = "",
     ) -> None:
         """Dispatch the lane pipeline and park the run in ``waiting_harness``.
 
@@ -1115,6 +1116,9 @@ class AzureRunService:
                     "driver": driver,
                     "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
                     "work_item_id": str(issue_number),
+                    # Bounded verification-failure context on a repair
+                    # re-dispatch; empty on cycle 1.
+                    **({"repair_context": repair_context[:2000]} if repair_context else {}),
                 },
             )
         except Exception as exc:

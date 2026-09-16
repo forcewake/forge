@@ -22,6 +22,31 @@ import { dirname } from "node:path";
 const driver = (process.argv[2] || process.env.FORGE_LOG_DRIVER || "")
   .replace(/^["']|["']$/g, "")
   .trim();
+// Collapse platform: "actions" (::group::), "gitlab" (section_start
+// [collapsed=true]), "flat" (no native folding — Azure DevOps has no log
+// section commands; the pretty lines render as-is).
+const platform = (process.env.FORGE_LOG_PLATFORM || "actions").trim().toLowerCase();
+
+const groupOpen = (title, id) => {
+  if (platform === "actions") {
+    emit(`::group::${title}`);
+  } else if (platform === "gitlab") {
+    const epoch = Math.floor(Date.now() / 1000);
+    process.stdout.write(
+      `\x1b[0Ksection_start:${epoch}:${id}[collapsed=true]\r\x1b[0K${title}\n`,
+    );
+  } else {
+    emit(title); // flat: the one-line summary still reads on its own
+  }
+};
+const groupClose = (id) => {
+  if (platform === "actions") emit("::endgroup::");
+  else if (platform === "gitlab") {
+    const epoch = Math.floor(Date.now() / 1000);
+    process.stdout.write(`\x1b[0Ksection_end:${epoch}:${id}\r\x1b[0K`);
+  }
+  // flat: nothing to close
+};
 const usageFile = process.env.FORGE_USAGE_FILE || ".forge/usage.json";
 const eventsFile = process.env.FORGE_EVENTS_FILE || "";
 
@@ -122,6 +147,25 @@ const writeUsageReceipt = () => {
   } catch { /* the receipt line above is the contract; the file is a copy */ }
 };
 
+// ── collapsible tool groups ───────────────────────────────────────────
+// A group opens at tool_use (title = the 🔧 line) and closes after the
+// tool_result lands; the expanded view carries the full formatted output.
+let openGroup = null;
+const groupFor = (hint) =>
+  "tool-" + oneLine(hint).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "tool";
+const openToolGroup = (hint) => {
+  if (openGroup) groupClose(openGroup);
+  openGroup = groupFor(hint);
+  groupOpen(`${ts()} 🔧 ${cap(hint, 80)}`, openGroup);
+};
+const closeToolGroup = (outcome, hint, detail) => {
+  glyphLine(outcome, `${cap(hint, 80)}${detail ? " · " + detail : ""}`);
+  if (openGroup) {
+    groupClose(openGroup);
+    openGroup = null;
+  }
+};
+
 // ── driver: claude-code ───────────────────────────────────────────────
 const pendingClaude = new Map(); // tool_use_id -> hint
 let claudeThoughtThisTurn = false;
@@ -158,7 +202,8 @@ async function runClaude(rl) {
           stats.tools += 1;
           const hint = hintFrom(b.input);
           pendingClaude.set(b.id, `${b.name} ${hint}`.trim());
-          glyphLine("🔧", `${scope}${b.name} ${hint}`);
+          if (!scope) openToolGroup(`${b.name} ${hint}`);
+          else glyphLine("🔧", `⟲ ${b.name} ${hint}`);
         } else if (b.type === "text") {
           const text = cap(b.text, 140);
           if (text) glyphLine("💬", text);
@@ -174,13 +219,16 @@ async function runClaude(rl) {
         if (b.type !== "tool_result") continue;
         const hint = pendingClaude.get(b.tool_use_id) || "tool";
         pendingClaude.delete(b.tool_use_id);
-        stats.tools += b.is_error ? 0 : 0; // counted at start
         if (b.is_error) {
           stats.toolsErr += 1;
-          glyphLine("❌", `${cap(hint, 80)} · ${cap(firstText(b.content), 120)}`);
+          const full = oneLine(firstText(b.content));
+          if (full) emit(cap(full, 4000)); // expanded view: the real output
+          closeToolGroup("❌", hint, cap(firstText(b.content), 120));
         } else {
           stats.toolsOk += 1;
-          glyphLine("✅", `${cap(hint, 80)} · ${kfmt(resultSize(b.content))}B`);
+          const full = oneLine(firstText(b.content));
+          if (full) emit(cap(full, 4000)); // expanded view: the real output
+          closeToolGroup("✅", hint, `${kfmt(resultSize(b.content))}B`);
         }
       }
       continue;
@@ -225,7 +273,7 @@ async function runGrok(rl) {
       stats.tools += 1;
       const title = cap(e.title || hintFrom(e.rawInput), 80);
       grokCalls.set(e.callId ?? `${e.toolName}`, `${e.toolName ?? "tool"} ${title}`.trim());
-      glyphLine("🔧", `${e.toolName ?? "tool"} ${title}`);
+      openToolGroup(`${e.toolName ?? "tool"} ${title}`);
       continue;
     }
     if (e.type === "tool_call_update") {
@@ -234,10 +282,10 @@ async function runGrok(rl) {
       const size = resultSize(e.rawOutput);
       if (failed) {
         stats.toolsErr += 1;
-        glyphLine("❌", `${cap(hint, 80)} · ${cap(oneLine(e.rawOutput), 120)}`);
+        closeToolGroup("❌", hint, cap(oneLine(e.rawOutput), 120));
       } else {
         stats.toolsOk += 1;
-        glyphLine("✅", `${cap(hint, 80)} · ${kfmt(size)}B`);
+        closeToolGroup("✅", hint, `${kfmt(size)}B`);
       }
       continue;
     }
@@ -321,7 +369,7 @@ async function runOpencode(rl) {
         glyphLine("❌", `${part.tool ?? "tool"} ${hint} · ${cap(oneLine(state.output), 120)}`);
       } else {
         stats.toolsOk += 1;
-        glyphLine("🔧", `${part.tool ?? "tool"} ${hint}`);
+        closeToolGroup("✅", `${part.tool ?? "tool"} ${hint}`, `${kfmt(resultSize(state.output))}B`);
       }
       continue;
     }

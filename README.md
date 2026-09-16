@@ -240,7 +240,7 @@ The full index lives at **[docs/README.md](docs/README.md)**. Highlights:
 | [docs/getting-started/github.md](docs/getting-started/github.md) | GitHub App + project setup |
 | [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md) | Azure DevOps setup + the live-verification checklist |
 | [docs/faq.md](docs/reference/faq.md) | frequently asked questions (all providers) |
-| [docs/adr/](docs/adr/) | architecture decisions (0000–0024) |
+| [docs/adr/](docs/adr/) | architecture decisions (0000–0025) |
 | [demo/](demo/) | sales demo script + regeneration skill |
 
 ## License
