@@ -88,6 +88,7 @@ jobs:
           # shared prompt builder. Nothing is written to the repository.
           GITHUB_TOKEN: ${{ github.token }}
           FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
         run: |
           pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"
           python -m forge.harness_entry --render-brief

@@ -566,9 +566,19 @@ def main(argv: list[str] | None = None) -> int:
                 "harness_entry: --render-brief needs --repo/--issue/GITHUB_TOKEN",
             )
         body, plan = fetch_issue_context(repo, issue_number, token)
+        brief_text = render_brief(body, plan)
+        repair_context = os.environ.get("FORGE_REPAIR_CONTEXT", "")
+        if repair_context.strip():
+            # Bounded verification-failure context on a repair re-dispatch
+            # (ADR-0008): the agent fixes its own candidate against the
+            # named failing checks instead of re-proposing blind.
+            brief_text += (
+                "\n\n## Repair context — previous candidate failed verification\n\n"
+                f"{repair_context[:2000]}\n"
+            )
         brief_path = Path(args.brief or ".forge/brief.md")
         brief_path.parent.mkdir(parents=True, exist_ok=True)
-        brief_path.write_text(render_brief(body, plan))
+        brief_path.write_text(brief_text)
         print(f"harness_entry: brief rendered at {brief_path}")
         return 0
 

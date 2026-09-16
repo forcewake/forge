@@ -716,6 +716,8 @@ class GitHubRunService:
         project_id: int,
         issue_number: int,
         driver: str | None = None,
+        repair_context: str = "",
+        repair_reason: str | None = None,
     ) -> None:
         """Dispatch the harness workflow and park the run in ``waiting_harness``.
 
@@ -769,6 +771,12 @@ class GitHubRunService:
                     # comment (fetched read-only) — it needs the issue
                     # number, never the plan TEXT (no input size limits).
                     "issue_number": str(issue_number),
+                    **(
+                        # Bounded verification-failure context (check names +
+                        # reason) on a repair re-dispatch; cycle 1 dispatches
+                        # the same shape as always.
+                        {"repair_context": repair_context[:2000]} if repair_context else {}
+                    ),
                 },
             )
         except Exception as exc:
@@ -896,6 +904,71 @@ class GitHubRunService:
             if status == 422:
                 return  # idempotent re-entry — the ref is there (ADR-0016)
             raise
+
+    async def _begin_repair(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        failure_kind: str,
+        failure_reason: str,
+    ) -> bool:
+        """Red-dispatch the harness lane as a bounded repair cycle (ADR-0008).
+
+        Only from `waiting_ci`, only for `code`-classified independent-check
+        failures, only while commit cycles remain. The walk is
+        waiting_ci → evaluating_ci → proposing (graph-legal edges), the
+        cycle counter bumps durably, and `_advance_harness` re-dispatches
+        with the bounded failure context riding as a dispatch input. The
+        lane appends it to the brief, so the agent fixes its own candidate
+        — the exact GitLab `_begin_repair` semantics on the Actions lane.
+        """
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await self._get_run(session, run_id)
+            if run.cancel_requested or run.status in (
+                FlowStatus.CANCELLED,
+                FlowStatus.FAILED,
+                FlowStatus.BLOCKED,
+            ):
+                return False
+            next_cycle = (run.commit_cycle or 1) + 1
+            max_cycles = int(
+                getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3
+            )
+            if next_cycle > max_cycles:
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"quality_contract: {failure_reason} — commit cycles exhausted",
+                )
+                return False
+            run.commit_cycle = next_cycle
+            await controller.transition(
+                run_id, FlowStatus.EVALUATING_CI, reason=f"repair cycle {next_cycle}"
+            )
+            await controller.transition(
+                run_id,
+                FlowStatus.PROPOSING,
+                reason=f"repair cycle {next_cycle}: {failure_reason}",
+            )
+            await session.commit()
+
+        bounded = f"{failure_kind}: {failure_reason}"[:2000]
+        logger.info(
+            "Run %s enters repair cycle %d — re-dispatching the lane",
+            run_id[:8],
+            next_cycle,
+        )
+        await self._advance_harness(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            repair_context=bounded,
+            repair_reason=f"{failure_kind}: {failure_reason}",
+        )
+        return True
 
     async def evaluate_waiting_harness(self, now: datetime | None = None) -> None:
         """One reconciler pass over every GitHub run parked in ``waiting_harness``."""
@@ -1426,15 +1499,16 @@ class GitHubRunService:
             return
 
         if failed:
-            # ADR-0008: an independent check failure blames the change, not
-            # the environment. Harness-side repair from a PR verification
-            # failure is a follow-up (needs GitHubRunService._begin_repair);
-            # an honest blocked state beats a fake ready.
+            # ADR-0008: an independent check failure blames the change —
+            # bounded repair while cycles remain, else an honest blocked
+            # state with the failing check names.
             names = ", ".join(sorted({c.get("name") or "check" for c in failed}))
-            await self._to_terminal(
+            await self._begin_repair(
                 run_id,
-                FlowStatus.BLOCKED,
-                f"quality_contract: checks failed ({names}) — merge is a human decision",
+                project_id=run.project_id,
+                issue_number=issue_number,
+                failure_kind="code",
+                failure_reason=f"checks failed ({names})",
             )
             return
 
