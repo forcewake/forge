@@ -1096,6 +1096,37 @@ class RunService:
             )
             await session.commit()
 
+        # Taken-in-work ack: the issue never goes quiet between /go and the
+        # evidence comment — name the agent and link the live pipeline.
+        pipeline_url = ""
+        get_pipeline = getattr(self._gitlab, "get_pipeline", None)
+        if get_pipeline is not None and pipeline_id:
+            try:
+                pipeline = await get_pipeline(project_id, pipeline_id)
+                pipeline_url = pipeline.web_url or ""
+            except GitLabAPIError:
+                pass  # the ack is best-effort; the reconciler still runs
+        if pipeline_url:
+            driver_doc = {
+                "claude-code": "Claude Code",
+                "grok-build": "Grok Build",
+                "opencode": "opencode",
+                "copilot": "GitHub Copilot CLI",
+            }.get(str(handle_data.get("harness") or driver or ""), driver or "harness")
+            await self._post_journaled_note(
+                project_id,
+                issue_iid=run.issue_iid or 0,
+                body=(
+                    f"## 🔨 Run `{run_id[:8]}` taken into work\n\n"
+                    f"- Agent: **{driver_doc}** in project CI\n"
+                    f"- Branch: `{handle_data.get('branch')}`\n"
+                    f"- [▶ watch the pipeline live]({pipeline_url})\n\n"
+                    "*This is an automated message.*"
+                ),
+                run_id=run_id,
+                kind="taken_in_work_note",
+            )
+
         logger.info(
             "Run %s delegated to harness backend (pipeline %d, driver %s) — waiting_harness",
             run_id[:8],

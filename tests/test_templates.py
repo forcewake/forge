@@ -249,14 +249,17 @@ class TestDriverFilter:
 
 
 class TestEventFilters:
-    def test_filters_emit_usage_receipts(self):
-        for name in ("grok-events-filter.mjs", "claude-events-filter.mjs"):
+    def test_universal_filter_emits_usage_receipts(self):
+        text = (TEMPLATES_DIR / "harness-log-filter.mjs").read_text()
+        assert "FORGE_USAGE:" in text
+        assert "usage.json" in text
+        assert 'completeness: "aggregate"' in text  # JS object-literal form
+
+    def test_all_lanes_reference_the_universal_filter(self):
+        for name in ("grok.gitlab-ci.yml", "claude-code.gitlab-ci.yml",
+                     "opencode.gitlab-ci.yml", "copilot.gitlab-ci.yml"):
             text = (TEMPLATES_DIR / name).read_text()
-            assert "FORGE_USAGE:" in text, name
-            assert "usage.json" in text, name
-            assert '"completeness": "aggregate"' in text or 'completeness: "aggregate"' in text, (
-                name
-            )
+            assert "harness-log-filter.mjs" in text, name
 
     def test_filters_write_the_usage_file_templates_read(self):
         for name in ("grok.gitlab-ci.yml", "claude-code.gitlab-ci.yml"):

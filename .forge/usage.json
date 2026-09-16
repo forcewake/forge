@@ -1,0 +1,7 @@
+{
+  "input_tokens": 1200,
+  "cached_input_tokens": 165000,
+  "output_tokens": 340,
+  "completeness": "aggregate",
+  "source": "claude-code:stream"
+}

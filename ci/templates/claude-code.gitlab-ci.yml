@@ -80,9 +80,9 @@ forge-agent:
     # Live visibility: the compacted agent-event stream (tool calls,
     # thinking, API errors, retries, final result) flows into the job trace
     # while the harness works — GitLab tails job traces live. The full
-    # stream-json log stays in /tmp/claude-events.jsonl for the final tail;
+    # stream-json log stays in /tmp/harness.jsonl for the final tail;
     # the filter also aggregates usage receipts into .forge/usage.json.
-    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/claude-events-filter.mjs -o /tmp/filter.mjs'
+    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
     # The task brief: approved plan, written to an ephemeral file (ADR-0012:
     # context passes through GitLab CI variables, not forge-side state).
     - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
@@ -125,8 +125,8 @@ forge-agent:
         --max-turns 200 \
         --mcp-config /tmp/forge-mcp.json --strict-mcp-config \
         --setting-sources '' --output-format stream-json --verbose 2>&1 \
-        | tee /tmp/claude-events.jsonl \
-        | node /tmp/filter.mjs \
+        | tee /tmp/harness.jsonl \
+        | node /tmp/filter.mjs claude-code \
         || FORGE_DRIVER_EXIT="failed"
       export FORGE_DRIVER_EXIT
     # Stage the whole working tree and capture the candidate diff against

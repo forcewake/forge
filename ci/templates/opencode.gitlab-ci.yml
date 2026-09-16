@@ -125,9 +125,12 @@ forge-agent:
     # artifacts still upload (when: always) and forge classifies the run as
     # failed. opencode emits no parseable usage receipt on stdout, so the
     # usage stays unknown (never zero).
+    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
     - |
       FORGE_DRIVER_EXIT="completed"
-      opencode run --auto "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
+      opencode run --auto --format json "Read .forge/brief.md and implement the task it describes for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." 2>&1 \
+        | tee .forge/events.jsonl \
+        | node /tmp/filter.mjs opencode \
         || FORGE_DRIVER_EXIT="failed"
       export FORGE_DRIVER_EXIT
     # The brief is context, not deliverable — never let it near the

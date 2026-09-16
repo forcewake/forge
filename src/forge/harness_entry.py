@@ -317,7 +317,7 @@ def render_driver_script(
             " BASH_MAX_TIMEOUT_MS=600000\n"
             + mcp_provision
             + preamble
-            + f"{invocation} | tee -a {events}"
+            + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
         )
 
     if driver == "grok-build":
@@ -352,7 +352,7 @@ def render_driver_script(
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
             f"  -p {quoted_prompt} 2>&1"
         )
-        return preamble + mcp_provision + f"{invocation} | tee -a {events}"
+        return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
 
     if driver == "opencode":
         preamble = (
@@ -379,12 +379,12 @@ def render_driver_script(
                 **({"mcp": json.loads(for_opencode(servers))} if servers else {}),
             }
         )
-        invocation = f"opencode run --auto {quoted_prompt} 2>&1"
+        invocation = f"opencode run --auto --format json {quoted_prompt} 2>&1"
         return (
             preamble + "# The mechanical deny rides in via the documented\n"
             "# config-injection env (merges over global/project config).\n"
             f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
-            f"{invocation} | tee -a {events}"
+            f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
         )
 
     if driver == "copilot":
@@ -417,7 +417,7 @@ def render_driver_script(
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' \\\n"
             "  2>&1"
         )
-        return preamble + mcp_provision + f"{invocation} | tee -a {events}"
+        return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 
@@ -615,6 +615,27 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         return _finish("failed", f"harness_entry: {exc}")
+
+    # The universal log filter rides from the same pinned forge ref the
+    # lane trusts (raw.githubusercontent over the pinned ref); if it cannot
+    # be fetched the driver still runs — the log degrades to raw output,
+    # never blocks the candidate.
+    filter_ref = os.environ.get("FORGE_PINNED_REF", "main")
+    filter_url = (
+        "https://raw.githubusercontent.com/forcewake/forge/"
+        f"{filter_ref}/ci/templates/harness-log-filter.mjs"
+    )
+    try:
+        import urllib.request
+
+        urllib.request.urlretrieve(filter_url, "/tmp/harness-log-filter.mjs")
+        os.environ["FORGE_FILTER_PIPE"] = (
+            f'node /tmp/harness-log-filter.mjs "{driver}"'
+        )
+    except Exception as exc:
+        print(f"harness_entry: log filter unavailable ({exc}) — raw output",
+              file=sys.stderr)
+        os.environ["FORGE_FILTER_PIPE"] = "cat"
 
     completed = subprocess.run(  # noqa: S603, S602 — fixed argv, lane-local script
         ["/bin/bash", "-o", "pipefail", "-c", script]

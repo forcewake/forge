@@ -1180,6 +1180,26 @@ class AzureRunService:
             correlated.driver,
         )
 
+        # Taken-in-work ack (same contract as the GitHub lane).
+        if correlated.run_id:
+            run_url = (
+                f"{str(self._settings.FORGE_AZDO_ORG_URL).rstrip('/')}/{self._project}"
+                f"/_build/results?buildId={correlated.run_id}"
+            )
+            await self._post_journaled_comment(
+                project_id,
+                issue_number,
+                (
+                    f"## 🔨 Run `{run_id[:8]}` taken into work\n\n"
+                    f"- Agent: **{correlated.driver}** in Azure Pipelines\n"
+                    f"- Branch: `{branch}`\n"
+                    f"- [▶ watch the pipeline live]({run_url})\n\n"
+                    "*This is an automated message.*"
+                ),
+                run_id,
+                "taken_in_work_note",
+            )
+
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
         """The driver frozen at plan time (ADR-0023 §6), or None for a
         pre-v2 RunSpec — None keeps the configured-backend default."""
