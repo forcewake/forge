@@ -1328,9 +1328,7 @@ class GitHubRunService:
                 run_id,
                 {"verification": {"status": "not_configured", "candidate_sha": candidate_sha}},
             )
-            logger.info(
-                "No CI checks configured for %s — review as unverified", run_id[:8]
-            )
+            logger.info("No CI checks configured for %s — review as unverified", run_id[:8])
             async with self._session_factory() as session:
                 controller = Controller(session)
                 await controller.transition(
@@ -1354,12 +1352,13 @@ class GitHubRunService:
         failed = [
             c
             for c in checks
-            if (c.get("conclusion") or "") in ("failure", "timed_out", "action_required", "cancelled")
+            if (c.get("conclusion") or "")
+            in ("failure", "timed_out", "action_required", "cancelled")
         ]
         if pending:
             # Deadline: verification must converge (R17 — bounded waiting).
             deadline = int(
-                getattr(self._settings, 'FORGE_VERIFICATION_TIMEOUT_SECONDS', 1800) or 1800
+                getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800
             )
             started = run.updated_at  # the WAITING_CI transition moment
             if started is not None and (now - started).total_seconds() > deadline:
@@ -1388,8 +1387,7 @@ class GitHubRunService:
                     "status": "passed",
                     "candidate_sha": candidate_sha,
                     "checks": [
-                        {"name": c.get("name"), "conclusion": c.get("conclusion")}
-                        for c in checks
+                        {"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks
                     ],
                 }
             },
