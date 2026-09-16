@@ -417,6 +417,12 @@ class RunBudget(Base):
     #: Actuals recorded from provider receipts / harness usage evidence.
     consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Liabilities from receipts whose usage stayed unknown (ADR-0013: unknown
+    #: is never zero). A settled hold with no known actual lands here instead
+    #: of vanishing, so it keeps occupying budget capacity — the estimate was
+    #: the only bound the dispatch ever agreed to.
+    unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
