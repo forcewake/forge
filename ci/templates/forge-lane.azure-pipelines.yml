@@ -110,9 +110,16 @@ jobs:
       # publisher will CAS against.
       - bash: |
           set -euo pipefail
-          git fetch origin "refs/heads/$(FORGE_ATTEMPT_REF)" || true
+          # checkout: self already sits at the dispatched branch tip —
+          # which IS the frozen base (the dispatch leg cut the branch
+          # there). Detach straight at the parameter SHA; no extra fetch
+          # (the credential-free remote cannot authenticate a second one).
           git checkout --detach "$FORGE_ATTEMPT_BASE"
         displayName: Checkout the frozen attempt base (detached)
+        env:
+          # job variables are NOT step env vars — map explicitly (LIVE-found:
+          # an unmapped \$VAR detached at HEAD instead of the frozen base).
+          FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}
 
       # The driver step NEVER fails the job: harness_entry always exits 0
       # and writes .forge/exit — the candidate steps below run
