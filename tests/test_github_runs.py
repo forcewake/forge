@@ -51,6 +51,9 @@ def make_settings(**overrides) -> Settings:
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
         FORGE_APPROVERS="alice",
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
+        # Hermetic against the dev .env (dogfood lanes on): these tests
+        # exercise the BUILTIN publish path — no harness workflow.
+        FORGE_GITHUB_HARNESS_WORKFLOW="",
     )
     values.update(overrides)
     return Settings(**values)

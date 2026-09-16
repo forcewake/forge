@@ -843,6 +843,37 @@ class GitHubRunService:
             correlated.driver,
         )
 
+        # Taken-in-work ack (dogfood feedback): the issue should never go
+        # quiet between /go and the evidence comment — name the agent, the
+        # branch, and the live Actions run so a human can watch it stream.
+        actions_url = (
+            f"https://github.com/{self._repo_full_name}/actions/runs/{correlated.run_id}"
+            if correlated.run_id
+            else None
+        )
+        driver_doc = {
+            "claude-code": "Claude Code",
+            "grok-build": "Grok Build",
+            "opencode": "opencode",
+            "copilot": "GitHub Copilot CLI",
+        }.get(correlated.driver, correlated.driver)
+        watching = f"[▶ watch the run live]({actions_url})" if actions_url else "run id pending"
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            (
+                f"## 🔨 Run `{run_id[:8]}` taken into work\n\n"
+                f"- Agent: **{driver_doc}** in GitHub Actions\n"
+                f"- Branch: `{branch}`\n"
+                f"- {watching}\n\n"
+                "The full-fidelity log stays in the job; this issue gets the "
+                "evidence comment when the run reaches a verdict.\n\n"
+                "*This is an automated message.*"
+            ),
+            run_id,
+            "taken_in_work_note",
+        )
+
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
         """The driver frozen at plan time (ADR-0023 §6), or None for a
         pre-v2 RunSpec — None keeps the configured-backend default."""
