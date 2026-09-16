@@ -69,14 +69,24 @@ from forge.harnesses.mcp import (
 #: Claude's scoped shell allowlist (same posture as the GitLab template:
 #: edits auto-accepted, shell limited to read-only git).
 # The quality bar demands the agent RUN the tests (ADR-0008): the
-# allowlist carries the repo's own test/lint commands, scoped to the
-# in-repo venv + uv. Anything else is auto-denied (no prompts headless).
+# allowlist carries the test/lint commands per runner reality — hosted
+# Actions runners have NO .venv (forge installs into the interpreter via
+# pip; LIVE-found: ".venv/bin/python" patterns denied everything and the
+# agent flailed). Read-only utils are allowed too: Claude Code requires
+# EVERY segment of a compound command to be allowed, and exploration
+# commands (ls|grep|head) otherwise deny the whole pipeline. Writes stay
+# denied: commit/push are --disallowedTools and the push URL is FORBIDDEN.
 _CLAUDE_ALLOWED_TOOLS = (
     "Bash(git status:*),Bash(git diff:*),Bash(git log:*),"
-    "Bash(.venv/bin/python -m pytest:*),Bash(.venv/bin/python -m pytest),"
-    "Bash(uv run pytest:*),Bash(uv run pytest),Bash(pytest:*)"
-    "Bash(uv run ruff:*),Bash(.venv/bin/ruff:*),Bash(uv run mypy:*),"
-    "Bash(python -m pytest:*),Bash(uv sync)"
+    "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
+    "Bash(python3 -m pytest:*),Bash(python3 -m pytest),"
+    "Bash(python -m pytest:*),Bash(python -m pytest),Bash(pytest:*)"
+    "Bash(python3 -m ruff:*),Bash(python -m ruff:*),Bash(ruff:*),"
+    "Bash(python3 -m mypy:*),Bash(python -m mypy:*),"
+    "Bash(pip install pytest*),Bash(pip install ruff*),Bash(pip install mypy*),"
+    "Bash(uv run pytest:*),Bash(uv run pytest),"
+    "Bash(uv run ruff:*),Bash(uv run mypy:*),Bash(uv sync),"
+    "Bash(.venv/bin/python -m pytest:*),Bash(.venv/bin/python -m pytest)"
 )
 
 #: Drivers understood by this entry point (the shipped multi-harness set).

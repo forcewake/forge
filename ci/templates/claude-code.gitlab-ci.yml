@@ -111,7 +111,7 @@ forge-agent:
       # The quality bar demands the agent RUN the tests (ADR-0008): the
       # allowlist carries the repo's own test/lint commands, scoped to the
       # in-repo venv + uv. Anything else is auto-denied in -p mode.
-      CLAUDE_TOOLS="Bash(git status:*),Bash(git diff:*),Bash(git log:*),.venv/bin/python -m pytest*,.venv/bin/python -m pytest,uv run pytest*,pytest,uv run ruff*,.venv/bin/ruff*,uv run mypy*,python -m pytest*,uv sync"
+      CLAUDE_TOOLS="Bash(git status:*),Bash(git diff:*),Bash(git log:*),ls:*,cat:*,grep:*,head:*,tail:*,wc:*,which:*,.venv/bin/python -m pytest*,.venv/bin/python -m pytest,python3 -m pytest*,python3 -m pytest,python -m pytest*,pytest,uv run pytest*,uv run ruff*,.venv/bin/ruff*,python3 -m ruff*,uv run mypy*,python3 -m mypy*,python -m mypy*,uv sync"
       if [ -n "$FORGE_HARNESS_MCP" ]; then
         printf '%s' "$FORGE_HARNESS_MCP" > /tmp/forge-mcp.json
         for n in $(node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;console.log(Object.keys(m).join("\n"))' "$FORGE_HARNESS_MCP"); do
