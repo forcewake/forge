@@ -676,7 +676,10 @@ class TestLaneTemplateContract:
     def test_detached_checkout_of_the_parameter_base(self):
         text = TEMPLATE_PATH.read_text()
 
-        assert 'git fetch origin "refs/heads/$(FORGE_ATTEMPT_REF)" || true' in text
+        assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
+        # the env mapping must carry the parameter explicitly (live-found:
+        # job variables are macro-expanded, never exported as env)
+        assert 'FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}' in text
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
         # The base comes from the queue-time parameter, echoed to an env var.
         assert "FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}" in text
