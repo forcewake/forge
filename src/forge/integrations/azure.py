@@ -560,17 +560,18 @@ class AzureDevOpsClient:
         :class:`AzureDevOpsDriftError`; callers treat an already-exists
         rejection as idempotent re-entry.
         """
+        # LIVE-found (ADR-0024 lab): the Refs-Update body is the BARE
+        # array — an object wrapper makes AzDO read "refUpdates": null
+        # (400 "Value cannot be null. Parameter name: refUpdates").
         response = await self._post(
             f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/refs",
-            json={
-                "refUpdates": [
-                    {
-                        "name": f"refs/heads/{branch}",
-                        "oldObjectId": ZERO_COMMIT_SHA,
-                        "newObjectId": base_sha,
-                    }
-                ]
-            },
+            json=[
+                {
+                    "name": f"refs/heads/{branch}",
+                    "oldObjectId": ZERO_COMMIT_SHA,
+                    "newObjectId": base_sha,
+                }
+            ],
         )
         payload = response.json()
         _raise_on_failed_ref_update(payload)

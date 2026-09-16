@@ -395,11 +395,11 @@ async def test_create_branch_from_sends_40_zero_old_object_id(
     await azdo.create_branch_from(PROJECT, REPO, "forge/wi-42", base_sha=BASE_SHA)
 
     (request,) = [r for r in httpx_mock.get_requests() if r.method == "POST"]
-    assert json.loads(request.content) == {
-        "refUpdates": [
-            {"name": "refs/heads/forge/wi-42", "oldObjectId": ZERO_SHA, "newObjectId": BASE_SHA}
-        ]
-    }
+    # LIVE-found: the body is the BARE array (an object wrapper makes AzDO
+    # read "refUpdates": null → 400 "Value cannot be null").
+    assert json.loads(request.content) == [
+        {"name": "refs/heads/forge/wi-42", "oldObjectId": ZERO_SHA, "newObjectId": BASE_SHA}
+    ]
 
 
 async def test_create_branch_from_value_wrapped_success(
