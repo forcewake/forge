@@ -83,6 +83,23 @@ REPAIR_JSON = json.dumps(
 
 REVIEW_OK_JSON = json.dumps({"verdict": "ok", "summary": "Clean change.", "findings": []})
 
+#: R06: the repair fixes the file cycle 1 CREATED — it exists only at the
+#: previous candidate's ref, never in the approved source base.
+UPDATE_CREATED_JSON = json.dumps(
+    {
+        "branch": "model/chose/this",
+        "commit_message": "model's repair",
+        "changes": [
+            {
+                "path": "forge-demo/feature.md",
+                "operation": "update",
+                "old_text": "# feature\n",
+                "new_text": "# feature\nFIXED = True\n",
+            }
+        ],
+    }
+)
+
 REVIEW_CONCERNS_JSON = json.dumps(
     {
         "verdict": "concerns",
@@ -409,6 +426,103 @@ class TestRepairLoop:
         assert run.status_reason.startswith("unknown_failure")
         assert llm.roles() == ["planner", "implementer"]
         assert len(run.candidate_shas) == 1
+
+
+class TestAttemptBaseSnapshot:
+    """R06: ONE AttemptContext per attempt — a repair's existence checks and
+    write run against the previous candidate; the frozen source base feeds
+    only the final cumulative review."""
+
+    CREATED_PATH = "forge-demo/feature.md"
+
+    async def test_repair_updates_a_file_the_previous_cycle_created(self, db, fake_gitlab):
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON, UPDATE_CREATED_JSON, REVIEW_OK_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        def created_reads() -> list[tuple]:
+            """Every get_file of the created path as (project_id, path, ref)."""
+            return [
+                call[1]
+                for call in fake_gitlab.calls_of("get_file")
+                if call[1][1] == self.CREATED_PATH
+            ]
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        # The candidate commit's tree: the file cycle 1 created exists at that
+        # ref only — the shared snapshot below never sees it.
+        fake_gitlab.seed_file_at(first_sha, self.CREATED_PATH, "# feature\n")
+        reads_before = created_reads()
+
+        failed_job_id = 77
+        seed_pipeline(
+            fake_gitlab,
+            branch_for(ISSUE_IID, run_id),
+            first_sha,
+            "failed",
+            jobs=[
+                {
+                    "id": failed_job_id,
+                    "name": "pytest",
+                    "status": "failed",
+                    "failure_reason": "script_failure",
+                }
+            ],
+            logs={failed_job_id: "E  AssertionError: feature text stale"},
+        )
+        await service.evaluate_waiting_ci()
+
+        # The repair extended the cycle-1 candidate instead of blocking.
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.commit_cycle == 2
+        assert len(run.candidate_shas) == 2
+        head = fake_gitlab.branches[branch_for(ISSUE_IID, run_id)][0]
+        assert head["parent_ids"] == [first_sha]  # cycle-1 work is kept
+
+        # Existence was judged at the ATTEMPT base: the repair added no read
+        # of the created file at the frozen source base — its probe and its
+        # validation both read the previous candidate.
+        reads_after = created_reads()
+        assert [ref for (_, _, ref) in reads_after].count(BASE_SHA) == [
+            ref for (_, _, ref) in reads_before
+        ].count(BASE_SHA)
+        assert reads_after[-1] == (PROJECT_ID, self.CREATED_PATH, first_sha)
+
+        # The persisted attempt record carries the bases, the previous
+        # candidate and the touched manifest.
+        attempt = run.evidence["attempt"]
+        assert attempt["cycle"] == 2
+        assert attempt["attempt_base"] == first_sha
+        assert attempt["source_base"] == BASE_SHA
+        assert attempt["previous_candidate"] == first_sha
+        assert attempt["manifest"] == [{"path": self.CREATED_PATH, "operation": "update"}]
+
+        # The green repair closes the run; the review diff stays cumulative
+        # (source base → repaired candidate), never a single attempt's.
+        repaired_sha = run.candidate_shas[-1]
+        seed_pipeline(fake_gitlab, branch_for(ISSUE_IID, run_id), repaired_sha, "success")
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.evidence or {})["review"]["sha"] == repaired_sha
+        assert fake_gitlab.calls_of("compare_commits")[-1][1][1:] == (BASE_SHA, repaired_sha)
+
+    async def test_first_attempt_persists_the_source_base_record(self, db, fake_gitlab):
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        run_id = await start_and_go(service, fake_gitlab)
+
+        run = await get_run(db, run_id)
+        assert run.evidence["attempt"] == {
+            "cycle": 1,
+            "attempt_base": BASE_SHA,
+            "source_base": BASE_SHA,
+            "previous_candidate": None,
+            "manifest": [{"path": "forge-demo/feature.md", "operation": "create"}],
+        }
 
 
 def _update_draft(path: str, old_text: str, new_text: str) -> str:

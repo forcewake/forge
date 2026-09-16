@@ -38,6 +38,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -126,6 +127,81 @@ _RESUMABLE_ADVANCE_STATUSES = frozenset(
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
+
+
+@dataclass(frozen=True)
+class AttemptContext:
+    """The bases of one propose → validate → publish attempt (R06).
+
+    ``attempt_base`` is the ONE snapshot the whole attempt works on: the
+    implementer reads it, materialization and :func:`validate_changeset`
+    check file existence against it, and the writer cuts and verifies the
+    commit at it. Cycle 1 pins the approved base; a repair pins the last
+    candidate, so the files that candidate created exist for its repair.
+
+    ``source_base`` is the run's frozen approved base. It feeds only the
+    final cumulative review/acceptance diff — never repair existence checks.
+    """
+
+    cycle: int
+    attempt_base: str
+    source_base: str
+    previous_candidate: str | None = None
+
+    @classmethod
+    def from_run(cls, run: FlowRun) -> AttemptContext:
+        """Derive the context for *run*'s current commit cycle.
+
+        Mirrors :func:`forge.runs.candidate.attempt_base_for` — the harness
+        lane's derivation of the same snapshot — for the builtin path. The
+        ``""`` fallback mirrors _read_base_sha's: base_sha is schema-nullable
+        and writer.apply needs a concrete ref.
+        """
+        cycle = run.commit_cycle or 1
+        candidates = list(run.candidate_shas or [])
+        previous = candidates[-1] if cycle > 1 and candidates else None
+        return cls(
+            cycle=cycle,
+            attempt_base=previous or run.base_sha or "",
+            source_base=run.base_sha or "",
+            previous_candidate=previous,
+        )
+
+    @classmethod
+    def from_evidence(cls, evidence: dict | None) -> AttemptContext | None:
+        """The attempt record a crashed attempt persisted, when usable.
+
+        A mid-leg resume must not re-derive the bases: the record is what
+        the attempt actually started from. Anything malformed falls back to
+        the caller's derivation.
+        """
+        record = (evidence or {}).get("attempt")
+        if not isinstance(record, dict):
+            return None
+        cycle = record.get("cycle")
+        attempt_base = record.get("attempt_base")
+        if isinstance(cycle, bool) or not isinstance(cycle, int) or cycle < 1:
+            return None
+        if not isinstance(attempt_base, str) or not attempt_base:
+            return None
+        source_base = record.get("source_base")
+        previous = record.get("previous_candidate")
+        return cls(
+            cycle=cycle,
+            attempt_base=attempt_base,
+            source_base=source_base if isinstance(source_base, str) else "",
+            previous_candidate=previous if isinstance(previous, str) else None,
+        )
+
+    def to_evidence(self, manifest: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        """The durable attempt record: attempt number, bases, parent, manifest."""
+        return {
+            "cycle": self.cycle,
+            "attempt_base": self.attempt_base,
+            "source_base": self.source_base,
+            "previous_candidate": self.previous_candidate,
+            "manifest": list(manifest or []),
+        }
 
 
 def task_digest_of(title: str, description: str) -> str:
@@ -844,18 +920,17 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             plan_summary, files_hint = self._plan_evidence(run)
-            cycle = run.commit_cycle or 1
-            # F02 (review): repairs build on the last VERIFIED candidate, not
-            # the original approved base — otherwise cycle 2 cannot see
-            # cycle 1's files and its update would roll work back. The
-            # source base stays frozen for full-result review.
-            # ``or ""`` mirrors _read_base_sha's failure fallback: base_sha is
-            # schema-nullable, and writer.apply needs a concrete ref.
-            attempt_base = (
-                (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
-            ) or ""
             entry_status = run.status
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
+        # F02 (review) / R06: one AttemptContext defines the whole attempt —
+        # repairs build on the last VERIFIED candidate (otherwise cycle 2
+        # cannot see cycle 1's files and its update would roll work back),
+        # while the source base stays frozen for the cumulative review. A
+        # mid-leg resume reuses the bases the attempt persisted at its start
+        # instead of deriving them again (ADR-0017 §3).
+        ctx = AttemptContext.from_run(run)
+        if mid_leg:
+            ctx = AttemptContext.from_evidence(run.evidence) or ctx
 
         issue_title = await self._read_issue_title(project_id, run)
         try:
@@ -865,7 +940,7 @@ class RunService:
                 plan_summary=plan_summary,
                 files_hint=files_hint,
                 repair_context=repair_context,
-                attempt_base=attempt_base,
+                attempt_base=ctx.attempt_base,
             )
         except MaterializationError as exc:
             # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
@@ -878,6 +953,15 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
             return
 
+        # Pin the attempt before the trusted legs: attempt number, bases,
+        # previous candidate and the touched manifest. A crash leaves the
+        # resume this record, and a blocked run keeps what it had proposed.
+        manifest = [
+            {"path": change.path, "operation": change.operation.value}
+            for change in changeset.changes
+        ]
+        await self._merge_run_evidence(run_id, {"attempt": ctx.to_evidence(manifest)})
+
         if not mid_leg:
             await self._transition(run_id, FlowStatus.VALIDATING)
 
@@ -886,8 +970,11 @@ class RunService:
         # scoping) is enforced here too — the builtin path is the second of
         # the two write boundaries (the trusted publisher is the other).
         allowed_paths = await self._read_spec_allowed_paths(run_id)
+        # R06: existence is judged against the ATTEMPT base — checking a
+        # repair's update/delete against the frozen source base would report
+        # a previous cycle's file as missing and block the repair.
         git_base = await self._fetch_git_base(
-            project_id, [change.path for change in changeset.changes], run.base_sha
+            project_id, [change.path for change in changeset.changes], ctx.attempt_base
         )
         violations = validate_changeset(changeset, git_base, allowed_paths=allowed_paths)
         if violations:
@@ -928,8 +1015,8 @@ class RunService:
                 result = await writer.apply(
                     run_id,
                     changeset,
-                    start_ref=attempt_base,
-                    expected_head=attempt_base,
+                    start_ref=ctx.attempt_base,
+                    expected_head=ctx.attempt_base,
                 )
             except GitLabAPIError as exc:
                 await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
@@ -1374,7 +1461,9 @@ class RunService:
             candidate_shas = list(run.candidate_shas or [])
             mr_iid = run.mr_iid
             plan_digest = run.plan_digest or ""
-            base_sha = run.base_sha or ""
+            # R06: the frozen approved base — the review/acceptance leg's
+            # ONLY use. Existence checks never read it.
+            source_base = run.base_sha or ""
             backend_name = str((run.evidence or {}).get("backend") or "").strip()
             deadline = await self._waiting_ci_deadline(session, run_id)
 
@@ -1468,7 +1557,7 @@ class RunService:
                 issue_iid=issue_iid,
                 mr_iid=mr_iid,
                 candidate_sha=candidate_sha,
-                base_sha=base_sha,
+                source_base=source_base,
                 pipeline=pipeline,
                 plan_digest=plan_digest,
                 verification_warnings=verification_warnings,
@@ -1512,12 +1601,17 @@ class RunService:
         issue_iid: int | None,
         mr_iid: int | None,
         candidate_sha: str,
-        base_sha: str,
+        source_base: str,
         pipeline,
         plan_digest: str,
         verification_warnings: list[str] | None = None,
     ) -> None:
-        """checks passed → reviewing → ready_for_human (ADR-0008 review leg)."""
+        """checks passed → reviewing → ready_for_human (ADR-0008 review leg).
+
+        The review diff spans ``source_base → candidate_sha`` — the
+        CUMULATIVE result against the frozen approved base, not one attempt's
+        snapshot (R06).
+        """
         await self._transition(run_id, FlowStatus.REVIEWING, reason="readonly review of candidate")
 
         plan_summary, _ = await self._read_plan_evidence(run_id)
@@ -1526,7 +1620,7 @@ class RunService:
                 project_id=project_id,
                 issue_title=await self._read_issue_title(project_id, issue_iid),
                 plan_summary=plan_summary,
-                base_sha=base_sha,
+                base_sha=source_base,
                 candidate_sha=candidate_sha,
                 flow_run_id=run_id,
             )
@@ -2413,10 +2507,12 @@ class RunService:
         paths: list[str],
         base_sha: str | None,
     ) -> dict[str, str]:
-        """Fetch base content for the update/delete paths at the base snapshot.
+        """Fetch base content for the update/delete paths at *base_sha*.
 
-        Delegates to :func:`forge.runs.backends.fetch_git_base` — the trusted
-        layer's own read (ADR-0001/0006), shared with the builtin backend.
+        The caller passes the ATTEMPT base (R06): a repair's existence checks
+        read its previous candidate, never the frozen source base. Delegates
+        to :func:`forge.runs.backends.fetch_git_base` — the trusted layer's
+        own read (ADR-0001/0006), shared with the builtin backend.
         """
         return await fetch_git_base(self._gitlab, project_id, paths, base_sha)
 

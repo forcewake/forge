@@ -41,7 +41,12 @@ from forge.runs.candidate import (
 from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
 from forge.runs.publisher import FenceCheck, PublishResult, publish_candidate
 from forge.runs.reconciler import run_reconciler
-from forge.runs.service import GATE_TTL_SECONDS, RunService, execute_run_command
+from forge.runs.service import (
+    AttemptContext,
+    GATE_TTL_SECONDS,
+    RunService,
+    execute_run_command,
+)
 from forge.runs.stubs import (
     StubImplementer,
     StubPlanner,
@@ -55,6 +60,7 @@ from forge.runs.verification import evaluate as evaluate_verification
 
 __all__ = [
     "AdmissionDecision",
+    "AttemptContext",
     "BuiltinBackend",
     "CITharnessBackend",
     "CandidateBundle",

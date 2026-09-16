@@ -12,7 +12,8 @@ from forge.durable import FlowRun, FlowStatus, GateApproval, Outbox
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import WriteOutcome, WriteResult
-from forge.runs import RunService
+from forge.runs import AttemptContext, RunService
+from forge.runs.candidate import attempt_base_for
 from forge.runs.stubs import (
     StubImplementer,
     StubPlanner,
@@ -453,3 +454,80 @@ async def test_head_checks_use_branch_endpoint_not_commit_history(service, fake_
     assert base == "base-sha-1"
     assert fake_gitlab.calls_of("list_commits") == []
     assert fake_gitlab.calls_of("get_branch_head")
+
+
+class TestAttemptContext:
+    """R06: one context defines an attempt's read/validate/publish base; the
+    source base is only the final review's cumulative diff base."""
+
+    def test_first_cycle_reads_the_approved_base(self):
+        ctx = AttemptContext.from_run(
+            FlowRun(id="runabc123", base_sha="base-sha-1", commit_cycle=1)
+        )
+
+        assert ctx == AttemptContext(
+            cycle=1, attempt_base="base-sha-1", source_base="base-sha-1", previous_candidate=None
+        )
+
+    def test_repair_extends_the_last_candidate_and_mirrors_the_harness_base(self):
+        run = FlowRun(
+            id="runabc123",
+            base_sha="base-sha-1",
+            candidate_shas=["sha-1", "sha-2"],
+            commit_cycle=2,
+        )
+
+        ctx = AttemptContext.from_run(run)
+
+        assert ctx.cycle == 2
+        assert ctx.attempt_base == "sha-2"
+        assert ctx.previous_candidate == "sha-2"
+        assert ctx.source_base == "base-sha-1"
+        assert ctx.attempt_base == attempt_base_for(run)  # same snapshot the lane gets
+
+    def test_from_evidence_ignores_malformed_records(self):
+        assert AttemptContext.from_evidence(None) is None
+        assert AttemptContext.from_evidence({}) is None
+        assert AttemptContext.from_evidence({"attempt": "junk"}) is None
+        assert AttemptContext.from_evidence({"attempt": {"cycle": 0, "attempt_base": "x"}}) is None
+        assert AttemptContext.from_evidence({"attempt": {"cycle": 2}}) is None
+
+    def test_to_evidence_round_trips_through_from_evidence(self):
+        ctx = AttemptContext(
+            cycle=2, attempt_base="sha-1", source_base="base", previous_candidate=None
+        )
+        record = ctx.to_evidence([{"path": "a.py", "operation": "update"}])
+        assert record["manifest"] == [{"path": "a.py", "operation": "update"}]
+        assert AttemptContext.from_evidence({"attempt": record}) == ctx
+
+
+class TestMidLegResume:
+    async def test_resume_validates_and_publishes_on_the_persisted_attempt_base(
+        self, service, fake_gitlab, db
+    ):
+        """R06: a mid-leg resume reuses the attempt record the crashed attempt
+        persisted instead of deriving the base again."""
+        run_id = await start_issue_run(service)
+
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.commit_cycle = 2
+            run.candidate_shas = ["derived-sha"]  # what a re-derivation would pick
+            run.evidence = {
+                "attempt": {
+                    "cycle": 2,
+                    "attempt_base": "pinned-sha",
+                    "source_base": "base-sha-1",
+                    "previous_candidate": "derived-sha",
+                    "manifest": [],
+                }
+            }
+            await session.commit()
+
+        await service._advance_proposal(PROJECT_ID, run_id)
+
+        writer = FakeWriter.instances[-1]
+        assert writer.calls[-1]["start_ref"] == "pinned-sha"
+        assert writer.calls[-1]["expected_head"] == "pinned-sha"
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value

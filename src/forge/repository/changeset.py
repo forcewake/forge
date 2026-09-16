@@ -122,9 +122,10 @@ def in_path_scope(path: str, allowed_paths: list[str]) -> bool:
 def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
     """Materialize a raw (untrusted, usually LLM-emitted) ChangeSet dict.
 
-    *git_base* maps path -> current file content at the run's base snapshot,
-    fetched by the caller (ADR-0006: the base the gate approved). ADR-0001
-    rules, with no fuzzy matching ever:
+    *git_base* maps path -> current file content at the caller's base
+    snapshot — the attempt base, read by the trusted caller (ADR-0006; a
+    repair cycle reads its previous candidate, not the gate-approved base).
+    ADR-0001 rules, with no fuzzy matching ever:
 
     - ``create``: full ``content`` required; the file must not exist in the
       base snapshot.
@@ -227,9 +228,11 @@ def validate_changeset(
     reports instead), only trusted callers decide what a violation means for
     the run.
 
-    When *git_base* (path -> base content at the approved snapshot) is given,
+    When *git_base* (path -> base content at the caller's snapshot) is given,
     ADR-0001 existence rules are enforced on top of the path policy: an
     ``update``/``delete`` must address a file that exists in the snapshot.
+    The snapshot is the ATTEMPT base (a repair's previous candidate), so a
+    file an earlier cycle created passes this check (R06).
 
     When *allowed_paths* (v0.7 monorepo path scoping, complex-projects.md §1)
     is non-empty, every change must fall under at least one glob — a change
@@ -291,6 +294,6 @@ def validate_changeset(
 
         if git_base is not None and change.operation in (Operation.UPDATE, Operation.DELETE):
             if change.path not in git_base:
-                violations.append(f"{where}: file does not exist in the approved base snapshot")
+                violations.append(f"{where}: file does not exist in the attempt base snapshot")
 
     return violations

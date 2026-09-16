@@ -29,6 +29,8 @@ class FakeGitLab:
         self.mr_notes: list[dict] = []  # merge-request notes
         self.issues: dict[int, dict] = {}
         self.files: dict[str, str] = {}  # path -> text content (all refs)
+        # (ref, path) -> text: content scoped to one ref, read before `files`.
+        self.files_at: dict[tuple[str, str], str] = {}
         self.mr_updates: list[dict] = []  # journal of update_merge_request calls
         self.calls: list[tuple[str, tuple]] = []
         # Knobs for failure injection:
@@ -149,11 +151,23 @@ class FakeGitLab:
         """Seed a file in the (ref-independent) repository snapshot."""
         self.files[path] = content
 
+    def seed_file_at(self, ref: str, path: str, content: str) -> None:
+        """Seed a file that exists ONLY at *ref* (a candidate commit's tree).
+
+        Read before the shared snapshot, this models ref-scoped content the
+        flat ``seed_file`` view cannot express — e.g. a file a previous
+        attempt created that is absent from the approved base.
+        """
+        self.files_at[(ref, path)] = content
+
     async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
         self.calls.append(("get_file", (project_id, file_path, ref)))
-        if file_path not in self.files:
+        if (ref, file_path) in self.files_at:
+            content = self.files_at[(ref, file_path)]
+        elif file_path in self.files:
+            content = self.files[file_path]
+        else:
             raise GitLabAPIError(404, f"file {file_path} not found")
-        content = self.files[file_path]
         return RepositoryFile.model_validate(
             {
                 "file_name": file_path.rsplit("/", 1)[-1],

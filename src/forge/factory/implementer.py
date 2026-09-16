@@ -1,7 +1,8 @@
 """LLM implementer agent (ADR-0001/0004): issue + plan -> ChangeSet draft.
 
 Pure with respect to run state: it reads GitLab (tree and file contents at
-the run's pinned base snapshot) and calls the LLM, but never advances run
+the attempt base snapshot — the approved base on cycle 1, the previous
+candidate on a repair) and calls the LLM, but never advances run
 state and never writes to GitLab. It emits a strict-JSON ChangeSet draft that
 :func:`forge.repository.changeset.materialize` turns into a typed ChangeSet
 against the actual base content — exact-match replacements only, no fuzzy
