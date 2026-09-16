@@ -51,6 +51,17 @@ parameters:
   - name: work_item_id
     type: string
 
+# Empty yaml-level defaults: an UNDEFINED AzDO variable expands its
+# $(macro) to the literal text (LIVE-found in the ADR-0024 lab run — the
+# brief-fetch built a "$(FORGE_AZDO_ORG_URL)..." URL), so every optional
+# input must be DEFINED here; the pipeline's own variables (settings UI)
+# provide the real values.
+variables:
+  FORGE_AZDO_ORG_URL: ''
+  FORGE_AZDO_BOT_NAME: 'forge-bot'
+  FORGE_AZDO_READ_TOKEN: ''
+  FORGE_HARNESS_MCP: ''
+
 jobs:
   - job: harness
     # Pool: any agent pool works — the repo owner picks theirs (a
