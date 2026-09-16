@@ -389,7 +389,9 @@ class RunBudget(Base):
 
     A ``NULL`` limit means unlimited on that dimension; the consumed counters
     keep recording actuals regardless of status, so failed and exhausted runs
-    stay explainable. ``run_id`` is UNIQUE: one budget per run —
+    stay explainable. Admission counts the whole exposure — consumed plus
+    outstanding reserved plus unresolved liability — never the holds alone.
+    ``run_id`` is UNIQUE: one budget per run —
     :func:`forge.durable.budgets.open_budget` is idempotent per run.
     """
 
@@ -417,6 +419,11 @@ class RunBudget(Base):
     #: Actuals recorded from provider receipts / harness usage evidence.
     consumed_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     consumed_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Holds settled against an UNKNOWN actual (ADR-0013: unknown ≠ zero).
+    #: Released but unproven spend, kept on the books so an unreadable
+    #: receipt cannot open hard-budget capacity as if nothing were spent.
+    unresolved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow

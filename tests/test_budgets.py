@@ -5,9 +5,13 @@ Covers the ADR-0018 §5 contract on top of ADR-0013's reserve-then-reconcile:
 - ``open_budget`` is idempotent per run and reads limits from the RunSpec's
   ``budgets`` block;
 - ``reserve`` refuses (and marks ``exhausted``) with a single conditional
-  UPDATE — the live row counters decide, never an ORM snapshot;
+  UPDATE — the live row counters decide, never an ORM snapshot, and the
+  admission test is the whole exposure (consumed + outstanding reserved +
+  unresolved liability + requested);
 - ``reconcile_actual`` moves reserved→consumed exactly once, records
-  under-reserved actuals, and never counts unknown usage as zero;
+  under-reserved actuals, and never counts unknown usage as zero — an
+  unreadable receipt parks its hold on the unresolved liability instead of
+  reopening capacity;
 - the LLM client raises ``budget_exhausted`` BEFORE the provider is contacted
   and reconciles real usage afterwards (failures still consume the call);
 - harness usage receipts reconcile the run budget (aggregate = 1 call +
@@ -31,6 +35,7 @@ from forge.durable.budgets import (
     load_budget_guard,
     open_budget,
     open_budget_from_spec,
+    Reservation,
     reconcile_actual,
     reconcile_harness_receipt,
     reserve,
@@ -210,6 +215,35 @@ class TestReserve:
         assert await session_reserve(db, budget, calls=1, tokens=200) is None
         assert (await get_budget(db)).status == "exhausted"
 
+    async def test_spent_budget_counts_against_the_limit(self, db):
+        """90 spent + 0 reserved + 20 requested at limit 100 cannot be granted."""
+        budget = await openb(db, max_tokens=100)
+        hold = await session_reserve(db, budget, calls=1, tokens=90)
+        assert hold is not None
+        async with db() as session:
+            await reconcile_actual(session, hold, actual_calls=1, actual_tokens=90)
+            await session.commit()
+        assert (await get_budget(db)).consumed_tokens == 90
+
+        # Holds alone would read 0 + 20 <= 100; the consumed 90 says no.
+        assert await session_reserve(db, budget, calls=1, tokens=20) is None
+        after = await get_budget(db)
+        assert after.status == "exhausted"
+        assert after.reserved_tokens == 0
+
+    async def test_negative_request_is_rejected(self, db):
+        """A negative amount would create capacity instead of consuming it."""
+        budget = await openb(db, max_calls=5, max_tokens=1000)
+        async with db() as session:
+            with pytest.raises(ValueError, match="non-negative"):
+                await reserve(session, budget, calls=-1, tokens=0)
+            with pytest.raises(ValueError, match="non-negative"):
+                await reserve(session, budget, calls=1, tokens=-5)
+        after = await get_budget(db)
+        assert after.status == "open"
+        assert after.reserved_calls == 0 and after.reserved_tokens == 0
+        assert await reservations(db) == []
+
     async def test_reserve_reads_live_counters_not_the_snapshot(self, db):
         """The conditional UPDATE, not the ORM object, enforces the limit."""
         await openb(db, max_calls=1)
@@ -296,7 +330,7 @@ class TestReconcile:
         assert settled.consumed_tokens == 600
         assert settled.status == "exhausted"
 
-    async def test_unknown_actuals_change_nothing_and_release_the_hold(self, db):
+    async def test_unknown_actuals_keep_the_liability_not_the_hold(self, db):
         budget = await openb(db, max_calls=2, max_tokens=1000)
         reservation = await session_reserve(db, budget, calls=1, tokens=400)
         async with db() as session:
@@ -304,11 +338,27 @@ class TestReconcile:
                 session, reservation, actual_calls=1, actual_tokens=None
             )
             await session.commit()
-        # Unknown tokens are never counted as zero — the counter just does
-        # not move; the hold IS released so later attempts keep headroom.
+        # Unknown tokens are never counted as zero — the counter does not
+        # move, and the hold is not released into free capacity either: it
+        # becomes unresolved liability the limit keeps counting.
         assert settled.consumed_tokens == 0
         assert settled.reserved_tokens == 0
+        assert settled.unresolved_tokens == 400
         assert settled.status == "open"
+
+    async def test_negative_actual_is_rejected_and_keeps_the_hold(self, db):
+        budget = await openb(db, max_tokens=1000)
+        reservation = await session_reserve(db, budget, calls=1, tokens=400)
+        async with db() as session:
+            with pytest.raises(ValueError, match="non-negative"):
+                await reconcile_actual(session, reservation, actual_calls=1, actual_tokens=-400)
+            await session.rollback()
+        # Validation ran before any counter move: the hold is intact.
+        after = await get_budget(db)
+        assert after.reserved_tokens == 400
+        assert after.consumed_tokens == 0
+        (row,) = await reservations(db)
+        assert row.released is False
 
     async def test_reconcile_is_exactly_once(self, db):
         budget = await openb(db, max_calls=5)
@@ -330,6 +380,58 @@ class TestReconcile:
         assert settled.consumed_calls == 1
         assert settled.status == "exhausted"
         assert settled.reserved_calls == 0
+
+
+class TestExposure:
+    """Admission bounds the whole exposure, never a subset of the counters."""
+
+    async def test_interleaved_reserves_and_settlements_stay_inside_the_limit(self, db):
+        """Grants and settlements interleaved across sessions never overshoot.
+
+        Every move is one conditional UPDATE whose predicate reads the row's
+        current counters — on Postgres that predicate is re-checked while the
+        contended row lock is held, so two parallel attempts cannot both grant
+        against a stale exposure. The row is the only shared state here,
+        exactly as it is between two concurrent dispatches.
+        """
+        budget = await openb(db, max_tokens=100)
+        booked = 0
+
+        async def check() -> None:
+            row = await get_budget(db)
+            # The limit bounds consumed + outstanding reserved + liability.
+            assert row.consumed_tokens + row.reserved_tokens + row.unresolved_tokens == booked
+            assert booked <= 100
+
+        async def grant(tokens: int) -> Reservation | None:
+            nonlocal booked
+            hold = await session_reserve(db, budget, calls=1, tokens=tokens)
+            if hold is not None:
+                booked += tokens
+            await check()
+            return hold
+
+        async def settle(hold: Reservation, actual: int) -> None:
+            nonlocal booked
+            booked = booked - hold.reserved_tokens + actual
+            async with db() as session:
+                await reconcile_actual(session, hold, actual_calls=1, actual_tokens=actual)
+                await session.commit()
+            await check()
+
+        first = await grant(60)
+        assert first is not None
+        second = await grant(40)
+        assert second is not None
+
+        await settle(second, actual=10)  # 10 spent, 60 still held
+        third = await grant(30)  # 10 spent + 60 held + 30 asked = 100
+        assert third is not None
+
+        await settle(third, actual=30)  # 40 spent, 60 held
+        await settle(first, actual=60)  # 100 spent, nothing held
+        assert (await get_budget(db)).status == "exhausted"  # fully spent
+        assert await grant(1) is None  # not even one token is left
 
 
 class TestLLMBudgetEnforcement:
@@ -371,6 +473,34 @@ class TestLLMBudgetEnforcement:
         assert row.status == "failed"
         assert row.error == "budget_exhausted"
         assert row.input_tokens is None and row.output_tokens is None
+
+    async def test_spent_budget_refuses_before_the_provider_is_called(self, db, httpx_mock):
+        await openb(db, max_tokens=100)
+        guard = await load_budget_guard(db, RUN_ID)
+        assert guard is not None
+        hold = await guard.reserve(calls=1, tokens=90)
+        assert hold is not None
+        await guard.reconcile(hold, actual_calls=1, actual_tokens=90)
+
+        # No httpx response is registered: pytest-httpx fails the test if any
+        # request reaches the transport — the 20 tokens asked on top of the
+        # 90 spent are refused before the provider is contacted.
+        client = self.make_client(db, guard)
+        with pytest.raises(LLMError, match="budget_exhausted"):
+            await client.complete(
+                tier="strong",
+                system="s",
+                user="u",
+                role="planner",
+                flow_run_id=RUN_ID,
+                max_tokens=20,
+            )
+        await client.close()
+
+        assert httpx_mock.get_requests() == []
+        after = await guard.refresh()
+        assert after is not None and after.status == "exhausted"
+        assert after.consumed_tokens == 90  # only what was already spent
 
     async def test_successful_call_reserves_then_reconciles_real_usage(self, db, httpx_mock):
         await openb(db, max_calls=5, max_tokens=10000)
@@ -419,10 +549,12 @@ class TestLLMBudgetEnforcement:
         after = await guard.refresh()
         assert after is not None
         # The provider may have processed the failed request: the call counts,
-        # the token actuals stay unknown (never zero), the hold is released.
+        # the token actuals stay unknown (never zero), and the estimate hold
+        # is retained as unresolved liability instead of becoming free spend.
         assert after.consumed_calls == 1
         assert after.consumed_tokens == 0
         assert after.reserved_tokens == 0
+        assert after.unresolved_tokens == 400
         assert after.status == "open"
 
     async def test_invalid_json_reconciles_the_known_usage(self, db, httpx_mock):
@@ -625,6 +757,8 @@ class TestMigration009:
             "reserved_tokens",
             "consumed_calls",
             "consumed_tokens",
+            "unresolved_calls",
+            "unresolved_tokens",
             "status",
             "created_at",
             "updated_at",
@@ -637,3 +771,42 @@ class TestMigration009:
             "reserved_tokens",
             "released",
         }
+
+
+class TestMigration011:
+    def _load_migration(self, filename: str, module_name: str):
+        path = Path(__file__).resolve().parent.parent / "alembic" / "versions" / filename
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_upgrade_adds_the_liability_columns_and_downgrade_drops_them(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine
+
+        budgets_009 = self._load_migration("009_run_budgets.py", "migration_009_baseline")
+        liability_011 = self._load_migration("011_budget_unresolved_liability.py", "migration_011")
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    budgets_009.upgrade()
+                with Operations.context(ctx):
+                    liability_011.upgrade()
+
+                inspector = inspect(conn)
+                budget_columns = {c["name"] for c in inspector.get_columns("run_budgets")}
+                assert {"unresolved_calls", "unresolved_tokens"} <= budget_columns
+
+                with Operations.context(ctx):
+                    liability_011.downgrade()
+                # A fresh inspector: table columns are cached per instance.
+                after = {c["name"] for c in inspect(conn).get_columns("run_budgets")}
+                assert "unresolved_calls" not in after
+                assert "unresolved_tokens" not in after
+        finally:
+            engine.dispose()
