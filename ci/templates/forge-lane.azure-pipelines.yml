@@ -73,6 +73,12 @@ jobs:
       FORGE_BRIEF: .forge/brief.md
       FORGE_EXIT_FILE: .forge/exit
     steps:
+      # forge requires Python >=3.13 — the hosted ubuntu-latest image
+      # defaults to 3.12 (LIVE-found in the ADR-0024 lab run: pip refused
+      # the forge install and the lane produced no candidate).
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
       - checkout: self
         fetchDepth: 0
         # Explicit: no credential is persisted into .git/config — nothing
