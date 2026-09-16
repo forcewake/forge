@@ -1,9 +1,9 @@
 # forge
 
-**forge** is an agentic software-factory sidecar for **self-hosted GitLab CE**
-and **GitHub**: an authorized issue becomes a plan, a human-approved branch
-with code, a green pipeline, and a Draft merge request — ready for human
-review. You bring the model (any provider via
+**forge** is an agentic software-factory sidecar for **self-hosted GitLab CE**,
+**GitHub**, and **Azure DevOps (beta)**: an authorized issue becomes a plan, a
+human-approved branch with code, a green pipeline, and a Draft merge request —
+ready for human review. You bring the model (any provider via
 [LiteLLM](https://docs.litellm.ai/) or native harness CLIs); forge runs on
 your own infrastructure and never merges.
 
@@ -53,17 +53,26 @@ issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
 
 ## Providers
 
-| Capability | GitLab CE | GitHub |
-|---|---|---|
-| Commands (`/implement`, `/go`, `/cancel`, label trigger) | ✅ comments | ✅ comments + `forge` label |
-| Plan comment + human gate | ✅ | ✅ |
-| Harness execution (Claude Code / Grok Build / opencode) | ✅ project CI (docker executor) | ✅ GitHub Actions (`workflow_dispatch`) |
-| Builtin LLM implementer (no CI needed) | ✅ | ✅ |
-| Trusted publisher | Commits API | GraphQL `createCommitOnBranch` + `expectedHeadOid` CAS |
-| Draft MR / PR before CI | ✅ | ✅ |
-| Readonly LLM review | ✅ | ✅ |
-| Fork/`pull_request_target` flows | — | intentionally out of scope (first beta) |
-| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) |
+The AzDO column is **beta**: the full loop is proven by the test suite
+(gate machinery, lane, reactive lanes, cross-slice joins over recorded
+payload shapes); live verification against a real organization is
+pending a user PAT — the checklist in
+[docs/azure-setup.md](docs/azure-setup.md) lists exactly what to
+confirm.
+
+| Capability | GitLab CE | GitHub | Azure DevOps (beta) |
+|---|---|---|---|
+| Commands (`/implement`, `/go`, `/cancel`) | ✅ comments | ✅ comments + `forge` label | ✅ work-item + PR comments (label trigger: —) |
+| Plan comment + human gate | ✅ | ✅ | ✅ (work-item comment) |
+| Harness execution (Claude Code / Grok Build / opencode) | ✅ project CI (docker executor) | ✅ GitHub Actions (`workflow_dispatch`) | ✅ Azure Pipelines (Runs-API dispatch; verified in tests, live pending PAT) |
+| Builtin LLM implementer (no CI needed) | ✅ | ✅ | ✅ |
+| Trusted publisher | Commits API | GraphQL `createCommitOnBranch` + `expectedHeadOid` CAS | Push API CAS (`oldObjectId`) |
+| Draft MR / PR before CI | ✅ | ✅ | ✅ (`isDraft: true`) |
+| Readonly LLM review | ✅ | ✅ | ✅ reactive PR threads (beta) |
+| CI-failure debug lane | ✅ | ✅ | ✅ timeline + task logs (beta) |
+| Fork/`pull_request_target` flows | — | intentionally out of scope (first beta) | — |
+| Identity | bot user + PAT | GitHub App installation (+ PAT lab mode) | service account + PAT (Entra SPN = upgrade path) |
+| Webhook authenticity | secret token | HMAC signature | Basic credentials (no HMAC exists) over HTTPS |
 
 Architecture: four orthogonal adapters — source, execution, harness driver,
 model route ([ADR-0019](docs/adr/0019-source-execution-adapters.md)).
@@ -139,13 +148,16 @@ curl localhost:8420/health
 - **GitHub:** [docs/github-setup.md](docs/github-setup.md)
   (GitHub App registration, webhook, secrets, harness workflow, label
   trigger, `forge doctor`).
+- **Azure DevOps (beta):** [docs/azure-setup.md](docs/azure-setup.md)
+  (service account + PAT scopes, service hooks, lane pipeline, branch
+  policy, live-verification checklist).
 
 ### 5. First run
 
-Comment `/implement` on an issue. forge posts a plan; reply
-`@forge /go <run-id>` (or assign the `forge` label on GitHub). When the run
-reaches `ready_for_human`, the evidence comment carries everything a
-reviewer needs. The merge button stays yours.
+Comment `/implement` on an issue (or a work item on Azure DevOps). forge
+posts a plan; reply `@forge /go <run-id>` (or assign the `forge` label on
+GitHub). When the run reaches `ready_for_human`, the evidence comment
+carries everything a reviewer needs. The merge button stays yours.
 
 ## For AI agents
 
@@ -173,11 +185,12 @@ This repository is built to be worked on by coding agents:
 | [AGENTS.md](AGENTS.md) | agent entry point + repo conventions |
 | [docs/onboarding-prompt.md](docs/onboarding-prompt.md) | bootstrap prompt for coding agents |
 | [docs/github-setup.md](docs/github-setup.md) | GitHub App + project setup + FAQ |
-| [docs/faq.md](docs/faq.md) | frequently asked questions (both providers) |
+| [docs/azure-setup.md](docs/azure-setup.md) | Azure DevOps (beta): PAT scopes, service hooks, lane, branch policy |
+| [docs/faq.md](docs/faq.md) | frequently asked questions (all providers) |
 | [docs/harness-onboarding.md](docs/harness-onboarding.md) | harness CLIs: setup + triage |
 | [docs/operations/](docs/operations/) | backup/restore, upgrade, token rotation, retention |
-| [docs/adr/](docs/adr/) | architecture decisions (0000–0020) |
-| [docs/research/](docs/research/) | live API research (GitHub, Actions, harnesses) |
+| [docs/adr/](docs/adr/) | architecture decisions (0000–0024) |
+| [docs/research/](docs/research/) | live API research (GitHub, Actions, Azure DevOps, harnesses) |
 | [demo/](demo/) | sales demo script + regeneration skill |
 
 ## License & provenance

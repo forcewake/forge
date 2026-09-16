@@ -1,8 +1,9 @@
-# FAQ — forge on GitLab CE and GitHub
+# FAQ — forge on GitLab CE, GitHub and Azure DevOps
 
 Short answers with pointers. Setup guides:
 [GitLab project onboarding](operations/onboarding.md) ·
-[GitHub setup](github-setup.md) · harness details:
+[GitHub setup](github-setup.md) ·
+[Azure DevOps setup (beta)](azure-setup.md) · harness details:
 [harness-onboarding](harness-onboarding.md).
 
 ## Runs and lifecycle
@@ -24,6 +25,19 @@ provider-specific logins: a GitLab username and a GitHub login are
 different identities even for the same human
 ([ADR-0018](adr/0018-immutable-run-spec.md) — identity is
 connection-scoped).
+
+**What about Azure DevOps?**
+It works as a third adapter (beta): `/implement` on a work item, the plan
+as a work-item comment, `/go` dispatches the harness into YOUR Azure
+Pipelines, the candidate comes back as a pipeline artifact and is
+published as a Draft PR via the Push API — forge never votes or
+completes. Approvers are AzDO identities (`uniqueName`, e.g.
+`dev@fabrikam.example`) in `FORGE_AZDO_APPROVERS`; PR CI on Azure Repos
+is your Build-validation branch policy (YAML `pr:` triggers are ignored).
+The loop is fully contract-tested; live verification against a real org
+is pending — setup and the verification checklist:
+[azure-setup](azure-setup.md), decision record:
+[ADR-0024](adr/0024-azure-devops-adapter.md).
 
 **A run is stuck in `waiting_approval` / `waiting_harness` / `waiting_ci`.**
 Those waits are durable by design. Deadlines exist (`decision` TTL,
