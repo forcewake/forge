@@ -5,17 +5,22 @@ Covers the ADR-0018 §5 contract on top of ADR-0013's reserve-then-reconcile:
 - ``open_budget`` is idempotent per run and reads limits from the RunSpec's
   ``budgets`` block;
 - ``reserve`` refuses (and marks ``exhausted``) with a single conditional
-  UPDATE — the live row counters decide, never an ORM snapshot;
+  UPDATE — the live row counters decide, never an ORM snapshot, and the
+  exposure it checks is ``consumed + reserved + unresolved``: spent and
+  unreported budget is never grantable again;
 - ``reconcile_actual`` moves reserved→consumed exactly once, records
-  under-reserved actuals, and never counts unknown usage as zero;
+  under-reserved actuals, and parks unknown usage as unresolved liability
+  instead of counting it as zero;
 - the LLM client raises ``budget_exhausted`` BEFORE the provider is contacted
   and reconciles real usage afterwards (failures still consume the call);
 - harness usage receipts reconcile the run budget (aggregate = 1 call +
-  reported tokens; unknown leaves tokens untouched).
+  reported tokens; unknown leaves tokens untouched and stops a hard-limited
+  budget rather than reading as capacity).
 """
 
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from sqlalchemy import inspect, select
@@ -210,6 +215,40 @@ class TestReserve:
         assert await session_reserve(db, budget, calls=1, tokens=200) is None
         assert (await get_budget(db)).status == "exhausted"
 
+    async def test_reserve_counts_consumed_against_the_limit(self, db):
+        """R12: spent budget is not grantable — exposure includes consumed."""
+        budget = await openb(db, max_calls=100, max_tokens=100)
+        spent = await session_reserve(db, budget, calls=1, tokens=90)
+        assert spent is not None
+        async with db() as session:
+            settled = await reconcile_actual(session, spent, actual_calls=1, actual_tokens=90)
+            await session.commit()
+        assert settled.status == "open"  # 90 spent, 10 of provable headroom
+        assert settled.consumed_tokens == 90
+
+        # 90 spent + 0 reserved + 20 requested > 100: denied before the
+        # provider is contacted, even though reserved was 0.
+        assert await session_reserve(db, budget, calls=1, tokens=20) is None
+        after = await get_budget(db)
+        assert after.status == "exhausted"
+        assert after.consumed_tokens == 90  # the refusal spent nothing
+
+    async def test_reserve_rejects_amounts_that_would_create_budget(self, db):
+        """Counter moves are ``counter = counter + delta``: a negative delta
+        would mint capacity, a zero-call hold under-reserves the dispatch."""
+        budget = await openb(db, max_calls=5, max_tokens=100)
+        for kwargs in (
+            {"calls": 0, "tokens": 10},
+            {"calls": -1, "tokens": 0},
+            {"calls": 1, "tokens": -5},
+        ):
+            with pytest.raises(ValueError):
+                await session_reserve(db, budget, **kwargs)
+        after = await get_budget(db)
+        assert after.status == "open"
+        assert after.reserved_calls == 0 and after.reserved_tokens == 0
+        assert await reservations(db) == []  # no audit row for a bad shape
+
     async def test_reserve_reads_live_counters_not_the_snapshot(self, db):
         """The conditional UPDATE, not the ORM object, enforces the limit."""
         await openb(db, max_calls=1)
@@ -296,7 +335,7 @@ class TestReconcile:
         assert settled.consumed_tokens == 600
         assert settled.status == "exhausted"
 
-    async def test_unknown_actuals_change_nothing_and_release_the_hold(self, db):
+    async def test_unknown_actuals_become_liability_not_zero_spend(self, db):
         budget = await openb(db, max_calls=2, max_tokens=1000)
         reservation = await session_reserve(db, budget, calls=1, tokens=400)
         async with db() as session:
@@ -304,11 +343,41 @@ class TestReconcile:
                 session, reservation, actual_calls=1, actual_tokens=None
             )
             await session.commit()
-        # Unknown tokens are never counted as zero — the counter just does
-        # not move; the hold IS released so later attempts keep headroom.
+        # Unknown tokens are never counted as zero — and never released as
+        # spendable: the hold parks in the unresolved counters, so the
+        # fenced capacity stays fenced for the rest of the run.
         assert settled.consumed_tokens == 0
         assert settled.reserved_tokens == 0
-        assert settled.status == "open"
+        assert settled.unresolved_tokens == 400
+        assert settled.status == "open"  # 400 liability, 600 provable headroom
+
+        assert await session_reserve(db, budget, calls=1, tokens=600) is not None
+        assert await session_reserve(db, budget, calls=1, tokens=100) is None
+
+    async def test_fully_unknown_receipt_parks_the_whole_hold(self, db):
+        """A cancelled dispatch reports nothing: the whole hold stays fenced."""
+        budget = await openb(db, max_calls=1, max_tokens=500)
+        reservation = await session_reserve(db, budget, calls=1, tokens=400)
+        async with db() as session:
+            settled = await reconcile_actual(session, reservation)
+            await session.commit()
+        assert settled.consumed_calls == 0 and settled.consumed_tokens == 0
+        assert settled.reserved_calls == 0 and settled.reserved_tokens == 0
+        assert settled.unresolved_calls == 1 and settled.unresolved_tokens == 400
+        # Exposure (1 call + 400 tokens) is unchanged: nothing reopened, and
+        # the liability alone exhausts the single-call budget.
+        assert settled.status == "exhausted"
+
+    async def test_reconcile_rejects_negative_actuals(self, db):
+        budget = await openb(db, max_calls=3, max_tokens=1000)
+        reservation = await session_reserve(db, budget, calls=1, tokens=100)
+        async with db() as session:
+            with pytest.raises(ValueError):
+                await reconcile_actual(session, reservation, actual_calls=1, actual_tokens=-5)
+            await session.rollback()
+        after = await get_budget(db)
+        assert after.consumed_tokens == 0
+        assert after.reserved_tokens == 100  # the hold is intact
 
     async def test_reconcile_is_exactly_once(self, db):
         budget = await openb(db, max_calls=5)
@@ -320,6 +389,26 @@ class TestReconcile:
         # A crash-retry (released already flipped) cannot double-apply.
         assert again.consumed_calls == 1
         assert again.consumed_tokens == 10
+        assert again.reserved_calls == 0  # never driven negative by a retry
+        assert again.unresolved_calls == 0 and again.unresolved_tokens == 0
+
+    async def test_interleaved_moves_never_overshoot_exposure(self, db):
+        """Every granted move keeps consumed + reserved + unresolved <= limit."""
+        budget = await openb(db, max_calls=4, max_tokens=1000)
+        for index in range(6):
+            hold = await session_reserve(db, budget, calls=1, tokens=300)
+            if hold is None:
+                break
+            after = await get_budget(db)
+            assert after.consumed_calls + after.reserved_calls + after.unresolved_calls <= 4
+            assert after.consumed_tokens + after.reserved_tokens + after.unresolved_tokens <= 1000
+            if index % 2 == 0:  # settle half the holds with a smaller actual
+                async with db() as session:
+                    await reconcile_actual(session, hold, actual_calls=1, actual_tokens=150)
+                    await session.commit()
+        final = await get_budget(db)
+        assert final.consumed_calls + final.reserved_calls + final.unresolved_calls <= 4
+        assert final.consumed_tokens + final.reserved_tokens + final.unresolved_tokens <= 1000
 
     async def test_call_limit_exhausts_on_reconcile(self, db):
         budget = await openb(db, max_calls=1)
@@ -470,7 +559,7 @@ class TestHarnessReceipt:
         assert settled.consumed_tokens == 150
         assert settled.status == "open"
 
-    async def test_unknown_completeness_keeps_tokens_unchanged(self, db):
+    async def test_unknown_completeness_stops_a_hard_limited_budget(self, db):
         await openb(db, max_calls=3, max_tokens=10000)
         unknown = SimpleUsage(input_tokens=None, output_tokens=None, completeness="unknown")
         async with db() as session:
@@ -481,6 +570,20 @@ class TestHarnessReceipt:
         # into a fabricated 0 that would falsify the total.
         assert settled.consumed_calls == 1
         assert settled.consumed_tokens == 0
+        # This path holds no reservation, so there is no liability figure to
+        # park: against a hard token limit the budget stops instead of
+        # reading the unknown as spendable headroom.
+        assert settled.status == "exhausted"
+
+    async def test_unknown_completeness_on_an_unlimited_token_axis_stays_open(self, db):
+        await openb(db, max_calls=3)
+        unknown = SimpleUsage(completeness="unknown")
+        async with db() as session:
+            settled = await reconcile_harness_receipt(session, RUN_ID, unknown)
+            await session.commit()
+        assert settled is not None
+        assert settled.consumed_calls == 1
+        assert settled.status == "open"  # no hard token limit to protect
 
     async def test_cached_tokens_are_never_added_on_top(self, db):
         await openb(db, max_calls=3, max_tokens=10000)
@@ -611,7 +714,7 @@ class TestMigration009:
             engine.dispose()
 
     def test_models_match_the_migrated_columns(self):
-        """The ORM tables declare exactly the columns the migration creates."""
+        """The ORM tables declare exactly the columns the migrations create."""
         from forge.durable.models import BudgetReservation, RunBudget
 
         assert {c.name for c in RunBudget.__table__.columns} == {
@@ -625,6 +728,9 @@ class TestMigration009:
             "reserved_tokens",
             "consumed_calls",
             "consumed_tokens",
+            # 011: unresolved usage liability (unknown ≠ zero, never spendable).
+            "unresolved_calls",
+            "unresolved_tokens",
             "status",
             "created_at",
             "updated_at",
@@ -637,3 +743,42 @@ class TestMigration009:
             "reserved_tokens",
             "released",
         }
+
+
+class TestMigration011:
+    def _load_migration(self, module_name: str, filename: str) -> ModuleType:
+        path = Path(__file__).resolve().parent.parent / "alembic" / "versions" / filename
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_upgrade_adds_the_unresolved_counters_and_downgrade_drops_them(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine
+
+        base = self._load_migration("migration_009", "009_run_budgets.py")
+        head = self._load_migration("migration_011", "011_budget_unresolved_liability.py")
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    base.upgrade()
+                    head.upgrade()
+
+                inspector = inspect(conn)
+                budget_columns = {c["name"] for c in inspector.get_columns("run_budgets")}
+                assert {"unresolved_calls", "unresolved_tokens"} <= budget_columns
+
+                with Operations.context(ctx):
+                    head.downgrade()
+                # A fresh inspector: table names are cached per instance.
+                after = inspect(conn)
+                after_columns = {c["name"] for c in after.get_columns("run_budgets")}
+                assert "unresolved_calls" not in after_columns
+                assert "unresolved_tokens" not in after_columns
+        finally:
+            engine.dispose()

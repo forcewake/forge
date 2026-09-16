@@ -13,10 +13,15 @@ previously loaded ORM object — so a burst of parallel attempts cannot
 overshoot a limit between measurement points (no read-modify-write races,
 portable across SQLite and Postgres).
 
-Unknown usage is never counted as zero: an unknown token figure leaves the
-consumed counters untouched (the hold is released), and the completeness fact
-travels on the ``llm_calls`` ledger row the caller writes. A refusal to grant
-a reservation marks the budget ``exhausted`` — a budget that cannot satisfy a
+Exposure is ``consumed + reserved + unresolved``: a reservation is granted
+only when that total plus the request still fits the limit, so budget that
+was already spent is never grantable again. Unknown usage is never counted
+as zero *and* never released as spendable capacity: an unknown dimension
+parks its hold in the ``unresolved_*`` counters (the completeness fact still
+travels on the ``llm_calls`` ledger row the caller writes), and an unknown
+receipt with no hold to fence it — the harness path — stops a hard-limited
+budget instead of reading as spendable headroom. A refusal to grant a
+reservation marks the budget ``exhausted`` — a budget that cannot satisfy a
 reservation must not keep accepting work.
 
 Wiring (ADR-0018 §5): RunService opens the budget when the RunSpec carries
@@ -97,6 +102,19 @@ def _limit_or_none(value: object) -> int | None:
     """A usable positive budget limit, or ``None`` (absent/invalid = unset)."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
+    return value
+
+
+def _usage_amount(value: object, name: str) -> int:
+    """A whole, non-negative usage amount; anything else is a caller bug.
+
+    Every counter move is an ``counter = counter + delta`` UPDATE, so a
+    negative or non-integer delta would *create* budget instead of spending
+    it — the amounts are validated here, at the only entry points that move
+    them, before any write happens.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"budget {name} must be a non-negative int, got {value!r}")
     return value
 
 
@@ -210,14 +228,26 @@ async def reserve(
 
     One atomic conditional UPDATE: the grant happens only when the budget is
     still ``open`` AND both (possibly unlimited) dimensions can absorb the
-    request — the counters in the predicate are the row's CURRENT values, so
-    *budget*'s in-memory snapshot is never trusted. A refused reservation
-    marks an ``open`` budget ``exhausted`` (it cannot serve the standard
-    reservation shape; ``closed``/``exhausted`` budgets just refuse).
+    request on top of the recorded exposure ``consumed + reserved +
+    unresolved`` — the counters in the predicate are the row's CURRENT
+    values, so *budget*'s in-memory snapshot is never trusted, and budget
+    already spent (or parked as unresolved liability) is never granted
+    again. A refused reservation marks an ``open`` budget ``exhausted`` (it
+    cannot serve the standard reservation shape; ``closed``/``exhausted``
+    budgets just refuse).
+
+    Amounts must be whole non-negative ints and a hold must cover at least
+    one call — every dispatch consumes one, so a zero-call hold
+    under-reserves it by policy — otherwise ``ValueError`` is raised before
+    any write happens.
 
     The grant is audited as a ``budget_reservations`` row whose ``released``
     flag is what makes :func:`reconcile_actual` exactly-once.
     """
+    calls = _usage_amount(calls, "calls")
+    tokens = _usage_amount(tokens, "tokens")
+    if calls < 1:
+        raise ValueError("budget calls must reserve at least one call")
     granted = await session.execute(
         update(RunBudget)
         .where(
@@ -225,11 +255,19 @@ async def reserve(
             RunBudget.status == "open",
             or_(
                 RunBudget.max_calls.is_(None),
-                RunBudget.reserved_calls + calls <= RunBudget.max_calls,
+                RunBudget.consumed_calls
+                + RunBudget.reserved_calls
+                + RunBudget.unresolved_calls
+                + calls
+                <= RunBudget.max_calls,
             ),
             or_(
                 RunBudget.max_tokens.is_(None),
-                RunBudget.reserved_tokens + tokens <= RunBudget.max_tokens,
+                RunBudget.consumed_tokens
+                + RunBudget.reserved_tokens
+                + RunBudget.unresolved_tokens
+                + tokens
+                <= RunBudget.max_tokens,
             ),
         )
         .values(
@@ -243,12 +281,7 @@ async def reserve(
     if granted.rowcount != 1:  # type: ignore[attr-defined]
         # Refused: either already not open (nothing to do), or the limits
         # cannot absorb the request — durably mark the budget exhausted.
-        await session.execute(
-            update(RunBudget)
-            .where(RunBudget.id == budget.id, RunBudget.status == "open")
-            .values(status="exhausted", updated_at=_utcnow())
-        )
-        await session.flush()
+        await _exhaust_open(session, budget.id)
         return None
 
     row = BudgetReservation(
@@ -277,14 +310,21 @@ async def reconcile_actual(
 ) -> RunBudget | None:
     """Settle a reservation against the provider's actual usage.
 
-    Releases the hold (reserved −) and records the actuals (consumed +) in
-    one conditional UPDATE; unknown dimensions add nothing — never zero
-    (ADR-0013). An under-reservation still records the full actuals, and the
-    budget is marked ``exhausted`` when the recorded actuals reach or
-    overshoot a limit (a fully-spent budget has nothing left to grant).
-    Exactly-once via the reservation's ``released`` flip: a re-run after a
-    crash cannot double-apply the move.
+    Releases the hold (reserved −) and records the known actuals (consumed
+    +) in one conditional UPDATE; an unknown dimension is never counted as
+    zero (ADR-0013) — its hold moves into the ``unresolved_*`` counters
+    instead, so exposure ``consumed + reserved + unresolved`` is invariant
+    and an unknown receipt cannot open hard-budget capacity as zero spend.
+    An under-reservation still records the full actuals (the caller breached
+    the reserve-enough policy), and the budget is marked ``exhausted`` when
+    the recorded spend reaches or overshoots a limit (a fully-spent budget
+    has nothing left to grant). Exactly-once via the reservation's
+    ``released`` flip: a re-run after a crash cannot double-apply the move.
     """
+    if actual_calls is not None:
+        actual_calls = _usage_amount(actual_calls, "actual_calls")
+    if actual_tokens is not None:
+        actual_tokens = _usage_amount(actual_tokens, "actual_tokens")
     flip = await session.execute(
         update(BudgetReservation)
         .where(BudgetReservation.id == reservation.id, BudgetReservation.released.is_(False))
@@ -296,6 +336,10 @@ async def reconcile_actual(
         # Already reconciled (crash-retry) — the counters were moved once.
         return await session.get(RunBudget, reservation.run_budget_id)
 
+    # The hold of an unknown dimension becomes unresolved liability — the
+    # same capacity that was fenced for the dispatch stays fenced.
+    unresolved_calls = reservation.reserved_calls if actual_calls is None else 0
+    unresolved_tokens = reservation.reserved_tokens if actual_tokens is None else 0
     await session.execute(
         update(RunBudget)
         .where(RunBudget.id == reservation.run_budget_id)
@@ -318,6 +362,8 @@ async def reconcile_actual(
             ),
             consumed_calls=RunBudget.consumed_calls + (actual_calls or 0),
             consumed_tokens=RunBudget.consumed_tokens + (actual_tokens or 0),
+            unresolved_calls=RunBudget.unresolved_calls + unresolved_calls,
+            unresolved_tokens=RunBudget.unresolved_tokens + unresolved_tokens,
             updated_at=_utcnow(),
         )
     )
@@ -341,27 +387,39 @@ async def close_budget(session: AsyncSession, budget: RunBudget) -> bool:
     return result.rowcount == 1  # type: ignore[attr-defined]
 
 
-async def _exhaust_if_over(session: AsyncSession, budget_id: str) -> RunBudget | None:
-    """Mark the budget ``exhausted`` when consumed actuals reach a limit.
+async def _exhaust_open(session: AsyncSession, budget_id: str) -> None:
+    """Durably flip an ``open`` budget to ``exhausted`` (any other status stands).
 
-    A fully-spent budget is exhausted: nothing remains for any further
-    actual, so the status flips the moment consumed hits the limit (or
-    overshoots it, when a hold under-reserved the call).
+    The no-extra-conditions form, used where the budget has proven it cannot
+    serve work: a refused reservation, and a hard-limited axis whose usage
+    arrived unverifiable and has no hold to fence it.
     """
+    await session.execute(
+        update(RunBudget)
+        .where(RunBudget.id == budget_id, RunBudget.status == "open")
+        .values(status="exhausted", updated_at=_utcnow())
+    )
+    await session.flush()
+
+
+async def _exhaust_if_over(session: AsyncSession, budget_id: str) -> RunBudget | None:
+    """Mark the budget ``exhausted`` when recorded spend reaches a limit.
+
+    Recorded spend is exposure minus the in-flight holds: consumed actuals
+    plus unresolved liability. A fully-spent budget is exhausted — nothing
+    remains for any further actual, so the status flips the moment spend
+    hits the limit (or overshoots it, when a hold under-reserved the call).
+    """
+    calls_spent = RunBudget.consumed_calls + RunBudget.unresolved_calls
+    tokens_spent = RunBudget.consumed_tokens + RunBudget.unresolved_tokens
     await session.execute(
         update(RunBudget)
         .where(
             RunBudget.id == budget_id,
             RunBudget.status == "open",
             or_(
-                and_(
-                    RunBudget.max_calls.is_not(None),
-                    RunBudget.consumed_calls >= RunBudget.max_calls,
-                ),
-                and_(
-                    RunBudget.max_tokens.is_not(None),
-                    RunBudget.consumed_tokens >= RunBudget.max_tokens,
-                ),
+                and_(RunBudget.max_calls.is_not(None), calls_spent >= RunBudget.max_calls),
+                and_(RunBudget.max_tokens.is_not(None), tokens_spent >= RunBudget.max_tokens),
             ),
         )
         .values(status="exhausted", updated_at=_utcnow())
@@ -380,22 +438,24 @@ async def reconcile_harness_receipt(
     The F22 harness path: the receipt parsed from ``candidate.meta.json``
     counts as exactly one call whose tokens are the reported input+output
     (cached rides inside the inclusive input — never added on top). Unknown
-    tokens leave the token counter untouched (unknown ≠ zero); the
-    completeness fact rides the ``llm_calls`` ledger row the caller writes.
-    Actuals are recorded on ``exhausted`` budgets too; only a ``closed``
-    budget ignores receipts. Returns the refreshed budget, or ``None`` when
-    the run has none (or it is closed).
+    tokens leave the token counter untouched (unknown ≠ zero) — and, on a
+    hard token limit, stop the budget: this path holds no reservation, so
+    there is no liability figure to park and unknown must not read as
+    spendable headroom. The completeness fact still rides the ``llm_calls``
+    ledger row the caller writes. Actuals are recorded on ``exhausted``
+    budgets too; only a ``closed`` budget ignores receipts. Returns the
+    refreshed budget, or ``None`` when the run has none (or it is closed).
     """
     budget = await budget_for_run(session, run_id)
     if budget is None or budget.status == "closed":
         return None
-    tokens = _known_token_total(usage) or 0
+    tokens = _known_token_total(usage)
     recorded = await session.execute(
         update(RunBudget)
         .where(RunBudget.id == budget.id, RunBudget.status != "closed")
         .values(
             consumed_calls=RunBudget.consumed_calls + 1,
-            consumed_tokens=RunBudget.consumed_tokens + tokens,
+            consumed_tokens=RunBudget.consumed_tokens + (tokens or 0),
             updated_at=_utcnow(),
         )
     )
@@ -403,6 +463,9 @@ async def reconcile_harness_receipt(
     # type it on CursorResult, so access it via the runtime attr.
     if recorded.rowcount != 1:  # type: ignore[attr-defined]
         return None
+    if tokens is None and budget.max_tokens is not None:
+        # Limits are frozen at open time, so the loaded row's limit is live.
+        await _exhaust_open(session, budget.id)
     return await _exhaust_if_over(session, budget.id)
 
 
