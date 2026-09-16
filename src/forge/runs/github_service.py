@@ -1364,6 +1364,14 @@ class GitHubRunService:
         checks = [r for r in runs if not (harness_workflow and r.get("name") == harness_workflow)]
 
         if not checks:
+            # RACE GUARD: a just-opened PR's checks take a few seconds to
+            # register (LIVE-found on the dogfood cycle: the verifier polled
+            # before ci.yml had started and wrongly concluded no-CI). Hold
+            # the run for a grace window before declaring not_configured.
+            started = run.updated_at
+            grace = int(getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", 120) or 120)
+            if started is not None and (now - started).total_seconds() < grace:
+                return  # keep waiting — checks may still register
             # No independent CI configured on this repo — proceed to review
             # as honestly unverified (R02: never presented as verified).
             await self._merge_run_evidence(
