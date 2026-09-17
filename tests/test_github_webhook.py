@@ -339,7 +339,46 @@ class TestLabeledTrigger:
         assert metadata["issue_number"] == 42
         assert metadata["issue_is_pr"] is False
         assert metadata["author_username"] == "alice"  # the labeler is the actor
-        assert metadata["note_id"] == 88100  # the label id keys dedupe
+        # The ISSUE id keys dedupe — the label id is constant across every
+        # issue carrying it and silently swallowed all but the first event
+        # (LIVE-found: #28 planned, #29 with the same label never fired).
+        assert metadata["note_id"] == 1010  # fixture issue.id, not label.id 88100
+
+    async def test_distinct_issues_with_the_same_label_do_not_collide(self):
+        """Two issues labeled by the same sender must produce distinct
+        delivery identities — the label id alone is NOT an event identity."""
+        from forge.gateway.github_webhook import github_source_event_id
+
+        first = self.labeled_payload()
+        second = self.labeled_payload()
+        second["issue"]["number"] = 43
+        second["issue"]["id"] = 88101
+
+        id_first = self.normalize(first)["note_id"]
+        id_second = self.normalize(second)["note_id"]
+        assert id_first != id_second
+
+        source_first = github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{id_first}"
+        )
+        source_second = github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{id_second}"
+        )
+        assert source_first != source_second
+
+    async def test_redelivered_label_event_keeps_a_stable_identity(self):
+        """Redelivery of the SAME labeled event collapses onto one identity
+        (dedup intact) even when the delivery GUID differs."""
+        from forge.gateway.github_webhook import github_source_event_id
+
+        metadata = self.normalize(self.labeled_payload())
+        again = self.normalize(self.labeled_payload())
+        assert metadata["note_id"] == again["note_id"]
+        assert github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{metadata['note_id']}"
+        ) == github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{again['note_id']}"
+        )
 
     async def test_label_match_is_case_insensitive(self):
         assert self.normalize(self.labeled_payload(label="FORGE")) is not None

@@ -207,7 +207,12 @@ def normalize_labeled_event(
         "issue_is_pr": "pull_request" in issue,
         "author_username": str((payload.get("sender") or {}).get("login") or ""),
         "note_text": "",
-        "note_id": label.get("id"),
+        # The ISSUE id, not the label id: the label id is constant across
+        # every issue carrying it, so keying dedupe on it silently swallowed
+        # every labeled event after the first (LIVE-found on forcewake/forge:
+        # #28 auto-planned, #29 with the same label never did). Issue-scoped
+        # identity keeps redelivery dedup intact while distinct issues fire.
+        "note_id": issue.get("id"),
     }
 
 
