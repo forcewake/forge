@@ -461,10 +461,18 @@ class TestIssueEditedTrigger:
     stale is the executor's job (it owns the plan-time snapshot).
     """
 
-    def edited_payload(self, *, body: str | None = None, sender: str = "alice") -> dict:
+    def edited_payload(
+        self,
+        *,
+        body: str | None = None,
+        sender: str = "alice",
+        updated_at: str | None = None,
+    ) -> dict:
         payload = json.loads(load_payload("issues_edited.json"))
         if body is not None:
             payload["issue"]["body"] = body
+        if updated_at is not None:
+            payload["issue"]["updated_at"] = updated_at
         payload["sender"]["login"] = sender
         return payload
 
@@ -515,6 +523,21 @@ class TestIssueEditedTrigger:
         assert github_source_event_id(
             connection, "issues", "edited", first["delivery_key"]
         ) != github_source_event_id(connection, "issues", "edited", other_edit["delivery_key"])
+
+    async def test_edit_back_to_a_seen_text_is_not_swallowed(self):
+        """The inbox identity is permanent, so an edit landing BACK on a
+        previously-seen text (A→B→A) must not collide with the earlier
+        A-edit's row — a collision would swallow the command entirely and
+        leave the waiting plan silently stale again."""
+        body_b = self.normalize(self.edited_payload(body="body B", updated_at="t1"))
+        body_a = self.normalize(self.edited_payload(body="body A", updated_at="t2"))
+        body_again = self.normalize(self.edited_payload(body="body B", updated_at="t3"))
+
+        assert body_b["delivery_key"] != body_again["delivery_key"]
+        assert body_a["delivery_key"] not in (
+            body_b["delivery_key"],
+            body_again["delivery_key"],
+        )
 
     async def test_edited_delivery_ingests_a_durable_run_command(self, tmp_path):
         """Full ingress: inbox row + scheduled step in ONE transaction — the

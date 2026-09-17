@@ -233,8 +233,14 @@ def normalize_issue_edited_event(payload: dict[str, Any]) -> dict[str, Any] | No
     the payload's ``changes`` diff is not needed for that.
 
     The delivery key is content-stable — ``edit:{issue_id}:{digest of the new
-    text}`` — so a redelivered edit collapses onto one inbox identity while
-    two genuinely different edits never do.
+    text}:{issue updated_at}`` — so a redelivered edit collapses onto one
+    inbox identity while two genuinely different edits never do. The text
+    digest alone is not enough identity: the inbox index is permanent, so an
+    edit landing BACK on a previously-seen text (A→B→A) would collide with
+    the first A-edit's row and be silently swallowed — no command, and the
+    waiting plan goes stale again. ``updated_at`` is bumped by GitHub on
+    every edit and travels identically in a redelivered payload, so it
+    separates the re-applied edit from the replay without a clock.
     """
     issue = payload.get("issue") or {}
     if not issue or "pull_request" in issue:
@@ -246,7 +252,7 @@ def normalize_issue_edited_event(payload: dict[str, Any]) -> dict[str, Any] | No
     body = str(issue.get("body") or "")
     issue_id = issue.get("id")
     text_digest = hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()
-    delivery_key = f"edit:{issue_id}:{text_digest}"
+    delivery_key = f"edit:{issue_id}:{text_digest}:{str(issue.get('updated_at') or '')}"
 
     return {
         "command": "issue_edited",
