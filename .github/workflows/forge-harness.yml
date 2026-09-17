@@ -118,7 +118,14 @@ jobs:
           # lane must carry the tooling for that (LIVE-found: bare hosted
           # python has no pytest, and the agent burned turns on denied
           # attempts to check).
-          pip install pytest "ruff>=0.4" || true
+          # PIN to the repo's own lock when it has one: a pip-latest ruff
+          # formats differently than the CI-pinned one and every candidate
+          # fails lint with "Would reformat" (LIVE-found on PR #30 — the
+          # drift burned two repair cycles on a healthy candidate).
+          RUFF_VER=$(grep -A1 '^name = "ruff"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
+          PYTEST_VER=$(grep -A1 '^name = "pytest"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
+          pip install ${RUFF_VER:+ruff==${RUFF_VER}} || pip install "ruff>=0.4" || true
+          pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
           if echo "$FORGE_HARNESS_MCP" | grep -q codegraph; then
             npm install -g --no-fund --no-audit @colbymchenry/codegraph@1.6.0
             codegraph telemetry off
