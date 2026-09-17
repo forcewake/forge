@@ -73,12 +73,13 @@ azure_router = APIRouter()
 #: Commands served by the durable run loop — the same set the GitLab and
 #: GitHub ingresses route; the normalized Azure command lands on the same
 #: durable step path. The mention parser is provider-agnostic (ADR-0024 §7).
-_AZDO_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
+_AZDO_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
 
 _COMMAND_MAP = {
     "/implement": "start_run",
     "/go": "go",
     "/cancel": "cancel",
+    "/retry": "retry",
     "/security": "security_triage",
 }
 

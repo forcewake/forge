@@ -11,7 +11,11 @@ Rules encoded here:
   announcement commit atomically (ADR-0005).
 - ``blocked`` / ``failed`` / ``cancelled`` may be entered from any
   non-terminal state; terminal states (``ready_for_human``, ``blocked``,
-  ``failed``, ``cancelled``) have no outgoing transitions.
+  ``failed``, ``cancelled``) have no outgoing transitions. The ONE
+  exception is the explicit revival edge (:meth:`Controller.revive_transition`):
+  a run parked ``blocked``/``failed`` may be walked back to ``proposing`` by
+  the operator (``/retry``) or by the Tier-1 auto-revive, never by the plain
+  graph.
 - External writes are journaled intent-first: ``record_action`` creates a
   ``requested`` row before dispatch, ``complete_action`` records the outcome
   exactly once (ADR-0005).
@@ -105,6 +109,15 @@ ALLOWED_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
 for _status in ALLOWED_TRANSITIONS:
     if _status not in TERMINAL_STATUSES:
         ALLOWED_TRANSITIONS[_status] = ALLOWED_TRANSITIONS[_status] | _FROM_ANY_TERMINAL
+
+
+#: The revival edge (Tier-1 auto-revive / Tier-2 operator ``/retry``): the
+#: only walk out of a terminal status, and only to ``proposing``. Deliberately
+#: NOT part of ``ALLOWED_TRANSITIONS`` — ``transition`` must never leave a
+#: terminal state on its own; :meth:`Controller.revive_transition` is the
+#: explicit, journaled exception, and ``cancelled``/``ready_for_human`` are
+#: excluded from it on purpose (a revoked publication grant stays revoked).
+_REVIVAL_SOURCES: frozenset[FlowStatus] = frozenset({FlowStatus.BLOCKED, FlowStatus.FAILED})
 
 
 class ControllerError(Exception):
@@ -204,6 +217,49 @@ class Controller:
                     "from": current.value,
                     "to": target.value,
                     "reason": reason,
+                },
+            )
+        )
+        await self.session.flush()
+        return run
+
+    async def revive_transition(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        authorized_by: str,
+    ) -> FlowRun:
+        """Walk a ``blocked``/``failed`` run back to ``proposing`` — the revival edge.
+
+        The explicit, operator-authorized (``/retry``) or machine-journaled
+        (``auto_revive``) exception to "terminal states have no outgoing
+        transitions": same run id, same branch, same candidate history. The
+        outbox row carries ``authorized_by`` so the walk is auditable.
+        Raises :class:`InvalidTransition` for any other source status.
+        """
+        run = await self.session.get(FlowRun, run_id)
+        if run is None:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        current = FlowStatus(run.status)
+        if current not in _REVIVAL_SOURCES:
+            raise InvalidTransition(
+                f"revival edge requires 'blocked' or 'failed', not {current.value!r}"
+            )
+
+        run.status = FlowStatus.PROPOSING.value
+        run.status_reason = (reason or "")[:200]
+        run.updated_at = datetime.now(timezone.utc)
+        self.session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type=TRANSITION_EVENT_TYPE,
+                payload={
+                    "flow_run_id": run_id,
+                    "from": current.value,
+                    "to": FlowStatus.PROPOSING.value,
+                    "reason": reason,
+                    "revival": authorized_by,
                 },
             )
         )

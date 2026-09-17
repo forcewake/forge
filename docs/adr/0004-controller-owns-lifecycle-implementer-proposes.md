@@ -78,3 +78,28 @@ the enum and migration surface small:
 
 If finer-grained observability is needed later this is an enum + graph +
 CHECK migration, not a semantic change.
+
+## Amendment (2026-09-17, revival: auto-retry of transient deaths, `/retry`)
+
+"Terminal states have no outgoing transitions" gains ONE explicit, journaled
+exception — the revival edge:
+
+- `blocked` → `proposing` and `failed` → `proposing`, available ONLY through
+  `Controller.revive_transition` (never through `ALLOWED_TRANSITIONS`), and
+  never for `cancelled` (a revoked publication grant stays revoked) or
+  `ready_for_human` (that run is done).
+- The edge is driven by two callers only: the Tier-1 auto-revive (a run whose
+  `failed` terminalization classified *transient* — dispatch 5xx/network/
+  timeout, rate limits, runner startup — parks `blocked` with a revival stamp
+  in its evidence and the reconciler re-dispatches the same branch after
+  bounded backoff, at most `FORGE_RUN_AUTO_REVIVE_LIMIT` times) and the
+  Tier-2 operator `/retry` (one operator-granted commit cycle, same branch).
+- A `failed` terminalization that classifies *fatal* (config errors such as
+  4xx input mismatches, driver quality signals, exhausted cycles) parks
+  `blocked` with the precise reason instead of `failed`: terminal death is
+  reserved for what genuinely needs a human, and the human gets an
+  actionable cause, not a status word. `failed` remains a legal status for
+  legacy rows and as a revival-edge source.
+
+The outbox row of a revival walk carries `authorized_by`
+(`operator:<user>` / `auto_revive`) so the audit trail stays complete.
