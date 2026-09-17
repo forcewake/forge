@@ -46,6 +46,15 @@ class TestRenderClaudeCode:
 
         assert "--model" not in script
 
+    def test_repair_dispatch_caps_thinking_budget(self):
+        """Repair re-dispatches are guided fixes: the thinking-cap export is
+        GUARDED at runtime by repair-context presence (the rendered script
+        is static — first cycles take the guard's else path and think
+        freely)."""
+        script = render_driver_script("claude-code", "m", BRIEF)
+        assert 'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then' in script
+        assert "MAX_THINKING_TOKENS=" in script
+
 
 class TestRenderGrokBuild:
     def test_script_installs_the_platform_binary_explicitly(self):

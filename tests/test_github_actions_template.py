@@ -38,6 +38,9 @@ class TestWorkflowTemplateContract:
             "driver",
             "model",
             "issue_number",  # the lane fetches its brief from the issue
+            # Repair re-dispatches only — an undeclared dispatch input is a
+            # dispatch-wide 422 (LIVE-found on db5408f4).
+            "repair_context",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())

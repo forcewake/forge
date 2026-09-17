@@ -208,7 +208,22 @@ class GitHubAppCredentials:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
-            transport=transport,
+            # Connection hygiene for flaky host networks (LIVE-found: after a
+            # host-network blip the worker's long-lived pool kept failing with
+            # ConnectTimeout for hours while fresh processes connected fine —
+            # only a worker restart recovered it). Short keepalive expiry
+            # drops dead sockets promptly; connect-phase retries (idempotent
+            # — they never resend a sent request) absorb transient blips.
+            # An injected transport (tests) always wins.
+            # NOTE: limits must ride ON the transport — httpx ignores the
+            # client-level `limits=` kwarg whenever an explicit transport
+            # is passed.
+            transport=transport
+            if transport is not None
+            else httpx.AsyncHTTPTransport(
+                retries=2,
+                limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=30.0),
+            ),
         )
         self._cached: InstallationToken | None = None
         self._lock = asyncio.Lock()
@@ -308,7 +323,19 @@ class GitHubClient:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
-            transport=transport,
+            # Same connection hygiene as the App-credentials client: short
+            # keepalive expiry + connect-phase retries so a host-network
+            # blip cannot wedge the worker's long-lived pool (LIVE-found).
+            # An injected transport (tests) always wins.
+            # NOTE: limits must ride ON the transport — httpx ignores the
+            # client-level `limits=` kwarg whenever an explicit transport
+            # is passed.
+            transport=transport
+            if transport is not None
+            else httpx.AsyncHTTPTransport(
+                retries=2,
+                limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=30.0),
+            ),
         )
         self._tokens = token_provider
 

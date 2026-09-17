@@ -83,9 +83,9 @@ from forge.factory.planner import LLMPlanner, PLAN_SUMMARY_CHARS
 from forge.factory.reviewer import (
     REVIEWER_MAX_DIFF_CHARS,
     REVIEWER_MAX_INPUT_CHARS,
-    REVIEWER_TIER,
     LLMReviewer,
     ReviewVerdict,
+    review_with_retry,
 )
 from forge.factory.implementer import LLMImplementer
 from forge.execution.azure_pipelines import (
@@ -336,15 +336,14 @@ class AzurePRReviewer:
             f"Plan summary:\n{plan_summary or '(no plan summary available)'}\n\n"
             f"Candidate diff ({base_sha[:8]}..{candidate_sha[:8]}):\n{diff}"
         )
-        result = await self._llm.complete(
-            tier=REVIEWER_TIER,
+        result = await review_with_retry(
+            self._llm,
             system=_REVIEW_SYSTEM_PROMPT,
             user=truncate_chars(user, REVIEWER_MAX_INPUT_CHARS),
-            role="reviewer",
+            parse=LLMReviewer._parse,
             flow_run_id=flow_run_id,
-            json_mode=True,
         )
-        return LLMReviewer._parse(result.text)
+        return result
 
     async def _pr_diff(self, project: str, repo: str, base_sha: str, candidate_sha: str) -> str:
         """Render the candidate's changed files as diff text, biggest first."""

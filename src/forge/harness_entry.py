@@ -344,6 +344,14 @@ def render_driver_script(
             "# must not die at the client default mid-run.\n"
             "export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000"
             " BASH_MAX_TIMEOUT_MS=600000\n"
+            "# Repair re-dispatches are GUIDED fixes (bounded failure context\n"
+            "# rides in the brief) — deep per-turn thinking is the lane's\n"
+            "# dominant wall-time cost (LIVE: 17% of turns >40s ≈ half the\n"
+            "# run), so repair cycles cap the thinking budget. First cycles\n"
+            "# think freely.\n"
+            'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then\n'
+            '  export MAX_THINKING_TOKENS="${FORGE_MAX_THINKING_TOKENS:-8000}"\n'
+            "fi\n"
             + mcp_provision
             + preamble
             + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
