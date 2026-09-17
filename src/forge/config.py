@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # failures never consume a cycle (they block instead of repairing).
     FORGE_MAX_COMMIT_CYCLES: int = 3
 
+    # Tier 1 auto-revive: a terminal failure classified transient (dispatch
+    # 5xx, network, rate limit, runner startup) re-dispatches the SAME branch
+    # instead of dying — bounded to LIMIT automatic revives per run, each
+    # after BACKOFF seconds (doubled per attempt). Exhausted (or a fatal
+    # cause) parks the run blocked for a human instead.
+    FORGE_RUN_AUTO_REVIVE_LIMIT: int = 2
+    FORGE_RUN_REVIVE_BACKOFF_SECONDS: int = 60
+
     # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
     # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
     # a coding harness executing as a job in the target project's CI.

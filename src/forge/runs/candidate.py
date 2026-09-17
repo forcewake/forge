@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from forge.runs.failures import revival_count
+
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
 
 #: The three manifest operations (``update`` in ChangeSet terms is ``modify``).
@@ -221,10 +223,15 @@ def attempt_base_for(run: object) -> str:
     source base; repair → the last verified candidate OID. Mirrors
     ``RunService._advance_proposal`` — passed to the harness lane as
     ``FORGE_ATTEMPT_BASE`` and checked against every candidate artifact.
+
+    A revived run (auto-revive, ``/retry``) is a continuation too — its last
+    candidate is the base even at cycle 1, or the re-dispatch would roll the
+    branch back to the approved base and discard the stranded work. The
+    revival is visible as a ``revive_count`` in the run's evidence.
     """
     cycle = getattr(run, "commit_cycle", None) or 1
     candidates = list(getattr(run, "candidate_shas", None) or [])
-    if cycle > 1 and candidates:
+    if candidates and (cycle > 1 or revival_count(getattr(run, "evidence", None))):
         return candidates[-1]
     return str(getattr(run, "base_sha", None) or "")
 

@@ -107,6 +107,17 @@ for _status in ALLOWED_TRANSITIONS:
         ALLOWED_TRANSITIONS[_status] = ALLOWED_TRANSITIONS[_status] | _FROM_ANY_TERMINAL
 
 
+#: Terminal death is reversible, but only deliberately: the Tier 1 auto-revive
+#: (a transient failure re-dispatched on the same branch) and the operator
+#: ``/retry`` override walk a dead run back to ``proposing``. No ordinary
+#: transition may take these edges — :meth:`Controller.transition` allows them
+#: only with ``revival=True``, so an accidental caller still hits the wall.
+REVIVAL_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
+    FlowStatus.FAILED: {FlowStatus.PROPOSING},
+    FlowStatus.BLOCKED: {FlowStatus.PROPOSING},
+}
+
+
 class ControllerError(Exception):
     """Base class for controller errors."""
 
@@ -174,8 +185,14 @@ class Controller:
         run_id: str,
         to_status: FlowStatus | str,
         reason: str | None = None,
+        *,
+        revival: bool = False,
     ) -> FlowRun:
         """Move the run to *to_status* and write one outbox row, atomically.
+
+        With ``revival=True`` the explicit revival edges
+        (:data:`REVIVAL_TRANSITIONS`) are allowed too — the only way out of a
+        terminal state, reserved for the auto-revive and the operator retry.
 
         Raises :class:`RunNotFound` if the run does not exist and
         :class:`InvalidTransition` if ADR-0004 does not allow the move.
@@ -185,7 +202,9 @@ class Controller:
         if run is None:
             raise RunNotFound(f"flow run {run_id!r} not found")
         current = FlowStatus(run.status)
-        allowed = ALLOWED_TRANSITIONS[current]
+        allowed = set(ALLOWED_TRANSITIONS[current])
+        if revival:
+            allowed |= REVIVAL_TRANSITIONS.get(current, set())
         if target not in allowed:
             raise InvalidTransition(
                 f"transition {current.value!r} -> {target.value!r} is not allowed; "
