@@ -430,6 +430,46 @@ class TestRepairLoop:
         assert run.candidate_shas == [first_sha]
         assert llm.roles() == ["planner", "implementer"]
 
+    async def test_human_push_on_the_factory_branch_blocks_never_force_fixed(
+        self, db, fake_gitlab
+    ):
+        """A human push on the factory branch is reported, never force-fixed.
+
+        The journaled candidate is no longer the branch head, so nothing is
+        adopted and the guarded apply refuses: the run blocks with the reason
+        instead of writing a second candidate over the human's commit.
+        """
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        branch = branch_for(ISSUE_IID, run_id)
+
+        human_sha = "human-push-sha"
+        fake_gitlab.seed_commit(branch, human_sha, "human tweak")
+
+        # Rewind to the crash the resume path covers: the attempt had
+        # materialized (manifest recorded) but the candidate sha never
+        # persisted, so the walk re-enters at the write.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.candidate_shas = []
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "branch_drift" in (run.status_reason or "")
+        # The human's commit stands on top of the candidate — no force-fix.
+        branch_shas = [c["sha"] for c in fake_gitlab.branches[branch] if c["sha"] != BASE_SHA]
+        assert branch_shas == [human_sha, first_sha]
+        assert llm.roles() == ["planner", "implementer"]
+
     async def test_repair_budget_exhausted_blocks(self, db, fake_gitlab):
         llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
         service = make_service(

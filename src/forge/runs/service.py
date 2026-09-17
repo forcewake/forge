@@ -85,6 +85,7 @@ from forge.repository import (
     changeset_to_document,
     validate_changeset,
 )
+from forge.repository.writer import BranchDriftError
 from forge.runs.admission import check_admission
 from forge.runs.backends import (
     HarnessOutcome,
@@ -976,6 +977,14 @@ class RunService:
                 )
             except GitLabAPIError as exc:
                 await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
+                return
+            except BranchDriftError as exc:
+                # A human push on the factory branch is never force-fixed
+                # (review F03): the guarded apply refused, so the run stops
+                # here with the reason — the same contract as the harness
+                # publisher and the GitHub/Azure lanes, and the branch keeps
+                # the human's commit.
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"branch_drift: {exc}")
                 return
             if result.outcome is WriteOutcome.UNKNOWN:
                 # Unknown outcome: block the run, never blind-retry (ADR-0005).
