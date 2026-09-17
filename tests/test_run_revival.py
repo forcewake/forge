@@ -439,6 +439,8 @@ async def test_retry_walks_back_to_proposing_and_redispatches(db, fake_gitlab):
     run = await get_run(db, run_id)
     assert run.status == FlowStatus.PROPOSING.value
     assert run.commit_cycle == 4  # one operator-granted cycle
+    # The retry resumes on the SAME branch: attempt base = last candidate.
+    assert attempt_base_for(run) == CANDIDATE_SHA
     assert fired and fired[0]["run_id"] == run_id
     assert "harness_start_failed: 500" in fired[0]["repair_context"]
     actions = await get_actions(db, run_id, "retry_requested")

@@ -671,7 +671,8 @@ class GitHubRunService:
         rejection: str | None = None
         if cancelled or status not in (FlowStatus.FAILED.value, FlowStatus.BLOCKED.value):
             rejection = _reject_reason(
-                f"it is {status}" + (" and cancelled" if cancelled else "")
+                f"it is {status}"
+                + (" and cancelled" if cancelled else "")
                 + ". `/retry` revives a dead (`failed`/`blocked`) run — use `/implement` "
                 "to start fresh work"
             )
