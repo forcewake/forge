@@ -216,17 +216,59 @@ def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBund
     )
 
 
+@dataclass(frozen=True)
+class AttemptContext:
+    """The base snapshot set of ONE proposal attempt (R06).
+
+    One definition of the bases every leg of an attempt shares: the
+    implementer reads and materializes at ``attempt_base``, update/delete
+    existence is validated against the same snapshot, and the writer pins the
+    factory branch to it (``start_ref == expected_head``). Cycle 1 reads the
+    approved source base; a repair extends the last verified candidate so it
+    can see cycle 1's files. ``source_base`` stays frozen at the approved
+    snapshot for the final cumulative review/acceptance diff only — it is
+    never consulted for repair existence checks.
+    """
+
+    cycle: int
+    #: read/materialize/validate/publish base for the WHOLE attempt.
+    attempt_base: str
+    #: frozen approved base — final cumulative review/acceptance only.
+    source_base: str
+    #: the verified candidate this attempt extends (None on cycle 1).
+    previous_candidate: str | None
+
+    @classmethod
+    def of(cls, run: object) -> AttemptContext:
+        """The context of *run*'s current attempt, from its durable state."""
+        cycle = getattr(run, "commit_cycle", None) or 1
+        source_base = str(getattr(run, "base_sha", None) or "")
+        candidates = list(getattr(run, "candidate_shas", None) or [])
+        previous = candidates[-1] if cycle > 1 and candidates else None
+        return cls(
+            cycle=cycle,
+            attempt_base=previous or source_base,
+            source_base=source_base,
+            previous_candidate=previous,
+        )
+
+    def document(self) -> dict:
+        """The evidence document: this attempt's number and bases."""
+        return {
+            "cycle": self.cycle,
+            "attempt_base": self.attempt_base,
+            "source_base": self.source_base,
+            "previous_candidate": self.previous_candidate,
+        }
+
+
 def attempt_base_for(run: object) -> str:
     """The frozen attempt base for *run* (ADR-0016 §4): cycle 1 → approved
-    source base; repair → the last verified candidate OID. Mirrors
-    ``RunService._advance_proposal`` — passed to the harness lane as
-    ``FORGE_ATTEMPT_BASE`` and checked against every candidate artifact.
+    source base; repair → the last verified candidate OID. The
+    :class:`AttemptContext` shared by the harness lane (``FORGE_ATTEMPT_BASE``,
+    checked against every candidate artifact) and the builtin proposal path.
     """
-    cycle = getattr(run, "commit_cycle", None) or 1
-    candidates = list(getattr(run, "candidate_shas", None) or [])
-    if cycle > 1 and candidates:
-        return candidates[-1]
-    return str(getattr(run, "base_sha", None) or "")
+    return AttemptContext.of(run).attempt_base
 
 
 # ----------------------------------------------------------------------

@@ -81,6 +81,8 @@ from forge.repository import (
     ChangesetWriter,
     MaterializationError,
     WriteOutcome,
+    changeset_from_document,
+    changeset_to_document,
     validate_changeset,
 )
 from forge.runs.admission import check_admission
@@ -90,6 +92,7 @@ from forge.runs.backends import (
     fetch_git_base,
     is_harness_backend,
 )
+from forge.runs.candidate import AttemptContext
 from forge.runs.ci_contract import classify_failure
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
@@ -844,39 +847,71 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             plan_summary, files_hint = self._plan_evidence(run)
-            cycle = run.commit_cycle or 1
-            # F02 (review): repairs build on the last VERIFIED candidate, not
-            # the original approved base — otherwise cycle 2 cannot see
-            # cycle 1's files and its update would roll work back. The
-            # source base stays frozen for full-result review.
-            # ``or ""`` mirrors _read_base_sha's failure fallback: base_sha is
-            # schema-nullable, and writer.apply needs a concrete ref.
-            attempt_base = (
-                (run.candidate_shas or [run.base_sha])[-1] if cycle > 1 else run.base_sha
-            ) or ""
+            # F02/R06: ONE context owns this attempt's bases — the implementer
+            # reads and materializes at ``attempt_base``, update/delete
+            # existence is validated against the SAME snapshot, and the writer
+            # pins the branch to it. Repairs build on the last VERIFIED
+            # candidate, not the original approved base — otherwise cycle 2
+            # cannot see cycle 1's files and its update would roll work back.
+            # The ``source_base`` stays frozen for the final cumulative
+            # review/acceptance only; it never decides repair existence.
+            attempt = AttemptContext.of(run)
             entry_status = run.status
+            recorded_attempt = (run.evidence or {}).get("attempt")
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
 
         issue_title = await self._read_issue_title(project_id, run)
-        try:
-            changeset = await self._implementer.propose(
-                run,
-                issue_title,
-                plan_summary=plan_summary,
-                files_hint=files_hint,
-                repair_context=repair_context,
-                attempt_base=attempt_base,
+        # ADR-0017 §3 (R06): a walk that re-enters its own attempt adopts the
+        # manifest it already materialized for THIS cycle at THIS base — same
+        # changes, no second paid proposal. Anything else (first proposal, a
+        # new repair cycle, a stale or absent record) proposes at the attempt
+        # base as before.
+        changeset = (
+            changeset_from_document(recorded_attempt.get("manifest"))
+            if isinstance(recorded_attempt, dict)
+            and recorded_attempt.get("cycle") == attempt.cycle
+            and recorded_attempt.get("attempt_base") == attempt.attempt_base
+            else None
+        )
+        if changeset is not None:
+            logger.info(
+                "Run %s cycle %d resumes on its recorded manifest (%d changes)",
+                run_id[:8],
+                attempt.cycle,
+                len(changeset.changes),
             )
-        except MaterializationError as exc:
-            # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
-            # a blocked run, not a guess.
-            await self._to_terminal(
-                run_id, FlowStatus.BLOCKED, f"changeset_invalid: materialization: {exc}"
+        else:
+            try:
+                changeset = await self._implementer.propose(
+                    run,
+                    issue_title,
+                    plan_summary=plan_summary,
+                    files_hint=files_hint,
+                    repair_context=repair_context,
+                    attempt_base=attempt.attempt_base,
+                )
+            except MaterializationError as exc:
+                # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
+                # a blocked run, not a guess.
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, f"changeset_invalid: materialization: {exc}"
+                )
+                return
+            except (LLMError, LLMResponseError) as exc:
+                await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
+                return
+            # R06: persist the attempt (number, manifest, previous candidate)
+            # the moment it materializes — the durable record a resumed walk
+            # continues from.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "attempt": {
+                        **attempt.document(),
+                        "manifest": changeset_to_document(changeset),
+                    }
+                },
             )
-            return
-        except (LLMError, LLMResponseError) as exc:
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
-            return
 
         if not mid_leg:
             await self._transition(run_id, FlowStatus.VALIDATING)
@@ -886,8 +921,14 @@ class RunService:
         # scoping) is enforced here too — the builtin path is the second of
         # the two write boundaries (the trusted publisher is the other).
         allowed_paths = await self._read_spec_allowed_paths(run_id)
+        # R06: existence is checked at the ATTEMPT base — the snapshot the
+        # proposal was materialized against. The frozen source base would
+        # report a cycle-1 created file as missing and block a legitimate
+        # cycle-2 update of it.
         git_base = await self._fetch_git_base(
-            project_id, [change.path for change in changeset.changes], run.base_sha
+            project_id,
+            [change.path for change in changeset.changes],
+            attempt.attempt_base,
         )
         violations = validate_changeset(changeset, git_base, allowed_paths=allowed_paths)
         if violations:
@@ -896,7 +937,9 @@ class RunService:
             )
             return
 
-        if not mid_leg:
+        # A resumed ``validating`` entry still owes the graph the committing
+        # move — validating -> ensuring_draft_mr is not a legal edge (ADR-0004).
+        if not mid_leg or entry_status == FlowStatus.VALIDATING.value:
             await self._transition(run_id, FlowStatus.COMMITTING)
 
         # committing: journaled, reconcilable write (ADR-0005). The factory
@@ -928,8 +971,8 @@ class RunService:
                 result = await writer.apply(
                     run_id,
                     changeset,
-                    start_ref=attempt_base,
-                    expected_head=attempt_base,
+                    start_ref=attempt.attempt_base,
+                    expected_head=attempt.attempt_base,
                 )
             except GitLabAPIError as exc:
                 await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")

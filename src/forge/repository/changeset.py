@@ -294,3 +294,68 @@ def validate_changeset(
                 violations.append(f"{where}: file does not exist in the approved base snapshot")
 
     return violations
+
+
+# ----------------------------------------------------------------------
+# Document round-trip (durable attempt manifest)
+# ----------------------------------------------------------------------
+
+
+def changeset_to_document(cs: ChangeSet) -> dict[str, Any]:
+    """Serialize a materialized ChangeSet into a JSON-safe document.
+
+    The durable manifest of one attempt: a resumed walk re-adopts exactly
+    these changes instead of re-proposing (and re-paying) for them.
+    """
+    return {
+        "branch": cs.branch,
+        "commit_message": cs.commit_message,
+        "attempt_base_oid": cs.attempt_base_oid,
+        "changes": [
+            {
+                "path": change.path,
+                "operation": change.operation.value,
+                "content": change.content,
+            }
+            for change in cs.changes
+        ],
+    }
+
+
+def changeset_from_document(data: object) -> ChangeSet | None:
+    """Rebuild the ChangeSet *data* was written from; None when it is not one.
+
+    The record is forge's own (written by :func:`changeset_to_document`), so a
+    malformed or alien document simply means "no resumable manifest" and the
+    caller falls back to a fresh proposal — never an error path.
+    """
+    if not isinstance(data, dict):
+        return None
+    branch = data.get("branch")
+    commit_message = data.get("commit_message")
+    raw_changes = data.get("changes")
+    if not isinstance(branch, str) or not isinstance(commit_message, str):
+        return None
+    if not isinstance(raw_changes, list) or not raw_changes:
+        return None
+    changes: list[Change] = []
+    for raw in raw_changes:
+        if not isinstance(raw, dict):
+            return None
+        operation = _OPERATION_ALIASES.get(str(raw.get("operation") or ""))
+        path = raw.get("path")
+        content = raw.get("content")
+        if operation is None or not isinstance(path, str) or not path:
+            return None
+        if content is not None and not isinstance(content, str):
+            return None
+        changes.append(Change(path=path, operation=operation, content=content))
+    attempt_base_oid = data.get("attempt_base_oid")
+    if not isinstance(attempt_base_oid, str):
+        attempt_base_oid = None
+    return ChangeSet(
+        branch=branch,
+        commit_message=commit_message,
+        changes=changes,
+        attempt_base_oid=attempt_base_oid,
+    )
