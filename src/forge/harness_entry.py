@@ -87,9 +87,23 @@ from forge.harnesses.mcp import (
 _CLAUDE_ALLOWED_TOOLS = (
     "Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git -C * diff:*),"
     "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
+    # Read-only text processing (LIVE-found: `... | awk 'length > 100'` and
+    # `sed 's/^+//'` in analysis pipelines were DENIED — every pipeline
+    # segment must be allowlisted, not just the head command):
+    "Bash(awk:*),Bash(sed:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),"
+    "Bash(find:*),Bash(diff:*),Bash(basename:*),Bash(dirname:*),Bash(realpath:*),"
     "Bash(python3:*)"
     "Bash(python:*)"
-    "Bash(pip install:*),Bash(pip list),Bash(pip show:*)"
+    "Bash(.venv/bin/python:*),Bash(./.venv/bin/python:*),"
+    "Bash(.venv/bin/pytest:*),Bash(.venv/bin/ruff:*),Bash(.venv/bin/mypy:*),"
+    "Bash(./.venv/bin/pytest:*),Bash(./.venv/bin/ruff:*),Bash(./.venv/bin/mypy:*),"
+    "Bash(pip install:*),Bash(pip list),Bash(pip show:*),Bash(pip3 install:*),"
+    # The repo's own quality gates (AGENTS.md / brief quality bar tell the
+    # agent to run them — LIVE-found: `make lint`, `uv run ruff`, bare
+    # pytest/ruff/mypy and `set -o pipefail &&` compounds were all DENIED
+    # and the agent burned turns flailing against permission prompts):
+    "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),"
+    "Bash(uv:*),Bash(make:*),Bash(set:*)"
 )
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
@@ -269,9 +283,10 @@ def render_driver_script(
     Rendered per driver from the GitLab templates' contract:
 
     - ``claude-code`` — headless print mode, stream-json events, no external
-      settings (prompt-injection surface reduction), acceptEdits with a
-      git-only shell allowlist PLUS the R5 mechanical deny: commit/push are
-      ``--disallowedTools`` (holds even under a permission escalation),
+      settings (prompt-injection surface reduction), bypassPermissions PLUS
+      the R5 mechanical deny: commit/push are ``--disallowedTools`` (holds
+      even under bypass — deny beats every permission mode; the lane's real
+      boundary is no write credentials + push FORBIDDEN + trusted publisher)
       ``--permission-prompts none`` guarantees no interactive prompt, and
       the vendor timeout budgets keep long tool calls from dying mid-run;
     - ``grok-build`` — the hardened npm preamble first: the wrapper declares
@@ -334,7 +349,15 @@ def render_driver_script(
             f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS + mcp_tools)} \\\n"
             '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
             "  --permission-prompts none \\\n"
-            "  --permission-mode acceptEdits \\\n"
+            # bypassPermissions, NOT acceptEdits + allowlist: the allowlist
+            # whack-a-mole is unfixable in principle (LIVE: three waves —
+            # quality gates, pipeline segments like awk/sed, then ANY
+            # redirection such as `python3 -m pytest 2>&1` poisoned segment
+            # matching). The lane's real security boundary is elsewhere:
+            # no write credentials, push FORBIDDEN at the remote, output as
+            # an artifact validated by the trusted publisher. The mechanical
+            # commit/push deny still applies (deny beats bypass).
+            "  --permission-mode bypassPermissions \\\n"
             "  --max-turns 200 \\\n"
             f"  --mcp-config {shlex.quote(mcp_file)} --strict-mcp-config \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
@@ -344,6 +367,22 @@ def render_driver_script(
             "# must not die at the client default mid-run.\n"
             "export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000"
             " BASH_MAX_TIMEOUT_MS=600000\n"
+            "# Ephemeral isolated config: claude's auto-memory is pointless in\n"
+            "# a proposal-only lane (the brief IS this run's memory) and\n"
+            "# HAZARDOUS on reused runners — the MEMORY.md index auto-loads into\n"
+            "# context, so a stale index from ANOTHER run on the same VM would\n"
+            "# poison this run (LIVE-found: the agent wrote memory/MEMORY.md).\n"
+            "# A fresh config dir per lane guarantees a cold start; lane auth\n"
+            "# rides on env vars, so nothing stored is lost.\n"
+            'export CLAUDE_CONFIG_DIR="$(mktemp -d /tmp/claude-lane-config.XXXXXX)"\n'
+            "# Repair re-dispatches are GUIDED fixes (bounded failure context\n"
+            "# rides in the brief) — deep per-turn thinking is the lane's\n"
+            "# dominant wall-time cost (LIVE: 17% of turns >40s ≈ half the\n"
+            "# run), so repair cycles cap the thinking budget. First cycles\n"
+            "# think freely.\n"
+            'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then\n'
+            '  export MAX_THINKING_TOKENS="${FORGE_MAX_THINKING_TOKENS:-8000}"\n'
+            "fi\n"
             + mcp_provision
             + preamble
             + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
@@ -380,8 +419,13 @@ def render_driver_script(
             "  --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \\\n"
             "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
             "  --allow 'Bash(pip install:*)' \\\n"
-            "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
-            "  --allow 'Bash(pip install:*)' \\\n"
+            # The repo's own quality gates (LIVE-found: make lint / bare
+            # ruff / venv python were denied and burned turns):
+            "  --allow 'Bash(uv:*)' --allow 'Bash(make:*)' --allow 'Bash(set:*)' \\\n"
+            "  --allow 'Bash(ruff:*)' --allow 'Bash(mypy:*)' \\\n"
+            "  --allow 'Bash(.venv/bin/python:*)' --allow 'Bash(.venv/bin/ruff:*)' \\\n"
+            "  --allow 'Bash(awk:*)' --allow 'Bash(sed:*)' --allow 'Bash(sort:*)' \\\n"
+            "  --allow 'Bash(cut:*)' --allow 'Bash(tr:*)' --allow 'Bash(find:*)' \\\n"
             "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
@@ -452,6 +496,11 @@ def render_driver_script(
             "  --allow-tool 'shell(pytest:*)' \\\n"
             "  --allow-tool 'shell(uv run ruff:*)' \\\n"
             "  --allow-tool 'shell(uv run mypy:*)' \\\n"
+            "  --allow-tool 'shell(uv:*)' --allow-tool 'shell(make:*)' \\\n"
+            "  --allow-tool 'shell(set:*)' --allow-tool 'shell(ruff:*)' \\\n"
+            "  --allow-tool 'shell(mypy:*)' \\\n"
+            "  --allow-tool 'shell(awk:*)' --allow-tool 'shell(sed:*)' \\\n"
+            "  --allow-tool 'shell(sort:*)' --allow-tool 'shell(cut:*)' \\\n"
             f"{mcp_grants}"
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )

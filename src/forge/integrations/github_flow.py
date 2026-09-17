@@ -39,9 +39,9 @@ from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import (
     REVIEWER_MAX_DIFF_CHARS,
     REVIEWER_MAX_INPUT_CHARS,
-    REVIEWER_TIER,
     LLMReviewer,
     ReviewVerdict,
+    review_with_retry,
 )
 from forge.factory.llm import truncate_chars
 from forge.integrations.github import (
@@ -354,15 +354,13 @@ class GitHubPRReviewer:
             f"Plan summary:\n{plan_summary or '(no plan summary available)'}\n\n"
             f"Candidate diff ({base_sha[:8]}..{candidate_sha[:8]}):\n{diff}"
         )
-        result = await self._llm.complete(
-            tier=REVIEWER_TIER,
+        return await review_with_retry(
+            self._llm,
             system=_REVIEW_SYSTEM_PROMPT,
             user=truncate_chars(user, REVIEWER_MAX_INPUT_CHARS),
-            role="reviewer",
+            parse=LLMReviewer._parse,
             flow_run_id=flow_run_id,
-            json_mode=True,
         )
-        return LLMReviewer._parse(result.text)
 
     async def _pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
         """Render the PR's file patches as diff text, biggest files first."""

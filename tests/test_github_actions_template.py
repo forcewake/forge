@@ -1,8 +1,8 @@
 """The forge-harness Actions workflow template contract (E3b, ADR-0020).
 
 The template is human-applied to the TARGET repo, so it must keep the exact
-shape forge's executor depends on: workflow_dispatch with the dispatch
-inputs, the factory-branch ref, the entry-point invocation, and the candidate
+shape forge's executor depends on: workflow_dispatch with the four inputs,
+the factory-branch ref, the entry-point invocation, and the candidate
 artifact contract (name + files) the trusted publisher consumes.
 """
 
@@ -38,8 +38,8 @@ class TestWorkflowTemplateContract:
             "driver",
             "model",
             "issue_number",  # the lane fetches its brief from the issue
-            # bounded verification-failure context; the executor sends it only
-            # on a repair re-dispatch, so the input itself stays optional
+            # Repair re-dispatches only — an undeclared dispatch input is a
+            # dispatch-wide 422 (LIVE-found on db5408f4).
             "repair_context",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
@@ -80,7 +80,10 @@ class TestWorkflowTemplateContract:
         job = workflow["jobs"]["harness"]
 
         assert job["runs-on"] == "ubuntu-latest"  # ephemeral runner
-        assert job["timeout-minutes"] <= 60
+        # Above the run-side FORGE_HARNESS_TIMEOUT_SECONDS (5400s = 90m) so
+        # the governed deadline classifies honestly instead of GitHub
+        # killing the job as "cancelled" (LIVE-found at 60m).
+        assert job["timeout-minutes"] == 120
         assert "persist-credentials: false" in text  # nothing actionable left behind
         assert "git remote set-url --push origin FORBIDDEN" in text  # ADR-0016
         # No forge-side secrets ever reach the lane: only harness provider keys.

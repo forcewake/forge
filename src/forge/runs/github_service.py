@@ -33,6 +33,12 @@ GitHub-specific deviations, all deliberate:
 - **Expired or drifted decisions block** the run with a friendly comment
   (``decision_expired`` / ``decision_drift``) instead of silently ignoring
   the /go: on GitHub the comment thread is the only operator surface.
+- **Event-driven operator busywork**: an ``issues.edited`` whose text drifted
+  from the frozen snapshot replans a gate-waiting run (or notes a mid-flight
+  edit, never yanking an approved run — ``handle_issue_edited``); removing
+  the trigger label cancels gate-waiting runs (``handle_label_removed``); a
+  successor run closes the Draft PRs of failed/blocked/cancelled
+  predecessors (``close_superseded_draft_prs``).
 
 Durability rules are unchanged (ADR-0005): every transition goes through
 :class:`forge.durable.Controller`; external writes (comments, commits, PRs)
@@ -93,11 +99,20 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.publisher import spec_allowed_paths
+from forge.runs.revival import (
+    build_retry_context,
+    evaluate_revivals,
+    has_active_run,
+    resolve_retry_target,
+    retry_rejection,
+    terminalize_failure,
+)
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
     _DECISION_TTL_FALLBACK_SECONDS,
     _GO_RE,
+    _RETRY_RE,
     canonical_json_digest,
     plan_digest_of,
     task_digest_of,
@@ -591,6 +606,541 @@ class GitHubRunService:
         )
         logger.info("GitHub run %s cancelled by @%s", run_id[:8], author_username)
 
+    async def handle_retry(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        note_text: str,
+        author_username: str,
+    ) -> None:
+        """``/retry [run-id]``: operator revival of a dead run on the Actions lane.
+
+        The exact GitLab ``handle_retry_note`` semantics (Tier 2): bare, the
+        latest ``failed``/``blocked`` run for the issue; the explicit revival
+        graph edge walks it to ``proposing``; one operator-granted commit
+        cycle; the SAME branch re-dispatched with the terminal reason and the
+        last verification evidence as the repair context.
+        """
+        match = _RETRY_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info(
+                "GitHub /retry from @%s who is not in the GitHub approver list — ignoring",
+                author_username,
+            )
+            return
+        if issue_number is None:
+            logger.info("GitHub /retry off-issue — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        run_id: str | None = None
+        rejection = ""
+        async with self._session_factory() as session:
+            run = await resolve_retry_target(
+                session,
+                provider="github",
+                project_id=project_id,
+                issue_iid=issue_number,
+                requested=requested,
+                repo_full_name=self._repo_full_name,
+            )
+            if run is not None:
+                run_id = run.id
+                rejection = retry_rejection(
+                    run,
+                    other_active=await has_active_run(
+                        session,
+                        provider=run.provider,
+                        project_id=run.project_id,
+                        issue_iid=run.issue_iid,
+                        repo_full_name=run.github_repo_full_name,
+                        exclude_run_id=run.id,
+                    ),
+                )
+                if not rejection:
+                    status = run.status
+                    status_reason = run.status_reason or ""
+                    cycle = run.commit_cycle or 1
+                    evidence = dict(run.evidence or {})
+        if run_id is None:
+            logger.info(
+                "GitHub /retry on %s#%s — no retryable run", self._repo_full_name, issue_number
+            )
+            return
+        if rejection:
+            await self._post_journaled_note(
+                project_id, issue_number, f"🔁 {rejection}", run_id, "retry_rejected_note"
+            )
+            return
+
+        # Intent-first journal (ADR-0005), then the durable walk.
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "retry_requested", correlation_id=f"issue-{issue_number}"
+            )
+            await controller.revive_transition(
+                run_id,
+                reason=f"retry requested by @{author_username}",
+                authorized_by=f"operator:@{author_username}",
+            )
+            run = await self._get_run(session, run_id)
+            run.commit_cycle = cycle + 1
+            await session.commit()
+
+        branch = github_factory_branch(issue_number, run_id)
+        logger.info(
+            "GitHub run %s retried by @%s — re-dispatching %s (cycle %d)",
+            run_id[:8],
+            author_username,
+            branch,
+            cycle + 1,
+        )
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            f"## 🔁 Run `{run_id[:8]}` retried by @{author_username}\n\n"
+            f"- Branch: `{branch}` — the work continues in place, no re-planning\n"
+            f"- Commit cycle: {cycle + 1}\n\n*This is an automated message.*",
+            run_id,
+            "retry_ack_note",
+        )
+
+        repair_context = build_retry_context(self._settings, status_reason, evidence)
+        repair_reason = f"retry by @{author_username}: {status_reason or status}"
+        try:
+            await self._advance_harness(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                repair_context=repair_context,
+                repair_reason=repair_reason,
+            )
+        except Exception as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"backend": "ci_harness"})
+
+    async def evaluate_revival(self, now: datetime | None = None) -> None:
+        """One revival pass over this repo's transiently dead runs (Tier 1)."""
+        await evaluate_revivals(
+            self._session_factory,
+            self._settings,
+            provider="github",
+            redispatch=self._redispatch_revival,
+            now=now,
+            log=logger,
+        )
+
+    async def _redispatch_revival(self, run_id: str) -> None:
+        """Re-dispatch a revived run — same branch, attempt base = last candidate."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            issue_number = run.issue_iid
+        if issue_number is None:
+            logger.warning("GitHub revival of run %s without an issue — skipping", run_id[:8])
+            return
+        await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
+
+    # ------------------------------------------------------------------
+    # Issue-edit replan + label-off cancel (operator busywork, event-driven)
+    # ------------------------------------------------------------------
+
+    async def handle_issue_edited(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        author_username: str,
+    ) -> str | None:
+        """``issues.edited``: keep the waiting plan honest — no operator round trip.
+
+        Three cases, decided against the issue-text snapshot frozen at plan
+        time (the RunSpec's ``task_digest``):
+
+        - the run is still ``waiting_approval`` and its gate is unconsumed:
+          the waiting plan is stale. The stale run is cancelled durably
+          (cancel-as-revoke, F13), a fresh run plans from the new text (its
+          plan comment included) and a note says the plan was regenerated —
+          no ``/cancel`` + ``/implement`` by hand.
+        - the run is beyond the gate: the agent executes the APPROVED
+          snapshot — never yanked mid-flight. One informational note says the
+          edit is not in the current plan.
+        - the text matches the snapshot: a redelivered edit (or an edit back
+          to the planned text) — nothing went stale, nothing happens.
+
+        Returns the id of the run that owns the issue afterwards (None when
+        the edit was ignored).
+        """
+        admission = check_admission(
+            self._settings, self._config, project_id, author_username, provider="github"
+        )
+        if not admission.allowed:
+            # ADR-0009: forge reacts to an edit only for an actor it would
+            # let start a run — anyone else's edit never yanks or replans.
+            logger.info(
+                "GitHub issue edit by @%s on %s#%s ignored — not admitted (%s)",
+                author_username,
+                self._repo_full_name,
+                issue_number,
+                admission.reason,
+            )
+            return None
+
+        run = await self._find_active_run(project_id, issue_number)
+        stale_run_id: str | None = None
+        if run is not None:
+            edited_digest = task_digest_of(issue_title, issue_body)
+            if await self._frozen_task_digest(run.id) == edited_digest:
+                logger.info(
+                    "GitHub issue edit on %s#%s matches run %s's snapshot — ignoring",
+                    self._repo_full_name,
+                    issue_number,
+                    run.id[:8],
+                )
+                return run.id
+
+            if run.status == FlowStatus.WAITING_APPROVAL.value and not await self._gate_consumed(
+                run.id
+            ):
+                stale_run_id = run.id
+                await self._revoke_publication_grant(stale_run_id)
+                await self._transition(
+                    stale_run_id,
+                    FlowStatus.CANCELLED,
+                    reason=f"superseded by issue edit by @{author_username}",
+                )
+                logger.info(
+                    "GitHub run %s superseded by an issue edit — replanning %s#%s",
+                    stale_run_id[:8],
+                    self._repo_full_name,
+                    issue_number,
+                )
+            else:
+                # Approved / in flight: the change is NOT pulled into the
+                # approved plan.
+                await self._post_journaled_note(
+                    project_id,
+                    issue_number,
+                    f"Issue edited while run `{run.id[:8]}` is in flight — the change is "
+                    "**not** in the approved plan. The run keeps executing its approved "
+                    "snapshot; run `/cancel` and `/implement` if it should pick the change "
+                    "up.\n\n*This is an automated message.*",
+                    run.id,
+                    "issue_edited_note",
+                )
+                return run.id
+        elif not await self._replan_interrupted(project_id, issue_number):
+            logger.info(
+                "GitHub issue edit on %s#%s — no active run",
+                self._repo_full_name,
+                issue_number,
+            )
+            return None
+
+        new_run_id = await self.start_run(
+            project_id=project_id,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_description=issue_body,
+            author_username=author_username,
+        )
+        # A retried replan (the first attempt died mid-step) has no stale run
+        # of its own to name — the note then just says where the plan came from.
+        if stale_run_id is not None:
+            origin = (
+                f"The plan of run `{stale_run_id[:8]}` was **stale** — the issue was edited "
+                "while its plan waited for approval. It was cancelled and the plan "
+            )
+        else:
+            origin = (
+                "The issue was edited while its plan waited for approval — that plan was "
+                "stale, so the plan "
+            )
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            f"{origin}"
+            f"regenerated from the current issue body as run `{new_run_id[:8]}`. "
+            f"Approve with `/go {new_run_id}`.\n\n*This is an automated message.*",
+            new_run_id,
+            "replan_note",
+        )
+        return new_run_id
+
+    async def _replan_interrupted(self, project_id: int, issue_number: int) -> bool:
+        """Whether an edit-triggered replan on this issue died mid-step.
+
+        The command step retries with backoff, and the retry must be able to
+        finish what the ``202`` promised: the stale run is already cancelled,
+        so a plain ``no active run`` would leave the issue run-less. Two
+        shapes are retried — the superseded cancellation itself (``start_run``
+        never created the fresh run), and a ``planning_failed`` run it did
+        create (the fresh attempt plans again, exactly like a retried
+        ``/implement``).
+        """
+        async with self._session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(FlowRun)
+                        .where(
+                            FlowRun.provider == "github",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_number,
+                        )
+                        .order_by(FlowRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if run is None:
+            return False
+        if run.status == FlowStatus.CANCELLED.value:
+            return (run.status_reason or "").startswith("superseded by issue edit")
+        if run.status == FlowStatus.FAILED.value:
+            return (run.status_reason or "").startswith("planning_failed")
+        return False
+
+    async def handle_label_removed(
+        self, *, project_id: int, issue_number: int, author_username: str
+    ) -> int:
+        """``issues.unlabeled`` (trigger label): label-off = cancel at the gate.
+
+        Symmetry with label-on = plan (ADR-0020 §4): removing the trigger
+        label cancels runs still parked in ``waiting_approval`` — the plan
+        was never approved, so nothing executed is lost. Runs past the gate
+        are untouched: the approval consumed that plan, the label no longer
+        owns it. Returns the number of cancelled runs.
+        """
+        if author_username not in self._approvers():
+            logger.info(
+                "GitHub label removal by @%s on %s#%s ignored — not an approver",
+                author_username,
+                self._repo_full_name,
+                issue_number,
+            )
+            return 0
+        async with self._session_factory() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(
+                            FlowRun.provider == "github",
+                            FlowRun.github_repo_full_name == self._repo_full_name,
+                            FlowRun.issue_iid == issue_number,
+                            FlowRun.status == FlowStatus.WAITING_APPROVAL.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            run_ids = [run.id for run in runs]
+        for run_id in run_ids:
+            await self._revoke_publication_grant(run_id)
+            await self._transition(
+                run_id,
+                FlowStatus.CANCELLED,
+                reason=f"trigger label removed by @{author_username}",
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` **cancelled** — the `forge` label was removed by "
+                f"@{author_username} while its plan waited for approval. Re-add the label "
+                "(or run `/implement`) to plan again.\n\n*This is an automated message.*",
+                run_id,
+                "cancel_note",
+            )
+            logger.info(
+                "GitHub run %s cancelled — trigger label removed by @%s",
+                run_id[:8],
+                author_username,
+            )
+        return len(run_ids)
+
+    async def _frozen_task_digest(self, run_id: str) -> str | None:
+        """The issue-text snapshot digest frozen into the RunSpec at plan time."""
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if spec is None:
+            return None
+        digest = (spec.document or {}).get("task_digest")
+        return str(digest) if digest else None
+
+    async def _gate_consumed(self, run_id: str) -> bool:
+        """Whether the run's latest gate decision is already consumed.
+
+        Status alone is not proof: between ``consume_approval`` and the
+        PROPOSING transition commit the run still reads ``waiting_approval`` —
+        an issue edit in exactly that window must not cancel an approved run
+        (the "gate already consumed" guard).
+        """
+        async with self._session_factory() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval)
+                        .where(GateApproval.flow_run_id == run_id)
+                        .order_by(GateApproval.id.desc())
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return gate is not None and gate.consumed_at is not None
+
+    async def _revoke_publication_grant(self, run_id: str) -> None:
+        """Cancel-as-revoke's durable core (F13, ADR-0018 §4).
+
+        Sets ``cancel_requested`` — the flag an in-flight publication leg
+        re-reads before writing — and withdraws the run's scheduled steps so
+        no worker picks them up later. The terminal transition stays the
+        caller's (``/cancel`` also stops a dispatched Actions run first).
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.cancel_requested = True
+            await session.execute(
+                update(StepRun)
+                .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
+                .values(status="cancelled")
+            )
+            await session.commit()
+
+    # ------------------------------------------------------------------
+    # Superseded-PR janitor
+    # ------------------------------------------------------------------
+
+    async def close_superseded_draft_prs(
+        self, *, project_id: int, issue_number: int, successor_run_id: str
+    ) -> int:
+        """Close Draft PRs left open by terminal runs of the same issue.
+
+        The janitor behind the lingering-Draft-PR chore: when a successor run
+        reaches ``waiting_harness`` (harness lane) or publishes its Draft PR
+        (builtin lane), any OPEN Draft PR on a ``failed``/``blocked``/
+        ``cancelled`` predecessor's factory branch is closed with a
+        superseded note naming the successor run. ``ready_for_human`` is a
+        terminal status too, but its PR is the LIVE deliverable — never
+        touched. Best-effort by contract: one stale PR that cannot be closed
+        is logged, never allowed to break the successor's leg. Returns the
+        number of PRs closed.
+        """
+        stale_statuses = (
+            FlowStatus.FAILED.value,
+            FlowStatus.BLOCKED.value,
+            FlowStatus.CANCELLED.value,
+        )
+        async with self._session_factory() as session:
+            stale_runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(
+                            FlowRun.provider == "github",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_number,
+                            FlowRun.status.in_(stale_statuses),
+                            FlowRun.id != successor_run_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            stale_meta = [
+                (
+                    run.id,
+                    run.status,
+                    str(
+                        ((run.evidence or {}).get("published_candidate") or {}).get("branch") or ""
+                    ),
+                    int(
+                        ((run.evidence or {}).get("published_candidate") or {}).get("pr_number")
+                        or run.mr_iid
+                        or 0
+                    ),
+                )
+                for run in stale_runs
+            ]
+
+        closed = 0
+        for stale_run_id, stale_status, branch, pr_number in stale_meta:
+            action_id = None
+            try:
+                branch = branch or github_factory_branch(issue_number, stale_run_id)
+                pr = await self._stack.client.get_pr_by_head(self._owner, self._repo, branch)
+                if pr is None or not pr.get("draft"):
+                    # Nothing open (or a human readied it) — nothing to janitor.
+                    continue
+                body = (
+                    "## 🧹 Superseded\n\n"
+                    f"This Draft PR belongs to run `{stale_run_id[:8]}` (**{stale_status}**) — "
+                    f"run `{successor_run_id[:8]}` now owns this issue and publishes its own "
+                    "Draft PR.\n\n*This is an automated message.*"
+                )
+                # ADR-0005: intent-first journal on the run being superseded.
+                async with self._session_factory() as session:
+                    controller = Controller(session)
+                    action_id = await controller.record_action(
+                        stale_run_id, "supersede_draft_pr", correlation_id=f"issue-{issue_number}"
+                    )
+                    await session.commit()
+                if pr_number:
+                    await self._stack.client.create_issue_comment(
+                        self._owner, self._repo, pr_number, body
+                    )
+                await self._stack.client.close_pull_request(
+                    self._owner, self._repo, int(pr["number"])
+                )
+                await self._complete_action(
+                    action_id,
+                    "succeeded",
+                    {"pr_number": pr["number"], "superseded_by": successor_run_id},
+                )
+                closed += 1
+                logger.info(
+                    "Closed superseded Draft PR #%s of run %s (superseded by %s)",
+                    pr["number"],
+                    stale_run_id[:8],
+                    successor_run_id[:8],
+                )
+            except Exception:
+                logger.warning(
+                    "Could not close the superseded Draft PR of run %s — successor %s is "
+                    "unaffected",
+                    stale_run_id[:8],
+                    successor_run_id[:8],
+                    exc_info=True,
+                )
+                if action_id is not None:
+                    try:
+                        await self._complete_action(action_id, "failed", {"error": "close_failed"})
+                    except Exception:
+                        logger.warning(
+                            "Supersede journal completion failed for run %s",
+                            stale_run_id[:8],
+                            exc_info=True,
+                        )
+        return closed
+
     # ------------------------------------------------------------------
     # Publish leg: propose → CAS commit → Draft PR → evidence → review
     # ------------------------------------------------------------------
@@ -681,6 +1231,12 @@ class GitHubRunService:
                 },
             )
             await session.commit()
+
+        # The builtin lane never parks in waiting_harness — publishing the
+        # Draft PR is this run claiming the issue, so the janitor runs here.
+        await self.close_superseded_draft_prs(
+            project_id=project_id, issue_number=issue_number, successor_run_id=run_id
+        )
 
         # The evidence comment lands as the run walks to waiting_ci; the
         # verification surface is the head's Actions checks (E3b wires the
@@ -837,6 +1393,13 @@ class GitHubRunService:
             correlated.workflow,
             correlated.run_id or "pending",
             correlated.driver,
+        )
+
+        # Superseded-PR janitor: this run now owns the issue — a dead
+        # predecessor's Draft PR must not linger open until an operator
+        # closes it by hand.
+        await self.close_superseded_draft_prs(
+            project_id=project_id, issue_number=issue_number, successor_run_id=run_id
         )
 
         # Taken-in-work ack (dogfood feedback): the issue should never go
@@ -2039,7 +2602,17 @@ class GitHubRunService:
             await self._transition_in_session(session, run_id, status, reason)
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        Mirrors the GitLab service: a ``failed`` terminalization is classified
+        first (Tier-1 revival) — transient causes schedule a bounded
+        auto-revive, fatal ones park ``blocked`` with the precise reason.
+        """
+        if status is FlowStatus.FAILED:
+            await terminalize_failure(
+                self._session_factory, self._settings, run_id, reason=reason, log=logger
+            )
+            return
         await self._transition(run_id, status, reason=reason[:200])
         logger.warning("GitHub run %s -> %s: %s", run_id[:8], status.value, reason)
 
@@ -2075,7 +2648,7 @@ async def execute_github_run_command(
 
         await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel"}:
+    if command not in {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)
         return
     repo_full_name = str(metadata.get("repo_full_name") or "")
@@ -2114,11 +2687,34 @@ async def execute_github_run_command(
                 note_text=note_text,
                 author_username=author_username,
             )
-        else:
+        elif command == "cancel":
             await service.handle_cancel(
                 project_id=project_id,
                 issue_number=issue_number,
                 note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "retry":
+            await service.handle_retry(
+                project_id=project_id,
+                issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "issue_edited":
+            # The edited text travels in the command metadata (the webhook
+            # payload's issue object) — no extra API read on the hot path.
+            await service.handle_issue_edited(
+                project_id=project_id,
+                issue_number=issue_number,
+                issue_title=str(metadata.get("issue_title") or ""),
+                issue_body=str(metadata.get("issue_body") or ""),
+                author_username=author_username,
+            )
+        else:
+            await service.handle_label_removed(
+                project_id=project_id,
+                issue_number=issue_number,
                 author_username=author_username,
             )
     finally:
@@ -2250,6 +2846,14 @@ async def run_github_harness_reconciler(
             )
         except Exception:
             logger.exception("GitHub verification reconciler pass failed")
+        try:
+            # Tier-1 auto-revive: re-dispatch runs whose transient-failure
+            # backoff has elapsed (forge.runs.revival).
+            await evaluate_github_revival(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub revival reconciler pass failed")
 
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
@@ -2325,9 +2929,54 @@ async def _repos_with_waiting_harness(
     return [row for row in rows if row]
 
 
+async def evaluate_github_revival(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """One Tier-1 auto-revive pass over every GitHub run whose backoff elapsed.
+
+    The twin of the GitLab reconciler's ``evaluate_revival`` leg: the same
+    classification, the same ``FORGE_RUN_AUTO_REVIVE_LIMIT`` budget, the same
+    journaled ``auto_revive`` walk — only the re-dispatch is the Actions lane.
+    """
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+
+    async def redispatch(run_id: str) -> None:
+        async with session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            repo_full_name = str(run.github_repo_full_name or "")
+            issue_number = run.issue_iid
+        owner, _, repo = repo_full_name.partition("/")
+        if not repo or issue_number is None:
+            logger.warning("GitHub revival of run %s without repo/issue — skipping", run_id[:8])
+            return
+        service = GitHubRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(owner, repo),
+            repo_full_name=repo_full_name,
+        )
+        await service._redispatch_revival(run_id)
+
+    await evaluate_revivals(
+        session_factory, settings, provider="github", redispatch=redispatch, now=now, log=logger
+    )
+
+
 __all__ = [
     "GitHubRunService",
     "execute_github_run_command",
+    "evaluate_github_revival",
     "evaluate_github_waiting_harness",
     "run_github_harness_reconciler",
 ]

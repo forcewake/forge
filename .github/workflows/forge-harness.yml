@@ -62,7 +62,10 @@ concurrency:
 jobs:
   harness:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Above the run-side FORGE_HARNESS_TIMEOUT_SECONDS (5400s) so the
+    # harness deadline classifies honestly (harness_timeout) instead of
+    # GitHub killing the job as 'cancelled' at 60m (LIVE-found).
+    timeout-minutes: 120
     # READ-ONLY: the lane fetches the issue body + the forge plan comment
     # to render .forge/brief.md (forge.harness_entry --render-brief). No
     # write permission is granted — the candidate travels as an artifact.
@@ -88,6 +91,9 @@ jobs:
           # codegraph's SQLite graph DB must never reach the candidate diff
           # (same fail-closed publisher posture as .forge/).
           echo ".codegraph/" >> .git/info/exclude 2>/dev/null || true
+          # uv sync creates the workspace venv - lane infrastructure, never
+          # a deliverable.
+          echo ".venv/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -118,7 +124,24 @@ jobs:
           # lane must carry the tooling for that (LIVE-found: bare hosted
           # python has no pytest, and the agent burned turns on denied
           # attempts to check).
-          pip install pytest "ruff>=0.4" || true
+          # PIN to the repo's own lock when it has one: a pip-latest ruff
+          # formats differently than the CI-pinned one and every candidate
+          # fails lint with "Would reformat" (LIVE-found on PR #30 — the
+          # drift burned two repair cycles on a healthy candidate).
+          RUFF_VER=$(grep -A1 '^name = "ruff"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
+          PYTEST_VER=$(grep -A1 '^name = "pytest"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
+          # Carry the SAME environment the repo's own gates run in: when the
+          # target has a uv.lock, sync it (mypy/ruff/pytest + all runtime deps
+          # at locked versions) so the agent can run the exact commands CI
+          # enforces - `uv run mypy` without the deps is a lie. Fallback for
+          # lock-less repos: minimal pip toolchain.
+          if [ -f uv.lock ]; then
+            pip install uv || true
+            uv sync --frozen || pip install ${RUFF_VER:+ruff==${RUFF_VER}} ${PYTEST_VER:+pytest==${PYTEST_VER}} || true
+          else
+            pip install ${RUFF_VER:+ruff==${RUFF_VER}} || pip install "ruff>=0.4" || true
+            pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
+          fi
           if echo "$FORGE_HARNESS_MCP" | grep -q codegraph; then
             npm install -g --no-fund --no-audit @colbymchenry/codegraph@1.6.0
             codegraph telemetry off
@@ -132,6 +155,10 @@ jobs:
           FORGE_MODEL: ${{ inputs.model }}
           FORGE_BRIEF: .forge/brief.md
           FORGE_EXIT_FILE: .forge/exit
+          # Non-empty on a repair re-dispatch: the driver then caps the
+          # model's per-turn thinking budget (guided fix — wall time is
+          # dominated by long thinking turns).
+          FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -155,9 +182,9 @@ jobs:
       - name: Emit candidate artifact
         if: always()
         run: |
-          # Belt and braces for the local exclude: the graph DB (and its
-          # watcher state) is lane infrastructure, never a deliverable.
-          rm -rf .codegraph
+          # Belt and braces for the local exclude: lane infrastructure is
+          # never a deliverable.
+          rm -rf .codegraph .venv
           git add -A
           git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
             > .forge/candidate.diff || true

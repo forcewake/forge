@@ -339,7 +339,46 @@ class TestLabeledTrigger:
         assert metadata["issue_number"] == 42
         assert metadata["issue_is_pr"] is False
         assert metadata["author_username"] == "alice"  # the labeler is the actor
-        assert metadata["note_id"] == 88100  # the label id keys dedupe
+        # The ISSUE id keys dedupe — the label id is constant across every
+        # issue carrying it and silently swallowed all but the first event
+        # (LIVE-found: #28 planned, #29 with the same label never fired).
+        assert metadata["note_id"] == 1010  # fixture issue.id, not label.id 88100
+
+    async def test_distinct_issues_with_the_same_label_do_not_collide(self):
+        """Two issues labeled by the same sender must produce distinct
+        delivery identities — the label id alone is NOT an event identity."""
+        from forge.gateway.github_webhook import github_source_event_id
+
+        first = self.labeled_payload()
+        second = self.labeled_payload()
+        second["issue"]["number"] = 43
+        second["issue"]["id"] = 88101
+
+        id_first = self.normalize(first)["note_id"]
+        id_second = self.normalize(second)["note_id"]
+        assert id_first != id_second
+
+        source_first = github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{id_first}"
+        )
+        source_second = github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{id_second}"
+        )
+        assert source_first != source_second
+
+    async def test_redelivered_label_event_keeps_a_stable_identity(self):
+        """Redelivery of the SAME labeled event collapses onto one identity
+        (dedup intact) even when the delivery GUID differs."""
+        from forge.gateway.github_webhook import github_source_event_id
+
+        metadata = self.normalize(self.labeled_payload())
+        again = self.normalize(self.labeled_payload())
+        assert metadata["note_id"] == again["note_id"]
+        assert github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{metadata['note_id']}"
+        ) == github_source_event_id(
+            "github:1:acme/acme-widget", "issues", "labeled", f"label:{again['note_id']}"
+        )
 
     async def test_label_match_is_case_insensitive(self):
         assert self.normalize(self.labeled_payload(label="FORGE")) is not None
@@ -411,6 +450,185 @@ class TestLabeledTrigger:
                     steps = (await session.execute(select(StepRun))).scalars().all()
                 assert len(inbox) == 1 and inbox[0].event_type == "github:issues"
                 assert steps == []  # no run for an unrelated label
+        finally:
+            reset_engine()
+
+
+class TestIssueEditedTrigger:
+    """``issues.edited`` → ``issue_edited``: the replan-on-edit trigger.
+
+    The gateway only normalizes — deciding whether the edit actually went
+    stale is the executor's job (it owns the plan-time snapshot).
+    """
+
+    def edited_payload(
+        self,
+        *,
+        body: str | None = None,
+        sender: str = "alice",
+        updated_at: str | None = None,
+    ) -> dict:
+        payload = json.loads(load_payload("issues_edited.json"))
+        if body is not None:
+            payload["issue"]["body"] = body
+        if updated_at is not None:
+            payload["issue"]["updated_at"] = updated_at
+        payload["sender"]["login"] = sender
+        return payload
+
+    def normalize(self, payload: dict) -> dict | None:
+        from forge.gateway.github_webhook import normalize_issue_edited_event
+
+        return normalize_issue_edited_event(payload)
+
+    async def test_edited_issue_normalizes_to_issue_edited(self):
+        payload = self.edited_payload()
+
+        metadata = self.normalize(payload)
+
+        assert metadata is not None
+        assert metadata["command"] == "issue_edited"
+        assert metadata["provider"] == "github"
+        assert metadata["repo_full_name"] == "acme/acme-widget"
+        assert metadata["project_id"] == 70010
+        assert metadata["issue_number"] == 42
+        assert metadata["author_username"] == "alice"
+        # The edited text travels in the metadata — the executor compares it
+        # against the plan-time snapshot without an extra API read.
+        assert metadata["issue_title"] == "Add password reset"
+        assert metadata["issue_body"].startswith("Users cannot reset")
+
+    async def test_pr_edit_is_ignored(self):
+        payload = self.edited_payload()
+        payload["issue"]["pull_request"] = {"url": "https://github.test/x"}
+
+        assert self.normalize(payload) is None
+
+    async def test_redelivered_edit_keeps_a_stable_identity(self):
+        """A redelivered edit collapses onto one inbox identity — even when
+        the delivery GUID differs — while a genuinely different edit does
+        not (it is new information, not a replay)."""
+        from forge.gateway.github_webhook import github_source_event_id
+
+        connection = "github:12345:acme/acme-widget"
+        first = self.normalize(self.edited_payload())
+        again = self.normalize(self.edited_payload())
+        other_edit = self.normalize(self.edited_payload(body="entirely different text"))
+
+        assert first["delivery_key"] == again["delivery_key"]
+        assert first["delivery_key"] != other_edit["delivery_key"]
+        assert github_source_event_id(
+            connection, "issues", "edited", first["delivery_key"]
+        ) == github_source_event_id(connection, "issues", "edited", again["delivery_key"])
+        assert github_source_event_id(
+            connection, "issues", "edited", first["delivery_key"]
+        ) != github_source_event_id(connection, "issues", "edited", other_edit["delivery_key"])
+
+    async def test_edit_back_to_a_seen_text_is_not_swallowed(self):
+        """The inbox identity is permanent, so an edit landing BACK on a
+        previously-seen text (A→B→A) must not collide with the earlier
+        A-edit's row — a collision would swallow the command entirely and
+        leave the waiting plan silently stale again."""
+        body_b = self.normalize(self.edited_payload(body="body B", updated_at="t1"))
+        body_a = self.normalize(self.edited_payload(body="body A", updated_at="t2"))
+        body_again = self.normalize(self.edited_payload(body="body B", updated_at="t3"))
+
+        assert body_b["delivery_key"] != body_again["delivery_key"]
+        assert body_a["delivery_key"] not in (
+            body_b["delivery_key"],
+            body_again["delivery_key"],
+        )
+
+    async def test_edited_delivery_ingests_a_durable_run_command(self, tmp_path):
+        """Full ingress: inbox row + scheduled step in ONE transaction — the
+        same durable path a /implement comment takes."""
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = load_payload("issues_edited.json")
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    response = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert response.status_code == 202
+                assert response.json()["run_command"] is True
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert len(inbox) == 1 and len(steps) == 1
+                assert inbox[0].payload["command"] == "issue_edited"
+                assert inbox[0].payload["issue_body"].startswith("Users cannot reset")
+                assert steps[0].status == "scheduled"
+        finally:
+            reset_engine()
+
+
+class TestUnlabeledTrigger:
+    """``issues.unlabeled`` (trigger label) → ``unlabeled``: label-off = cancel.
+
+    Mirror of the label-on trigger (ADR-0020 §4); whether the actor may
+    cancel is the executor's admission decision.
+    """
+
+    def unlabeled_payload(self, *, label: str = "Forge", sender: str = "alice") -> dict:
+        payload = json.loads(load_payload("issues_unlabeled.json"))
+        payload["label"]["name"] = label
+        payload["sender"]["login"] = sender
+        return payload
+
+    def normalize(self, payload: dict, delivery_key: str = "d" * 32) -> dict | None:
+        from forge.gateway.github_webhook import normalize_issue_unlabeled_event
+
+        return normalize_issue_unlabeled_event(payload, delivery_key=delivery_key)
+
+    async def test_trigger_label_removal_normalizes_to_unlabeled(self):
+        metadata = self.normalize(self.unlabeled_payload())
+
+        assert metadata is not None
+        assert metadata["command"] == "unlabeled"
+        assert metadata["provider"] == "github"
+        assert metadata["issue_number"] == 42
+        assert metadata["author_username"] == "alice"  # the remover is the actor
+        assert metadata["note_id"] == "d" * 32  # the delivery GUID keys identity
+
+    async def test_other_label_removal_is_ignored(self):
+        assert self.normalize(self.unlabeled_payload(label="bug")) is None
+
+    async def test_pr_unlabel_is_ignored(self):
+        payload = self.unlabeled_payload()
+        payload["issue"]["pull_request"] = {"url": "https://github.test/x"}
+
+        assert self.normalize(payload) is None
+
+    async def test_unlabeled_delivery_ingests_a_durable_run_command(self, tmp_path):
+        """Full ingress, and the delivery GUID is the dedupe identity: a
+        redelivered unlabel collapses onto the same inbox row."""
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    body = load_payload("issues_unlabeled.json")
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    first = await ac.post("/webhook/github", content=body, headers=headers)
+                    second = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert first.json()["run_command"] is True
+                assert second.json()["deduplicated"] is True
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert len(inbox) == 1 and len(steps) == 1
+                assert inbox[0].payload["command"] == "unlabeled"
         finally:
             reset_engine()
 

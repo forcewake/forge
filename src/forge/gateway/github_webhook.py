@@ -28,6 +28,13 @@ Event routing for this slice:
   (ADR-0020 §4: the honest agent-UX fallback — a label trigger, not a
   partner-program listing). Admission still applies downstream: only
   FORGE_APPROVERS logins actually start runs.
+- ``issues`` ``edited`` → normalized to ``issue_edited``: the executor
+  compares the new text against the plan-time snapshot and either replans a
+  gate-waiting run or notes a mid-flight edit (see
+  ``GitHubRunService.handle_issue_edited``).
+- ``issues`` ``unlabeled`` (trigger label) → normalized to ``unlabeled``:
+  label-off = cancel, the mirror of the label-on trigger — runs still
+  parked at the gate are cancelled, runs past it are untouched.
 - ``pull_request`` ``opened``/``synchronize`` → the reactive review lane
   (v0.7, docs/research/github-reactive.md F1): Draft PRs in tracked repos
   are normalized to a ``review_pr`` command routed through the SAME durable
@@ -74,12 +81,13 @@ github_router = APIRouter()
 #: GitHub command lands on the same durable step path. ``/security`` (v0.7)
 #: is the provider-neutral triage step — comments on issues AND PRs route
 #: identically (``issue_is_pr`` is surfaced but does not change routing).
-_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
+_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
 
 _COMMAND_MAP = {
     "/implement": "start_run",
     "/go": "go",
     "/cancel": "cancel",
+    "/retry": "retry",
     "/security": "security_triage",
 }
 
@@ -207,7 +215,108 @@ def normalize_labeled_event(
         "issue_is_pr": "pull_request" in issue,
         "author_username": str((payload.get("sender") or {}).get("login") or ""),
         "note_text": "",
-        "note_id": label.get("id"),
+        # The ISSUE id, not the label id: the label id is constant across
+        # every issue carrying it, so keying dedupe on it silently swallowed
+        # every labeled event after the first (LIVE-found on forcewake/forge:
+        # #28 auto-planned, #29 with the same label never did). Issue-scoped
+        # identity keeps redelivery dedup intact while distinct issues fire.
+        "note_id": issue.get("id"),
+    }
+
+
+def normalize_issue_edited_event(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize an ``issues.edited`` payload into an ``issue_edited`` command.
+
+    Fires for ISSUE edits only — a PR arrives as an issue object too, but the
+    plan snapshot binds the issue text, so PR body edits are inbox-only. The
+    edited title + body travel in the metadata: the executor compares them
+    against the snapshot frozen at plan time without an extra API read, and
+    the payload's ``changes`` diff is not needed for that.
+
+    The delivery key is content-stable — ``edit:{issue_id}:{digest of the new
+    text}:{issue updated_at}`` — so a redelivered edit collapses onto one
+    inbox identity while two genuinely different edits never do. The text
+    digest alone is not enough identity: the inbox index is permanent, so an
+    edit landing BACK on a previously-seen text (A→B→A) would collide with
+    the first A-edit's row and be silently swallowed — no command, and the
+    waiting plan goes stale again. ``updated_at`` is bumped by GitHub on
+    every edit and travels identically in a redelivered payload, so it
+    separates the re-applied edit from the replay without a clock.
+    """
+    issue = payload.get("issue") or {}
+    if not issue or "pull_request" in issue:
+        return None
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+
+    title = str(issue.get("title") or "")
+    body = str(issue.get("body") or "")
+    issue_id = issue.get("id")
+    text_digest = hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()
+    delivery_key = f"edit:{issue_id}:{text_digest}:{str(issue.get('updated_at') or '')}"
+
+    return {
+        "command": "issue_edited",
+        "provider": "github",
+        "connection_id": github_connection_id(
+            installation.get("id"), str(repository.get("full_name") or "")
+        ),
+        "project_id": int(repository.get("id") or 0),
+        "repo_full_name": str(repository.get("full_name") or ""),
+        "issue_number": int(issue.get("number") or 0),
+        "issue_is_pr": False,
+        "issue_title": title,
+        "issue_body": body,
+        "author_username": str((payload.get("sender") or {}).get("login") or ""),
+        "note_text": "",
+        "note_id": delivery_key,  # stable fast-path dedup + task identity
+        "delivery_key": delivery_key,
+    }
+
+
+def normalize_issue_unlabeled_event(
+    payload: dict[str, Any],
+    trigger_label: str = "forge",
+    delivery_key: str = "",
+) -> dict[str, Any] | None:
+    """Normalize an ``issues.unlabeled`` payload into an ``unlabeled`` command.
+
+    Label-off = cancel: the mirror of :func:`normalize_labeled_event`
+    (ADR-0020 §4). Fires only when the REMOVED label matches *trigger_label*
+    case-insensitively; PRs are ignored. Whether the actor may actually
+    cancel is the executor's admission decision — the ingress stays shape-only.
+
+    The delivery GUID is the only per-event identity GitHub gives an unlabel,
+    so it is the delivery key (research §2.2: a redelivery reuses the GUID and
+    collapses). A duplicate that slipped through with a fresh GUID is harmless
+    — the executor cancels only runs still parked at the gate, and a cancelled
+    run is terminal.
+    """
+    issue = payload.get("issue") or {}
+    if not issue or "pull_request" in issue:
+        return None
+    label = payload.get("label") or {}
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+
+    name = str(label.get("name") or "").strip().lower()
+    if not trigger_label or name != trigger_label.strip().lower():
+        return None
+
+    return {
+        "command": "unlabeled",
+        "provider": "github",
+        "connection_id": github_connection_id(
+            installation.get("id"), str(repository.get("full_name") or "")
+        ),
+        "project_id": int(repository.get("id") or 0),
+        "repo_full_name": str(repository.get("full_name") or ""),
+        "issue_number": int(issue.get("number") or 0),
+        "issue_is_pr": False,
+        "author_username": str((payload.get("sender") or {}).get("login") or ""),
+        "note_text": "",
+        "note_id": delivery_key,
+        "delivery_key": delivery_key,
     }
 
 
@@ -449,24 +558,39 @@ async def _ingest_github_event(
             request, background_tasks, run_command, source_event_id
         )
 
-    if event == "issues" and action == "labeled":
+    if event == "issues" and action in ("labeled", "edited", "unlabeled"):
         sender = payload.get("sender") or {}
         author = str(sender.get("login") or "")
         if author and author == settings.FORGE_BOT_USERNAME:
-            # Forge never labels issues, but the guard stays symmetric with
-            # the comment path (bot-loop safety by construction).
-            logger.info("Skipping bot-authored GitHub label event", extra={"event": event})
+            # Forge never labels or edits issues, but the guard stays
+            # symmetric with the comment path (bot-loop safety by
+            # construction).
+            logger.info("Skipping bot-authored GitHub issue event", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
-        run_command = normalize_labeled_event(
-            payload, trigger_label=getattr(settings, "FORGE_TRIGGER_LABEL", "forge")
-        )
+        if action == "labeled":
+            run_command = normalize_labeled_event(
+                payload, trigger_label=getattr(settings, "FORGE_TRIGGER_LABEL", "forge")
+            )
+        elif action == "edited":
+            run_command = normalize_issue_edited_event(payload)
+        else:
+            run_command = normalize_issue_unlabeled_event(
+                payload,
+                trigger_label=getattr(settings, "FORGE_TRIGGER_LABEL", "forge"),
+                delivery_key=delivery,
+            )
         if run_command is None:
             return _record_inbox_only(
                 request, background_tasks, event, delivery, connection_id, project_id, payload
             )
-        source_event_id = github_source_event_id(
-            connection_id, event, action, f"label:{run_command['note_id']}"
-        )
+        if action == "labeled":
+            # The ISSUE id, not the label id, keys the identity — the label id
+            # is constant across every issue carrying it (see
+            # normalize_labeled_event).
+            key = f"label:{run_command['note_id']}"
+        else:
+            key = str(run_command["delivery_key"])
+        source_event_id = github_source_event_id(connection_id, event, action, key)
         return await _ingest_github_run_command(
             request, background_tasks, run_command, source_event_id, event=event
         )

@@ -836,7 +836,7 @@ class TestReviewLeg:
 
 
 class TestAgentFailures:
-    async def test_planner_failure_fails_run_and_journals(self, db, fake_gitlab):
+    async def test_planner_failure_parks_run_blocked_and_journals(self, db, fake_gitlab):
         llm = FakeLLM(db, script=[LLMError("proxy down")])
         service = make_service(db, fake_gitlab, llm)
 
@@ -845,14 +845,14 @@ class TestAgentFailures:
 
         run = await get_run(db, (await _only_run_id(db)))
         assert run is not None
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
         assert run.status_reason.startswith("planning_failed")
 
         (row,) = await llm_rows(db)
         assert row.status == "failed"
         assert row.role == "planner"
 
-    async def test_implementer_invalid_json_fails_run_and_journals(self, db, fake_gitlab):
+    async def test_implementer_invalid_json_parks_run_blocked_and_journals(self, db, fake_gitlab):
         llm = FakeLLM(db, script=[PLAN_JSON, "this is not json"])
         service = make_service(db, fake_gitlab, llm)
 
@@ -864,7 +864,7 @@ class TestAgentFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
         assert run.status_reason.startswith("proposal_failed")
 
         implementer_rows = [row for row in await llm_rows(db) if row.role == "implementer"]

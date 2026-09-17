@@ -35,7 +35,9 @@ class TestRenderClaudeCode:
 
         assert "claude -p " in script  # headless print mode
         assert "--model 'glm-5.3-flash[1m]'" in script
-        assert "--permission-mode acceptEdits" in script  # edits auto-accepted
+        assert (
+            "--permission-mode bypassPermissions" in script
+        )  # the lane boundary is no-creds + publisher, not an allowlist
         assert "--setting-sources ''" in script  # no external settings load
         assert "--output-format stream-json" in script  # normalized event stream
         assert "--allowedTools" in script and "Bash(git status:*)" in script  # git-only shell
@@ -45,6 +47,15 @@ class TestRenderClaudeCode:
         script = render_driver_script("claude-code", "", BRIEF)
 
         assert "--model" not in script
+
+    def test_repair_dispatch_caps_thinking_budget(self):
+        """Repair re-dispatches are guided fixes: the thinking-cap export is
+        GUARDED at runtime by repair-context presence (the rendered script
+        is static — first cycles take the guard's else path and think
+        freely)."""
+        script = render_driver_script("claude-code", "m", BRIEF)
+        assert 'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then' in script
+        assert "MAX_THINKING_TOKENS=" in script
 
 
 class TestRenderGrokBuild:
@@ -558,3 +569,45 @@ class TestMain:
 
         assert rc == 0
         assert (lane / ".forge" / "exit").read_text().strip() == "completed"
+
+
+class TestQualityGateAllowlist:
+    """The brief + AGENTS.md tell the agent to run the repo's own quality
+    gates — every driver must be ALLOWED to execute them (LIVE-found: `make
+    lint`, `uv run ruff`, venv python and `set -o pipefail &&` compounds
+    were denied and the agent burned turns on permission prompts). The
+    mechanical commit/push deny still wins everywhere."""
+
+    _GATES = ("make", "uv", "set", "ruff", "mypy", "pytest")
+
+    def test_claude_allowlist_carries_the_full_gate_set(self):
+        script = render_driver_script("claude-code", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"Bash({gate}:*)" in script, gate
+        # analysis pipelines: every segment must be allowlisted (LIVE-found:
+        # `... | awk 'length > 100'` and sed substitutions were denied)
+        for util in ("awk", "sed", "sort", "cut", "tr", "find"):
+            assert f"Bash({util}:*)" in script, util
+        # bypass mode makes redirects/--add-dir moot (everything allowed
+        # except the mechanical deny)
+        assert "--permission-mode bypassPermissions" in script
+        # isolated ephemeral config: no auto-memory bleed across runs on
+        # reused runners (the MEMORY.md index auto-loads into context)
+        assert 'CLAUDE_CONFIG_DIR="$(mktemp -d /tmp/claude-lane-config.XXXXXX)"' in script
+        # venv forms (harmless where the venv does not exist — a normal
+        # tool result beats a permission denial)
+        assert "Bash(.venv/bin/python:*)" in script
+        # mechanical deny intact
+        assert '--disallowedTools "Bash(git commit:*)" "Bash(git push:*)"' in script
+
+    def test_grok_grants_carry_the_full_gate_set(self):
+        script = render_driver_script("grok-build", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"--allow 'Bash({gate}:*)'" in script, gate
+        assert "--deny 'Bash(git commit:*)'" in script
+
+    def test_copilot_grants_carry_the_full_gate_set(self):
+        script = render_driver_script("copilot", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"--allow-tool 'shell({gate}:*)'" in script, gate
+        assert "--deny-tool 'shell(git commit)'" in script

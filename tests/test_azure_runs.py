@@ -654,7 +654,7 @@ class TestImplement:
         (body,) = comments(fake)
         assert "admission denied" in body and "mallory" in body
 
-    async def test_planning_failure_fails_the_run(self, db, fake):
+    async def test_planning_failure_parks_the_run_blocked(self, db, fake):
         class FailingPlanner:
             async def plan(self, *args, **kwargs):
                 raise LLMError("proxy down")
@@ -666,7 +666,7 @@ class TestImplement:
 
         async with db() as session:
             run = (await session.execute(select(FlowRun))).scalars().one()
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
         assert "planning_failed" in (run.status_reason or "")
 
 
@@ -1007,7 +1007,7 @@ class TestGoLane:
         assert len(harness) == 1 and harness[0].status == "succeeded"
         assert fake.pull_requests == []
 
-    async def test_lane_dispatch_failure_fails_the_run(self, db, fake):
+    async def test_lane_dispatch_failure_parks_the_run_blocked(self, db, fake):
         settings = make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
 
         class ExplodingClient(FakeAzureDevOps):
@@ -1022,7 +1022,7 @@ class TestGoLane:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # 400 config error: fatal, no auto-retry
         assert "harness_start_failed" in (run.status_reason or "")
 
 

@@ -31,6 +31,7 @@ from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.github_service import GitHubRunService, execute_github_run_command
+from forge.runs.service import task_digest_of
 from forge.runs.stubs import StubImplementer, StubPlanner
 from tests.fixtures.fake_github import FakeGitHub
 
@@ -293,7 +294,7 @@ class TestImplement:
         (body,) = comments(fake)
         assert "admission denied" in body and "@mallory" in body
 
-    async def test_planning_failure_fails_the_run(self, db, fake):
+    async def test_planning_failure_parks_the_run_blocked(self, db, fake):
         from forge.factory.llm import LLMError
 
         class FailingPlanner:
@@ -306,7 +307,7 @@ class TestImplement:
             await start(service)
 
         run = await get_run(db, (await _only_run_id(db)))
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
         assert "planning_failed" in (run.status_reason or "")
 
 
@@ -845,3 +846,363 @@ class TestDispatch:
         assert run.status == FlowStatus.WAITING_APPROVAL.value
         assert step.status == "succeeded"
         assert fake.calls_of("create_issue_comment")  # the plan comment went out
+
+
+# ----------------------------------------------------------------------
+# issues.edited: replan a stale gate-waiting run, never yank a live one
+# ----------------------------------------------------------------------
+
+WORKFLOW = "forge-harness.github.yml"
+
+
+async def edit_issue(
+    service: GitHubRunService,
+    *,
+    body: str,
+    title: str = ISSUE_TITLE,
+    author: str = "alice",
+) -> str | None:
+    return await service.handle_issue_edited(
+        project_id=PROJECT_ID,
+        issue_number=ISSUE,
+        issue_title=title,
+        issue_body=body,
+        author_username=author,
+    )
+
+
+class TestIssueEdited:
+    async def test_edit_while_waiting_approval_replans(self, db, fake):
+        service = make_service(db, fake)
+        stale_id = await start(service)
+        clear_comments(fake)
+        new_body = "Users cannot reset their password. The reset mail bounces with SMTP 550."
+
+        new_id = await edit_issue(service, body=new_body)
+
+        assert new_id is not None and new_id != stale_id
+        stale = await get_run(db, stale_id)
+        fresh = await get_run(db, new_id)
+        # The stale run is cancelled DURABLY: grant revoked, not just parked.
+        assert stale.status == FlowStatus.CANCELLED.value
+        assert stale.cancel_requested is True
+        assert fresh.status == FlowStatus.WAITING_APPROVAL.value
+
+        # The fresh run's frozen snapshot IS the new text.
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == new_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["task_digest"] == task_digest_of(ISSUE_TITLE, new_body)
+
+        # The plan comment went out again, plus the regeneration note.
+        bodies = comments(fake)
+        assert len([b for b in bodies if "Forge plan" in b]) == 1
+        (note,) = [b for b in bodies if "stale" in b]
+        assert stale_id[:8] in note and new_id[:8] in note
+
+        # The stale run's gate was never consumed by the replan.
+        async with db() as session:
+            gates = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == stale_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert gates and all(gate.consumed_at is None for gate in gates)
+
+    async def test_redelivered_edit_is_a_no_op(self, db, fake):
+        """A redelivered edit (fresh run's snapshot already IS that text)
+        must not spawn a third run or re-post anything."""
+        service = make_service(db, fake)
+        await start(service)
+        new_body = "The issue body, edited once."
+        first = await edit_issue(service, body=new_body)
+        notes_after_first = len(fake.calls_of("create_issue_comment"))
+
+        second = await edit_issue(service, body=new_body)
+
+        assert second == first
+        assert len(fake.calls_of("create_issue_comment")) == notes_after_first
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2  # the stale run + the replan, nothing more
+
+    async def test_gate_consumed_but_still_waiting_posts_note_only(self, db, fake):
+        """The "gate already consumed" guard: between consume_approval and
+        the PROPOSING commit the run still reads waiting_approval — an edit
+        in exactly that window must never cancel an approved run."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        async with db() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            gate.consumed_at = datetime.now(timezone.utc)
+            await session.commit()
+        clear_comments(fake)
+
+        result = await edit_issue(service, body="an edited body")
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert run.cancel_requested is False
+        (note,) = comments(fake)
+        assert "not** in the approved plan" in note
+
+    async def test_mid_flight_edit_notes_once_and_does_not_yank(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)  # approved → published → waiting_ci
+        clear_comments(fake)
+
+        result = await edit_issue(service, body="edited while the run executes")
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.cancel_requested is False
+        (note,) = comments(fake)
+        assert "in flight" in note
+
+    async def test_non_admitted_edit_is_ignored(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        result = await edit_issue(service, body="vandalism", author="mallory")
+
+        assert result is None
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert comments(fake) == []
+
+    async def test_edited_command_dispatch_replans(self, db, fake):
+        """The gateway-normalized command drives the service end to end."""
+        service = make_service(db, fake)
+        stale_id = await start(service)
+        metadata = {
+            "command": "issue_edited",
+            "provider": "github",
+            "repo_full_name": REPO,
+            "project_id": PROJECT_ID,
+            "issue_number": ISSUE,
+            "issue_title": ISSUE_TITLE,
+            "issue_body": "dispatched edit body",
+            "author_username": "alice",
+            "note_text": "",
+            "note_id": "edit:1010:abc",
+        }
+
+        await execute_github_run_command(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            metadata,
+            stack_factory=lambda owner, name: make_stack(fake),
+        )
+
+        stale = await get_run(db, stale_id)
+        assert stale.status == FlowStatus.CANCELLED.value
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2
+        assert any(run.status == FlowStatus.WAITING_APPROVAL.value for run in runs)
+
+
+# ----------------------------------------------------------------------
+# issues.unlabeled (trigger label): label-off = cancel at the gate
+# ----------------------------------------------------------------------
+
+
+class TestLabelOff:
+    async def test_label_removal_cancels_the_gate_waiting_run(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=ISSUE, author_username="alice"
+        )
+
+        assert cancelled == 1
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert run.cancel_requested is True
+        (note,) = comments(fake)
+        assert "cancelled" in note and "label" in note
+
+    async def test_label_removal_leaves_a_past_gate_run_alone(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)  # the approval consumed the plan
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=ISSUE, author_username="alice"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+
+    async def test_non_approver_label_removal_is_ignored(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=ISSUE, author_username="mallory"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+
+
+# ----------------------------------------------------------------------
+# Superseded-PR janitor: a successor run closes dead runs' Draft PRs
+# ----------------------------------------------------------------------
+
+
+class TestSupersededDraftPR:
+    async def test_successor_dispatch_closes_the_dead_run_s_draft_pr(self, db, fake):
+        service = make_service(db, fake)
+        stale_id = await start(service)
+        await go(service, stale_id)  # Draft PR published, parked at waiting_ci
+        # The operator's old chore: /cancel the dead run, close its PR by hand.
+        await service.handle_cancel(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/cancel {stale_id}",
+            author_username="alice",
+        )
+        branch = f"forge/{ISSUE}/{stale_id[:8]}"
+        assert fake.prs_for(REPO, branch)[0]["state"] == "open"
+
+        # A successor claims the issue on the harness lane → waiting_harness.
+        harness = make_service(
+            db, fake, settings=make_settings(FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW)
+        )
+        successor_id = await start(harness)
+        clear_comments(fake)
+        await go(harness, successor_id)
+
+        assert fake.prs_for(REPO, branch)[0]["state"] == "closed"
+        assert fake.calls_of("close_pull_request")
+        (note,) = [body for body in comments(fake) if "Superseded" in body]
+        assert stale_id[:8] in note and successor_id[:8] in note
+
+    async def test_ready_for_human_pr_is_never_janitored(self, db, fake):
+        """ready_for_human is terminal too, but its PR is the LIVE deliverable."""
+        service = make_service(db, fake)
+        ready_id = await start(service)
+        await go(service, ready_id)
+        await service.evaluate_waiting_ci_one(ready_id)
+        assert (await get_run(db, ready_id)).status == FlowStatus.READY_FOR_HUMAN.value
+        # A sibling run that died after publishing its Draft PR.
+        dead_id = await start(service)
+        await go(service, dead_id)
+        await service.handle_cancel(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/cancel {dead_id}",
+            author_username="alice",
+        )
+
+        closed = await service.close_superseded_draft_prs(
+            project_id=PROJECT_ID, issue_number=ISSUE, successor_run_id="f" * 32
+        )
+
+        assert closed == 1
+        assert fake.prs_for(REPO, f"forge/{ISSUE}/{ready_id[:8]}")[0]["state"] == "open"
+        assert fake.prs_for(REPO, f"forge/{ISSUE}/{dead_id[:8]}")[0]["state"] == "closed"
+
+    async def test_janitor_is_idempotent(self, db, fake):
+        service = make_service(db, fake)
+        dead_id = await start(service)
+        await go(service, dead_id)
+        await service.handle_cancel(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/cancel {dead_id}",
+            author_username="alice",
+        )
+        successor = "a" * 32
+
+        first = await service.close_superseded_draft_prs(
+            project_id=PROJECT_ID, issue_number=ISSUE, successor_run_id=successor
+        )
+        second = await service.close_superseded_draft_prs(
+            project_id=PROJECT_ID, issue_number=ISSUE, successor_run_id=successor
+        )
+
+        assert (first, second) == (1, 0)
+        assert len(fake.calls_of("close_pull_request")) == 1
+
+    async def test_terminal_run_without_a_pr_is_a_no_op(self, db, fake):
+        service = make_service(db, fake)
+        await start(service)  # never approved — no Draft PR exists
+
+        closed = await service.close_superseded_draft_prs(
+            project_id=PROJECT_ID, issue_number=ISSUE, successor_run_id="b" * 32
+        )
+
+        assert closed == 0
+        assert fake.calls_of("close_pull_request") == []
+
+
+def test_gateway_commands_are_reachable_through_the_dispatch_guard():
+    """Regression (LIVE-found): /retry was accepted by the gateway, routed
+    below, and then silently dropped by the dispatch GUARD set that did not
+    list it — dead code behind a rejection, invisible to handler tests.
+    Every command the gateway can emit must appear in the service's
+    dispatch guard."""
+    import inspect
+    import re
+
+    from forge.gateway import github_webhook
+    from forge.runs import github_service
+
+    # The mapping VALUES are the emitted command names; security_triage is
+    # consumed upstream in execute_run_command (runs/service.py) and never
+    # reaches the provider dispatch.
+    gateway_cmds = set(
+        re.findall(r'"/[a-z_]+":\s*"([a-z_]+)"', inspect.getsource(github_webhook))
+    ) - {"security_triage"}
+    dispatch_src = inspect.getsource(github_service)
+    guard = re.search(r"command not in \{([^}]+)\}", dispatch_src)
+    assert guard, "dispatch guard not found"
+    for cmd in gateway_cmds:
+        assert f'"{cmd}"' in guard.group(1), (
+            f"gateway command {cmd} is rejected by the dispatch guard"
+        )
+
+
+def test_azure_gateway_commands_are_reachable_through_the_dispatch_guard():
+    import inspect
+    import re
+
+    from forge.gateway import azure_webhook
+    from forge.runs import azure_service
+
+    gateway_cmds = set(
+        re.findall(r'"/[a-z_]+":\s*"([a-z_]+)"', inspect.getsource(azure_webhook))
+    ) - {"security_triage"}
+    dispatch_src = inspect.getsource(azure_service)
+    guard = re.search(r"command not in \{([^}]+)\}", dispatch_src)
+    assert guard, "dispatch guard not found"
+    for cmd in gateway_cmds:
+        assert f'"{cmd}"' in guard.group(1), (
+            f"gateway command /{cmd} is rejected by the Azure dispatch guard"
+        )
