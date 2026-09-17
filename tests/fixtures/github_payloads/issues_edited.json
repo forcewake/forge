@@ -1,0 +1,25 @@
+{
+  "action": "edited",
+  "issue": {
+    "id": 1010,
+    "number": 42,
+    "title": "Add password reset",
+    "body": "Users cannot reset their password. Forgot-password mail bounces with SMTP 550.",
+    "state": "open",
+    "user": {"login": "alice", "id": 501, "type": "User"}
+  },
+  "changes": {
+    "body": {
+      "from": "Users cannot reset their password."
+    }
+  },
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "private": true,
+    "default_branch": "main"
+  },
+  "sender": {"login": "alice", "id": 501, "type": "User"},
+  "installation": {"id": 12345}
+}

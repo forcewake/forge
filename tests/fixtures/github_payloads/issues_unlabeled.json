@@ -1,0 +1,26 @@
+{
+  "action": "unlabeled",
+  "issue": {
+    "id": 1010,
+    "number": 42,
+    "title": "Add password reset",
+    "body": "Users cannot reset their password.",
+    "state": "open",
+    "user": {"login": "alice", "id": 501, "type": "User"}
+  },
+  "label": {
+    "id": 88100,
+    "name": "Forge",
+    "color": "0e8a16",
+    "description": "Ask forge to implement this issue"
+  },
+  "repository": {
+    "id": 70010,
+    "name": "acme-widget",
+    "full_name": "acme/acme-widget",
+    "private": true,
+    "default_branch": "main"
+  },
+  "sender": {"login": "alice", "id": 501, "type": "User"},
+  "installation": {"id": 12345}
+}
