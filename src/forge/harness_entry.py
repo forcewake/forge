@@ -283,9 +283,10 @@ def render_driver_script(
     Rendered per driver from the GitLab templates' contract:
 
     - ``claude-code`` — headless print mode, stream-json events, no external
-      settings (prompt-injection surface reduction), acceptEdits with a
-      git-only shell allowlist PLUS the R5 mechanical deny: commit/push are
-      ``--disallowedTools`` (holds even under a permission escalation),
+      settings (prompt-injection surface reduction), bypassPermissions PLUS
+      the R5 mechanical deny: commit/push are ``--disallowedTools`` (holds
+      even under bypass — deny beats every permission mode; the lane's real
+      boundary is no write credentials + push FORBIDDEN + trusted publisher)
       ``--permission-prompts none`` guarantees no interactive prompt, and
       the vendor timeout budgets keep long tool calls from dying mid-run;
     - ``grok-build`` — the hardened npm preamble first: the wrapper declares
@@ -348,13 +349,16 @@ def render_driver_script(
             f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS + mcp_tools)} \\\n"
             '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
             "  --permission-prompts none \\\n"
-            "  --permission-mode acceptEdits \\\n"
+            # bypassPermissions, NOT acceptEdits + allowlist: the allowlist
+            # whack-a-mole is unfixable in principle (LIVE: three waves —
+            # quality gates, pipeline segments like awk/sed, then ANY
+            # redirection such as `python3 -m pytest 2>&1` poisoned segment
+            # matching). The lane's real security boundary is elsewhere:
+            # no write credentials, push FORBIDDEN at the remote, output as
+            # an artifact validated by the trusted publisher. The mechanical
+            # commit/push deny still applies (deny beats bypass).
+            "  --permission-mode bypassPermissions \\\n"
             "  --max-turns 200 \\\n"
-            # /tmp is writable analysis space (LIVE-found: `git diff -U0 >
-            # /tmp/forge.diff` was denied — redirects outside the workspace
-            # need an explicit add-dir under acceptEdits). Ephemeral lane,
-            # no secrets: safe.
-            "  --add-dir /tmp \\\n"
             f"  --mcp-config {shlex.quote(mcp_file)} --strict-mcp-config \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
         )

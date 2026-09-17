@@ -35,7 +35,9 @@ class TestRenderClaudeCode:
 
         assert "claude -p " in script  # headless print mode
         assert "--model 'glm-5.3-flash[1m]'" in script
-        assert "--permission-mode acceptEdits" in script  # edits auto-accepted
+        assert (
+            "--permission-mode bypassPermissions" in script
+        )  # the lane boundary is no-creds + publisher, not an allowlist
         assert "--setting-sources ''" in script  # no external settings load
         assert "--output-format stream-json" in script  # normalized event stream
         assert "--allowedTools" in script and "Bash(git status:*)" in script  # git-only shell
@@ -586,8 +588,9 @@ class TestQualityGateAllowlist:
         # `... | awk 'length > 100'` and sed substitutions were denied)
         for util in ("awk", "sed", "sort", "cut", "tr", "find"):
             assert f"Bash({util}:*)" in script, util
-        # temp-file redirects are inside the writable scope
-        assert "--add-dir /tmp" in script
+        # bypass mode makes redirects/--add-dir moot (everything allowed
+        # except the mechanical deny)
+        assert "--permission-mode bypassPermissions" in script
         # venv forms (harmless where the venv does not exist — a normal
         # tool result beats a permission denial)
         assert "Bash(.venv/bin/python:*)" in script
