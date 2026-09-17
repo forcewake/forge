@@ -16,6 +16,8 @@ Public surface:
   stand-ins used by tests and offline runs.
 - :mod:`forge.runs.ci_contract` — the ADR-0008 quality contract and CI
   failure classification.
+- :mod:`forge.runs.revival` — terminal-failure classification and the
+  Tier-1 auto-revive / Tier-2 ``/retry`` revival of dead runs.
 - :mod:`forge.runs.admission` — the ADR-0018 §3 pre-spend admission check.
 - :mod:`forge.runs.verification` — the F19 verification profile.
 """
@@ -41,6 +43,7 @@ from forge.runs.candidate import (
 from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
 from forge.runs.publisher import FenceCheck, PublishResult, publish_candidate
 from forge.runs.reconciler import run_reconciler
+from forge.runs.revival import classify_terminal_failure, revival_backoff_seconds
 from forge.runs.service import GATE_TTL_SECONDS, RunService, execute_run_command
 from forge.runs.stubs import (
     StubImplementer,
@@ -77,6 +80,7 @@ __all__ = [
     "bundle_from_changeset",
     "check_admission",
     "classify_failure",
+    "classify_terminal_failure",
     "execute_run_command",
     "evaluate_quality_contract",
     "evaluate_verification",
@@ -85,6 +89,7 @@ __all__ = [
     "parse_unified_diff",
     "plan_digest_of",
     "publish_candidate",
+    "revival_backoff_seconds",
     "run_reconciler",
     "short_run_id",
 ]

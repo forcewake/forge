@@ -294,7 +294,7 @@ class TestImplement:
         (body,) = comments(fake)
         assert "admission denied" in body and "@mallory" in body
 
-    async def test_planning_failure_fails_the_run(self, db, fake):
+    async def test_planning_failure_parks_the_run_blocked(self, db, fake):
         from forge.factory.llm import LLMError
 
         class FailingPlanner:
@@ -307,7 +307,7 @@ class TestImplement:
             await start(service)
 
         run = await get_run(db, (await _only_run_id(db)))
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
         assert "planning_failed" in (run.status_reason or "")
 
 

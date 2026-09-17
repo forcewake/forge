@@ -29,6 +29,9 @@ async def run_reconciler(
         for evaluate in (
             service.evaluate_waiting_ci,
             service.evaluate_waiting_harness,
+            # Tier-1 auto-revive: re-dispatch runs whose transient-failure
+            # backoff has elapsed (forge.runs.revival).
+            service.evaluate_revival,
             # ADR-0017 §5: re-post the evidence note for runs that reached
             # ready_for_human before their worker died mid-announcement.
             service.evaluate_ready_evidence,

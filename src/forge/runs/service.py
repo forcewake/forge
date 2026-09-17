@@ -103,6 +103,14 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.publisher import publish_candidate, spec_allowed_paths
+from forge.runs.revival import (
+    build_retry_context,
+    evaluate_revivals,
+    has_active_run,
+    resolve_retry_target,
+    retry_rejection,
+    terminalize_failure,
+)
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import VerificationProfile
 from forge.runs.verification import evaluate as evaluate_verification
@@ -151,6 +159,8 @@ _CI_ACTIVE_STATUSES = frozenset(
 #: ``/go <run-id>`` — full 32-hex run id as posted in the plan comment.
 _GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
 _CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
+#: ``/retry [run-id]`` — bare retries the issue's latest failed/blocked run.
+_RETRY_RE = re.compile(r"/retry(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 
 #: Repair-loop log budgets (ADR-0013: bounded repair context).
 REPAIR_LOG_PER_JOB_CHARS = 4000
@@ -672,6 +682,133 @@ class RunService:
         )
         logger.info("Run %s cancelled by @%s", run_id[:8], author_username)
 
+    async def handle_retry_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        issue_iid: int | None,
+    ) -> None:
+        """``@forge /retry [run-id]``: operator revival of a dead run (Tier 2).
+
+        Bare, the latest ``failed``/``blocked`` run for the issue; authority
+        mirrors ``/go`` (FORGE_APPROVERS only). The walk is the explicit
+        revival graph edge (``blocked``/``failed`` → ``proposing``), the
+        commit cycle gains ONE operator-granted cycle (it may exceed
+        FORGE_MAX_COMMIT_CYCLES), and the SAME branch is re-dispatched with a
+        repair context built from the terminal reason and the last
+        verification evidence — no new run id, no re-planning.
+
+        Cancelled runs, and runs that never committed a candidate, are
+        rejected with an actionable note: there is no work to continue, so
+        ``/implement`` is the honest path.
+        """
+        match = _RETRY_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info("/retry from @%s who is not in FORGE_APPROVERS — ignoring", author_username)
+            return
+        if issue_iid is None:
+            logger.info("/retry off-issue — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        run_id: str | None = None
+        rejection = ""
+        async with self._session_factory() as session:
+            run = await resolve_retry_target(
+                session,
+                provider="gitlab",
+                project_id=project_id,
+                issue_iid=issue_iid,
+                requested=requested,
+            )
+            if run is not None:
+                run_id = run.id
+                rejection = retry_rejection(
+                    run,
+                    other_active=await has_active_run(
+                        session,
+                        provider=run.provider,
+                        project_id=run.project_id,
+                        issue_iid=run.issue_iid,
+                        repo_full_name=run.github_repo_full_name,
+                        exclude_run_id=run.id,
+                    ),
+                )
+                if not rejection:
+                    status = run.status
+                    status_reason = run.status_reason or ""
+                    cycle = run.commit_cycle or 1
+                    evidence = dict(run.evidence or {})
+        if run_id is None:
+            logger.info("/retry on issue !%s — no retryable run", issue_iid)
+            return
+        if rejection:
+            await self._post_journaled_note(
+                project_id, issue_iid, f"🔁 {rejection}", run_id, "retry_rejected_note"
+            )
+            return
+
+        # Intent-first journal (ADR-0005), then the durable walk. The revived
+        # run re-enters ``proposing`` with one more cycle; the backend frozen
+        # in the evidence decides the advance leg (ADR-0015).
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "retry_requested", correlation_id=f"issue-{issue_iid}"
+            )
+            await controller.revive_transition(
+                run_id,
+                reason=f"retry requested by @{author_username}",
+                authorized_by=f"operator:@{author_username}",
+            )
+            run = await self._get_run(session, run_id)
+            run.commit_cycle = cycle + 1
+            await session.commit()
+
+        branch = factory_branch(issue_iid, run_id)
+        logger.info(
+            "Run %s retried by @%s — re-dispatching %s (cycle %d)",
+            run_id[:8],
+            author_username,
+            branch,
+            cycle + 1,
+        )
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            f"## 🔁 Run `{run_id[:8]}` retried by @{author_username}\n\n"
+            f"- Branch: `{branch}` — the work continues in place, no re-planning\n"
+            f"- Commit cycle: {cycle + 1}\n\n*This is an automated message.*",
+            run_id,
+            "retry_ack_note",
+        )
+
+        repair_context = build_retry_context(self._settings, status_reason, evidence)
+        repair_reason = f"retry by @{author_username}: {status_reason or status}"
+        backend_name = str(evidence.get("backend") or "").strip() or self._backend_name()
+        try:
+            if is_harness_backend(backend_name):
+                await self._advance_harness(
+                    project_id,
+                    run_id,
+                    repair_context=repair_context,
+                    repair_reason=repair_reason,
+                )
+            else:
+                await self._advance_proposal(
+                    project_id,
+                    run_id,
+                    repair_context=repair_context,
+                    repair_reason=repair_reason,
+                )
+        except Exception as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"backend": backend_name})
+
     async def handle_command_note(
         self,
         project_id: int,
@@ -812,6 +949,13 @@ class RunService:
             )
         elif command == "cancel":
             await self.handle_cancel_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("issue_iid"),
+            )
+        elif command == "retry":
+            await self.handle_retry_note(
                 metadata["project_id"],
                 metadata.get("note_text", ""),
                 metadata.get("author_username", ""),
@@ -1726,6 +1870,39 @@ class RunService:
         return as_aware_utc(entered) + timedelta(seconds=wait_seconds)
 
     # ------------------------------------------------------------------
+    # Reconciler tick: Tier-1 auto-revive of transiently dead runs
+    # ------------------------------------------------------------------
+
+    async def evaluate_revival(self, now: datetime | None = None) -> None:
+        """One reconciler pass over every run waiting for its auto-revive.
+
+        A transiently dead run parks ``blocked`` with a revival stamp
+        (:mod:`forge.runs.revival`); this pass re-dispatches the due ones on
+        the SAME branch — the wait is worker-free, like ``waiting_ci``.
+        """
+        await evaluate_revivals(
+            self._session_factory,
+            self._settings,
+            provider="gitlab",
+            redispatch=self._redispatch_revival,
+            now=now,
+            log=logger,
+        )
+
+    async def _redispatch_revival(self, run_id: str) -> None:
+        """Re-dispatch a revived run — same branch, attempt base = last candidate."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            backend_name = (
+                str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+            )
+        if is_harness_backend(backend_name):
+            await self._advance_harness(project_id, run_id)
+        else:
+            await self._advance_proposal(project_id, run_id)
+
+    # ------------------------------------------------------------------
     # Reconciler tick: waiting_harness → … (ADR-0015)
     # ------------------------------------------------------------------
 
@@ -2565,7 +2742,19 @@ class RunService:
             await session.commit()
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        A ``failed`` terminalization is classified first (Tier-1 revival):
+        a transient cause schedules a bounded auto-revive on the same branch,
+        a fatal one parks ``blocked`` with the precise reason — a run never
+        dies ``failed`` for an operator to notice; ``/retry`` walks the
+        genuinely dead ones forward.
+        """
+        if status is FlowStatus.FAILED:
+            await terminalize_failure(
+                self._session_factory, self._settings, run_id, reason=reason, log=logger
+            )
+            return
         await self._transition(run_id, status, reason=reason[:200])
         logger.warning("Run %s -> %s: %s", run_id[:8], status.value, reason)
 

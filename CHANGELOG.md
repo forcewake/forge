@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — terminal-failure revival (Tier 1 auto-revive + Tier 2 `/retry`)
+
+- **Tier 1 — automatic revival of transient deaths**: every `failed`
+  terminalization is classified (`forge.runs.revival`) before the run parks.
+  A *transient* cause (dispatch/CI 5xx, network, timeout, rate limits, runner
+  startup, an empty harness-start error) parks `blocked` with a revival stamp
+  in its evidence; the provider reconciler re-dispatches the SAME branch after
+  bounded backoff (60s doubling, capped), at most
+  `FORGE_RUN_AUTO_REVIVE_LIMIT` (default 2) times, journaled as `auto_revive`
+  actions. No issue comment, no operator. `FORGE_RUN_REVIVE_BACKOFF_SECONDS`
+  sets the ladder base; `0` disables auto-revive.
+- **Tier 2 — `@forge /retry [run-id]`** on GitLab, GitHub and Azure DevOps
+  (bare = the issue's latest `failed`/`blocked` run): approver-authorized like
+  `/go`, it walks the run back to `proposing` through the explicit revival
+  graph edge, grants ONE operator cycle (may exceed `FORGE_MAX_COMMIT_CYCLES`)
+  and re-dispatches the same branch with the terminal reason and the last
+  verification evidence as the repair context. Cancelled runs, and runs that
+  never committed a candidate, are rejected with an actionable note pointing
+  at `/implement`.
+- **Fatal failures park `blocked`, not `failed`**: config errors (4xx input
+  mismatches, missing workflow), driver quality signals and exhausted cycles
+  carry a precise, actionable `status_reason` — nobody watches a run flap.
+  ADR-0004 amended with the revival edge (`Controller.revive_transition`,
+  audited via `authorized_by` in the outbox payload).
+
 ## [0.9.0] - 2026-09-16
 
 ### Added — task-aware harness selection (ADR-0023) + Azure DevOps adapter beta (ADR-0024)

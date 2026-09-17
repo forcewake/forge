@@ -81,12 +81,13 @@ github_router = APIRouter()
 #: GitHub command lands on the same durable step path. ``/security`` (v0.7)
 #: is the provider-neutral triage step — comments on issues AND PRs route
 #: identically (``issue_is_pr`` is surfaced but does not change routing).
-_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
+_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
 
 _COMMAND_MAP = {
     "/implement": "start_run",
     "/go": "go",
     "/cancel": "cancel",
+    "/retry": "retry",
     "/security": "security_triage",
 }
 

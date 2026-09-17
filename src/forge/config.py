@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     # failures never consume a cycle (they block instead of repairing).
     FORGE_MAX_COMMIT_CYCLES: int = 3
 
+    # Tier-1 auto-revive: how many times a run killed by a TRANSIENT failure
+    # (dispatch 5xx / network / timeout, rate limit, runner startup) may be
+    # re-dispatched on the same branch by the reconciler before it parks
+    # blocked for a human. 0 disables auto-revive. Fatal failures (config
+    # errors, driver quality signals, exhausted cycles) never auto-retry.
+    FORGE_RUN_AUTO_REVIVE_LIMIT: int = 2
+
+    # Base of the auto-revive backoff ladder (60s → 120s → 240s …, capped in
+    # forge.runs.revival) — the worker-free wait between a transient death and
+    # its reconciler re-dispatch.
+    FORGE_RUN_REVIVE_BACKOFF_SECONDS: int = 60
+
     # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
     # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
     # a coding harness executing as a job in the target project's CI.

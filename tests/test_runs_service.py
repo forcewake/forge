@@ -347,7 +347,7 @@ class TestAdvanceFailures:
         assert fake_gitlab.merge_requests == {}
         assert FakeWriter.instances == []  # never reached the commit step
 
-    async def test_unknown_commit_outcome_fails_run_without_retry(self, db, fake_gitlab):
+    async def test_unknown_commit_outcome_parks_run_blocked_without_retry(self, db, fake_gitlab):
         FakeWriter.reset()
         service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
@@ -365,11 +365,13 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert (
+            run.status == FlowStatus.BLOCKED.value
+        )  # ADR-0005: unknown outcome never blind-retries
         assert run.status_reason == "commit_unknown_outcome"
         assert fake_gitlab.merge_requests == {}  # no MR after unresolved commit
 
-    async def test_commit_api_error_fails_run(self, db, fake_gitlab):
+    async def test_commit_api_error_parks_run_blocked(self, db, fake_gitlab):
         FakeWriter.reset()
         service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
@@ -383,7 +385,7 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value  # 400 config error: fatal, no auto-retry
         assert run.status_reason.startswith("commit_failed")
 
 
