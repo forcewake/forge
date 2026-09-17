@@ -46,18 +46,14 @@ class TestRenderClaudeCode:
 
         assert "--model" not in script
 
-    def test_repair_dispatch_caps_thinking_budget(self, monkeypatch):
-        """Repair re-dispatches are guided fixes: the driver exports a
-        thinking cap only when repair context is present (first cycles
-        think freely)."""
-        monkeypatch.delenv("FORGE_REPAIR_CONTEXT", raising=False)
-        plain = render_driver_script("claude-code", "m", BRIEF)
-        assert "MAX_THINKING_TOKENS" not in plain
-
-        monkeypatch.setenv("FORGE_REPAIR_CONTEXT", "ci_failure: test_x failed")
-        repair = render_driver_script("claude-code", "m", BRIEF)
-        assert 'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then' in repair
-        assert "MAX_THINKING_TOKENS" in repair
+    def test_repair_dispatch_caps_thinking_budget(self):
+        """Repair re-dispatches are guided fixes: the thinking-cap export is
+        GUARDED at runtime by repair-context presence (the rendered script
+        is static — first cycles take the guard's else path and think
+        freely)."""
+        script = render_driver_script("claude-code", "m", BRIEF)
+        assert 'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then' in script
+        assert "MAX_THINKING_TOKENS=" in script
 
 
 class TestRenderGrokBuild:
