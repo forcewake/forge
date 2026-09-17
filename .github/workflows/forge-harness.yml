@@ -132,6 +132,10 @@ jobs:
           FORGE_MODEL: ${{ inputs.model }}
           FORGE_BRIEF: .forge/brief.md
           FORGE_EXIT_FILE: .forge/exit
+          # Non-empty on a repair re-dispatch: the driver then caps the
+          # model's per-turn thinking budget (guided fix — wall time is
+          # dominated by long thinking turns).
+          FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
