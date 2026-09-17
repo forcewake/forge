@@ -91,6 +91,9 @@ jobs:
           # codegraph's SQLite graph DB must never reach the candidate diff
           # (same fail-closed publisher posture as .forge/).
           echo ".codegraph/" >> .git/info/exclude 2>/dev/null || true
+          # uv sync creates the workspace venv - lane infrastructure, never
+          # a deliverable.
+          echo ".venv/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -127,8 +130,18 @@ jobs:
           # drift burned two repair cycles on a healthy candidate).
           RUFF_VER=$(grep -A1 '^name = "ruff"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
           PYTEST_VER=$(grep -A1 '^name = "pytest"$' uv.lock 2>/dev/null | grep -m1 -o '"[0-9][^"]*"' | tr -d '"')
-          pip install ${RUFF_VER:+ruff==${RUFF_VER}} || pip install "ruff>=0.4" || true
-          pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
+          # Carry the SAME environment the repo's own gates run in: when the
+          # target has a uv.lock, sync it (mypy/ruff/pytest + all runtime deps
+          # at locked versions) so the agent can run the exact commands CI
+          # enforces - `uv run mypy` without the deps is a lie. Fallback for
+          # lock-less repos: minimal pip toolchain.
+          if [ -f uv.lock ]; then
+            pip install uv || true
+            uv sync --frozen || pip install ${RUFF_VER:+ruff==${RUFF_VER}} ${PYTEST_VER:+pytest==${PYTEST_VER}} || true
+          else
+            pip install ${RUFF_VER:+ruff==${RUFF_VER}} || pip install "ruff>=0.4" || true
+            pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
+          fi
           if echo "$FORGE_HARNESS_MCP" | grep -q codegraph; then
             npm install -g --no-fund --no-audit @colbymchenry/codegraph@1.6.0
             codegraph telemetry off
@@ -169,9 +182,9 @@ jobs:
       - name: Emit candidate artifact
         if: always()
         run: |
-          # Belt and braces for the local exclude: the graph DB (and its
-          # watcher state) is lane infrastructure, never a deliverable.
-          rm -rf .codegraph
+          # Belt and braces for the local exclude: lane infrastructure is
+          # never a deliverable.
+          rm -rf .codegraph .venv
           git add -A
           git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
             > .forge/candidate.diff || true
