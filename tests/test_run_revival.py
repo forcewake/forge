@@ -299,8 +299,12 @@ async def test_reconciler_skips_until_the_revive_is_due(db, fake_gitlab):
     run_id = await seed_run(
         db,
         status="proposing",
-        evidence={"revive": {"at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-                             "count": 1}},
+        evidence={
+            "revive": {
+                "at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                "count": 1,
+            },
+        },
     )
     fired: list[tuple] = []
 
@@ -321,8 +325,12 @@ async def test_due_revive_redispatches_the_same_branch_and_journals(db, fake_git
         status="proposing",
         candidate_shas=["a" * 40, CANDIDATE_SHA],
         commit_cycle=2,
-        evidence={"revive": {"at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
-                             "count": 1}},
+        evidence={
+            "revive": {
+                "at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                "count": 1,
+            },
+        },
     )
     fired: list[tuple] = []
 
@@ -350,8 +358,10 @@ async def test_due_revive_of_a_builtin_run_takes_the_proposal_leg(db, fake_gitla
         status="validating",
         evidence={
             "backend": "builtin",
-            "revive": {"at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
-                       "count": 1},
+            "revive": {
+                "at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                "count": 1,
+            },
         },
     )
     fired: list[tuple] = []
