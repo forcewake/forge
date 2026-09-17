@@ -921,8 +921,7 @@ class GitHubRunService:
                     run.id,
                     run.status,
                     str(
-                        ((run.evidence or {}).get("published_candidate") or {}).get("branch")
-                        or ""
+                        ((run.evidence or {}).get("published_candidate") or {}).get("branch") or ""
                     ),
                     int(
                         ((run.evidence or {}).get("published_candidate") or {}).get("pr_number")
