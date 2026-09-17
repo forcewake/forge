@@ -80,7 +80,10 @@ class TestWorkflowTemplateContract:
         job = workflow["jobs"]["harness"]
 
         assert job["runs-on"] == "ubuntu-latest"  # ephemeral runner
-        assert job["timeout-minutes"] <= 60
+        # Above the run-side FORGE_HARNESS_TIMEOUT_SECONDS (5400s = 90m) so
+        # the governed deadline classifies honestly instead of GitHub
+        # killing the job as "cancelled" (LIVE-found at 60m).
+        assert job["timeout-minutes"] == 120
         assert "persist-credentials: false" in text  # nothing actionable left behind
         assert "git remote set-url --push origin FORBIDDEN" in text  # ADR-0016
         # No forge-side secrets ever reach the lane: only harness provider keys.
