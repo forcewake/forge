@@ -8,6 +8,8 @@ from forge.repository.changeset import (
     Change,
     ChangeSet,
     Operation,
+    changeset_from_document,
+    changeset_to_document,
     is_lockfile,
     validate_changeset,
 )
@@ -211,3 +213,37 @@ class TestPathScope:
             _cs(_create("services/package-lock.json")), allowed_paths=["services/**"]
         )
         assert any("lockfiles are denylisted" in v for v in violations)
+
+
+class TestDocumentRoundTrip:
+    """The durable attempt manifest: ChangeSet -> JSON document -> ChangeSet."""
+
+    def test_round_trip_preserves_the_changeset(self):
+        cs = ChangeSet(
+            branch="factory/7/abcd1234",
+            commit_message="forge: implement 7 (run abcd1234)",
+            changes=[
+                _create("forge-demo/new.md", "# created\n"),
+                Change(path="src/app.py", operation=Operation.UPDATE, content="x = 2\n"),
+                Change(path="src/old.py", operation=Operation.DELETE, content=None),
+            ],
+            attempt_base_oid="candidate-sha-9",
+        )
+        assert changeset_from_document(changeset_to_document(cs)) == cs
+
+    def test_delete_content_stays_none_not_missing(self):
+        document = changeset_to_document(_cs(Change(path="src/old.py", operation=Operation.DELETE)))
+        assert document["changes"][0]["content"] is None
+
+    def test_non_documents_are_not_resumable(self):
+        assert changeset_from_document(None) is None
+        assert changeset_from_document("changeset") is None
+        assert changeset_from_document({"branch": "b"}) is None
+
+    def test_malformed_changes_are_not_resumable(self):
+        base = {"branch": "b", "commit_message": "m", "attempt_base_oid": "base"}
+        assert changeset_from_document({**base, "changes": []}) is None
+        assert changeset_from_document({**base, "changes": "nope"}) is None
+        assert changeset_from_document({**base, "changes": [{"path": "p"}]}) is None
+        rename = [{"path": "p", "operation": "rename", "content": "x"}]
+        assert changeset_from_document({**base, "changes": rename}) is None

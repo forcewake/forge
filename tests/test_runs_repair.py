@@ -20,8 +20,10 @@ from forge.factory.llm import LLMError
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.models.base import Base
+from forge.repository import Change, ChangeSet, Operation, changeset_to_document
 from forge.repository.changeset import MaterializationError
 from forge.runs import RunService
+from forge.runs import service as service_module
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.fixtures.fake_llm import FakeLLM
 
@@ -76,6 +78,21 @@ REPAIR_JSON = json.dumps(
                 "operation": "update",
                 "old_text": "x = 1\n",
                 "new_text": "x = 1\nFIXED = True\n",
+            }
+        ],
+    }
+)
+
+REPAIR_CREATED_FILE_JSON = json.dumps(
+    {
+        "branch": "model/chose/this",
+        "commit_message": "model's repair",
+        "changes": [
+            {
+                "path": "forge-demo/feature.md",
+                "operation": "update",
+                "old_text": "# feature\n",
+                "new_text": "# feature\nstatus: fixed\n",
             }
         ],
     }
@@ -310,6 +327,220 @@ class TestRepairLoop:
         review = (run.evidence or {}).get("review")
         assert review["sha"] == repaired_sha
         assert llm.roles() == ["planner", "implementer", "implementer", "reviewer"]
+
+    async def test_repair_updates_a_file_created_in_cycle_one(self, db, fake_gitlab, monkeypatch):
+        """R06: create in cycle 1 → CI failure → update the NEW file in cycle 2.
+
+        Every leg of the repair attempt uses the ATTEMPT base (the last
+        verified candidate): materialization, the update/delete existence
+        check and the write. The frozen source base would report cycle 1's
+        file as missing and block the repair; the review still diffs the
+        source base so the human sees the cumulative result.
+        """
+        llm = FakeLLM(
+            db,
+            script=[PLAN_JSON, CREATE_JSON, REPAIR_CREATED_FILE_JSON, REVIEW_OK_JSON],
+        )
+        service = make_service(db, fake_gitlab, llm)
+
+        validation_bases: list[str | None] = []
+        real_fetch = service_module.fetch_git_base
+
+        async def spy_fetch(gitlab, project_id, paths, base_sha):
+            validation_bases.append(base_sha)
+            return await real_fetch(gitlab, project_id, paths, base_sha)
+
+        monkeypatch.setattr(service_module, "fetch_git_base", spy_fetch)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        # Cycle 1 committed the new file on the factory branch; the fake's
+        # snapshot is ref-independent, so seed the post-commit state every ref
+        # read must return.
+        fake_gitlab.seed_file("forge-demo/feature.md", "# feature\n")
+
+        failed_job_id = 55
+        seed_pipeline(
+            fake_gitlab,
+            branch_for(ISSUE_IID, run_id),
+            first_sha,
+            "failed",
+            jobs=[
+                {
+                    "id": failed_job_id,
+                    "name": "pytest",
+                    "status": "failed",
+                    "failure_reason": "script_failure",
+                }
+            ],
+            logs={failed_job_id: "E  AssertionError: feature file incomplete"},
+        )
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.commit_cycle == 2
+        # Cycle 1 validated at the source base; the repair validated at the
+        # attempt base — cycle 1's file is visible to the update.
+        assert validation_bases == [BASE_SHA, first_sha]
+
+        repaired_sha = run.candidate_shas[-1]
+        seed_pipeline(fake_gitlab, branch_for(ISSUE_IID, run_id), repaired_sha, "success")
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        # The cumulative review spans source base .. final candidate — both
+        # cycles, not just the repair.
+        review_user = llm.calls_for("reviewer")[0]["user"]
+        assert f"Candidate diff ({BASE_SHA[:8]}..{repaired_sha[:8]})" in review_user
+
+    async def test_resume_adopts_the_recorded_manifest(self, db, fake_gitlab):
+        """R06: a crashed attempt resumes on its persisted record.
+
+        The attempt number, manifest and previous candidate are persisted the
+        moment a proposal materializes; the resumed walk re-adopts exactly
+        that manifest instead of paying for a second, possibly different,
+        proposal.
+        """
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+
+        # Rewind to the crash the resume path covers: the attempt had
+        # materialized (manifest recorded) but nothing after it persisted.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.candidate_shas = []
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        # The walk re-adopted the recorded manifest: the journaled commit is
+        # adopted (no second commit) and no new proposal was bought — an
+        # exhausted script would have produced a broken draft and blocked.
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.candidate_shas == [first_sha]
+        assert llm.roles() == ["planner", "implementer"]
+
+    async def test_resume_publishes_on_the_recorded_base_when_state_drifted(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R06/ADR-0017 §3: mid-leg, the persisted attempt record wins.
+
+        The resumed walk continues the attempt it already started — the
+        recorded base and manifest — even where a re-derivation from durable
+        state would pin a different base. Re-deriving would aim the remaining
+        legs at a snapshot the proposal never read and re-propose (a second
+        paid call) changes that are already materialized.
+        """
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        validation_bases: list[str | None] = []
+        real_fetch = service_module.fetch_git_base
+
+        async def spy_fetch(gitlab, project_id, paths, base_sha):
+            validation_bases.append(base_sha)
+            return await real_fetch(gitlab, project_id, paths, base_sha)
+
+        monkeypatch.setattr(service_module, "fetch_git_base", spy_fetch)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        branch = branch_for(ISSUE_IID, run_id)
+        manifest = changeset_to_document(
+            ChangeSet(
+                branch=branch,
+                commit_message=f"forge: implement {ISSUE_IID} (run {run_id[:8]})",
+                changes=[
+                    Change(
+                        path="forge-demo/feature.md",
+                        operation=Operation.CREATE,
+                        content="# feature\n",
+                    )
+                ],
+                attempt_base_oid=first_sha,
+            )
+        )
+
+        # Rewind mid-attempt with the durable state DRIFTED from the record:
+        # a re-derivation would pin ``divergent-sha``, the record pins the
+        # snapshot the proposal was materialized against.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.commit_cycle = 2
+            run.candidate_shas = ["divergent-sha"]
+            run.evidence = {
+                "attempt": {
+                    "cycle": 2,
+                    "attempt_base": first_sha,
+                    "source_base": BASE_SHA,
+                    "previous_candidate": "divergent-sha",
+                    "manifest": manifest,
+                }
+            }
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        # The walk continued the recorded attempt: validated at the RECORDED
+        # base and re-adopted the journaled candidate — no second proposal
+        # and no second commit.
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.candidate_shas == ["divergent-sha", first_sha]
+        assert validation_bases == [BASE_SHA, first_sha]
+        assert llm.roles() == ["planner", "implementer"]
+        branch_shas = [c["sha"] for c in fake_gitlab.branches[branch] if c["sha"] != BASE_SHA]
+        assert branch_shas == [first_sha]
+
+    async def test_human_push_on_the_factory_branch_blocks_never_force_fixed(self, db, fake_gitlab):
+        """A human push on the factory branch is reported, never force-fixed.
+
+        The journaled candidate is no longer the branch head, so nothing is
+        adopted and the guarded apply refuses: the run blocks with the reason
+        instead of writing a second candidate over the human's commit.
+        """
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        branch = branch_for(ISSUE_IID, run_id)
+
+        human_sha = "human-push-sha"
+        fake_gitlab.seed_commit(branch, human_sha, "human tweak")
+
+        # Rewind to the crash the resume path covers: the attempt had
+        # materialized (manifest recorded) but the candidate sha never
+        # persisted, so the walk re-enters at the write.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.candidate_shas = []
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "branch_drift" in (run.status_reason or "")
+        # The human's commit stands on top of the candidate — no force-fix.
+        branch_shas = [c["sha"] for c in fake_gitlab.branches[branch] if c["sha"] != BASE_SHA]
+        assert branch_shas == [human_sha, first_sha]
+        assert llm.roles() == ["planner", "implementer"]
 
     async def test_repair_budget_exhausted_blocks(self, db, fake_gitlab):
         llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])

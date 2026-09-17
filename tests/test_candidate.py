@@ -12,6 +12,7 @@ import pytest
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.repository import Change, ChangeSet, Operation
 from forge.runs.candidate import (
+    AttemptContext,
     CandidateBundle,
     CandidateError,
     HarnessUsage,
@@ -286,6 +287,35 @@ class TestHelpers:
             "R", (), {"commit_cycle": 2, "candidate_shas": ["c1", "c2"], "base_sha": "src-1"}
         )
         assert attempt_base_for(run) == "c2"
+
+    def test_attempt_context_cycle_one_is_the_source_base(self):
+        run = type("R", (), {"commit_cycle": 1, "candidate_shas": None, "base_sha": "src-1"})
+        ctx = AttemptContext.of(run)
+        assert ctx.cycle == 1
+        assert ctx.attempt_base == "src-1"
+        assert ctx.source_base == "src-1"
+        assert ctx.previous_candidate is None
+
+    def test_attempt_context_repair_extends_the_last_candidate(self):
+        run = type(
+            "R", (), {"commit_cycle": 2, "candidate_shas": ["c1", "c2"], "base_sha": "src-1"}
+        )
+        ctx = AttemptContext.of(run)
+        assert ctx.attempt_base == "c2"
+        assert ctx.source_base == "src-1"  # frozen for cumulative review only
+        assert ctx.previous_candidate == "c2"
+        assert ctx.document() == {
+            "cycle": 2,
+            "attempt_base": "c2",
+            "source_base": "src-1",
+            "previous_candidate": "c2",
+        }
+
+    def test_attempt_context_repair_without_a_candidate_falls_back_to_source(self):
+        run = type("R", (), {"commit_cycle": 3, "candidate_shas": None, "base_sha": None})
+        ctx = AttemptContext.of(run)
+        assert ctx.attempt_base == ""
+        assert ctx.previous_candidate is None
 
     def test_bundle_from_changeset_maps_operations(self):
         cs = ChangeSet(
