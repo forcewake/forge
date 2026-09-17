@@ -20,6 +20,7 @@ from forge.factory.llm import LLMError
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.models.base import Base
+from forge.repository import Change, ChangeSet, Operation, changeset_to_document
 from forge.repository.changeset import MaterializationError
 from forge.runs import RunService
 from forge.runs import service as service_module
@@ -429,6 +430,81 @@ class TestRepairLoop:
         assert run.status == FlowStatus.WAITING_CI.value
         assert run.candidate_shas == [first_sha]
         assert llm.roles() == ["planner", "implementer"]
+
+    async def test_resume_publishes_on_the_recorded_base_when_state_drifted(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """R06/ADR-0017 §3: mid-leg, the persisted attempt record wins.
+
+        The resumed walk continues the attempt it already started — the
+        recorded base and manifest — even where a re-derivation from durable
+        state would pin a different base. Re-deriving would aim the remaining
+        legs at a snapshot the proposal never read and re-propose (a second
+        paid call) changes that are already materialized.
+        """
+        llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
+        service = make_service(db, fake_gitlab, llm)
+
+        validation_bases: list[str | None] = []
+        real_fetch = service_module.fetch_git_base
+
+        async def spy_fetch(gitlab, project_id, paths, base_sha):
+            validation_bases.append(base_sha)
+            return await real_fetch(gitlab, project_id, paths, base_sha)
+
+        monkeypatch.setattr(service_module, "fetch_git_base", spy_fetch)
+
+        run_id = await start_and_go(service, fake_gitlab)
+        first_sha = (await get_run(db, run_id)).candidate_shas[-1]
+        branch = branch_for(ISSUE_IID, run_id)
+        manifest = changeset_to_document(
+            ChangeSet(
+                branch=branch,
+                commit_message=f"forge: implement {ISSUE_IID} (run {run_id[:8]})",
+                changes=[
+                    Change(
+                        path="forge-demo/feature.md",
+                        operation=Operation.CREATE,
+                        content="# feature\n",
+                    )
+                ],
+                attempt_base_oid=first_sha,
+            )
+        )
+
+        # Rewind mid-attempt with the durable state DRIFTED from the record:
+        # a re-derivation would pin ``divergent-sha``, the record pins the
+        # snapshot the proposal was materialized against.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.VALIDATING.value
+            run.commit_cycle = 2
+            run.candidate_shas = ["divergent-sha"]
+            run.evidence = {
+                "attempt": {
+                    "cycle": 2,
+                    "attempt_base": first_sha,
+                    "source_base": BASE_SHA,
+                    "previous_candidate": "divergent-sha",
+                    "manifest": manifest,
+                }
+            }
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        # The walk continued the recorded attempt: validated at the RECORDED
+        # base and re-adopted the journaled candidate — no second proposal
+        # and no second commit.
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.candidate_shas == ["divergent-sha", first_sha]
+        assert validation_bases == [BASE_SHA, first_sha]
+        assert llm.roles() == ["planner", "implementer"]
+        branch_shas = [c["sha"] for c in fake_gitlab.branches[branch] if c["sha"] != BASE_SHA]
+        assert branch_shas == [first_sha]
 
     async def test_human_push_on_the_factory_branch_blocks_never_force_fixed(
         self, db, fake_gitlab

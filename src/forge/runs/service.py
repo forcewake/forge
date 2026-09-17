@@ -860,6 +860,27 @@ class RunService:
             entry_status = run.status
             recorded_attempt = (run.evidence or {}).get("attempt")
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
+        # ADR-0017 §3 (R06): mid-leg, the persisted record — not a fresh
+        # re-derivation — says what this attempt actually started from.
+        # Durable state may have drifted under a crashed attempt
+        # (``candidate_shas``, ``commit_cycle``); re-deriving would aim the
+        # remaining legs at a snapshot the proposal never read and re-propose
+        # (a second paid call) changes that are already materialized. A
+        # same-cycle record is never stale, so its base wins.
+        if (
+            mid_leg
+            and isinstance(recorded_attempt, dict)
+            and recorded_attempt.get("cycle") == attempt.cycle
+            and isinstance(recorded_attempt.get("attempt_base"), str)
+            and recorded_attempt.get("attempt_base")
+        ):
+            previous = recorded_attempt.get("previous_candidate")
+            attempt = AttemptContext(
+                cycle=attempt.cycle,
+                attempt_base=str(recorded_attempt["attempt_base"]),
+                source_base=attempt.source_base,
+                previous_candidate=previous if isinstance(previous, str) else None,
+            )
 
         issue_title = await self._read_issue_title(project_id, run)
         # ADR-0017 §3 (R06): a walk that re-enters its own attempt adopts the
