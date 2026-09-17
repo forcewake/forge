@@ -1206,3 +1206,46 @@ def test_azure_gateway_commands_are_reachable_through_the_dispatch_guard():
         assert f'"{cmd}"' in guard.group(1), (
             f"gateway command /{cmd} is rejected by the Azure dispatch guard"
         )
+
+
+def test_provider_command_sets_stay_in_parity():
+    """R27 guard: every feature command must be dispatched by ALL THREE
+    provider services unless explicitly whitelisted. LIVE-found twice:
+    /retry shipped with a missing Azure guard entry, and the #29 lifecycle
+    commands (issue_edited/unlabeled) shipped GitHub-only despite the
+    issue's mirror promise. A deviation here must carry a reason in the
+    whitelist below — otherwise this test fails until parity is restored."""
+    import inspect
+    import re
+
+    from forge.runs import azure_service, github_service, service
+
+    def dispatched_commands(module_src: str) -> set[str]:
+        return set(re.findall(r'command == "([a-z_]+)"', module_src))
+
+    gitlab_cmds = dispatched_commands(inspect.getsource(service))
+    github_cmds = dispatched_commands(inspect.getsource(github_service))
+    azure_cmds = dispatched_commands(inspect.getsource(azure_service))
+
+    # reactive/observation commands are single-provider by design (GitHub
+    # PR review fanout, GitLab pipeline debug) — not part of the run
+    # lifecycle parity contract.
+    lifecycle_only = {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}
+    gitlab_cmds &= lifecycle_only
+    github_cmds &= lifecycle_only
+    azure_cmds &= lifecycle_only
+
+    # TODO(parity): issue_edited/unlabeled (#29) are GitHub-only until the
+    # GitLab/Azure propagation issue lands. Whitelisted EXPLICITLY, with an
+    # issue pointer — remove entries as propagation lands.
+    known_gaps = {
+        ("gitlab", "issue_edited"),
+        ("gitlab", "unlabeled"),
+        ("azure", "issue_edited"),
+        ("azure", "unlabeled"),
+    }
+    all_sets = {"gitlab": gitlab_cmds, "github": github_cmds, "azure": azure_cmds}
+    union = set().union(*all_sets.values())
+    for provider, cmds in all_sets.items():
+        missing = union - cmds - {cmd for p, cmd in known_gaps if p == provider}
+        assert not missing, f"{provider} is missing lifecycle commands: {sorted(missing)}"

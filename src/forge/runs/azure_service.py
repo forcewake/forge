@@ -2341,13 +2341,15 @@ async def execute_azure_run_command(
                 note_text=note_text,
                 author_username=author_username,
             )
-        else:
+        elif command == "cancel":
             await service.handle_cancel(
                 project_id=project_id,
                 issue_number=issue_number,
                 note_text=note_text,
                 author_username=author_username,
             )
+        else:
+            logger.warning("Unknown Azure DevOps run command %r — ignoring", command)
     finally:
         aclose = getattr(stack.client, "aclose", None)
         if aclose is not None:
