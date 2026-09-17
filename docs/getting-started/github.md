@@ -104,7 +104,15 @@ comment @forge /go <run-id>
 ```
 
 Label trigger: add the `forge` label (configurable,
-`FORGE_TRIGGER_LABEL`) to an issue — same as `/implement`.
+`FORGE_TRIGGER_LABEL`) to an issue — same as `/implement`. Removing it
+cancels runs still waiting for approval (runs past the gate are untouched —
+the approval already consumed that plan).
+Editing the issue keeps the plan honest: while a run waits for approval, a
+changed body cancels the stale plan and regenerates it from the new text;
+once a run is approved or in flight it is never yanked — forge posts one
+note that the change is not in the approved plan. When a new run takes an
+issue over, the Draft PRs of its failed/blocked/cancelled predecessors are
+closed automatically with a superseded note.
 Cancel: `@forge /cancel <run-id>` (or bare `/cancel`).
 
 ## FAQ

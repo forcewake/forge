@@ -670,6 +670,19 @@ class GitHubClient:
             return dict(pull_requests[0])
         return None
 
+    async def close_pull_request(self, owner: str, repo: str, number: int) -> dict[str, Any]:
+        """Close PR *number* (``PATCH /repos/{o}/{r}/pulls/{n}``, idempotent).
+
+        The superseded-Draft-PR janitor's only write: a terminal run's Draft PR
+        is closed, never deleted. Closing an already-closed PR is a no-op.
+        """
+        response = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/{number}",
+            json={"state": "closed"},
+        )
+        return dict(response.json())
+
     async def get_pr_files(self, owner: str, repo: str, number: int) -> list[dict[str, Any]]:
         """The changed-file entries of PR *number* (REST, paginated).
 

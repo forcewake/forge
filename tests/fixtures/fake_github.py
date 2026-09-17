@@ -203,6 +203,15 @@ class FakeGitHub:
                 return dict(pr)
         return None
 
+    async def close_pull_request(self, owner: str, repo: str, number: int) -> dict:
+        self.calls.append(("close_pull_request", (owner, repo, number)))
+        full = f"{owner}/{repo}"
+        for pr in self.pull_requests.get(full, []):
+            if pr["number"] == number:
+                pr["state"] = "closed"
+                return dict(pr)
+        raise GitHubAPIError(404, f"PR #{number} not found")
+
     def prs_for(self, full_name: str, head_branch: str) -> list[dict]:
         return [
             pr for pr in self.pull_requests.get(full_name, []) if pr["head"]["ref"] == head_branch
