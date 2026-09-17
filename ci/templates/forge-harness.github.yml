@@ -54,7 +54,10 @@ concurrency:
 jobs:
   harness:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Above the run-side FORGE_HARNESS_TIMEOUT_SECONDS (5400s) so the
+    # harness deadline classifies honestly (harness_timeout) instead of
+    # GitHub killing the job as 'cancelled' at 60m (LIVE-found).
+    timeout-minutes: 120
     # READ-ONLY: the lane fetches the issue body + the forge plan comment
     # to render .forge/brief.md (forge.harness_entry --render-brief). No
     # write permission is granted — the candidate travels as an artifact.
