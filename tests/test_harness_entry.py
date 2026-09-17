@@ -567,3 +567,35 @@ class TestMain:
 
         assert rc == 0
         assert (lane / ".forge" / "exit").read_text().strip() == "completed"
+
+
+class TestQualityGateAllowlist:
+    """The brief + AGENTS.md tell the agent to run the repo's own quality
+    gates — every driver must be ALLOWED to execute them (LIVE-found: `make
+    lint`, `uv run ruff`, venv python and `set -o pipefail &&` compounds
+    were denied and the agent burned turns on permission prompts). The
+    mechanical commit/push deny still wins everywhere."""
+
+    _GATES = ("make", "uv", "set", "ruff", "mypy", "pytest")
+
+    def test_claude_allowlist_carries_the_full_gate_set(self):
+        script = render_driver_script("claude-code", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"Bash({gate}:*)" in script, gate
+        # venv forms (harmless where the venv does not exist — a normal
+        # tool result beats a permission denial)
+        assert "Bash(.venv/bin/python:*)" in script
+        # mechanical deny intact
+        assert '--disallowedTools "Bash(git commit:*)" "Bash(git push:*)"' in script
+
+    def test_grok_grants_carry_the_full_gate_set(self):
+        script = render_driver_script("grok-build", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"--allow 'Bash({gate}:*)'" in script, gate
+        assert "--deny 'Bash(git commit:*)'" in script
+
+    def test_copilot_grants_carry_the_full_gate_set(self):
+        script = render_driver_script("copilot", "m", BRIEF)
+        for gate in self._GATES:
+            assert f"--allow-tool 'shell({gate}:*)'" in script, gate
+        assert "--deny-tool 'shell(git commit)'" in script

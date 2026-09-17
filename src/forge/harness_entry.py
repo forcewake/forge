@@ -89,7 +89,16 @@ _CLAUDE_ALLOWED_TOOLS = (
     "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
     "Bash(python3:*)"
     "Bash(python:*)"
-    "Bash(pip install:*),Bash(pip list),Bash(pip show:*)"
+    "Bash(.venv/bin/python:*),Bash(./.venv/bin/python:*),"
+    "Bash(.venv/bin/pytest:*),Bash(.venv/bin/ruff:*),Bash(.venv/bin/mypy:*),"
+    "Bash(./.venv/bin/pytest:*),Bash(./.venv/bin/ruff:*),Bash(./.venv/bin/mypy:*),"
+    "Bash(pip install:*),Bash(pip list),Bash(pip show:*),Bash(pip3 install:*),"
+    # The repo's own quality gates (AGENTS.md / brief quality bar tell the
+    # agent to run them — LIVE-found: `make lint`, `uv run ruff`, bare
+    # pytest/ruff/mypy and `set -o pipefail &&` compounds were all DENIED
+    # and the agent burned turns flailing against permission prompts):
+    "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),"
+    "Bash(uv:*),Bash(make:*),Bash(set:*)"
 )
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
@@ -388,8 +397,11 @@ def render_driver_script(
             "  --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \\\n"
             "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
             "  --allow 'Bash(pip install:*)' \\\n"
-            "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
-            "  --allow 'Bash(pip install:*)' \\\n"
+            # The repo's own quality gates (LIVE-found: make lint / bare
+            # ruff / venv python were denied and burned turns):
+            "  --allow 'Bash(uv:*)' --allow 'Bash(make:*)' --allow 'Bash(set:*)' \\\n"
+            "  --allow 'Bash(ruff:*)' --allow 'Bash(mypy:*)' \\\n"
+            "  --allow 'Bash(.venv/bin/python:*)' --allow 'Bash(.venv/bin/ruff:*)' \\\n"
             "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
@@ -460,6 +472,9 @@ def render_driver_script(
             "  --allow-tool 'shell(pytest:*)' \\\n"
             "  --allow-tool 'shell(uv run ruff:*)' \\\n"
             "  --allow-tool 'shell(uv run mypy:*)' \\\n"
+            "  --allow-tool 'shell(uv:*)' --allow-tool 'shell(make:*)' \\\n"
+            "  --allow-tool 'shell(set:*)' --allow-tool 'shell(ruff:*)' \\\n"
+            "  --allow-tool 'shell(mypy:*)' \\\n"
             f"{mcp_grants}"
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )
