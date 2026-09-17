@@ -336,7 +336,7 @@ class TestRepairLoop:
         # No repair LLM call was burned: planner + one implementer, that's it.
         assert llm.roles() == ["planner", "implementer"]
 
-    async def test_infrastructure_failure_blocks_without_repair(self, db, fake_gitlab):
+    async def test_infrastructure_failure_is_transient_without_repair(self, db, fake_gitlab):
         llm = FakeLLM(db, script=[PLAN_JSON, CREATE_JSON])
         service = make_service(db, fake_gitlab, llm)
 
@@ -359,9 +359,11 @@ class TestRepairLoop:
         await service.evaluate_waiting_ci()
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.BLOCKED.value
+        # A runner flake is transient: the run stays dead only until the
+        # scheduled auto-revive, and no LLM repair is burned on it (ADR-0008).
+        assert run.status == FlowStatus.FAILED.value
         assert run.status_reason.startswith("infrastructure_failure")
-        # Never burn LLM repairs on infra (ADR-0008): no second implementer.
+        assert run.evidence["revive"]["revive_count"] == 1
         assert llm.roles() == ["planner", "implementer"]
         assert len(run.candidate_shas) == 1
 

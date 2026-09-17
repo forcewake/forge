@@ -99,6 +99,7 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.publisher import spec_allowed_paths
+from forge.runs.revival import RevivalMixin, classify_dispatch_error, repos_with_due_revival
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -117,7 +118,7 @@ _VERIFICATION_NOTE = (
 )
 
 
-class GitHubRunService:
+class GitHubRunService(RevivalMixin):
     """Coordinates the GitHub agents, the controller and one run's lifecycle."""
 
     def __init__(
@@ -1186,7 +1187,15 @@ class GitHubRunService:
             )
         except Exception as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            # 5xx/network/timeout/rate-limit self-heal on re-dispatch; a 4xx
+            # (undeclared input, missing workflow) would reproduce exactly.
+            transient = classify_dispatch_error(exc) == "transient"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_start_failed: {exc}",
+                transient=transient,
+            )
             return
 
         await self._complete_action(
@@ -1290,6 +1299,28 @@ class GitHubRunService:
                 ack_note_id=ack_note_id, ack_url_pending=True, ack_body=ack_body
             )
             await self._merge_run_evidence(run_id, {"harness": harness_fragment})
+
+    def _owns_revival(self, run: FlowRun) -> bool:
+        """Only this repo's own GitHub runs — a foreign repo's revival is
+        another service's tick."""
+        return (
+            getattr(run, "provider", "") == "github"
+            and str(run.github_repo_full_name or "") == self._repo_full_name
+        )
+
+    async def _revival_redispatch(
+        self, run: FlowRun, *, repair_context: str, repair_reason: str
+    ) -> None:
+        """Re-dispatch the Actions lane on the SAME branch (ADR-0016 §4:
+        the attempt base is the last candidate, so the lane continues its
+        previous work instead of re-deriving it)."""
+        await self._advance_harness(
+            run.id,
+            project_id=run.project_id,
+            issue_number=run.issue_iid or 0,
+            repair_context=repair_context,
+            repair_reason=repair_reason,
+        )
 
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
         """The driver frozen at plan time (ADR-0023 §6), or None for a
@@ -1504,7 +1535,15 @@ class GitHubRunService:
                 failure_reason=outcome.reason,
             ):
                 return
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            # A runner/infrastructure flake is transient — it self-heals on a
+            # bounded auto-revive; code/config still needs a human.
+            transient = kind == "infrastructure"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_{kind}: {outcome.reason}",
+                transient=transient,
+            )
             return
 
         await self._publish_harness_candidate(run_id, project_id, issue_number, outcome, handle)
@@ -2434,6 +2473,10 @@ class GitHubRunService:
         await self._complete_action(action_id, "succeeded", {"note_id": note_id})
         return note_id
 
+    # Revival (``forge.runs.revival``): the issue-note poster the shared
+    # mixin posts its operator acks and rejections through.
+    _post_operator_note = _post_journaled_note
+
     async def _complete_action(self, action_id: int, status: str, remote_result=None) -> None:
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -2452,9 +2495,19 @@ class GitHubRunService:
         async with self._session_factory() as session:
             await self._transition_in_session(session, run_id, status, reason)
 
-    async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+    async def _to_terminal(
+        self, run_id: str, status: FlowStatus, reason: str, *, transient: bool = False
+    ) -> None:
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        A *transient* death (dispatch 5xx/network/timeout, rate limit, runner
+        startup) also schedules a bounded auto-revive: the run stays parked
+        until the reconciler finds ``revive_at`` due. Fatal deaths stay dead
+        and are what an operator ``/retry`` is for.
+        """
         await self._transition(run_id, status, reason=reason[:200])
+        if transient:
+            await self._schedule_revival(run_id, reason)
         logger.warning("GitHub run %s -> %s: %s", run_id[:8], status.value, reason)
 
 
@@ -2489,7 +2542,7 @@ async def execute_github_run_command(
 
         await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel", "issue_edited", "unlabeled"}:
+    if command not in {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)
         return
     repo_full_name = str(metadata.get("repo_full_name") or "")
@@ -2525,6 +2578,13 @@ async def execute_github_run_command(
             await service.handle_go(
                 project_id=project_id,
                 issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "retry":
+            await service.handle_retry_note(
+                project_id=project_id,
+                issue_iid=issue_number,
                 note_text=note_text,
                 author_username=author_username,
             )
@@ -2682,6 +2742,13 @@ async def run_github_harness_reconciler(
             logger.exception("GitHub verification reconciler pass failed")
 
         try:
+            await evaluate_github_revival(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub revival reconciler pass failed")
+
+        try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
             break  # Event set — clean shutdown.
         except asyncio.TimeoutError:
@@ -2726,6 +2793,43 @@ async def evaluate_github_waiting_harness(
         except Exception:
             # One broken repo must not stall the reconciler pass.
             logger.exception("GitHub harness reconcile failed for %s", repo_full_name)
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def evaluate_github_revival(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One revival pass over dead GitHub runs (terminal-failure revival).
+
+    The twin of the GitLab ``RunService.evaluate_revival`` slot in
+    :func:`forge.runs.reconciler.run_reconciler`: a transient death
+    re-dispatches its own branch after a bounded backoff, with no human in
+    the loop. Silent no-op when no run is due.
+    """
+    now = now or datetime.now(timezone.utc)
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+    for repo_full_name in await repos_with_due_revival(session_factory, "github", now):
+        owner, _, repo = repo_full_name.partition("/")
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service.evaluate_revival(now=now)
+        except Exception:
+            # One broken repo must not stall the reconciler pass.
+            logger.exception("GitHub revival pass failed for %s", repo_full_name)
         finally:
             aclose = getattr(stack.client, "aclose", None)
             if aclose is not None:

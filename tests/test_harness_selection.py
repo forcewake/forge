@@ -536,8 +536,10 @@ class TestGitLabFallbackFlow(_DbBase):
         await service.evaluate_waiting_harness()
 
         run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
+        # Infra is transient (revival): parked failed with a revive due.
+        assert run.status == "failed"
         assert run.status_reason.startswith("harness_infrastructure")
+        assert run.evidence["revive"]["revive_count"] == 1
         assert len(fake_gitlab.pipelines) == 1
         assert await self.fallback_actions(db, run_id) == []
 
@@ -590,8 +592,9 @@ class TestGitLabFallbackFlow(_DbBase):
         await service.evaluate_waiting_harness()
 
         run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
+        assert run.status == "failed"
         assert run.status_reason.startswith("harness_infrastructure")
+        assert run.evidence["revive"]["revive_count"] == 1
         assert len(fake_gitlab.pipelines) == 2  # no third leg — chain done
 
     async def test_code_failure_never_switches_even_when_enabled(self, db, fake_gitlab):
@@ -631,7 +634,8 @@ class TestGitLabFallbackFlow(_DbBase):
         await service.evaluate_waiting_harness()
 
         run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
+        assert run.status == "failed"
+        assert run.evidence["revive"]["revive_count"] == 1
         assert len(fake_gitlab.pipelines) == 1
 
 
@@ -716,8 +720,10 @@ class TestGitHubFallbackFlow(_DbBase):
         await service.evaluate_waiting_harness()
 
         run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
+        # Infra is transient (revival): parked failed with a revive due.
+        assert run.status == "failed"
         assert (run.status_reason or "").startswith("harness_infrastructure")
+        assert run.evidence["revive"]["revive_count"] == 1
         assert len(fake.dispatch_inputs) == 1
         assert await self.fallback_actions(db, run_id) == []
 
@@ -754,8 +760,9 @@ class TestGitHubFallbackFlow(_DbBase):
         await service.evaluate_waiting_harness()
 
         run = await self.get_run(db, run_id)
-        assert run.status == "blocked"
+        assert run.status == "failed"
         assert (run.status_reason or "").startswith("harness_infrastructure")
+        assert run.evidence["revive"]["revive_count"] == 1
         assert len(fake.dispatch_inputs) == 2
 
     async def test_code_failure_never_switches_even_when_enabled(self, db, fake):

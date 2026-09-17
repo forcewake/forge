@@ -218,13 +218,13 @@ def bundle_from_changeset(cs: object, *, attempt_base_oid: str) -> CandidateBund
 
 def attempt_base_for(run: object) -> str:
     """The frozen attempt base for *run* (ADR-0016 §4): cycle 1 → approved
-    source base; repair → the last verified candidate OID. Mirrors
+    source base; a repair, an auto-revive or an operator ``/retry`` → the
+    last candidate OID — a true continuation of the same attempt. Mirrors
     ``RunService._advance_proposal`` — passed to the harness lane as
     ``FORGE_ATTEMPT_BASE`` and checked against every candidate artifact.
     """
-    cycle = getattr(run, "commit_cycle", None) or 1
     candidates = list(getattr(run, "candidate_shas", None) or [])
-    if cycle > 1 and candidates:
+    if candidates:
         return candidates[-1]
     return str(getattr(run, "base_sha", None) or "")
 

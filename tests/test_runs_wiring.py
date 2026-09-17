@@ -164,6 +164,17 @@ class TestGatewayRouting:
         (task,) = app.state.task_queue.submit.await_args[0]
         assert task.metadata["command"] == "cancel"
 
+    async def test_bare_retry_note_without_mention_is_routed(self, app, client):
+        """/retry is a run command: it must reach the durable loop, not the
+        legacy path (terminal-failure revival, Tier 2)."""
+        resp = await client.post("/webhook", json=note_payload("/retry"), headers=webhook_headers())
+
+        assert resp.json()["run_command"] is True
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "run_command"
+        assert task.metadata["command"] == "retry"
+        assert task.metadata["issue_iid"] == ISSUE_IID
+
     async def test_bare_unknown_command_keeps_legacy_path(self, app, client):
         resp = await client.post(
             "/webhook", json=note_payload("/explain something"), headers=webhook_headers()

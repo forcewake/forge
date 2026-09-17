@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # entry (journaled in action_log); everything else fails visibly.
     FORGE_HARNESS_FALLBACK: bool = False
 
+    # Terminal-failure revival: how many times a run killed by a TRANSIENT
+    # failure (dispatch 5xx/network/timeout, rate limit, runner startup) may
+    # re-dispatch its own branch on exponential backoff before it stays dead.
+    # Fatal failures never auto-retry — they park blocked with the cause and
+    # wait for an operator /retry. 0 disables auto-revival entirely.
+    FORGE_RUN_AUTO_REVIVE_LIMIT: int = 2
+
     # ADR-0018 (F15): how long the pending plan decision — created when the
     # plan note is posted — stays consumable. After the deadline a `/go` is
     # refused: the plan is stale and must be re-planned and re-approved.

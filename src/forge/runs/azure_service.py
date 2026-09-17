@@ -107,6 +107,7 @@ from forge.repository import Change, ChangeSet, Operation
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, is_harness_backend
 from forge.runs.candidate import attempt_base_for
+from forge.runs.revival import RevivalMixin, classify_dispatch_error, repos_with_due_revival
 from forge.repository.changeset import validate_changeset
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
@@ -434,7 +435,7 @@ class AzurePRReviewer:
         return str(content) if content is not None else None
 
 
-class AzureRunService:
+class AzureRunService(RevivalMixin):
     """Coordinates the Azure agents, the controller and one run's lifecycle."""
 
     def __init__(
@@ -1122,7 +1123,16 @@ class AzureRunService:
             )
         except Exception as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            # 5xx/network/timeout/rate-limit self-heal on re-dispatch; a 4xx
+            # (undeclared template parameter, missing pipeline) would
+            # reproduce exactly.
+            transient = classify_dispatch_error(exc) == "transient"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_start_failed: {exc}",
+                transient=transient,
+            )
             return
 
         correlated = handle.with_run_id(lane_run.run_id)
@@ -1202,6 +1212,27 @@ class AzureRunService:
                 run_id,
                 "taken_in_work_note",
             )
+
+    def _owns_revival(self, run: FlowRun) -> bool:
+        """Only this project/repo's own AzDO runs — a foreign subject's
+        revival is another service's tick."""
+        return (
+            getattr(run, "provider", "") == "azure_devops"
+            and str(run.github_repo_full_name or "") == self._repo_full_name
+        )
+
+    async def _revival_redispatch(
+        self, run: FlowRun, *, repair_context: str, repair_reason: str
+    ) -> None:
+        """Re-dispatch the lane pipeline on the SAME branch (ADR-0016 §4:
+        the attempt base is the last candidate, so the lane continues its
+        previous work instead of re-deriving it)."""
+        await self._advance_harness(
+            run.id,
+            project_id=run.project_id,
+            issue_number=run.issue_iid or 0,
+            repair_context=repair_context,
+        )
 
     async def _frozen_harness_driver(self, run_id: str) -> str | None:
         """The driver frozen at plan time (ADR-0023 §6), or None for a
@@ -1521,7 +1552,15 @@ class AzureRunService:
 
         if outcome.status == "failed":
             kind = outcome.failure_kind or "code"
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            # A runner/infrastructure flake is transient — it self-heals on a
+            # bounded auto-revive; code/config still needs a human.
+            transient = kind == "infrastructure"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_{kind}: {outcome.reason}",
+                transient=transient,
+            )
             return
 
         await self._publish_harness_candidate(run_id, project_id, issue_number, outcome, journaled)
@@ -2069,6 +2108,10 @@ class AzureRunService:
         note_id = note.get("commentId") if isinstance(note, dict) else None
         await self._complete_action(action_id, "succeeded", {"comment_id": note_id})
 
+    # Revival (``forge.runs.revival``): the work-item comment poster the
+    # shared mixin posts its operator acks and rejections through.
+    _post_operator_note = _post_journaled_comment
+
     async def _complete_action(self, action_id: int, status: str, remote_result=None) -> None:
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -2087,9 +2130,19 @@ class AzureRunService:
         async with self._session_factory() as session:
             await self._transition_in_session(session, run_id, status, reason)
 
-    async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+    async def _to_terminal(
+        self, run_id: str, status: FlowStatus, reason: str, *, transient: bool = False
+    ) -> None:
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        A *transient* death (dispatch 5xx/network/timeout, rate limit, agent
+        startup) also schedules a bounded auto-revive: the run stays parked
+        until the reconciler finds ``revive_at`` due. Fatal deaths stay dead
+        and are what an operator ``/retry`` is for.
+        """
         await self._transition(run_id, status, reason=reason[:200])
+        if transient:
+            await self._schedule_revival(run_id, reason)
         logger.warning("Azure DevOps run %s -> %s: %s", run_id[:8], status.value, reason)
 
 
@@ -2129,7 +2182,7 @@ async def execute_azure_run_command(
 
         await execute_azure_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel"}:
+    if command not in {"start_run", "go", "cancel", "retry"}:
         logger.warning("Unknown Azure DevOps run command %r — ignoring", command)
         return
     project = str(metadata.get("project") or "")
@@ -2170,6 +2223,13 @@ async def execute_azure_run_command(
             await service.handle_go(
                 project_id=project_id,
                 issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "retry":
+            await service.handle_retry_note(
+                project_id=project_id,
+                issue_iid=issue_number,
                 note_text=note_text,
                 author_username=author_username,
             )
@@ -2456,10 +2516,52 @@ async def run_azure_harness_reconciler(
             logger.exception("Azure DevOps harness reconciler pass failed")
 
         try:
+            await evaluate_azure_revival(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("Azure DevOps revival reconciler pass failed")
+
+        try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
         except asyncio.TimeoutError:
             pass
     logger.info("Azure DevOps harness reconciler stopped")
+
+
+async def evaluate_azure_revival(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+) -> None:
+    """One revival pass over dead AzDO runs (terminal-failure revival).
+
+    The twin of :func:`forge.runs.github_service.evaluate_github_revival`:
+    a transient death re-dispatches its own branch after a bounded backoff,
+    with no human in the loop. Silent no-op when no run is due.
+    """
+    now = now or datetime.now(timezone.utc)
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+    for repo_full_name in await repos_with_due_revival(session_factory, "azure_devops", now):
+        project, _, repo_name = repo_full_name.partition("/")
+        service = AzureRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(project, repo_name),
+            repo_full_name=repo_full_name,
+        )
+        try:
+            await service.evaluate_revival(now=now)
+        except Exception:
+            # One broken subject must not stall the reconciler pass.
+            logger.exception("Azure DevOps revival pass failed for %s", repo_full_name)
 
 
 async def evaluate_azure_waiting_harness(

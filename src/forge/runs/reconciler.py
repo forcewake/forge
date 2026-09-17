@@ -32,6 +32,9 @@ async def run_reconciler(
             # ADR-0017 §5: re-post the evidence note for runs that reached
             # ready_for_human before their worker died mid-announcement.
             service.evaluate_ready_evidence,
+            # Terminal-failure revival: transient deaths re-dispatch their own
+            # branch after a bounded backoff, without a human noticing.
+            service.evaluate_revival,
         ):
             try:
                 await evaluate()

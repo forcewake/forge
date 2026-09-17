@@ -267,7 +267,9 @@ class TestHarnessReconciler:
         assert "harness_no_changes" in run.status_reason
         assert fake_gitlab.merge_requests == {}
 
-    async def test_infrastructure_failure_blocks_without_repair(self, service, fake_gitlab, db):
+    async def test_infrastructure_failure_is_transient_without_repair(
+        self, service, fake_gitlab, db
+    ):
         run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
         seed_forge_agent_job(
             fake_gitlab, pipeline_id, status="failed", failure_reason="runner_system_failure"
@@ -276,9 +278,11 @@ class TestHarnessReconciler:
         await service.evaluate_waiting_harness()
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.BLOCKED.value
+        # A runner flake is transient: parked failed with a revive scheduled,
+        # before any forge-side implementer/MR work happened.
+        assert run.status == FlowStatus.FAILED.value
         assert run.status_reason.startswith("harness_infrastructure")
-        # Blocked before any forge-side implementer/MR work happened.
+        assert run.evidence["revive"]["revive_count"] == 1
         assert fake_gitlab.merge_requests == {}
 
     async def test_timeout_blocks_as_harness_timeout(self, service, fake_gitlab, db):
@@ -293,9 +297,12 @@ class TestHarnessReconciler:
 
         await service.evaluate_waiting_harness(now=late)
 
-        blocked = await get_run(db, run_id)
-        assert blocked.status == FlowStatus.BLOCKED.value
-        assert "harness_timeout" in blocked.status_reason
+        timed_out = await get_run(db, run_id)
+        # The durable deadline is an environment verdict — transient, so it
+        # parks failed with a bounded auto-revive instead of blocking.
+        assert timed_out.status == FlowStatus.FAILED.value
+        assert "harness_timeout" in timed_out.status_reason
+        assert timed_out.evidence["revive"]["revive_count"] == 1
 
     async def test_before_deadline_still_blocks_never(self, service, fake_gitlab, db):
         run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
@@ -323,7 +330,7 @@ class TestHarnessReconciler:
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("harness_code")
 
-    async def test_unknown_failure_reason_blocks_as_infrastructure(self, service, fake_gitlab, db):
+    async def test_unknown_failure_reason_is_transient(self, service, fake_gitlab, db):
         """No failure reason does not blame the code (ADR-0008) — seen live
         when a canceled job was read transiently as failed with no reason."""
         run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
@@ -338,8 +345,10 @@ class TestHarnessReconciler:
         await service.evaluate_waiting_harness()
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.BLOCKED.value
+        # No failure reason never blames the code — and never a human either.
+        assert run.status == FlowStatus.FAILED.value
         assert run.status_reason.startswith("harness_infrastructure")
+        assert run.evidence["revive"]["revive_count"] == 1
 
     async def test_artifact_base_mismatch_blocks_the_run(self, service, fake_gitlab, db):
         run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)

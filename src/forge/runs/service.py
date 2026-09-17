@@ -103,6 +103,7 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.publisher import publish_candidate, spec_allowed_paths
+from forge.runs.revival import RevivalMixin, classify_dispatch_error
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import VerificationProfile
 from forge.runs.verification import evaluate as evaluate_verification
@@ -270,7 +271,7 @@ async def execute_run_command(
         await service.run_command(metadata)
 
 
-class RunService:
+class RunService(RevivalMixin):
     """Coordinates the factory agents, the controller and GitLab for one run."""
 
     def __init__(
@@ -810,6 +811,13 @@ class RunService:
                 metadata.get("issue_iid"),
                 author_user_id=int(metadata.get("author_user_id") or 0),
             )
+        elif command == "retry":
+            await self.handle_retry_note(
+                project_id=metadata["project_id"],
+                issue_iid=metadata.get("issue_iid"),
+                note_text=metadata.get("note_text", ""),
+                author_username=metadata.get("author_username", ""),
+            )
         elif command == "cancel":
             await self.handle_cancel_note(
                 metadata["project_id"],
@@ -1038,7 +1046,8 @@ class RunService:
         try:
             backend = self._harness_backend(project_id, driver=driver)
         except ValueError as exc:
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"backend_config: {exc}")
+            # Config is fatal, never transient: the same dispatch would 4xx again.
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"backend_config: {exc}")
             return
 
         # Intent-first journal for the harness start (ADR-0005). The pipeline
@@ -1053,7 +1062,15 @@ class RunService:
             handle = await backend.start(run, issue_title, "", brief)
         except (GitLabAPIError, httpx.HTTPError) as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            # 5xx/network/timeout/rate-limit self-heal on re-dispatch; a 4xx
+            # (undeclared input, missing workflow) would reproduce exactly.
+            transient = classify_dispatch_error(exc) == "transient"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_start_failed: {exc}",
+                transient=transient,
+            )
             return
 
         handle_data = json.loads(handle)
@@ -1481,11 +1498,15 @@ class RunService:
         failure_class = classify_failure(jobs)
         if failure_class != "code":
             failed = _failed_job_names(jobs)
+            # A runner/infrastructure flake is transient — it self-heals on a
+            # bounded auto-revive. Config/unknown evidence still needs a human.
+            transient = failure_class == "infrastructure"
             await self._to_terminal(
                 run_id,
-                FlowStatus.BLOCKED,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
                 f"{failure_class}_failure: pipeline {pipeline.id} {pipeline.status}"
                 + (f"; failed jobs: {failed}" if failed else ""),
+                transient=transient,
             )
             return
 
@@ -1699,6 +1720,30 @@ class RunService:
         )
         return redacted[-REPAIR_CONTEXT_MAX_CHARS:]
 
+    def _owns_revival(self, run: FlowRun) -> bool:
+        # R03 slice: non-GitLab runs are driven by their own reconcilers
+        # (github_service / azure_service), revival included.
+        return getattr(run, "provider", "gitlab") == "gitlab"
+
+    async def _revival_redispatch(
+        self, run: FlowRun, *, repair_context: str, repair_reason: str
+    ) -> None:
+        """Re-dispatch this run's own advance leg on the SAME branch.
+
+        The attempt base is the last candidate (ADR-0016 §4), so a revived
+        harness continues from its previous work instead of re-deriving it.
+        """
+        project_id, run_id = run.project_id, run.id
+        backend = str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+        if is_harness_backend(backend):
+            await self._advance_harness(
+                project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
+            )
+        else:
+            await self._advance_proposal(
+                project_id, run_id, repair_context=repair_context, repair_reason=repair_reason
+            )
+
     async def _waiting_ci_deadline(self, session: AsyncSession, run_id: str) -> datetime | None:
         """Durable CI deadline: waiting_ci outbox timestamp + FORGE_CI_WAIT_SECONDS.
 
@@ -1803,7 +1848,13 @@ class RunService:
                 run_id, project_id, failure_kind=kind, failure_reason=outcome.reason
             ):
                 return
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            transient = kind == "infrastructure"
+            await self._to_terminal(
+                run_id,
+                FlowStatus.FAILED if transient else FlowStatus.BLOCKED,
+                f"harness_{kind}: {outcome.reason}",
+                transient=transient,
+            )
             return
 
         await self._adopt_harness_change(run_id, project_id, outcome)
@@ -2530,6 +2581,10 @@ class RunService:
             raise
         await self._complete_action(action_id, "succeeded", {"note_id": note.get("id")})
 
+    # Revival (``forge.runs.revival``): the issue-note poster the shared
+    # mixin posts its operator acks and rejections through.
+    _post_operator_note = _post_journaled_note
+
     async def _post_journaled_mr_note(
         self, project_id: int, mr_iid: int | None, body: str, run_id: str
     ) -> None:
@@ -2564,9 +2619,19 @@ class RunService:
             await controller.transition(run_id, status, reason=reason)
             await session.commit()
 
-    async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+    async def _to_terminal(
+        self, run_id: str, status: FlowStatus, reason: str, *, transient: bool = False
+    ) -> None:
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        A *transient* death (dispatch 5xx/network/timeout, rate limit, runner
+        startup) also schedules a bounded auto-revive: the run stays parked
+        until the reconciler finds ``revive_at`` due, so no one has to watch
+        it flap. Fatal deaths stay dead and are what ``/retry`` is for.
+        """
         await self._transition(run_id, status, reason=reason[:200])
+        if transient:
+            await self._schedule_revival(run_id, reason)
         logger.warning("Run %s -> %s: %s", run_id[:8], status.value, reason)
 
 

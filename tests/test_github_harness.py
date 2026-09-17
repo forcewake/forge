@@ -278,7 +278,7 @@ class TestGoDispatchesHarness:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
 
-    async def test_dispatch_failure_fails_the_run_without_a_second_dispatch(self, db, fake):
+    async def test_config_dispatch_failure_blocks_the_run_without_a_second_dispatch(self, db, fake):
         service = make_service(db, fake)
         run_id = await start(service)
         clear_comments(fake)
@@ -294,8 +294,11 @@ class TestGoDispatchesHarness:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # A 4xx means forge's own request was wrong (undeclared input /
+        # missing workflow): fatal — blocked with the cause, never auto-retried.
+        assert run.status == FlowStatus.BLOCKED.value
         assert "harness_start_failed" in (run.status_reason or "")
+        assert "revive" not in run.evidence
         assert len(dispatch_calls) == 1  # never replayed
 
 
@@ -422,7 +425,7 @@ class TestReconcile:
         # Harness failures never enter the repair loop — no new dispatch.
         assert len(fake.dispatch_inputs) == 1
 
-    async def test_infrastructure_failure_blocks_with_its_kind(self, db, fake):
+    async def test_infrastructure_failure_is_transient_with_its_kind(self, db, fake):
         service = make_service(db, fake)
         run_id = await start(service)
         await go(service, run_id)
@@ -435,8 +438,10 @@ class TestReconcile:
         await service.evaluate_waiting_harness()
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.BLOCKED.value
+        # A quota/runner flake is transient — parked failed, revive due.
+        assert run.status == FlowStatus.FAILED.value
         assert (run.status_reason or "").startswith("harness_infrastructure:")
+        assert run.evidence["revive"]["revive_count"] == 1
 
     async def test_uncorrelated_handle_converges_after_a_restart(self, db, fake):
         """A legacy empty-202 dispatch leaves the handle uncorrelated; the

@@ -106,6 +106,11 @@ for _status in ALLOWED_TRANSITIONS:
     if _status not in TERMINAL_STATUSES:
         ALLOWED_TRANSITIONS[_status] = ALLOWED_TRANSITIONS[_status] | _FROM_ANY_TERMINAL
 
+#: The only statuses :meth:`Controller.revive` may start from. Deliberately
+#: NOT part of :data:`ALLOWED_TRANSITIONS` — a terminal run stays edge-free
+#: for every ordinary transition; revival is its own authorized walk.
+_REVIVABLE_STATUSES = frozenset({FlowStatus.FAILED.value, FlowStatus.BLOCKED.value})
+
 
 class ControllerError(Exception):
     """Base class for controller errors."""
@@ -204,6 +209,52 @@ class Controller:
                     "from": current.value,
                     "to": target.value,
                     "reason": reason,
+                },
+            )
+        )
+        await self.session.flush()
+        return run
+
+    async def revive(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        authorized_by: str,
+    ) -> FlowRun:
+        """The one authorized walk out of a terminal status, onto ``proposing``.
+
+        ADR-0004 keeps the terminal states edge-free: nothing leaves
+        ``failed``/``blocked`` on its own. Revival is the single explicit
+        exception — a bounded auto-revive of a transient failure
+        (``authorized_by="auto_revive"``) or an operator's ``/retry``
+        (``authorized_by="operator:<login>"``) — and it never mints a new
+        run: the SAME branch is re-dispatched with the attempt base pinned
+        to the last candidate. *authorized_by* rides in the outbox payload
+        so the audit trail shows who reopened a dead run.
+        """
+        run = await self.session.get(FlowRun, run_id)
+        if run is None:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        current = FlowStatus(run.status)
+        if current.value not in _REVIVABLE_STATUSES:
+            raise InvalidTransition(
+                f"run {run_id!r} is {current.value!r}; only a failed or blocked run"
+                " can be revived — cancelled is never revivable"
+            )
+        run.status = FlowStatus.PROPOSING.value
+        run.status_reason = reason
+        run.updated_at = datetime.now(timezone.utc)
+        self.session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type=TRANSITION_EVENT_TYPE,
+                payload={
+                    "flow_run_id": run_id,
+                    "from": current.value,
+                    "to": FlowStatus.PROPOSING.value,
+                    "reason": reason,
+                    "authorized_by": authorized_by,
                 },
             )
         )

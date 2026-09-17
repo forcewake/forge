@@ -1007,7 +1007,7 @@ class TestGoLane:
         assert len(harness) == 1 and harness[0].status == "succeeded"
         assert fake.pull_requests == []
 
-    async def test_lane_dispatch_failure_fails_the_run(self, db, fake):
+    async def test_lane_dispatch_config_failure_blocks_the_run(self, db, fake):
         settings = make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
 
         class ExplodingClient(FakeAzureDevOps):
@@ -1022,8 +1022,11 @@ class TestGoLane:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # TF400813 is a 4xx — forge's own request was wrong, so the same
+        # dispatch would reproduce it: fatal, blocked with the exact cause.
+        assert run.status == FlowStatus.BLOCKED.value
         assert "harness_start_failed" in (run.status_reason or "")
+        assert "revive" not in run.evidence
 
 
 # ----------------------------------------------------------------------
