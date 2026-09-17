@@ -231,3 +231,48 @@ class TestTruncateChars:
 
     def test_zero_limit_empty(self):
         assert truncate_chars("abc", 0) == ""
+
+
+class TestReviewWithRetry:
+    """The reviewer model is stochastic (LIVE: prose instead of JSON on 2 of
+    4 calls blocked otherwise-green runs) — one bounded re-ask, then raise."""
+
+    def _verdict_json(self) -> str:
+        import json
+
+        return json.dumps({"verdict": "ok", "summary": "clean", "findings": []})
+
+    async def _run(self, fake_llm, parse=None):
+        from forge.factory.reviewer import LLMReviewer, review_with_retry
+
+        return await review_with_retry(
+            fake_llm,
+            system="sys",
+            user="user",
+            parse=parse or LLMReviewer._parse,
+        )
+
+    async def test_unparseable_review_is_reasked_once(self, db):
+        from tests.fixtures.fake_llm import FakeLLM
+
+        llm = FakeLLM(script=["Sorry, I cannot comply.", self._verdict_json()])
+        verdict = await self._run(llm)
+
+        assert verdict.verdict == "ok"
+        assert len(llm.calls) == 2  # both attempts journaled
+
+    async def test_both_attempts_unparseable_raises(self, db):
+        from tests.fixtures.fake_llm import FakeLLM
+
+        llm = FakeLLM(script=["nope", "still nope"])
+        with pytest.raises(LLMResponseError):
+            await self._run(llm)
+        assert len(llm.calls) == 2  # bounded, not an infinite loop
+
+    async def test_first_call_clean_makes_exactly_one_call(self, db):
+        from tests.fixtures.fake_llm import FakeLLM
+
+        llm = FakeLLM(script=[self._verdict_json()])
+        verdict = await self._run(llm)
+        assert verdict.verdict == "ok"
+        assert len(llm.calls) == 1

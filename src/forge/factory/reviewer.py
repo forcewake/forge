@@ -24,6 +24,49 @@ logger = logging.getLogger(__name__)
 #: The strong tier: review quality gates ready_for_human.
 REVIEWER_TIER = "strong"
 
+#: The reviewer model is stochastic (LIVE: glm returned prose instead of
+#: JSON on 2 of 4 review calls, blocking otherwise-green runs at
+#: ``review_failed``). One bounded re-ask — same prompt, same contract,
+#: every attempt journaled to ``llm_calls`` — is honest; weakening the
+#: verdict because the model had a bad sample is not (ADR-0008).
+REVIEW_ATTEMPTS = 2
+
+
+async def review_with_retry(
+    llm: LLMClient,
+    *,
+    system: str,
+    user: str,
+    parse: Any,
+    flow_run_id: str | None = None,
+) -> Any:
+    """Run the review call, re-asking once when the output won't parse.
+
+    *parse* is a callable turning the model text into the verdict; only
+    :class:`LLMResponseError` (an unusable response — invalid JSON in JSON
+    mode, unparseable or wrong-shape output) triggers a retry, from the
+    call itself or from *parse*; real API/network failures propagate
+    immediately.
+    """
+    last_error: LLMResponseError | None = None
+    for attempt in range(1, REVIEW_ATTEMPTS + 1):
+        try:
+            result = await llm.complete(
+                tier=REVIEWER_TIER,
+                system=system,
+                user=user,
+                role="reviewer",
+                flow_run_id=flow_run_id,
+                json_mode=True,
+            )
+            return parse(result.text)
+        except LLMResponseError as exc:
+            last_error = exc
+            logger.warning("review parse failed (attempt %d/%d): %s", attempt, REVIEW_ATTEMPTS, exc)
+    assert last_error is not None
+    raise last_error
+
+
 #: Deterministic input budget (chars) for the review prompt (ADR-0013).
 REVIEWER_MAX_INPUT_CHARS = 20000
 
@@ -90,20 +133,18 @@ class LLMReviewer:
     ) -> ReviewVerdict:
         """Review base_sha..candidate_sha and return the parsed verdict."""
         diff = await self._candidate_diff(project_id, base_sha, candidate_sha)
-        user = (
+        result_user = (
             f"Issue title: {issue_title}\n\n"
             f"Plan summary:\n{plan_summary or '(no plan summary available)'}\n\n"
             f"Candidate diff ({base_sha[:8]}..{candidate_sha[:8]}):\n{diff}"
         )
-        result = await self._llm.complete(
-            tier=REVIEWER_TIER,
+        return await review_with_retry(
+            self._llm,
             system=_SYSTEM_PROMPT,
-            user=truncate_chars(user, REVIEWER_MAX_INPUT_CHARS),
-            role="reviewer",
+            user=truncate_chars(result_user, REVIEWER_MAX_INPUT_CHARS),
+            parse=self._parse,
             flow_run_id=flow_run_id,
-            json_mode=True,
         )
-        return self._parse(result.text)
 
     # ------------------------------------------------------------------
 
@@ -164,10 +205,12 @@ def _parse_finding(raw: Any) -> ReviewFinding:
 
 
 __all__ = [
+    "REVIEW_ATTEMPTS",
     "REVIEWER_MAX_DIFF_CHARS",
     "REVIEWER_MAX_INPUT_CHARS",
     "REVIEWER_TIER",
     "LLMReviewer",
+    "review_with_retry",
     "ReviewFinding",
     "ReviewVerdict",
 ]
