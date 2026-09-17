@@ -39,8 +39,14 @@ Containers reach host-published services via `host.containers.internal`, so:
 and `GITLAB*` variable from `.env` with explicit `-e` flags (see git history
 for the exact working command). App: `-p 8420:8420 -v "$PWD/data:/app/data"`
 running `uv run uvicorn forge.main:app --host 0.0.0.0 --port 8420`; worker:
-`uv run python -m forge.worker`. The app needs `-v` data mount; the worker
-does not.
+`python -m forge.worker` (the image CMD is the WEB APP — a worker container
+created without the command override silently becomes a second useless web
+server; LIVE-found 2026-09-17). **The worker MUST mount
+`-v "$PWD/.secrets:/app/.secrets"`** — `FORGE_GITHUB_PRIVATE_KEY` is a PATH
+to the GitHub App PEM; without the mount every GitHub call dies with
+`InvalidKeyError: Could not parse the provided public key` and steps go
+dead (LIVE-found 2026-09-17). The app mounts data (webhook captures) and
+.secrets too.
 
 ## Verify
 
