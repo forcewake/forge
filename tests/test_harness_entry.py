@@ -591,6 +591,9 @@ class TestQualityGateAllowlist:
         # bypass mode makes redirects/--add-dir moot (everything allowed
         # except the mechanical deny)
         assert "--permission-mode bypassPermissions" in script
+        # isolated ephemeral config: no auto-memory bleed across runs on
+        # reused runners (the MEMORY.md index auto-loads into context)
+        assert 'CLAUDE_CONFIG_DIR="$(mktemp -d /tmp/claude-lane-config.XXXXXX)"' in script
         # venv forms (harmless where the venv does not exist — a normal
         # tool result beats a permission denial)
         assert "Bash(.venv/bin/python:*)" in script
