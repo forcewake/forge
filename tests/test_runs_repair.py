@@ -328,9 +328,7 @@ class TestRepairLoop:
         assert review["sha"] == repaired_sha
         assert llm.roles() == ["planner", "implementer", "implementer", "reviewer"]
 
-    async def test_repair_updates_a_file_created_in_cycle_one(
-        self, db, fake_gitlab, monkeypatch
-    ):
+    async def test_repair_updates_a_file_created_in_cycle_one(self, db, fake_gitlab, monkeypatch):
         """R06: create in cycle 1 → CI failure → update the NEW file in cycle 2.
 
         Every leg of the repair attempt uses the ATTEMPT base (the last
@@ -506,9 +504,7 @@ class TestRepairLoop:
         branch_shas = [c["sha"] for c in fake_gitlab.branches[branch] if c["sha"] != BASE_SHA]
         assert branch_shas == [first_sha]
 
-    async def test_human_push_on_the_factory_branch_blocks_never_force_fixed(
-        self, db, fake_gitlab
-    ):
+    async def test_human_push_on_the_factory_branch_blocks_never_force_fixed(self, db, fake_gitlab):
         """A human push on the factory branch is reported, never force-fixed.
 
         The journaled candidate is no longer the branch head, so nothing is

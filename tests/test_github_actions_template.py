@@ -1,8 +1,8 @@
 """The forge-harness Actions workflow template contract (E3b, ADR-0020).
 
 The template is human-applied to the TARGET repo, so it must keep the exact
-shape forge's executor depends on: workflow_dispatch with the four inputs,
-the factory-branch ref, the entry-point invocation, and the candidate
+shape forge's executor depends on: workflow_dispatch with the dispatch
+inputs, the factory-branch ref, the entry-point invocation, and the candidate
 artifact contract (name + files) the trusted publisher consumes.
 """
 
@@ -38,6 +38,9 @@ class TestWorkflowTemplateContract:
             "driver",
             "model",
             "issue_number",  # the lane fetches its brief from the issue
+            # bounded verification-failure context; the executor sends it only
+            # on a repair re-dispatch, so the input itself stays optional
+            "repair_context",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())

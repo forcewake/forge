@@ -232,9 +232,7 @@ class TestDocumentRoundTrip:
         assert changeset_from_document(changeset_to_document(cs)) == cs
 
     def test_delete_content_stays_none_not_missing(self):
-        document = changeset_to_document(
-            _cs(Change(path="src/old.py", operation=Operation.DELETE))
-        )
+        document = changeset_to_document(_cs(Change(path="src/old.py", operation=Operation.DELETE)))
         assert document["changes"][0]["content"] is None
 
     def test_non_documents_are_not_resumable(self):
