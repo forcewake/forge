@@ -93,11 +93,14 @@ from forge.runs.backends import (
 from forge.runs.candidate import attempt_base_for
 from forge.runs.ci_contract import classify_failure
 from forge.runs.failures import (
+    REVIVE_COUNT,
     TRANSIENT,
     classify_terminal_failure,
+    revival_count,
     revival_due,
     revival_due_at,
     revival_evidence,
+    revival_pending,
     revival_repair_context,
     revival_state,
     strip_revival_schedule,
@@ -893,8 +896,8 @@ class RunService:
                 project_id,
                 issue_iid,
                 run_id,
-                f"Run `{run_id[:8]}` was cancelled — a retry would override your own cancel."
-                " Use `/implement` for a fresh run.",
+                f"Run `{run_id[:8]}` was **cancelled** — a retry would override your own"
+                " cancel. Use `/implement` for a fresh run.",
             )
             return
         if status not in (FlowStatus.FAILED.value, FlowStatus.BLOCKED.value):
@@ -2019,7 +2022,20 @@ class RunService:
                 )
                 return False
             backend_name = str((run.evidence or {}).get("backend") or "").strip()
-            run.evidence = strip_revival_schedule(run.evidence)
+            evidence = dict(run.evidence or {})
+            # The revival lands in the evidence blob (ADR-0005): a scheduled
+            # auto-revive is already counted there, an unscheduled one
+            # (``/retry`` on a fatal death) takes the next slot. Either way
+            # the blob now says "continuation", which pins the attempt base
+            # to the last candidate instead of rolling the branch back to the
+            # approved base (forge.runs.candidate.attempt_base_for).
+            if not revival_pending(evidence):
+                evidence[REVIVE_COUNT] = revival_count(evidence) + 1
+            run.evidence = strip_revival_schedule(evidence)
+            # Capture the death reason BEFORE the walk: transition() overwrites
+            # status_reason with the revival reason, and the revival brief
+            # needs the terminal cause, not its own trace.
+            terminal_reason = run.status_reason
             await controller.transition(
                 run_id, FlowStatus.PROPOSING, reason=reason, revival=True
             )
@@ -2027,7 +2043,7 @@ class RunService:
 
         logger.info("Run %s revived in place (%s)", run_id[:8], reason)
         if repair_context is None:
-            repair_context = await self._revival_repair_context(run_id)
+            repair_context = await self._revival_repair_context(run_id, terminal_reason)
         if is_harness_backend(backend_name):
             await self._advance_harness(
                 project_id, run_id, repair_context=repair_context, repair_reason=reason
@@ -2038,11 +2054,17 @@ class RunService:
             )
         return True
 
-    async def _revival_repair_context(self, run_id: str) -> str:
-        """Bounded revival context: why the run died + its last verification."""
+    async def _revival_repair_context(
+        self, run_id: str, terminal_reason: str | None = None
+    ) -> str:
+        """Bounded revival context: why the run died + its last verification.
+
+        ``terminal_reason`` is the death reason captured before the revival
+        walk (the walk itself overwrites ``status_reason``).
+        """
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            reason = run.status_reason
+            reason = terminal_reason if terminal_reason is not None else run.status_reason
             evidence = dict(run.evidence or {})
         # F23: the reason embeds provider/CI text — redact before a brief.
         redacted, _ = EvidencePolicy.from_settings(self._settings).apply_policy(

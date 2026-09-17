@@ -347,7 +347,7 @@ class TestAdvanceFailures:
         assert fake_gitlab.merge_requests == {}
         assert FakeWriter.instances == []  # never reached the commit step
 
-    async def test_unknown_commit_outcome_fails_run_without_retry(self, db, fake_gitlab):
+    async def test_unknown_commit_outcome_blocks_run_without_retry(self, db, fake_gitlab):
         FakeWriter.reset()
         service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
@@ -365,11 +365,13 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # Tier 1: an unclassified outcome is fatal — it parks blocked (never
+        # blind-retried) instead of failed.
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason == "commit_unknown_outcome"
         assert fake_gitlab.merge_requests == {}  # no MR after unresolved commit
 
-    async def test_commit_api_error_fails_run(self, db, fake_gitlab):
+    async def test_commit_api_error_blocks_run(self, db, fake_gitlab):
         FakeWriter.reset()
         service = make_service(db, fake_gitlab)
         run_id = await start_issue_run(service)
@@ -383,7 +385,8 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # A 4xx commit error is a fatal config signal, not a transient one.
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("commit_failed")
 
 

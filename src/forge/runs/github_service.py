@@ -90,11 +90,14 @@ from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
 from forge.runs.failures import (
+    REVIVE_COUNT,
     TRANSIENT,
     classify_terminal_failure,
+    revival_count,
     revival_due,
     revival_due_at,
     revival_evidence,
+    revival_pending,
     revival_repair_context,
     revival_state,
     strip_revival_schedule,
@@ -2686,18 +2689,33 @@ class GitHubRunService:
                 return False
             project_id = run.project_id
             issue_number = run.issue_iid or 0
-            run.evidence = strip_revival_schedule(run.evidence)
+            terminal_reason = run.status_reason
+            evidence = dict(run.evidence or {})
+            # Same evidence rule as the GitLab walk: a scheduled auto-revive
+            # is already counted, an unscheduled one (``/retry`` on a fatal
+            # death) takes the next slot — and the blob says "continuation",
+            # so the attempt base stays on the last candidate.
+            if not revival_pending(evidence):
+                evidence[REVIVE_COUNT] = revival_count(evidence) + 1
+            run.evidence = strip_revival_schedule(evidence)
             await controller.transition(
                 run_id, FlowStatus.PROPOSING, reason=reason, revival=True
             )
             await session.commit()
 
         logger.info("GitHub run %s revived in place (%s)", run_id[:8], reason)
+        if not repair_context:
+            # The auto-revive brief carries the death reason + last
+            # verification, redacted and capped like the operator retry's.
+            redacted, _ = EvidencePolicy.from_settings(self._settings).apply_policy(
+                revival_repair_context(terminal_reason, evidence)
+            )
+            repair_context = redacted[-REPAIR_CONTEXT_MAX_CHARS:]
         await self._advance_harness(
             run_id,
             project_id=project_id,
             issue_number=issue_number,
-            repair_context=repair_context or f"revived: {reason}",
+            repair_context=repair_context,
             repair_reason=reason,
         )
         return True

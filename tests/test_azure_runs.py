@@ -654,7 +654,7 @@ class TestImplement:
         (body,) = comments(fake)
         assert "admission denied" in body and "mallory" in body
 
-    async def test_planning_failure_fails_the_run(self, db, fake):
+    async def test_planning_failure_blocks_the_run(self, db, fake):
         class FailingPlanner:
             async def plan(self, *args, **kwargs):
                 raise LLMError("proxy down")
@@ -666,7 +666,9 @@ class TestImplement:
 
         async with db() as session:
             run = (await session.execute(select(FlowRun))).scalars().one()
-        assert run.status == FlowStatus.FAILED.value
+        # Tier 1: an unclassified failure is fatal — it parks blocked for a
+        # human instead of failed.
+        assert run.status == FlowStatus.BLOCKED.value
         assert "planning_failed" in (run.status_reason or "")
 
 
@@ -1007,7 +1009,7 @@ class TestGoLane:
         assert len(harness) == 1 and harness[0].status == "succeeded"
         assert fake.pull_requests == []
 
-    async def test_lane_dispatch_failure_fails_the_run(self, db, fake):
+    async def test_lane_dispatch_failure_blocks_the_run(self, db, fake):
         settings = make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
 
         class ExplodingClient(FakeAzureDevOps):
@@ -1022,7 +1024,9 @@ class TestGoLane:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # "pipeline not found" is a config error — Tier 1 parks it blocked
+        # for a human instead of scheduling a revive.
+        assert run.status == FlowStatus.BLOCKED.value
         assert "harness_start_failed" in (run.status_reason or "")
 
 
