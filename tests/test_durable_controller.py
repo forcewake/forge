@@ -83,8 +83,15 @@ class TestTransitionGraph:
         assert tuple(status.value for status in FlowStatus) == FLOW_STATUSES
 
     def test_terminal_states_have_no_outgoing_transitions(self):
+        # Revival amendment: failed/blocked keep ONE authorized edge back into
+        # the graph (the bounded auto-revive or an operator /retry — same run,
+        # same branch, never a re-plan); cancelled and ready stay final.
         for status in TERMINAL_STATUSES:
-            assert ALLOWED_TRANSITIONS[status] == set()
+            allowed = ALLOWED_TRANSITIONS[status]
+            if status in (FlowStatus.BLOCKED, FlowStatus.FAILED):
+                assert allowed == {FlowStatus.PROPOSING}
+            else:
+                assert allowed == set()
 
     async def test_happy_path_transition_sequence(self, db_session: AsyncSession):
         run = await _add_run(db_session)

@@ -614,7 +614,9 @@ class TestAgentFailures:
 
         run = await get_run(db, (await _only_run_id(db)))
         assert run is not None
-        assert run.status == FlowStatus.FAILED.value
+        # Planning is pre-gate and pre-candidate: a fatal planning failure
+        # parks blocked (only /implement re-enters, never a repair).
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("planning_failed")
 
         (row,) = await llm_rows(db)
@@ -633,7 +635,7 @@ class TestAgentFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("proposal_failed")
 
         implementer_rows = [row for row in await llm_rows(db) if row.role == "implementer"]

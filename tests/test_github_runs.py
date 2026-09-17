@@ -306,7 +306,7 @@ class TestImplement:
             await start(service)
 
         run = await get_run(db, (await _only_run_id(db)))
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value
         assert "planning_failed" in (run.status_reason or "")
 
 

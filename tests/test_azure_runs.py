@@ -666,7 +666,7 @@ class TestImplement:
 
         async with db() as session:
             run = (await session.execute(select(FlowRun))).scalars().one()
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value
         assert "planning_failed" in (run.status_reason or "")
 
 
@@ -1022,7 +1022,8 @@ class TestGoLane:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # A 4xx lane rejection is a config error — parked blocked (fatal).
+        assert run.status == FlowStatus.BLOCKED.value
         assert "harness_start_failed" in (run.status_reason or "")
 
 

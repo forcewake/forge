@@ -365,7 +365,7 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason == "commit_unknown_outcome"
         assert fake_gitlab.merge_requests == {}  # no MR after unresolved commit
 
@@ -383,7 +383,9 @@ class TestAdvanceFailures:
         )
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # A 4xx commit rejection is a configuration error — parked blocked
+        # (fatal), not failed: only a human decision resumes it.
+        assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("commit_failed")
 
 

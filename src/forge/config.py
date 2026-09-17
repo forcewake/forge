@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # failures never consume a cycle (they block instead of repairing).
     FORGE_MAX_COMMIT_CYCLES: int = 3
 
+    # Bounded automatic revival: how many times a run killed by a TRANSIENT
+    # failure (dispatch 5xx/network/timeout, rate limit, runner startup) is
+    # re-dispatched on the same branch before it parks blocked with the
+    # reason. 0 disables auto-revive; the operator's /retry always stays
+    # available. Fatal failures never auto-revive.
+    FORGE_RUN_AUTO_REVIVE_LIMIT: int = 2
+
     # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
     # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
     # a coding harness executing as a job in the target project's CI.

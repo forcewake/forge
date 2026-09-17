@@ -278,7 +278,7 @@ class TestGoDispatchesHarness:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
 
-    async def test_dispatch_failure_fails_the_run_without_a_second_dispatch(self, db, fake):
+    async def test_dispatch_failure_blocks_the_run_without_a_second_dispatch(self, db, fake):
         service = make_service(db, fake)
         run_id = await start(service)
         clear_comments(fake)
@@ -294,7 +294,9 @@ class TestGoDispatchesHarness:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.FAILED.value
+        # A 422 input mismatch is a config error — parked blocked (fatal),
+        # never auto-retried; /retry is the operator's way back in.
+        assert run.status == FlowStatus.BLOCKED.value
         assert "harness_start_failed" in (run.status_reason or "")
         assert len(dispatch_calls) == 1  # never replayed
 

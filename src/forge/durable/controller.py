@@ -56,7 +56,12 @@ class FlowStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-#: States that end a run; no outgoing transitions.
+#: States that end a run. Terminal in the operator-facing sense — no
+#: automatic leg leaves them — except the explicit revival edges below:
+#: a failed/blocked run may be walked back to ``proposing`` by the bounded
+#: auto-revive (transient failures only) or by an operator ``/retry``
+#: (ADR-0004 amendment: one authorized edge back into the graph, same run,
+#: same branch — never a re-plan).
 TERMINAL_STATUSES: frozenset[FlowStatus] = frozenset(
     {
         FlowStatus.READY_FOR_HUMAN,
@@ -97,8 +102,11 @@ ALLOWED_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
     FlowStatus.EVALUATING_CI: {FlowStatus.PROPOSING, FlowStatus.REVIEWING},
     FlowStatus.REVIEWING: {FlowStatus.READY_FOR_HUMAN},
     FlowStatus.READY_FOR_HUMAN: set(),
-    FlowStatus.BLOCKED: set(),
-    FlowStatus.FAILED: set(),
+    # Revival edges (see TERMINAL_STATUSES): the ONLY way out of a terminal
+    # state, and only back into ``proposing`` — the run keeps its identity,
+    # branch and evidence; planning is never re-run.
+    FlowStatus.BLOCKED: {FlowStatus.PROPOSING},
+    FlowStatus.FAILED: {FlowStatus.PROPOSING},
     FlowStatus.CANCELLED: set(),
 }
 

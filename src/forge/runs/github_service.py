@@ -92,12 +92,23 @@ from forge.runs.harness_selection import (
     selection_from_spec_document,
     validate_preference,
 )
+from forge.runs.failure import (
+    FailureClass,
+    RESUMABLE_ADVANCE_STATUSES,
+    arm_revive,
+    classify_terminal_failure,
+    revive_at,
+    revive_count,
+    revive_evidence,
+)
 from forge.runs.publisher import spec_allowed_paths
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
     _DECISION_TTL_FALLBACK_SECONDS,
     _GO_RE,
+    _RETRY_RE,
+    _TERMINAL_STATUS_VALUES,
     canonical_json_digest,
     plan_digest_of,
     task_digest_of,
@@ -590,6 +601,143 @@ class GitHubRunService:
             "cancel_note",
         )
         logger.info("GitHub run %s cancelled by @%s", run_id[:8], author_username)
+
+    async def handle_retry(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        note_text: str,
+        author_username: str,
+    ) -> None:
+        """``/retry [run-id]``: revive a dead run in place (Tier 2).
+
+        The operator override for everything the auto-revive refuses to
+        touch: the latest terminal ``failed``/``blocked`` run for the issue
+        (or an explicit id/prefix) walks back to ``proposing`` on the SAME
+        branch and the frozen harness lane re-fires with the terminal reason
+        riding as repair context. Authority mirrors /go: FORGE_APPROVERS
+        only. A builtin-lane run has no dispatch to re-fire (it would
+        re-derive, not fix forward) — the rejection points at /implement.
+        """
+        match = _RETRY_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info(
+                "/retry from @%s who is not in the GitHub approver list — ignoring",
+                author_username,
+            )
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            query = select(FlowRun).where(
+                FlowRun.provider == "github",
+                FlowRun.github_repo_full_name == self._repo_full_name,
+                FlowRun.issue_iid == issue_number,
+            )
+            if requested:
+                query = query.where(FlowRun.id.like(f"{requested}%"))
+            else:
+                query = query.where(
+                    FlowRun.status.in_([FlowStatus.FAILED.value, FlowStatus.BLOCKED.value])
+                )
+            runs = (
+                (await session.execute(query.order_by(FlowRun.created_at.desc())))
+                .scalars()
+                .all()
+            )
+            if requested and len(runs) != 1:
+                logger.info("/retry %s matches %d runs — ignoring", requested[:8], len(runs))
+                return
+            run = runs[0] if runs else None
+            if run is None:
+                logger.info("/retry on issue #%d — no failed/blocked run", issue_number)
+                return
+            run_id = run.id
+            status = run.status
+            status_reason = str(run.status_reason or "")
+            cancelled = bool(run.cancel_requested)
+            candidate_shas = list(run.candidate_shas or [])
+            commit_cycle = run.commit_cycle or 1
+            revivable = is_harness_backend(str((run.evidence or {}).get("backend") or "").strip())
+
+        def _reject_reason(text: str) -> str:
+            return (
+                f"Run `{run_id[:8]}` cannot be retried: {text}.\n\n*This is an automated message.*"
+            )
+
+        rejection: str | None = None
+        if cancelled or status not in (FlowStatus.FAILED.value, FlowStatus.BLOCKED.value):
+            rejection = _reject_reason(
+                f"it is {status}" + (" and cancelled" if cancelled else "")
+                + ". `/retry` revives a dead (`failed`/`blocked`) run — use `/implement` "
+                "to start fresh work"
+            )
+        elif not candidate_shas:
+            rejection = _reject_reason(
+                "it has no candidate to retry — it died before producing work. "
+                "Run `/implement` to start fresh"
+            )
+        elif not revivable:
+            rejection = _reject_reason(
+                "it ran on the builtin lane, which has no dispatch to re-fire — "
+                "run `/implement` to start fresh"
+            )
+        if rejection is not None:
+            await self._post_journaled_note(
+                project_id, issue_number, rejection, run_id, "retry_rejected"
+            )
+            return
+
+        next_cycle = commit_cycle + 1
+        bounded = f"operator retry after terminal {status}: {status_reason}"[:2000]
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "retry_requested", correlation_id=f"issue-{issue_number}"
+            )
+            await session.commit()
+
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await self._get_run(session, run_id)
+            # One operator-granted cycle: /retry may exceed
+            # FORGE_MAX_COMMIT_CYCLES by one — a human decided, not the loop.
+            run.commit_cycle = next_cycle
+            run.evidence = _merge_evidence(
+                run.evidence, {"revive": {"count": revive_count(run.evidence)}}
+            )
+            await controller.transition(
+                run_id, FlowStatus.PROPOSING, reason=f"retried by @{author_username}"
+            )
+            await session.commit()
+        await self._complete_action(
+            action_id, "succeeded", {"revived_from": status, "commit_cycle": next_cycle}
+        )
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            f"Run `{run_id[:8]}` **retried** by @{author_username} — resuming on the "
+            f"same branch, cycle {next_cycle}.",
+            run_id,
+            "retry_note",
+        )
+        logger.info(
+            "GitHub run %s retried by @%s from %s — re-dispatching the lane",
+            run_id[:8],
+            author_username,
+            status,
+        )
+        await self._advance_harness(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            repair_context=bounded,
+            repair_reason=f"retry: {status_reason}",
+        )
 
     # ------------------------------------------------------------------
     # Publish leg: propose → CAS commit → Draft PR → evidence → review
@@ -2039,9 +2187,143 @@ class GitHubRunService:
             await self._transition_in_session(session, run_id, status, reason)
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
-        """Park the run in ``blocked``/``failed`` with an operator-facing reason."""
+        """Park the run in ``blocked``/``failed`` with an operator-facing reason.
+
+        A ``failed`` terminalization is classified first (see
+        :mod:`forge.runs.failure`): a transient reason arms the bounded
+        auto-revive instead of dying, a fatal one parks ``blocked``.
+        """
+        if status is FlowStatus.FAILED:
+            await self._terminalize_failure(run_id, reason)
+            return
         await self._transition(run_id, status, reason=reason[:200])
         logger.warning("GitHub run %s -> %s: %s", run_id[:8], status.value, reason)
+
+    async def _terminalize_failure(self, run_id: str, reason: str) -> None:
+        """Classify a ``failed`` terminalization and act on it (Tier 1).
+
+        Same contract as the GitLab service. Only the harness lane arms a
+        revival: its dispatch can be re-fired on the SAME branch (attempt
+        base = last candidate, ADR-0016 §4). The builtin lane re-derives the
+        work from the approved base on a CAS commit, so a revival there
+        would re-derive instead of fixing forward — it parks ``blocked``.
+        """
+        revivable = await self._revivable(run_id)
+        if revivable is None or classify_terminal_failure(reason) is FailureClass.FATAL:
+            await self._transition(run_id, FlowStatus.BLOCKED, reason=reason[:200])
+            logger.warning("GitHub run %s -> blocked: %s", run_id[:8], reason)
+            return
+
+        limit = int(getattr(self._settings, "FORGE_RUN_AUTO_REVIVE_LIMIT", 2) or 0)
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            status = run.status
+            cancelled = bool(run.cancel_requested)
+            attempts = revive_count(run.evidence)
+
+        resumable = status in RESUMABLE_ADVANCE_STATUSES
+        if cancelled or not resumable or limit <= 0 or attempts >= limit:
+            exhausted = resumable and limit > 0 and attempts >= limit
+            prefix = "auto_revive_exhausted: " if exhausted else ""
+            await self._transition(run_id, FlowStatus.BLOCKED, reason=f"{prefix}{reason}"[:200])
+            logger.warning("GitHub run %s -> blocked: %s", run_id[:8], reason)
+            return
+        await self._merge_run_evidence(run_id, arm_revive(attempts, reason))
+        logger.warning(
+            "GitHub run %s failed transiently (%s) — auto-revive %d/%d armed",
+            run_id[:8],
+            reason,
+            attempts + 1,
+            limit,
+        )
+
+    async def _revivable(self, run_id: str) -> bool | None:
+        """True when the run's frozen backend can be re-fired in place.
+
+        None — the run is gone; the caller parks it blocked rather than
+        raising out of the terminalization path.
+        """
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return None
+            backend_name = str((run.evidence or {}).get("backend") or "").strip()
+        return is_harness_backend(backend_name)
+
+    async def evaluate_revival(self, now: datetime | None = None) -> None:
+        """One revival pass over this repo's parked runs (Tier 1).
+
+        Skips until the armed backoff elapses, then re-dispatches the frozen
+        harness lane on the SAME branch (attempt base = last candidate).
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run_ids = (
+                (
+                    await session.execute(
+                        select(FlowRun.id).where(
+                            FlowRun.provider == "github",
+                            FlowRun.github_repo_full_name == self._repo_full_name,
+                            FlowRun.status.notin_(_TERMINAL_STATUS_VALUES),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run_id in run_ids:
+            try:
+                await self._revive_one(run_id, now)
+            except Exception:
+                # One broken run must not stall the reconciler loop.
+                logger.exception("GitHub revival pass failed for run %s", run_id[:8])
+
+    async def _revive_one(self, run_id: str, now: datetime) -> None:
+        """Fire one due auto-revive — or stand down for it."""
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            status = run.status
+            cancelled = bool(run.cancel_requested)
+            evidence = dict(run.evidence or {})
+            project_id = run.project_id
+            issue_number = run.issue_iid or 0
+
+        if not revive_evidence(evidence):
+            return  # not parked for revival
+        if cancelled:
+            await self._transition(
+                run_id, FlowStatus.CANCELLED, reason="cancelled while revival was scheduled"
+            )
+            return
+        due = revive_at(evidence)
+        if due is None or as_aware_utc(now) < as_aware_utc(due):
+            return  # the bounded backoff still runs — skip until due
+        if status not in RESUMABLE_ADVANCE_STATUSES or not await self._revivable(run_id):
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"auto_revive_unresumable: status {status}"
+            )
+            return
+
+        count = revive_count(evidence)
+        # One launch per intent (ADR-0005): drop the due stamp BEFORE firing,
+        # so the next tick cannot double-dispatch while the advance leg runs.
+        await self._merge_run_evidence(run_id, {"revive": {"count": count}})
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "auto_revive", correlation_id=f"attempt-{count}"
+            )
+            await session.commit()
+
+        logger.info(
+            "GitHub run %s auto-revive %d firing — re-dispatching the same branch",
+            run_id[:8],
+            count,
+        )
+        await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
+        await self._complete_action(action_id, "succeeded", {"revive_count": count})
 
 
 async def execute_github_run_command(
@@ -2075,7 +2357,7 @@ async def execute_github_run_command(
 
         await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel"}:
+    if command not in {"start_run", "go", "cancel", "retry"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)
         return
     repo_full_name = str(metadata.get("repo_full_name") or "")
@@ -2109,6 +2391,13 @@ async def execute_github_run_command(
             )
         elif command == "go":
             await service.handle_go(
+                project_id=project_id,
+                issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "retry":
+            await service.handle_retry(
                 project_id=project_id,
                 issue_number=issue_number,
                 note_text=note_text,
@@ -2245,6 +2534,12 @@ async def run_github_harness_reconciler(
             # A failed pass must never kill the reconciler task.
             logger.exception("GitHub harness reconciler pass failed")
         try:
+            await evaluate_github_revival(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub revival reconciler pass failed")
+        try:
             await evaluate_github_waiting_ci(
                 settings, forge_config, session_factory, stack_factory=stack_factory
             )
@@ -2296,6 +2591,64 @@ async def evaluate_github_waiting_harness(
         except Exception:
             # One broken repo must not stall the reconciler pass.
             logger.exception("GitHub harness reconcile failed for %s", repo_full_name)
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def evaluate_github_revival(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One revival pass over every parked GitHub run (Tier 1).
+
+    The twin of :meth:`GitHubRunService.evaluate_revival` at the worker
+    level, like ``evaluate_github_waiting_harness``: groups the runs carrying
+    ``revive`` evidence by repository and gives each repo's service a tick.
+    """
+    runs = []
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "github",
+                        FlowRun.status.notin_(_TERMINAL_STATUS_VALUES),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for run in rows:
+            if revive_evidence(run.evidence):
+                runs.append((run.id, str(run.github_repo_full_name or "")))
+    if not runs:
+        return
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+    now = now or datetime.now(timezone.utc)
+    for run_id, repo_full_name in runs:
+        if "/" not in repo_full_name:
+            logger.warning("GitHub revival run %s without repo identity", run_id[:8])
+            continue
+        owner, _, repo = repo_full_name.partition("/")
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service._revive_one(run_id, now)
+        except Exception:
+            # One broken run must not stall the reconciler pass.
+            logger.exception("GitHub revival failed for run %s", run_id[:8])
         finally:
             aclose = getattr(stack.client, "aclose", None)
             if aclose is not None:

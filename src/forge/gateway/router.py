@@ -36,7 +36,7 @@ router.include_router(github_router)
 #: ``/security`` (v0.7) joins them — the durable triage step — and is the ONLY
 #: run command also accepted on MR notes (triage targets MRs, issues and PRs;
 #: /implement, /go and /cancel stay issue-bound).
-_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/security"})
+_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
@@ -44,6 +44,8 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
 
     - ``<mention> /implement`` on an issue → ``start_run``.
     - ``<mention> /go <run-id>`` on an issue → ``handle_command_note``.
+    - ``<mention> /retry [run-id]`` on an issue → ``handle_retry_note``
+      (the operator revival of a dead run, in place).
     - ``<mention> /security`` on an issue **or MR** → ``security_triage``
       (the provider-neutral durable triage step, v0.7).
 
@@ -96,6 +98,8 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         return {**common, "command": "start_run"}
     if slash_command == "/cancel":
         return {**common, "command": "cancel", "note_text": event.object_attributes.note or ""}
+    if slash_command == "/retry":
+        return {**common, "command": "retry", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
 
 
