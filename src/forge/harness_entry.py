@@ -350,7 +350,7 @@ def render_driver_script(
             "# run), so repair cycles cap the thinking budget. First cycles\n"
             "# think freely.\n"
             'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then\n'
-            f'  export MAX_THINKING_TOKENS="${{FORGE_MAX_THINKING_TOKENS:-8000}}"\n'
+            '  export MAX_THINKING_TOKENS="${FORGE_MAX_THINKING_TOKENS:-8000}"\n'
             "fi\n"
             + mcp_provision
             + preamble
