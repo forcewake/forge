@@ -109,11 +109,13 @@ for _status in ALLOWED_TRANSITIONS:
 
 #: Terminal death is reversible, but only deliberately: the Tier 1 auto-revive
 #: (a transient failure re-dispatched on the same branch) and the operator
-#: ``/retry`` override walk a dead run back to ``proposing``. No ordinary
-#: transition may take these edges — :meth:`Controller.transition` allows them
-#: only with ``revival=True``, so an accidental caller still hits the wall.
+#: ``/retry`` override walk a dead run back to ``proposing``, and a fatal
+#: re-classification re-parks a dead ``failed`` run as ``blocked`` with the
+#: precise reason. No ordinary transition may take these edges —
+#: :meth:`Controller.transition` allows them only with ``revival=True``, so an
+#: accidental caller still hits the wall.
 REVIVAL_TRANSITIONS: dict[FlowStatus, set[FlowStatus]] = {
-    FlowStatus.FAILED: {FlowStatus.PROPOSING},
+    FlowStatus.FAILED: {FlowStatus.PROPOSING, FlowStatus.BLOCKED},
     FlowStatus.BLOCKED: {FlowStatus.PROPOSING},
 }
 

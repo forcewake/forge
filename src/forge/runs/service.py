@@ -868,9 +868,7 @@ class RunService:
 
         # ADR-0009: the same authority rule as /go — an operator decision.
         if author_username not in self._approvers():
-            logger.info(
-                "/retry from @%s who is not in FORGE_APPROVERS — ignoring", author_username
-            )
+            logger.info("/retry from @%s who is not in FORGE_APPROVERS — ignoring", author_username)
             return
 
         requested = (match.group(1) or "").lower()
@@ -1958,17 +1956,14 @@ class RunService:
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
             rows = (
-                (
-                    await session.execute(
-                        select(FlowRun.id, FlowRun.project_id, FlowRun.evidence).where(
-                            FlowRun.status == FlowStatus.FAILED.value,
-                            FlowRun.provider == "gitlab",
-                            FlowRun.cancel_requested.is_(False),
-                        )
+                await session.execute(
+                    select(FlowRun.id, FlowRun.project_id, FlowRun.evidence).where(
+                        FlowRun.status == FlowStatus.FAILED.value,
+                        FlowRun.provider == "gitlab",
+                        FlowRun.cancel_requested.is_(False),
                     )
                 )
-                .all()
-            )
+            ).all()
         for run_id, project_id, evidence in rows:
             if not revival_due(evidence, now):
                 continue  # not scheduled, or not due yet — the next tick re-checks
@@ -2036,9 +2031,7 @@ class RunService:
             # status_reason with the revival reason, and the revival brief
             # needs the terminal cause, not its own trace.
             terminal_reason = run.status_reason
-            await controller.transition(
-                run_id, FlowStatus.PROPOSING, reason=reason, revival=True
-            )
+            await controller.transition(run_id, FlowStatus.PROPOSING, reason=reason, revival=True)
             await session.commit()
 
         logger.info("Run %s revived in place (%s)", run_id[:8], reason)
@@ -2054,9 +2047,7 @@ class RunService:
             )
         return True
 
-    async def _revival_repair_context(
-        self, run_id: str, terminal_reason: str | None = None
-    ) -> str:
+    async def _revival_repair_context(self, run_id: str, terminal_reason: str | None = None) -> str:
         """Bounded revival context: why the run died + its last verification.
 
         ``terminal_reason`` is the death reason captured before the revival
@@ -2905,10 +2896,12 @@ class RunService:
             await controller.complete_action(action_id, status, remote_result)  # type: ignore[arg-type]
             await session.commit()
 
-    async def _transition(self, run_id: str, status: FlowStatus, reason: str | None = None) -> None:
+    async def _transition(
+        self, run_id: str, status: FlowStatus, reason: str | None = None, *, revival: bool = False
+    ) -> None:
         async with self._session_factory() as session:
             controller = Controller(session)
-            await controller.transition(run_id, status, reason=reason)
+            await controller.transition(run_id, status, reason=reason, revival=revival)
             await session.commit()
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
@@ -2930,15 +2923,18 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             _, used = revival_state(run.evidence)
+            current = FlowStatus(run.status)
         limit = int(getattr(self._settings, "FORGE_RUN_AUTO_REVIVE_LIMIT", 2) or 0)
         if classify_terminal_failure(reason) == TRANSIENT:
             if used < limit:
-                backoff = int(
-                    getattr(self._settings, "FORGE_RUN_REVIVE_BACKOFF_SECONDS", 60) or 60
-                )
+                backoff = int(getattr(self._settings, "FORGE_RUN_REVIVE_BACKOFF_SECONDS", 60) or 60)
                 due = revival_due_at(datetime.now(timezone.utc), used + 1, backoff)
                 await self._merge_run_evidence(run_id, revival_evidence(due, used + 1, reason))
-                await self._transition(run_id, FlowStatus.FAILED, reason=reason[:200])
+                if current is not FlowStatus.FAILED:
+                    # A live leg parks here; an already-``failed`` run only
+                    # gains its revival schedule — ``failed`` has no ordinary
+                    # self-loop (ADR-0004).
+                    await self._transition(run_id, FlowStatus.FAILED, reason=reason[:200])
                 logger.warning(
                     "Run %s failed transiently — auto-revive %d/%d due %s: %s",
                     run_id[:8],
@@ -2950,7 +2946,12 @@ class RunService:
                 return
             # The revival bound is spent: this needs a human after all.
             reason = f"auto_revive_exhausted ({used}): {reason}"
-        await self._transition(run_id, FlowStatus.BLOCKED, reason=reason[:200])
+        # Re-parking a dead run takes the explicit revival edge — moving a
+        # ``failed`` run to ``blocked`` is a deliberate re-classification,
+        # never an ordinary exit (ADR-0004).
+        await self._transition(
+            run_id, FlowStatus.BLOCKED, reason=reason[:200], revival=current is FlowStatus.FAILED
+        )
         logger.warning("Run %s -> blocked: %s", run_id[:8], reason)
 
 

@@ -2239,16 +2239,24 @@ class AzureRunService:
             await session.commit()
 
     async def _transition_in_session(
-        self, session: AsyncSession, run_id: str, status: FlowStatus, reason: str | None = None
+        self,
+        session: AsyncSession,
+        run_id: str,
+        status: FlowStatus,
+        reason: str | None = None,
+        *,
+        revival: bool = False,
     ) -> None:
         """One transition inside the caller's open session (committed here)."""
         controller = Controller(session)
-        await controller.transition(run_id, status, reason=reason)
+        await controller.transition(run_id, status, reason=reason, revival=revival)
         await session.commit()
 
-    async def _transition(self, run_id: str, status: FlowStatus, reason: str | None = None) -> None:
+    async def _transition(
+        self, run_id: str, status: FlowStatus, reason: str | None = None, *, revival: bool = False
+    ) -> None:
         async with self._session_factory() as session:
-            await self._transition_in_session(session, run_id, status, reason)
+            await self._transition_in_session(session, run_id, status, reason, revival=revival)
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
         """Park the run in ``blocked``/``failed`` with an operator-facing reason.
@@ -2268,15 +2276,18 @@ class AzureRunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             _, used = revival_state(run.evidence)
+            current = FlowStatus(run.status)
         limit = int(getattr(self._settings, "FORGE_RUN_AUTO_REVIVE_LIMIT", 2) or 0)
         if classify_terminal_failure(reason) == TRANSIENT:
             if used < limit:
-                backoff = int(
-                    getattr(self._settings, "FORGE_RUN_REVIVE_BACKOFF_SECONDS", 60) or 60
-                )
+                backoff = int(getattr(self._settings, "FORGE_RUN_REVIVE_BACKOFF_SECONDS", 60) or 60)
                 due = revival_due_at(datetime.now(timezone.utc), used + 1, backoff)
                 await self._merge_run_evidence(run_id, revival_evidence(due, used + 1, reason))
-                await self._transition(run_id, FlowStatus.FAILED, reason=reason[:200])
+                if current is not FlowStatus.FAILED:
+                    # A live leg parks here; an already-``failed`` run only
+                    # gains its revival schedule — ``failed`` has no ordinary
+                    # self-loop (ADR-0004).
+                    await self._transition(run_id, FlowStatus.FAILED, reason=reason[:200])
                 logger.warning(
                     "Azure DevOps run %s failed transiently — auto-revive %d/%d due %s: %s",
                     run_id[:8],
@@ -2286,8 +2297,14 @@ class AzureRunService:
                     reason,
                 )
                 return
+            # The revival bound is spent: this needs a human after all.
             reason = f"auto_revive_exhausted ({used}): {reason}"
-        await self._transition(run_id, FlowStatus.BLOCKED, reason=reason[:200])
+        # Re-parking a dead run takes the explicit revival edge — moving a
+        # ``failed`` run to ``blocked`` is a deliberate re-classification,
+        # never an ordinary exit (ADR-0004).
+        await self._transition(
+            run_id, FlowStatus.BLOCKED, reason=reason[:200], revival=current is FlowStatus.FAILED
+        )
         logger.warning("Azure DevOps run %s -> blocked: %s", run_id[:8], reason)
 
     async def _revive_run(self, run_id: str, *, reason: str, repair_context: str = "") -> bool:
@@ -2333,9 +2350,7 @@ class AzureRunService:
             if not revival_pending(evidence):
                 evidence[REVIVE_COUNT] = revival_count(evidence) + 1
             run.evidence = strip_revival_schedule(evidence)
-            await controller.transition(
-                run_id, FlowStatus.PROPOSING, reason=reason, revival=True
-            )
+            await controller.transition(run_id, FlowStatus.PROPOSING, reason=reason, revival=True)
             await session.commit()
 
         logger.info("Azure DevOps run %s revived in place (%s)", run_id[:8], reason)
@@ -2764,17 +2779,14 @@ async def evaluate_azure_auto_revive(
     now = now or datetime.now(timezone.utc)
     async with session_factory() as session:
         rows = (
-            (
-                await session.execute(
-                    select(FlowRun.id, FlowRun.evidence).where(
-                        FlowRun.provider == "azure_devops",
-                        FlowRun.status == FlowStatus.FAILED.value,
-                        FlowRun.cancel_requested.is_(False),
-                    )
+            await session.execute(
+                select(FlowRun.id, FlowRun.evidence).where(
+                    FlowRun.provider == "azure_devops",
+                    FlowRun.status == FlowStatus.FAILED.value,
+                    FlowRun.cancel_requested.is_(False),
                 )
             )
-            .all()
-        )
+        ).all()
     due_ids = [run_id for run_id, evidence in rows if revival_due(evidence, now)]
     if not due_ids:
         return

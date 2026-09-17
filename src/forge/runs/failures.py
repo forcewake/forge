@@ -181,9 +181,7 @@ def revival_repair_context(status_reason: str | None, evidence: dict | None) -> 
     same branch without re-deriving the task. Callers redact/cap it with the
     evidence policy before it rides a dispatch.
     """
-    sections = [
-        f"The previous attempt of this run died: {status_reason or 'unknown reason'}"
-    ]
+    sections = [f"The previous attempt of this run died: {status_reason or 'unknown reason'}"]
     pipeline = (evidence or {}).get("pipeline")
     if isinstance(pipeline, dict) and pipeline.get("id"):
         sections.append(
