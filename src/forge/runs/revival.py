@@ -30,13 +30,16 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.controller import TERMINAL_STATUSES, Controller, FlowStatus, as_aware_utc
 from forge.durable.models import FlowRun
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-light
+    from forge.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +436,7 @@ def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
     return merged
 
 
-def build_retry_context(settings: object, status_reason: str, evidence: dict) -> str:
+def build_retry_context(settings: Settings, status_reason: str, evidence: dict) -> str:
     """Bounded ``/retry`` brief: why the run stopped + its last verification evidence.
 
     Shared by every provider so a retried lane gets the same shape of context.
