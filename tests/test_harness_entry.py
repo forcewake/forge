@@ -582,6 +582,12 @@ class TestQualityGateAllowlist:
         script = render_driver_script("claude-code", "m", BRIEF)
         for gate in self._GATES:
             assert f"Bash({gate}:*)" in script, gate
+        # analysis pipelines: every segment must be allowlisted (LIVE-found:
+        # `... | awk 'length > 100'` and sed substitutions were denied)
+        for util in ("awk", "sed", "sort", "cut", "tr", "find"):
+            assert f"Bash({util}:*)" in script, util
+        # temp-file redirects are inside the writable scope
+        assert "--add-dir /tmp" in script
         # venv forms (harmless where the venv does not exist — a normal
         # tool result beats a permission denial)
         assert "Bash(.venv/bin/python:*)" in script

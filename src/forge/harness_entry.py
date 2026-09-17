@@ -87,6 +87,11 @@ from forge.harnesses.mcp import (
 _CLAUDE_ALLOWED_TOOLS = (
     "Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git -C * diff:*),"
     "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
+    # Read-only text processing (LIVE-found: `... | awk 'length > 100'` and
+    # `sed 's/^+//'` in analysis pipelines were DENIED — every pipeline
+    # segment must be allowlisted, not just the head command):
+    "Bash(awk:*),Bash(sed:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),"
+    "Bash(find:*),Bash(diff:*),Bash(basename:*),Bash(dirname:*),Bash(realpath:*),"
     "Bash(python3:*)"
     "Bash(python:*)"
     "Bash(.venv/bin/python:*),Bash(./.venv/bin/python:*),"
@@ -345,6 +350,11 @@ def render_driver_script(
             "  --permission-prompts none \\\n"
             "  --permission-mode acceptEdits \\\n"
             "  --max-turns 200 \\\n"
+            # /tmp is writable analysis space (LIVE-found: `git diff -U0 >
+            # /tmp/forge.diff` was denied — redirects outside the workspace
+            # need an explicit add-dir under acceptEdits). Ephemeral lane,
+            # no secrets: safe.
+            "  --add-dir /tmp \\\n"
             f"  --mcp-config {shlex.quote(mcp_file)} --strict-mcp-config \\\n"
             "  --setting-sources '' --output-format stream-json --verbose 2>&1"
         )
@@ -402,6 +412,8 @@ def render_driver_script(
             "  --allow 'Bash(uv:*)' --allow 'Bash(make:*)' --allow 'Bash(set:*)' \\\n"
             "  --allow 'Bash(ruff:*)' --allow 'Bash(mypy:*)' \\\n"
             "  --allow 'Bash(.venv/bin/python:*)' --allow 'Bash(.venv/bin/ruff:*)' \\\n"
+            "  --allow 'Bash(awk:*)' --allow 'Bash(sed:*)' --allow 'Bash(sort:*)' \\\n"
+            "  --allow 'Bash(cut:*)' --allow 'Bash(tr:*)' --allow 'Bash(find:*)' \\\n"
             "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
             "  --output-format streaming-json \\\n"
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
@@ -475,6 +487,8 @@ def render_driver_script(
             "  --allow-tool 'shell(uv:*)' --allow-tool 'shell(make:*)' \\\n"
             "  --allow-tool 'shell(set:*)' --allow-tool 'shell(ruff:*)' \\\n"
             "  --allow-tool 'shell(mypy:*)' \\\n"
+            "  --allow-tool 'shell(awk:*)' --allow-tool 'shell(sed:*)' \\\n"
+            "  --allow-tool 'shell(sort:*)' --allow-tool 'shell(cut:*)' \\\n"
             f"{mcp_grants}"
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )
