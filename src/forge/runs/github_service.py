@@ -2648,7 +2648,7 @@ async def execute_github_run_command(
 
         await execute_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel", "issue_edited", "unlabeled"}:
+    if command not in {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}:
         logger.warning("Unknown GitHub run command %r — ignoring", command)
         return
     repo_full_name = str(metadata.get("repo_full_name") or "")

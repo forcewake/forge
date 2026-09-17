@@ -1160,3 +1160,49 @@ class TestSupersededDraftPR:
 
         assert closed == 0
         assert fake.calls_of("close_pull_request") == []
+
+
+def test_gateway_commands_are_reachable_through_the_dispatch_guard():
+    """Regression (LIVE-found): /retry was accepted by the gateway, routed
+    below, and then silently dropped by the dispatch GUARD set that did not
+    list it — dead code behind a rejection, invisible to handler tests.
+    Every command the gateway can emit must appear in the service's
+    dispatch guard."""
+    import inspect
+    import re
+
+    from forge.gateway import github_webhook
+    from forge.runs import github_service
+
+    # The mapping VALUES are the emitted command names; security_triage is
+    # consumed upstream in execute_run_command (runs/service.py) and never
+    # reaches the provider dispatch.
+    gateway_cmds = set(
+        re.findall(r'"/[a-z_]+":\s*"([a-z_]+)"', inspect.getsource(github_webhook))
+    ) - {"security_triage"}
+    dispatch_src = inspect.getsource(github_service)
+    guard = re.search(r"command not in \{([^}]+)\}", dispatch_src)
+    assert guard, "dispatch guard not found"
+    for cmd in gateway_cmds:
+        assert f'"{cmd}"' in guard.group(1), (
+            f"gateway command {cmd} is rejected by the dispatch guard"
+        )
+
+
+def test_azure_gateway_commands_are_reachable_through_the_dispatch_guard():
+    import inspect
+    import re
+
+    from forge.gateway import azure_webhook
+    from forge.runs import azure_service
+
+    gateway_cmds = set(
+        re.findall(r'"/[a-z_]+":\s*"([a-z_]+)"', inspect.getsource(azure_webhook))
+    ) - {"security_triage"}
+    dispatch_src = inspect.getsource(azure_service)
+    guard = re.search(r"command not in \{([^}]+)\}", dispatch_src)
+    assert guard, "dispatch guard not found"
+    for cmd in gateway_cmds:
+        assert f'"{cmd}"' in guard.group(1), (
+            f"gateway command /{cmd} is rejected by the Azure dispatch guard"
+        )

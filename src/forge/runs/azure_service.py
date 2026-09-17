@@ -2290,7 +2290,7 @@ async def execute_azure_run_command(
 
         await execute_azure_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel"}:
+    if command not in {"start_run", "go", "cancel", "retry"}:
         logger.warning("Unknown Azure DevOps run command %r — ignoring", command)
         return
     project = str(metadata.get("project") or "")

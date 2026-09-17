@@ -58,6 +58,10 @@ def make_settings(**overrides) -> Settings:
         GITLAB_WEBHOOK_SECRET="whsec",  # noqa: S105
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
         FORGE_APPROVERS="alice",
+        # Hermetic vs the dev .env (which sets ci_harness): the retry leg
+        # dispatches on the backend frozen in the run evidence, and the
+        # default backend decides between _advance_proposal/_advance_harness.
+        FORGE_IMPLEMENTER_BACKEND="builtin",
         FORGE_MAX_COMMIT_CYCLES=3,
         FORGE_RUN_AUTO_REVIVE_LIMIT=2,
         FORGE_RUN_REVIVE_BACKOFF_SECONDS=60,
