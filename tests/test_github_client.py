@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from functools import lru_cache
 
+import httpx
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -82,6 +83,30 @@ async def reader(github: GitHubClient) -> GitHubRepositoryReader:
 # ---------------------------------------------------------------------------
 # JWT shape (research §1.1) — no live call
 # ---------------------------------------------------------------------------
+
+
+async def test_client_connection_hygiene_is_pinned():
+    """Flaky host networks must not wedge the worker's long-lived pool
+    (LIVE-found: dead keepalive sockets failed with ConnectTimeout for
+    hours until a worker restart). Short keepalive expiry + connect-phase
+    retries; an injected transport (pytest-httpx) always wins."""
+    private_pem, _ = _keypair()
+    creds = GitHubAppCredentials(
+        app_id="1", private_key=private_pem, installation_id="2", base_url=BASE
+    )
+    assert creds._client._transport._pool._keepalive_expiry == 30.0
+    assert isinstance(creds._client._transport, httpx.AsyncHTTPTransport)
+    assert creds._client._transport._pool._retries == 2
+    assert creds._client._transport._pool._max_keepalive_connections == 10
+
+    client = GitHubClient(
+        base_url=BASE,
+        token_provider=creds,
+        transport=httpx.AsyncHTTPTransport(retries=5),
+    )
+    assert client._client._transport._pool._retries == 5  # injection respected
+    await client.aclose()
+    await creds.aclose()
 
 
 async def test_app_jwt_is_rs256_with_required_claims():
