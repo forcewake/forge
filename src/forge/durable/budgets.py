@@ -229,31 +229,53 @@ async def open_budget(
     Re-opening an already-budgeted run returns the existing row unchanged:
     limits are frozen at open time and mid-run mutations would silently move
     an approved budget. A concurrent opener that lost the INSERT race is
-    folded onto the winner's row (SAVEPOINT rollback, outer transaction
-    intact).
+    folded onto the winner's row: the INSERT itself is the concurrency
+    arbiter — ``INSERT ... ON CONFLICT (run_id) DO NOTHING`` (A10), the same
+    portable arbiter as the webhook inbox and the usage-receipt ingest —
+    followed by a read-back, so BOTH callers end with the same row identity
+    and the loser's outer transaction stays fully usable.
+
+    A SAVEPOINT cannot arbitrate this: SQLAlchemy flushes all pending state
+    *before* emitting the SAVEPOINT, so an ``add()`` before
+    ``begin_nested()`` executes the conflicting INSERT on the OUTER
+    transaction — the duplicate poisons the session
+    (``PendingRollbackError`` on the read-the-winner path) instead of being
+    absorbed. The on-conflict form never raises: no rollback is needed at
+    all, and any un-flushed neighboring writes of the losing session survive
+    the commit.
     """
     if await session.get(FlowRun, run_id) is None:
         raise RunNotFound(f"flow run {run_id!r} not found")
     existing = await budget_for_run(session, run_id)
     if existing is not None:
         return existing
-    budget = RunBudget(
-        run_id=run_id,
-        spec_digest=spec_digest,
-        wallclock_s=wallclock_s,
-        max_calls=max_calls,
-        max_tokens=max_tokens,
+    inserted = await session.execute(
+        pg_insert(RunBudget)
+        .values(
+            run_id=run_id,
+            spec_digest=spec_digest,
+            wallclock_s=wallclock_s,
+            max_calls=max_calls,
+            max_tokens=max_tokens,
+        )
+        # ON CONFLICT DO NOTHING works identically on Postgres and SQLite
+        # (tests) — the same portable arbiter as the webhook inbox.
+        .on_conflict_do_nothing(index_elements=[RunBudget.run_id])
     )
-    session.add(budget)
-    try:
-        async with session.begin_nested():
-            await session.flush()
-    except IntegrityError:
-        existing = await budget_for_run(session, run_id)
-        if existing is None:
-            raise
-        return existing
-    return budget
+    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only
+    # type it on CursorResult, so access it via the runtime attr.
+    if inserted.rowcount != 1:  # type: ignore[attr-defined]
+        # Lost the open race: adopt the winner's (frozen) row. Read back
+        # through the session so both callers share the row's identity.
+        winner = (
+            await session.execute(
+                select(RunBudget)
+                .where(RunBudget.run_id == run_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        return winner
+    return (await session.execute(select(RunBudget).where(RunBudget.run_id == run_id))).scalar_one()
 
 
 async def open_budget_from_spec(

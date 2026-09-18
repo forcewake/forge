@@ -18,16 +18,18 @@ Covers the ADR-0018 §5 contract on top of ADR-0013's reserve-then-reconcile:
   budget rather than reading as capacity).
 """
 
+import asyncio
 import importlib.util
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 from sqlalchemy import inspect, select
+from sqlalchemy.exc import IntegrityError, PendingRollbackError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from forge.durable import FlowRun, RunBudget
+from forge.durable import FlowRun, LLMCall, RunBudget
 from forge.durable.budgets import (
     BudgetGuard,
     budget_block_reason,
@@ -187,6 +189,108 @@ async def get_budget_or_none(db) -> RunBudget | None:
         if budget is not None:
             session.expunge(budget)
         return budget
+
+
+def _ledger_row(flow_run_id: str = RUN_ID) -> LLMCall:
+    """A minimal usage-ledger row: the 'neighboring audit write' companion."""
+    return LLMCall(flow_run_id=flow_run_id, role="planner", provider="test", model="m")
+
+
+async def run_budget_rows(db) -> list[RunBudget]:
+    async with db() as session:
+        return (
+            (await session.execute(select(RunBudget).where(RunBudget.run_id == RUN_ID)))
+            .scalars()
+            .all()
+        )
+
+
+async def ledger_rows(db) -> list[LLMCall]:
+    async with db() as session:
+        return (await session.execute(select(LLMCall).order_by(LLMCall.id))).scalars().all()
+
+
+class TestConcurrentOpen:
+    """A10: a concurrent open of the same run budget must be arbitrated by
+    the INSERT itself (``ON CONFLICT (run_id) DO NOTHING`` + read-back), so
+    the losing caller adopts the winner's row with its OUTER transaction
+    intact. The pre-A10 shape — ``add()`` before ``begin_nested()`` — could
+    not do this: SQLAlchemy flushes pending state BEFORE emitting the
+    SAVEPOINT, so the duplicate INSERT failed on the outer transaction and
+    poisoned the session (control test below)."""
+
+    async def test_two_concurrent_opens_end_on_one_row(self, db):
+        """Two real AsyncSessions race the same run's budget (gathered):
+        both succeed on the SAME row identity, exactly one row exists, and
+        each session's neighboring audit write survives."""
+
+        async def opener(max_calls: int) -> str:
+            async with db() as session:
+                session.add(_ledger_row())
+                budget = await open_budget(session, run_id=RUN_ID, max_calls=max_calls)
+                await session.commit()
+                return budget.id
+
+        first, second = await asyncio.gather(opener(5), opener(9))
+        assert first == second
+
+        rows = await run_budget_rows(db)
+        assert len(rows) == 1
+        assert rows[0].id == first
+        assert rows[0].max_calls in (5, 9)  # one opener's frozen limits won
+        # BOTH sessions' neighboring ledger writes survived the race.
+        assert len(await ledger_rows(db)) == 2
+
+    async def test_lost_race_adopts_the_winner_and_stays_usable(self, db, monkeypatch):
+        """Deterministic loser path: a session whose pre-read raced BEFORE
+        the winner's commit still ends on the winner's row (frozen limits
+        stand, no second row), and its own neighboring write commits."""
+
+        winner = await openb(db, spec_digest="d1", max_calls=5)
+
+        import forge.durable.budgets as budgets_module
+
+        async def raced_read(session, run_id):
+            return None  # the pre-read lost the timing race — saw no row
+
+        monkeypatch.setattr(budgets_module, "budget_for_run", raced_read)
+        async with db() as session:
+            session.add(_ledger_row())
+            budget = await open_budget(session, run_id=RUN_ID, max_calls=99, spec_digest="OTHER")
+            await session.commit()
+            # The outer transaction stayed usable across the lost race.
+            rows = (
+                (await session.execute(select(RunBudget).where(RunBudget.run_id == RUN_ID)))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 1
+        assert budget.id == winner.id
+        assert budget.max_calls == 5  # the winner's frozen limits stand
+        assert budget.spec_digest == "d1"
+        assert len(await ledger_rows(db)) == 1  # the neighbor survived
+
+    async def test_add_before_savepoint_is_the_regressed_shape(self, db):
+        """CONTROL — this asserts the pre-A10 DEFECT, not the shipped
+        behavior: with ``add()`` BEFORE ``begin_nested()`` the pending INSERT
+        is flushed at savepoint ENTRY (before the SAVEPOINT is emitted), so
+        the duplicate poisons the OUTER transaction — the except-branch
+        winner read raises PendingRollbackError and every later statement on
+        the session fails. open_budget therefore arbitrates with ON CONFLICT
+        DO NOTHING instead of a SAVEPOINT."""
+        await openb(db, max_calls=5)
+        async with db() as session:
+            session.add(RunBudget(run_id=RUN_ID, max_calls=1))
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    await session.flush()
+            # Exactly what the old except branch did — and why it failed:
+            with pytest.raises(PendingRollbackError):
+                await budget_for_run(session, RUN_ID)
+            # The session is unusable for the neighboring writes too.
+            session.add(_ledger_row())
+            with pytest.raises(PendingRollbackError):
+                await session.commit()
 
 
 class TestReserve:
