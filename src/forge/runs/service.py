@@ -38,6 +38,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -71,6 +72,7 @@ from forge.durable import (
     consume_approval,
     due_intents,
     is_valid,
+    OPEN_STATES,
     ProbeObservation,
     ProbeVerdict,
     record_approval,
@@ -119,24 +121,35 @@ from forge.runs.consistency import (
 from forge.runs.candidate import AttemptContext
 from forge.runs.ci_contract import classify_failure
 from forge.runs.harness_selection import (
-    SHIPPED_DRIVERS,
+    BudgetCeilings,
     HarnessSelection,
     advance_harness_fallback,
     compile_harness_selection,
     current_driver,
     implementation_block,
+    resolve_available_drivers,
     resolve_preference,
     selection_from_spec_document,
+    SHIPPED_DRIVERS,
     validate_preference,
 )
 from forge.runs.publisher import publish_candidate
 from forge.runs.revival import (
+    RECONCILE_RE,
+    STATUS_RE,
+    WHY_BLOCKED_RE,
     build_retry_context,
+    collect_status_snapshot,
     evaluate_revivals,
+    format_reconcile_reply,
+    format_status_reply,
     has_active_run,
+    intents_for_run,
     resolve_retry_target,
+    resolve_status_target,
     retry_rejection,
     terminalize_failure,
+    why_blocked_reply,
 )
 from forge.runs.spec import (
     EXECUTABLE_SPEC_SCHEMA_VERSION,
@@ -1152,6 +1165,189 @@ class RunService:
         await self._complete_action(action_id, "succeeded", {"backend": backend_name})
 
     # ------------------------------------------------------------------
+    # R29 operator surface around dead/stuck runs
+    # ------------------------------------------------------------------
+
+    async def handle_status_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        issue_iid: int | None,
+    ) -> None:
+        """``@forge /status [run-id]``: READ-ONLY run snapshot (R29).
+
+        Bare, the issue's latest run of any state. The reply is composed
+        from durable state only — status, reason, cycle, candidates, budget
+        headroom, verification evidence, publication-intent states and the
+        revive/retry counters. No transitions, no model calls, no provider
+        effects; the only write is the journaled reply note itself.
+        """
+        match = STATUS_RE.search(note_text or "")
+        if match is None:
+            return
+        if issue_iid is None:
+            logger.info("/status off-issue — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            run = await resolve_status_target(
+                session,
+                provider="gitlab",
+                project_id=project_id,
+                issue_iid=issue_iid,
+                requested=requested,
+            )
+            if run is None:
+                body = (
+                    "## Forge — status\n\nNo forge run found on this issue yet. "
+                    "Start one with `@forge /implement`.\n\n*This is an automated message.*"
+                )
+                logger.info("/status on issue !%s — no run", issue_iid)
+            else:
+                body = format_status_reply(await collect_status_snapshot(session, run))
+                run_id = run.id
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            body,
+            run_id if run is not None else "",
+            "status_note",
+        )
+
+    async def handle_why_blocked_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        issue_iid: int | None,
+    ) -> None:
+        """``@forge /why-blocked [run-id]``: READ-ONLY precise cause (R29).
+
+        Explains the terminal/blocked cause — the parked reason, its Tier-1
+        classification and the honest revive/retry eligibility (which quotes
+        the ONE rejection table ``/retry`` itself uses).
+        """
+        match = WHY_BLOCKED_RE.search(note_text or "")
+        if match is None:
+            return
+        if issue_iid is None:
+            logger.info("/why-blocked off-issue — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            run = await resolve_status_target(
+                session,
+                provider="gitlab",
+                project_id=project_id,
+                issue_iid=issue_iid,
+                requested=requested,
+            )
+            if run is None:
+                body = (
+                    "## Forge — why blocked\n\nNo forge run found on this issue yet. "
+                    "Start one with `@forge /implement`.\n\n*This is an automated message.*"
+                )
+                logger.info("/why-blocked on issue !%s — no run", issue_iid)
+            else:
+                other_active = await has_active_run(
+                    session,
+                    provider=run.provider,
+                    project_id=run.project_id,
+                    issue_iid=run.issue_iid,
+                    repo_full_name=run.github_repo_full_name,
+                    exclude_run_id=run.id,
+                )
+                body = why_blocked_reply(run, other_active=other_active)
+                run_id = run.id
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            body,
+            run_id if run is not None else "",
+            "why_blocked_note",
+        )
+
+    async def handle_reconcile_note(
+        self,
+        project_id: int,
+        note_text: str,
+        author_username: str,
+        issue_iid: int | None,
+    ) -> None:
+        """``@forge /reconcile <run-id>``: drive the R11 recovery explicitly (R29).
+
+        THE mutating new command — approver-gated exactly like ``/retry``
+        and NOT a generic revival (``/retry`` stays the revival path). It
+        targets runs with an OPEN publication intent (a crash left the
+        outcome unrecorded) or a superseded/unknown completion, and drives
+        the SAME probe/recovery pass the reconciler runs, then reports the
+        resolution: adopted / duplicated / unknown (+ manual instruction).
+        Runs without any publication intent are refused — there is nothing
+        to reconcile.
+        """
+        match = RECONCILE_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info(
+                "/reconcile from @%s who is not in FORGE_APPROVERS — ignoring", author_username
+            )
+            return
+        if issue_iid is None:
+            logger.info("/reconcile off-issue — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        run_id: str | None = None
+        intents = []
+        async with self._session_factory() as session:
+            run = await resolve_retry_target(
+                session,
+                provider="gitlab",
+                project_id=project_id,
+                issue_iid=issue_iid,
+                requested=requested,
+            )
+            if run is not None:
+                run_id = run.id
+                intents = await intents_for_run(session, run.id)
+        if run_id is None:
+            logger.info("/reconcile references unknown run %s — ignoring", requested[:8])
+            return
+        if not intents:
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                f"Run `{run_id[:8]}` has no publication intent — nothing to reconcile. "
+                "`/reconcile` drives lost publications only; revival is `/retry`'s job.",
+                run_id,
+                "reconcile_refused_note",
+            )
+            return
+
+        now = datetime.now(timezone.utc)
+        for intent in intents:
+            if intent.status not in OPEN_STATES:
+                continue  # terminal intents are immutable — reported, never re-driven
+            try:
+                await self._resolve_one_publication_intent(intent, now=now)
+            except Exception:
+                # One broken intent must not strand the others' resolutions.
+                logger.exception("Reconcile pass failed for intent %s", intent.id[:8])
+        async with self._session_factory() as session:
+            resolved = [await session.get(PublicationIntent, intent.id) for intent in intents]
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            format_reconcile_reply(run_id, [row for row in resolved if row is not None]),
+            run_id,
+            "reconcile_note",
+        )
+
+    # ------------------------------------------------------------------
     # Issue-edit replan + label-off cancel (operator busywork, event-driven)
     # ------------------------------------------------------------------
 
@@ -1240,13 +1436,22 @@ class RunService:
                     "issue_edited_note",
                 )
                 return run.id
-        elif not await self._replan_interrupted(project_id, issue_iid):
+        elif (rework_source := await self._replan_interrupted(project_id, issue_iid)) is None:
             logger.info("GitLab issue edit on !%s — no active run", issue_iid)
             return None
 
         new_run_id = await self.start_run(
             project_id, issue_iid, issue_title, issue_body, author_username
         )
+        # R24 acceptance honesty: the replacement run records WHICH prior
+        # attempt it reworks, and a cancelled-superseded run records what
+        # replaced it — evidence-only linkage for the delivery metrics; the
+        # failed sibling stays in the attempts denominator either way.
+        prior_run_id = stale_run_id or rework_source
+        if prior_run_id is not None and prior_run_id != new_run_id:
+            await self._merge_run_evidence(new_run_id, {"rework_of": prior_run_id})
+        if stale_run_id is not None:
+            await self._merge_run_evidence(stale_run_id, {"superseded_by": new_run_id})
         # A retried replan (the first attempt died mid-step) has no stale run
         # of its own to name — the note then just says where the plan came from.
         if stale_run_id is not None:
@@ -1432,8 +1637,8 @@ class RunService:
             )
             await session.commit()
 
-    async def _replan_interrupted(self, project_id: int, issue_iid: int) -> bool:
-        """Whether an edit-triggered replan on this issue died mid-step.
+    async def _replan_interrupted(self, project_id: int, issue_iid: int) -> str | None:
+        """The interrupted replan's run id, when an edit-triggered replan died mid-step.
 
         The command step retries with backoff, and the retry must be able to
         finish what the ``202`` promised: the stale run is already cancelled,
@@ -1442,6 +1647,10 @@ class RunService:
         never created the fresh run), and a ``planning_failed`` run it did
         create (the fresh attempt plans again, exactly like a retried
         ``/implement``).
+
+        R24: returns the interrupted run's ID (not a bool) so the fresh run
+        records its ``rework_of`` linkage even when the superseding replan
+        is the RETRIED one and has no stale run of its own to name.
         """
         async with self._session_factory() as session:
             run = (
@@ -1461,12 +1670,15 @@ class RunService:
                 .first()
             )
         if run is None:
-            return False
-        if run.status == FlowStatus.CANCELLED.value:
-            return (run.status_reason or "").startswith("superseded by issue edit")
-        if run.status == FlowStatus.FAILED.value:
-            return (run.status_reason or "").startswith("planning_failed")
-        return False
+            return None
+        interrupted = (
+            run.status == FlowStatus.CANCELLED.value
+            and (run.status_reason or "").startswith("superseded by issue edit")
+        ) or (
+            run.status == FlowStatus.FAILED.value
+            and (run.status_reason or "").startswith("planning_failed")
+        )
+        return run.id if interrupted else None
 
     async def handle_command_note(
         self,
@@ -1621,6 +1833,27 @@ class RunService:
             )
         elif command == "retry":
             await self.handle_retry_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("issue_iid"),
+            )
+        elif command == "status":
+            await self.handle_status_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("issue_iid"),
+            )
+        elif command == "why_blocked":
+            await self.handle_why_blocked_note(
+                metadata["project_id"],
+                metadata.get("note_text", ""),
+                metadata.get("author_username", ""),
+                metadata.get("issue_iid"),
+            )
+        elif command == "reconcile":
+            await self.handle_reconcile_note(
                 metadata["project_id"],
                 metadata.get("note_text", ""),
                 metadata.get("author_username", ""),
@@ -3616,6 +3849,65 @@ class RunService:
         )
         logger.warning("Run %s: recovered the evidence note after a crash", run_id[:8])
 
+    async def evaluate_accepted(self) -> None:
+        """R24 acceptance reconciliation: record a READY run's merge outcome.
+
+        Forge never merges (ADR-0003) — the human's merge IS the acceptance
+        signal, and it is observable provider-side. This lightweight pass
+        (no webhooks) reads each ready run's native MR state once and records
+        the decision as ``acceptance`` evidence: ``merged`` feeds the
+        ``accepted`` ladder rung and ``forge_runs_accepted``; ``closed``
+        records an honest rejection. A run with a recorded decision is never
+        re-read — acceptance is counted exactly once — and an API failure
+        just waits for the next tick.
+
+        R03: GitLab-scoped like ``evaluate_ready_evidence`` — the GitHub and
+        Azure lanes get their acceptance reads from their own reconcilers.
+        """
+        async with self._session_factory() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.status == FlowStatus.READY_FOR_HUMAN.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for run in runs:
+            evidence = dict(run.evidence or {})
+            recorded = evidence.get("acceptance")
+            if isinstance(recorded, dict) and recorded.get("state"):
+                continue  # already counted — never re-read, never re-recorded
+            if run.mr_iid is None:
+                continue
+            try:
+                mr = await self._gitlab.get_merge_request(run.project_id, run.mr_iid)
+            except GitLabAPIError:
+                logger.debug(
+                    "Acceptance read failed for run %s — keeping it for the next tick",
+                    run.id[:8],
+                )
+                continue
+            state = (mr.state or "").strip().lower()
+            if state not in ("merged", "closed"):
+                continue  # still open — the human has not decided
+            await self._merge_run_evidence(
+                run.id,
+                {
+                    "acceptance": {
+                        "state": state,
+                        "sha": mr.sha or "",
+                        "merged_at": mr.merged_at or "",
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            )
+            logger.info("Run %s recorded acceptance %s — MR !%s", run.id[:8], state, run.mr_iid)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -3638,30 +3930,70 @@ class RunService:
 
         The configured backend driver is always part of the list (tighten-
         only, ADR-0015) — a contradictory preference is refused, never
-        silently repaired. v0.9: the compilable lanes are the shipped driver
-        set — credential presence is declared by the preference and
-        doctor-verified (ADR-0011); a lane without creds fails
-        infrastructure at dispatch, which with the fallback switch OFF (the
-        default) blocks the run visibly.
+        silently repaired. R31: the compilable lanes are the project's
+        available-driver manifest (:func:`resolve_available_drivers`;
+        unset — the shipped driver set, exactly what the compiler was
+        handed before the manifest existed), so a driver the project did
+        not onboard is never selected — not by the preference, not by the
+        planner's proposal. Credential presence stays declared by the
+        preference and doctor-verified (ADR-0011); a lane without creds
+        fails infrastructure at dispatch, which with the fallback switch
+        OFF (the default) blocks the run visibly.
 
-        TODO(ADR-0023 §5): pass the planner's structured proposal
-        ({"harness", "budget_class", "reason"}) from LLMPlanner.plan's
-        output once that surface exists — the integration point is the
-        ``plan`` call in start_run (factory/planner.py returns plain
-        markdown today and is outside this change's scope). None keeps the
-        compiler defaults.
+        R31 §5: the planner's structured proposal ({"harness",
+        "budget_class", "reason"}) is honored when the planner output
+        carries one (``last_plan``) — policy-constrained ranking: the
+        compiler accepts it only inside preference ∩ available. The stub
+        planner carries no proposal, so the stub path falls back to the
+        preference order verbatim.
         """
         preference = resolve_preference(self._config, self._settings)
         backend = self._backend_name()
         validate_preference(
             preference, current_driver(backend) if is_harness_backend(backend) else None
         )
-        return compile_harness_selection(
+        available = resolve_available_drivers(self._config, self._settings) or set(SHIPPED_DRIVERS)
+        selection = compile_harness_selection(
             preference,
             backend,
-            set(SHIPPED_DRIVERS),
-            None,
+            available,
+            self._planner_harness_proposal(),
         )
+        # R31: the budget class's numeric profile (R13 FORGE_BUDGET_PROFILES)
+        # resolves AT FREEZE TIME and rides ON the selection — the gate
+        # approves exactly these ceilings. ``None`` (no finite profile)
+        # freezes no ceiling block at all (byte-compatible).
+        limits = self._budget_limits_for_class(selection.budget_class)
+        if limits is not None:
+            selection = replace(
+                selection,
+                budget_ceilings=BudgetCeilings(
+                    max_calls=limits.max_calls,
+                    max_tokens=limits.max_tokens,
+                    wallclock_s=limits.wallclock_s,
+                ),
+            )
+        return selection
+
+    def _planner_harness_proposal(self) -> dict | None:
+        """R31: the planner's optional harness proposal, leniently read.
+
+        Mirrors :meth:`_plan_files_hint` discipline: whatever the planner
+        agent exposes as ``last_plan`` may carry ``harness`` /
+        ``budget_class`` / ``reason``; anything missing, non-string or
+        empty yields no proposal (the compiler keeps its defaults). The
+        planner is never the authority — every field is re-validated by
+        :func:`compile_harness_selection` against the frozen policy.
+        """
+        last_plan = getattr(self._planner, "last_plan", None)
+        if not isinstance(last_plan, dict):
+            return None
+        proposal: dict[str, str] = {}
+        for key in ("harness", "budget_class", "reason"):
+            value = str(last_plan.get(key) or "").strip()
+            if value:
+                proposal[key] = value
+        return proposal or None
 
     def _policy_digest(self) -> str:
         # ADR-0009 + ADR-0018 §1: the gate binds the effective execution

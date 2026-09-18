@@ -147,12 +147,21 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.revival import (
+    RECONCILE_RE,
+    STATUS_RE,
+    WHY_BLOCKED_RE,
     build_retry_context,
+    collect_status_snapshot,
     evaluate_revivals,
+    format_reconcile_reply,
+    format_status_reply,
     has_active_run,
+    intents_for_run,
     resolve_retry_target,
+    resolve_status_target,
     retry_rejection,
     terminalize_failure,
+    why_blocked_reply,
 )
 from forge.runs.verification import PRODUCER_AZURE_BUILD
 from forge.runs.service import (
@@ -1112,6 +1121,191 @@ class AzureRunService:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             raise
         await self._complete_action(action_id, "succeeded", {"backend": "ci_harness"})
+
+    # ------------------------------------------------------------------
+    # R29 operator surface around dead/stuck runs
+    # ------------------------------------------------------------------
+
+    async def handle_status(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        note_text: str,
+        author_username: str,
+    ) -> None:
+        """``/status [run-id]``: READ-ONLY run snapshot (R29).
+
+        The exact GitLab ``handle_status_note`` semantics: bare, the work
+        item's latest run of any state; durable-state reply only — no
+        transitions, no model calls, no provider effects beyond the
+        journaled reply comment.
+        """
+        match = STATUS_RE.search(note_text or "")
+        if match is None:
+            return
+        if issue_number is None:
+            logger.info("Azure DevOps /status off-work-item — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            run = await resolve_status_target(
+                session,
+                provider="azure_devops",
+                project_id=project_id,
+                issue_iid=issue_number,
+                requested=requested,
+            )
+            if run is None:
+                body = (
+                    "## Forge — status\n\nNo forge run found on this work item yet. "
+                    "Start one with `/implement`.\n\n*This is an automated message.*"
+                )
+                logger.info(
+                    "Azure DevOps /status on %s#%s — no run", self._repo_full_name, issue_number
+                )
+            else:
+                body = format_status_reply(await collect_status_snapshot(session, run))
+                run_id = run.id
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            body,
+            run_id if run is not None else "",
+            "status_note",
+        )
+
+    async def handle_why_blocked(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        note_text: str,
+        author_username: str,
+    ) -> None:
+        """``/why-blocked [run-id]``: READ-ONLY precise cause (R29)."""
+        match = WHY_BLOCKED_RE.search(note_text or "")
+        if match is None:
+            return
+        if issue_number is None:
+            logger.info("Azure DevOps /why-blocked off-work-item — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        async with self._session_factory() as session:
+            run = await resolve_status_target(
+                session,
+                provider="azure_devops",
+                project_id=project_id,
+                issue_iid=issue_number,
+                requested=requested,
+            )
+            if run is None:
+                body = (
+                    "## Forge — why blocked\n\nNo forge run found on this work item yet. "
+                    "Start one with `/implement`.\n\n*This is an automated message.*"
+                )
+                logger.info(
+                    "Azure DevOps /why-blocked on %s#%s — no run",
+                    self._repo_full_name,
+                    issue_number,
+                )
+            else:
+                other_active = await has_active_run(
+                    session,
+                    provider=run.provider,
+                    project_id=run.project_id,
+                    issue_iid=run.issue_iid,
+                    repo_full_name=run.github_repo_full_name,
+                    exclude_run_id=run.id,
+                )
+                body = why_blocked_reply(run, other_active=other_active)
+                run_id = run.id
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            body,
+            run_id if run is not None else "",
+            "why_blocked_note",
+        )
+
+    async def handle_reconcile(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        note_text: str,
+        author_username: str,
+    ) -> None:
+        """``/reconcile <run-id>``: drive the R11 recovery explicitly (R29).
+
+        The exact GitLab ``handle_reconcile_note`` semantics: approver-gated
+        like ``/retry`` (NOT a generic revival), run id REQUIRED, refuses
+        runs without a publication intent, drives the existing
+        ``_resolve_one_publication_intent`` probe pass and replies with the
+        resolution.
+        """
+        match = RECONCILE_RE.search(note_text or "")
+        if match is None:
+            return
+        if author_username not in self._approvers():
+            logger.info(
+                "Azure DevOps /reconcile from @%s who is not in the AzDO approver list — ignoring",
+                author_username,
+            )
+            return
+        if issue_number is None:
+            logger.info("Azure DevOps /reconcile off-work-item — ignoring")
+            return
+
+        requested = (match.group(1) or "").lower()
+        run_id: str | None = None
+        intents = []
+        async with self._session_factory() as session:
+            run = await resolve_retry_target(
+                session,
+                provider="azure_devops",
+                project_id=project_id,
+                issue_iid=issue_number,
+                requested=requested,
+            )
+            if run is not None:
+                run_id = run.id
+                intents = await intents_for_run(session, run.id)
+        if run_id is None:
+            logger.info(
+                "Azure DevOps /reconcile references unknown run %s — ignoring", requested[:8]
+            )
+            return
+        if not intents:
+            await self._post_journaled_comment(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` has no publication intent — nothing to reconcile. "
+                "`/reconcile` drives lost publications only; revival is `/retry`'s job.",
+                run_id,
+                "reconcile_refused_note",
+            )
+            return
+
+        now = datetime.now(timezone.utc)
+        for intent in intents:
+            if intent.status not in OPEN_STATES:
+                continue  # terminal intents are immutable — reported, never re-driven
+            try:
+                await self._resolve_one_publication_intent(intent, now=now)
+            except Exception:
+                logger.exception("Reconcile pass failed for intent %s", intent.id[:8])
+        async with self._session_factory() as session:
+            resolved = [await session.get(PublicationIntent, intent.id) for intent in intents]
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            format_reconcile_reply(run_id, [row for row in resolved if row is not None]),
+            run_id,
+            "reconcile_note",
+        )
 
     # ------------------------------------------------------------------
     # Issue-edit replan + tag-off cancel (operator busywork, event-driven)
@@ -3493,7 +3687,17 @@ async def execute_azure_run_command(
 
         await execute_azure_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}:
+    if command not in {
+        "start_run",
+        "go",
+        "cancel",
+        "retry",
+        "issue_edited",
+        "unlabeled",
+        "status",
+        "why_blocked",
+        "reconcile",
+    }:
         logger.warning("Unknown Azure DevOps run command %r — ignoring", command)
         return
     project = str(metadata.get("project") or "")
@@ -3546,6 +3750,27 @@ async def execute_azure_run_command(
             )
         elif command == "cancel":
             await service.handle_cancel(
+                project_id=project_id,
+                issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "status":
+            await service.handle_status(
+                project_id=project_id,
+                issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "why_blocked":
+            await service.handle_why_blocked(
+                project_id=project_id,
+                issue_number=issue_number,
+                note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "reconcile":
+            await service.handle_reconcile(
                 project_id=project_id,
                 issue_number=issue_number,
                 note_text=note_text,

@@ -81,7 +81,9 @@ github_router = APIRouter()
 #: GitHub command lands on the same durable step path. ``/security`` (v0.7)
 #: is the provider-neutral triage step — comments on issues AND PRs route
 #: identically (``issue_is_pr`` is surfaced but does not change routing).
-_GITHUB_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
+_GITHUB_RUN_COMMANDS = frozenset(
+    {"/implement", "/go", "/cancel", "/retry", "/security", "/status", "/why-blocked", "/reconcile"}
+)
 
 _COMMAND_MAP = {
     "/implement": "start_run",
@@ -89,6 +91,12 @@ _COMMAND_MAP = {
     "/cancel": "cancel",
     "/retry": "retry",
     "/security": "security_triage",
+    # R29 operator surface around dead/stuck runs: two read-only commands
+    # and the ONE mutating recovery command (/reconcile — approver-gated
+    # at the executor, like /retry).
+    "/status": "status",
+    "/why-blocked": "why_blocked",
+    "/reconcile": "reconcile",
 }
 
 #: installation webhook actions that mean "this connection is gone".

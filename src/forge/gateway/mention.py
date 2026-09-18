@@ -68,8 +68,11 @@ def extract_mention(
     # Text after the mention pattern
     after = note_body[match.end() :].strip()
 
-    # Check for a slash command
-    slash_match = re.match(r"(/\w+)\s*(.*)", after, re.DOTALL)
+    # Check for a slash command. Hyphenated commands (`/why-blocked`, R29)
+    # parse as ONE command token; acceptance is still gated by the known
+    # command set below, so an unknown hyphenated token falls through to the
+    # plain-message path exactly as before.
+    slash_match = re.match(r"(/[\w-]+)\s*(.*)", after, re.DOTALL)
     if slash_match:
         command = slash_match.group(1).lower()
         args_text = slash_match.group(2).strip()

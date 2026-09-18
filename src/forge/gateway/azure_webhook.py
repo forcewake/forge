@@ -79,7 +79,9 @@ azure_router = APIRouter()
 #: Commands served by the durable run loop — the same set the GitLab and
 #: GitHub ingresses route; the normalized Azure command lands on the same
 #: durable step path. The mention parser is provider-agnostic (ADR-0024 §7).
-_AZDO_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
+_AZDO_RUN_COMMANDS = frozenset(
+    {"/implement", "/go", "/cancel", "/retry", "/security", "/status", "/why-blocked", "/reconcile"}
+)
 
 _COMMAND_MAP = {
     "/implement": "start_run",
@@ -87,6 +89,12 @@ _COMMAND_MAP = {
     "/cancel": "cancel",
     "/retry": "retry",
     "/security": "security_triage",
+    # R29 operator surface around dead/stuck runs: two read-only commands
+    # and the ONE mutating recovery command (/reconcile — approver-gated
+    # at the executor, like /retry).
+    "/status": "status",
+    "/why-blocked": "why_blocked",
+    "/reconcile": "reconcile",
 }
 
 #: PR-comment event spellings: the display name (``git.pullrequest.commented-on``)

@@ -28,6 +28,10 @@ class MergeRequest(BaseModel):
     draft: bool = False
     labels: list[str] = []
     sha: str | None = None
+    #: R24 acceptance: ISO-8601 timestamp the MR was merged at — None while
+    #: the MR is open/closed-unmerged; carried so the acceptance evidence can
+    #: time the human-wait decomposition from the provider's own record.
+    merged_at: str | None = None
     diff_refs: DiffRefs | None = None
     has_conflicts: bool = False
 

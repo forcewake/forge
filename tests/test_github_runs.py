@@ -1230,7 +1230,20 @@ def test_provider_command_sets_stay_in_parity():
     # reactive/observation commands are single-provider by design (GitHub
     # PR review fanout, GitLab pipeline debug) — not part of the run
     # lifecycle parity contract.
-    lifecycle_only = {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}
+    lifecycle_only = {
+        "start_run",
+        "go",
+        "cancel",
+        "retry",
+        "issue_edited",
+        "unlabeled",
+        # R29 operator commands: /status, /why-blocked (read-only) and
+        # /reconcile (the explicit R11 recovery driver) are lifecycle
+        # commands too — every provider service must dispatch them.
+        "status",
+        "why_blocked",
+        "reconcile",
+    }
     gitlab_cmds &= lifecycle_only
     github_cmds &= lifecycle_only
     azure_cmds &= lifecycle_only

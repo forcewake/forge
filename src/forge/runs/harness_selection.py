@@ -4,9 +4,12 @@ Selection happens at PLAN time and is frozen into the RunSpec — it is part
 of the decision the human gate approves (ADR-0023 Decision 1). This module
 owns the deterministic side of that decision:
 
-- :func:`compile_harness_selection` — preference ∩ onboarded lanes ∪
+- :func:`compile_harness_selection` — preference ∩ available drivers ∪
   (optional) planner proposal → the frozen :class:`HarnessSelection`. The
   planner may reorder, never extend: it is never the authority (rule 4).
+  R31: the available set is the project's capability manifest
+  (:func:`resolve_available_drivers`) — a driver the project did not
+  onboard is never selected, whatever the preference or the proposal says.
 - :func:`advance_harness_fallback` — the shared dispatch-time fallback step
   (ADR-0023 Decision 3): pure; given the current selection and a classified
   lane failure it returns the next selection down the frozen chain, or None
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BUDGET_CLASSES",
+    "BudgetCeilings",
     "DEFAULT_DRIVER",
     "DRIVER_CREDENTIAL_VARS",
     "SHIPPED_DRIVERS",
@@ -37,6 +41,7 @@ __all__ = [
     "implementation_block",
     "parse_driver_entry",
     "parse_preference",
+    "resolve_available_drivers",
     "resolve_preference",
     "selection_from_spec_document",
     "validate_preference",
@@ -72,28 +77,56 @@ _ENTRY_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
+class BudgetCeilings:
+    """The numeric ceilings a budget class resolves to at freeze time (R31).
+
+    The local mirror of the R13 profile axes
+    (:func:`forge.durable.budgets.resolve_budget_limits` — same names, same
+    ``None`` = unlimited semantics); kept module-local so this pure module
+    stays stdlib-only. Attached to a selection by the service AFTER the
+    class resolves against the configured profiles, so the selection
+    evidence shows the exact ceilings the gate approves.
+    """
+
+    max_calls: int | None = None
+    max_tokens: int | None = None
+    wallclock_s: int | None = None
+
+
+@dataclass(frozen=True)
 class HarnessSelection:
     """The frozen harness decision the gate approves (ADR-0023 Decision 1).
 
     ``harness`` is the selected driver; ``fallbacks`` is the frozen ordered
     tail (subset of the allowed chain, recorded in the spec even when the
     dispatch-time fallback switch is OFF — the spec describes the chain, the
-    switch is a separate runtime policy).
+    switch is a separate runtime policy). ``budget_ceilings`` (R31, optional)
+    records the numeric ceilings ``budget_class`` resolved to at freeze time
+    (R13 profiles); ``None`` — nothing configured, the run is unlimited and
+    the evidence carries no ceiling block.
     """
 
     harness: str
     fallbacks: tuple[str, ...]
     budget_class: str
     reason: str
+    budget_ceilings: BudgetCeilings | None = None
 
     def as_document(self) -> dict:
         """The ``backend_config`` fragment frozen into the RunSpec."""
-        return {
+        document: dict = {
             "harness": self.harness,
             "harness_fallbacks": list(self.fallbacks),
             "budget_class": self.budget_class,
             "selection_reason": self.reason,
         }
+        if self.budget_ceilings is not None:
+            document["budget_ceilings"] = {
+                "max_calls": self.budget_ceilings.max_calls,
+                "max_tokens": self.budget_ceilings.max_tokens,
+                "wallclock_s": self.budget_ceilings.wallclock_s,
+            }
+        return document
 
 
 def implementation_block(
@@ -184,6 +217,27 @@ def resolve_preference(config: ForgeConfig, settings: Settings) -> list[str]:
     return parse_preference(str(getattr(settings, "FORGE_HARNESS_PREFERENCE", "") or ""))
 
 
+def resolve_available_drivers(config: ForgeConfig, settings: Settings) -> set[str]:
+    """The project's available-driver set — the R31 capability manifest.
+
+    ``ForgeConfig.implement.available_drivers`` (the YAML form) wins; the
+    ``FORGE_AVAILABLE_DRIVERS`` JSON is the lab/CI alternative (the same
+    precedence as :func:`resolve_preference`). Unset everywhere — every
+    shipped driver is available, which is exactly the set the compiler was
+    handed before R31 existed (byte-compat). This set only ever CAPS the
+    chain: a driver outside it is dropped before anything else, so a
+    preference entry or a planner proposal can never select it. An R15 pin
+    (``FORGE_DRIVER_VERSIONS``) presupposes the capability — a pinned entry
+    never widens this set.
+    """
+    from_config = list(config.available_drivers)
+    if from_config:
+        return set(from_config)
+    from forge.config import parse_available_drivers
+
+    return set(parse_available_drivers(str(getattr(settings, "FORGE_AVAILABLE_DRIVERS", "") or "")))
+
+
 def validate_preference(preference: list[str], driver: str | None = None) -> None:
     """Config-validation time checks (brief §1), tighten-only (ADR-0015).
 
@@ -222,9 +276,14 @@ def compile_harness_selection(
     """Compile the frozen harness decision (brief §2, rules 1–6).
 
     *preference* is the project's ordered list (may be empty);
-    *available_lanes* the lanes the project onboarded (credential presence —
-    doctor feeds this); *planner_proposal* the optional structured
-    ``{"harness", "budget_class", "reason"}`` from the planner.
+    *available_lanes* the drivers the project onboarded — the R31 capability
+    manifest (:func:`resolve_available_drivers`) feeds this from the service,
+    so an un-onboarded driver is never selected even when preferred or
+    proposed; *planner_proposal* the optional structured
+    ``{"harness", "budget_class", "reason"}`` from the planner. The
+    proposal is policy-constrained ranking, never free choice: a harness
+    outside preference ∩ available is ignored, and the budget class is
+    validated against the closed :data:`BUDGET_CLASSES` set independently.
     """
     driver = current_driver(current_backend)
 
@@ -279,7 +338,10 @@ def selection_from_spec_document(document: dict | None) -> HarnessSelection | No
 
     None for pre-v2 documents (no ``backend_config.harness`` key) — callers
     fall back to the configured backend, which keeps every pre-ADR-0023 run
-    dispatching exactly as before.
+    dispatching exactly as before. The optional ``budget_ceilings`` block
+    (R31) round-trips when present; older documents without it read as
+    ``None`` (the run's ceilings then live only in the spec's ``budgets``
+    block, as they always have).
     """
     backend_config = (document or {}).get("backend_config")
     if not isinstance(backend_config, dict):
@@ -288,12 +350,29 @@ def selection_from_spec_document(document: dict | None) -> HarnessSelection | No
     if not harness:
         return None
     fallbacks = backend_config.get("harness_fallbacks")
+    ceilings_raw = backend_config.get("budget_ceilings")
+    ceilings = None
+    if isinstance(ceilings_raw, dict):
+        ceilings = BudgetCeilings(
+            max_calls=_optional_int(ceilings_raw.get("max_calls")),
+            max_tokens=_optional_int(ceilings_raw.get("max_tokens")),
+            wallclock_s=_optional_int(ceilings_raw.get("wallclock_s")),
+        )
     return HarnessSelection(
         harness=harness,
         fallbacks=tuple(str(entry) for entry in (fallbacks or []) if str(entry).strip()),
         budget_class=str(backend_config.get("budget_class") or "standard"),
         reason=str(backend_config.get("selection_reason") or "default"),
+        budget_ceilings=ceilings,
     )
+
+
+def _optional_int(value: object) -> int | None:
+    """A documented ceiling (a real int) or ``None`` — anything else in a
+    re-read document is absent, never zero (unknown ≠ unlimited-spent)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def advance_harness_fallback(

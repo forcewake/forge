@@ -265,6 +265,19 @@ class Settings(BaseSettings):
     # (``budget_profiles:``) wins when both are set.
     FORGE_BUDGET_PROFILES: str = ""
 
+    # R31 capability manifest: the drivers THIS project onboarded — JSON
+    # array of driver ids, or a versioned manifest object
+    # {"version": 1, "drivers": [...]}. A driver outside this set is never
+    # selected, whatever the preference or the planner proposes (the set CAPS
+    # the chain; it never extends it). Unset/empty — every shipped driver is
+    # available (byte-compatible with pre-R31 projects, where the shipped
+    # set was the implicit manifest). Malformed JSON or an unknown manifest
+    # version fails startup (fail closed, like FORGE_BUDGET_PROFILES). The
+    # forge.yml form (``implement.available_drivers``) wins when both are
+    # set. An R15 pin (FORGE_DRIVER_VERSIONS) never widens this set: a pin
+    # presupposes the capability, it does not create it.
+    FORGE_AVAILABLE_DRIVERS: str = ""
+
     # R15: per-driver CLI version pins for the Actions harness lane — JSON
     # object driver → version (claude-code | grok-build | opencode |
     # copilot); the literal "latest" keeps the unpinned npm dist-tag
@@ -351,6 +364,65 @@ def parse_budget_profiles(raw: str | None) -> dict[str, dict[str, Any]]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"FORGE_BUDGET_PROFILES is not valid JSON: {exc}") from exc
     return validate_budget_profiles(data)
+
+
+#: The manifest version :func:`validate_available_drivers` accepts (R31).
+#: A higher number means a shape this control plane does not know yet — it
+#: refuses rather than guess what the new fields mean.
+AVAILABLE_DRIVERS_MANIFEST_VERSION = 1
+
+
+def validate_available_drivers(raw: object) -> list[str]:
+    """Validate a capability manifest (R31) — the drivers the project
+    onboarded. Accepts a plain array of driver ids or a versioned manifest
+    object ``{"version": 1, "drivers": [...]}``; ``ValueError`` on any other
+    shape, so a mistyped manifest fails startup instead of silently widening
+    (or emptying) the project's driver set."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        entries = raw
+    elif isinstance(raw, dict):
+        version = raw.get("version", AVAILABLE_DRIVERS_MANIFEST_VERSION)
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("available_drivers.version must be an int")
+        if version != AVAILABLE_DRIVERS_MANIFEST_VERSION:
+            raise ValueError(
+                f"available_drivers manifest version {version} is not supported "
+                f"(this forge understands version {AVAILABLE_DRIVERS_MANIFEST_VERSION})"
+            )
+        if set(raw) - {"version", "drivers"}:
+            raise ValueError("available_drivers manifest accepts only 'version' and 'drivers' keys")
+        entries = raw.get("drivers")
+        if not isinstance(entries, list):
+            raise ValueError("available_drivers manifest needs a 'drivers' list")
+    else:
+        raise ValueError(
+            "available_drivers must be a driver-id list or a "
+            "{'version': 1, 'drivers': [...]} manifest"
+        )
+    seen: list[str] = []
+    for entry in entries:
+        driver = str(entry).strip()
+        if not driver:
+            raise ValueError("available_drivers entries must be non-empty driver ids")
+        if driver not in seen:
+            seen.append(driver)
+    return seen
+
+
+def parse_available_drivers(raw: str | None) -> list[str]:
+    """The FORGE_AVAILABLE_DRIVERS JSON form (R31) — ``ValueError`` when
+    malformed. Fail closed like FORGE_BUDGET_PROFILES: a manifest that does
+    not parse must abort startup, never silently change the driver set."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_AVAILABLE_DRIVERS is not valid JSON: {exc}") from exc
+    return validate_available_drivers(data)
 
 
 def parse_driver_versions(raw: str | None) -> dict[str, str]:
@@ -526,6 +598,11 @@ class ForgeConfig:
         # the configured backend as a one-element list (byte-compatible).
         "implement": {
             "harnesses": [],
+            # R31: the capability manifest — the drivers this project
+            # onboarded (forge.yml form of FORGE_AVAILABLE_DRIVERS, wins when
+            # both are set). Empty — every shipped driver is available
+            # (byte-compatible default).
+            "available_drivers": [],
         },
         # ADR-0018 §5 (R13): named numeric budget profiles — the forge.yml
         # form of FORGE_BUDGET_PROFILES (wins when both are set). Name →
@@ -616,6 +693,19 @@ class ForgeConfig:
             if driver and driver not in seen:
                 seen.append(driver)
         return seen
+
+    @property
+    def available_drivers(self) -> list[str]:
+        """``implement.available_drivers`` — the R31 capability manifest: the
+        drivers this project onboarded. Only these may ever be selected, so
+        an unavailable driver is dropped from the chain before anything else
+        (a proposal can reorder the chain, never extend it). Empty — every
+        shipped driver is available (byte-compatible default; the closed id
+        set itself lives in :mod:`forge.runs.harness_selection` — importing
+        it here would close an import cycle through the runs package). The
+        forge.yml form wins over the FORGE_AVAILABLE_DRIVERS JSON.
+        """
+        return validate_available_drivers(self._data["implement"].get("available_drivers"))
 
     @property
     def mcp_servers(self) -> dict[str, Any]:

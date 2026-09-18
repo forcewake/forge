@@ -37,7 +37,12 @@ router.include_router(github_router)
 #: ``/security`` (v0.7) joins them — the durable triage step — and is the ONLY
 #: run command also accepted on MR notes (triage targets MRs, issues and PRs;
 #: /implement, /go, /cancel and /retry stay issue-bound).
-_RUN_COMMANDS = frozenset({"/implement", "/go", "/cancel", "/retry", "/security"})
+#: R29 adds the operator surface around dead/stuck runs: ``/status`` and
+#: ``/why-blocked`` are read-only, ``/reconcile`` drives the publication-intent
+#: recovery path — all three issue-bound like /retry.
+_RUN_COMMANDS = frozenset(
+    {"/implement", "/go", "/cancel", "/retry", "/security", "/status", "/why-blocked", "/reconcile"}
+)
 
 
 def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
@@ -100,6 +105,20 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
     if slash_command == "/retry":
         # Tier 2: operator revival of a dead run on the same branch.
         return {**common, "command": "retry", "note_text": event.object_attributes.note or ""}
+    if slash_command == "/status":
+        # R29 read-only operator snapshot of a run (bare = latest on the issue).
+        return {**common, "command": "status", "note_text": event.object_attributes.note or ""}
+    if slash_command == "/why-blocked":
+        # R29 read-only explanation of the terminal/blocked cause.
+        return {
+            **common,
+            "command": "why_blocked",
+            "note_text": event.object_attributes.note or "",
+        }
+    if slash_command == "/reconcile":
+        # R29 operator-driven publication-intent recovery (the ONE mutating
+        # new command; approver-gated at the executor like /retry).
+        return {**common, "command": "reconcile", "note_text": event.object_attributes.note or ""}
     return {**common, "command": "go", "note_text": event.object_attributes.note or ""}
 
 
