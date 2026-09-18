@@ -80,7 +80,7 @@ jobs:
       issues: read
     steps:
       - name: Checkout target at the frozen attempt base (detached)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.attempt_base_oid }}
           fetch-depth: 0

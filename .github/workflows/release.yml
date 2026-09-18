@@ -25,7 +25,7 @@ jobs:
       id-token: write # cosign keyless signing (Fulcio OIDC)
       attestations: write # actions/attest-build-provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Guard — FORGE_RELEASE_TOKEN must exist (PAT with write:packages)
         env:
