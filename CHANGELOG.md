@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase-A correctness alignment (external review e8bf381: all Phase-A P1s closed)
+
+- **R01 — one publication boundary (ADR-0026)**: `publish_validated_candidate`
+  owns validate → intent → native adapter; `ValidatedCandidate` is the capability
+  to publish (raw ChangeSets refused by type). The GitHub builtin path now crosses
+  strict materialization + policy validation before any commit-API call.
+  28 negative conformance tests: 8 deny scenarios × 3 publish paths, zero
+  commit-API calls asserted.
+- **R02 — verification parity**: Azure publication parks at `waiting_ci` with a
+  reconciler pass correlating Builds by candidate sha (lane excluded);
+  red → repair/blocked, grace → honest unverified. GitLab empty profiles label
+  ready as unverified. Unified `VerificationResult` evidence on all providers.
+- **R03 — provider-namespaced identity**: migration 012 rebuilds the active-run
+  unique index over (provider, project_id, issue_iid); every lifecycle scan and
+  guard filters provider — a GitHub repo-id 5 no longer collides with a GitLab
+  project 5.
+- **R05 — brief binding**: the lane renders the brief from the EXACT journaled
+  plan-comment id (dispatch input → addressed fetch → fail-closed on
+  missing/wrong-author/wrong-run); the 100-comment heuristic is a loud legacy
+  fallback.
+- **R08/R09 — patch engine**: discriminated representations
+  (Create/Delete/FullReplacement/UnifiedPatch) with `base_blob_digest` +
+  `intended_digest` verification; POSIX zero-context placement, `\n`-only
+  splitting (CRLF/U+2028 safe), typed rejections (mode/rename/binary/
+  corrupt/stale); 31-case differential suite against `git apply` as the oracle.
+- **R16 — artifact recipe**: clean non-hidden output dir, meta schema v2
+  (attempt id, manifest digest, usage receipt), control-plane ZIP caps/
+  allowlist/validation with one bounded retry.
+- **R17 — liveness**: deadline/cancel evaluated BEFORE provider I/O on all
+  three providers; bounded dispatch discovery; the reaper parks exhausted and
+  deadline-exceeded steps as dead; late callbacks to terminal runs are
+  superseded evidence, never READY.
+- **R19 — MCP authorization**: default-deny wrapper on every tool, repo-target
+  allowlist (`FORGE_MCP_TOKEN_REPOS`), denial auditing.
+- **Lifecycle parity (#38/#29)**: `issue_edited` auto-replan and `unlabeled`
+  gate-cancel on all three providers; the parity test whitelist is empty.
+- **Operator tooling**: `/retry` (same-branch revival, operator-granted cycle),
+  Tier-1 auto-revive of transient deaths, superseded-PR janitor.
+- **Lane hardening**: `bypassPermissions` + mechanical deny (the allowlist
+  whack-a-mole is retired), ephemeral `CLAUDE_CONFIG_DIR` (no cross-run memory
+  bleed), `uv sync --frozen` from the target lock (the agent runs the gates CI
+  runs), pinned toolchain, lane job ceiling 120m.
+- **Research base**: docs/research/{patch-application, remote-effect-reconciliation,
+  actions-artifacts-usage, schema-upgrade-gates}.md.
+
+### Fixed
+- Provider-namespaced unique index; Alembic live-head startup gate replaces the
+  stale marker; MCP classic-tool scope bypass; worker reaper parks exhausted
+  steps; late-callback supersede widened to all terminal states.
+
 ### Added — terminal-failure revival (Tier 1 auto-revive + Tier 2 `/retry`)
 
 - **Tier 1 — automatic revival of transient deaths**: every `failed`
