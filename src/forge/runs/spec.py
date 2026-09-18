@@ -53,6 +53,18 @@ class SpecInvalid(Exception):
     """
 
 
+class SpecLegacy(SpecInvalid):
+    """A stored RunSpec predates the executable schema (A02 legacy policy).
+
+    A v1/v2 row (created before the freeze carried executable content) is
+    never re-interpreted as v3 on a later dispatch: the run parks
+    ``blocked(spec_legacy: re-approval required)`` — the honest policy,
+    because the approver never saw the full v3 input (task text, plan
+    artifact, model route, budgets). Subclassing :class:`SpecInvalid` keeps
+    every generic ``except SpecInvalid`` caller fail-closed.
+    """
+
+
 def canonical_json_digest(document: dict) -> str:
     """sha256 over the canonical (sorted-key) JSON of *document*."""
     return hashlib.sha256(json.dumps(document, sort_keys=True).encode("utf-8")).hexdigest()
@@ -151,6 +163,12 @@ class ExecutableRunSpec:
     budget_max_tokens: int | None = None
     budget_wallclock_s: int | None = None
     budget_enforcement: str = ""
+    # A02: the frozen dispatch contract of the provider's harness lane —
+    # the GitHub Actions workflow filename / the Azure DevOps lane pipeline
+    # id the gate approved. Additive (defaulted, like the R13 ceilings): a
+    # lane-less run freezes neither key and stays byte-identical.
+    harness_workflow: str = ""
+    lane_pipeline_id: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.schema_version, int) or (
@@ -190,6 +208,12 @@ class ExecutableRunSpec:
             or self.budget_wallclock_s is not None
         ):
             raise SpecInvalid("spec numeric budget ceilings require an enforcement level")
+        if self.lane_pipeline_id is not None and (
+            isinstance(self.lane_pipeline_id, bool) or self.lane_pipeline_id < 1
+        ):
+            raise SpecInvalid(
+                f"spec lane_pipeline_id must be a positive int, got {self.lane_pipeline_id!r}"
+            )
         if not self.harness_driver.strip() or not self.target_branch.strip():
             raise SpecInvalid("spec harness driver and target branch must be non-empty")
 
@@ -225,6 +249,8 @@ class ExecutableRunSpec:
         budget_wallclock_s: int | None = None,
         budget_enforcement: str = "",
         allowed_paths: Sequence[str] = (),
+        harness_workflow: str = "",
+        lane_pipeline_id: int | None = None,
     ) -> ExecutableRunSpec:
         """Freeze the executable spec from plan-time values (F14, R04).
 
@@ -264,6 +290,8 @@ class ExecutableRunSpec:
             harness_fallbacks=_string_tuple(tuple(harness_fallbacks), "harness_fallbacks"),
             budget_class=str(budget_class or "standard"),
             selection_reason=str(selection_reason or "default"),
+            harness_workflow=str(harness_workflow or "").strip(),
+            lane_pipeline_id=(int(lane_pipeline_id) if lane_pipeline_id is not None else None),
         )
 
     @classmethod
@@ -312,6 +340,12 @@ class ExecutableRunSpec:
                 ),
                 budget_class=str(backend_config.get("budget_class") or "standard"),
                 selection_reason=str(backend_config.get("selection_reason") or "default"),
+                harness_workflow=str(backend_config.get("harness_workflow") or "").strip(),
+                lane_pipeline_id=(
+                    int(backend_config["lane_pipeline_id"])
+                    if backend_config.get("lane_pipeline_id") is not None
+                    else None
+                ),
             )
         except (ValueError, TypeError) as exc:
             # Numeric fields with non-numeric garbage etc. — still a corrupt
@@ -326,7 +360,9 @@ class ExecutableRunSpec:
         ``allowed_paths`` is present only for scoped runs, and the R13 budget
         ceilings/enforcement only when a finite profile was resolved — an
         unscoped, unbudgeted document stays byte-identical to the pre-v0.7
-        shape convention.
+        shape convention. The A02 dispatch-contract keys
+        (``harness_workflow`` / ``lane_pipeline_id``) ride ``backend_config``
+        only for lane-dispatching runs, same additive convention.
         """
         budgets_block: dict = {
             "commit_cycles": self.commit_cycles,
@@ -358,6 +394,12 @@ class ExecutableRunSpec:
                 "harness_fallbacks": list(self.harness_fallbacks),
                 "budget_class": self.budget_class,
                 "selection_reason": self.selection_reason,
+                **({"harness_workflow": self.harness_workflow} if self.harness_workflow else {}),
+                **(
+                    {"lane_pipeline_id": self.lane_pipeline_id}
+                    if self.lane_pipeline_id is not None
+                    else {}
+                ),
             },
             "budgets": budgets_block,
             "task": {
@@ -401,9 +443,11 @@ def load_verified_spec(
 
     Every consumption read goes through here. Raises :class:`SpecInvalid` —
     never falls back — when the row is missing, its stored digest does not
-    match the canonical JSON of its document (tampered/corrupt), its digest
-    is not the one the gate froze into the run, or the document is a legacy
-    (pre-v3) shape that carries no executable content.
+    match the canonical JSON of its document (tampered/corrupt), or its
+    digest is not the one the gate froze into the run. A legacy (pre-v3)
+    row raises :class:`SpecLegacy` (an :class:`SpecInvalid` subclass, A02):
+    the run parks ``blocked(spec_legacy: re-approval required)`` — a spec
+    that predates the executable shape is never re-interpreted as v3.
     """
     if not isinstance(document, dict):
         raise SpecInvalid("no spec document is stored for this run")
@@ -420,8 +464,8 @@ def load_verified_spec(
             f"spec digest {digest[:12]} is not the gate-approved digest {run_spec_digest[:12]}"
         )
     if schema_version is not None and schema_version < EXECUTABLE_SPEC_SCHEMA_VERSION:
-        raise SpecInvalid(
-            f"legacy spec schema v{schema_version} is not executable "
-            f"(need v{EXECUTABLE_SPEC_SCHEMA_VERSION})"
+        raise SpecLegacy(
+            f"re-approval required — legacy spec schema v{schema_version} is not "
+            f"executable (need v{EXECUTABLE_SPEC_SCHEMA_VERSION})"
         )
     return ExecutableRunSpec.from_document(document)

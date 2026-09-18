@@ -329,6 +329,61 @@ async def _get_run(db, run_id: str) -> FlowRun:
         return run
 
 
+async def _seed_executable_spec(
+    db,
+    run_id: str,
+    *,
+    provider: str,
+    project_id: int,
+    issue_iid: int,
+) -> None:
+    """Freeze a valid v3 RunSpec row for a hand-seeded run (A02).
+
+    The GitHub/Azure consumption legs read the digest-verified executable
+    spec on every pass and park ``spec_invalid`` without one — these tests
+    exercise the finalization wording, so the run gets a well-formed spec
+    bound the way start_run would have frozen it.
+    """
+    from forge.durable import RunSpec
+    from forge.runs.service import canonical_json_digest
+    from forge.runs.spec import ExecutableRunSpec
+
+    spec = ExecutableRunSpec.freeze(
+        provider=provider,
+        project_id=project_id,
+        issue_iid=issue_iid,
+        source_base_oid="1" * 40,
+        task_title="Add password reset",
+        task_description="Users cannot reset.",
+        plan_summary="Plan.",
+        plan_files_hint=(),
+        plan_digest="a" * 64,
+        model_route="code",
+        policy_digest="b" * 64,
+        required_jobs=(),
+        backend="builtin",
+        harness_model="glm-5.3-flash[1m]",
+        target_branch="main",
+        harness_driver="claude-code",
+        commit_cycles=3,
+        harness_timeout=1800,
+    )
+    document = spec.to_document()
+    async with db() as session:
+        run = await session.get(FlowRun, run_id)
+        assert run is not None
+        session.add(
+            RunSpec(
+                run_id=run_id,
+                schema_version=3,
+                document=document,
+                digest=canonical_json_digest(document),
+            )
+        )
+        run.spec_digest = canonical_json_digest(document)
+        await session.commit()
+
+
 async def _finalize_gitlab(db, verified: bool) -> str:
     """Drive the GitLab service's real finalization leg to ready."""
     from tests.fixtures.fake_gitlab import FakeGitLab
@@ -386,6 +441,9 @@ async def _finalize_github(db, verified: bool) -> str:
         github_issue_number=GITHUB_ISSUE,
         mr_iid=101,
     )
+    await _seed_executable_spec(
+        db, run_id, provider="github", project_id=GITHUB_PROJECT, issue_iid=GITHUB_ISSUE
+    )
     service = make_github_service(
         db, fake, settings=github_settings(), stack=make_github_stack(fake)
     )
@@ -421,6 +479,9 @@ async def _finalize_azure(db, verified: bool) -> str:
         issue_iid=AZURE_WORK_ITEM,
         evidence={"verification": fragment},  # the gate already recorded its verdict
         mr_iid=501,
+    )
+    await _seed_executable_spec(
+        db, run_id, provider="azure_devops", project_id=project_id, issue_iid=AZURE_WORK_ITEM
     )
     service = make_azure_service(db, fake, settings=azure_settings(), stack=make_azure_stack(fake))
     await service._review_and_ready(
@@ -515,6 +576,9 @@ class TestGateEvidenceUnification:
             github_repo_full_name=GITHUB_REPO,
             github_issue_number=GITHUB_ISSUE,
             mr_iid=101,
+        )
+        await _seed_executable_spec(
+            db, run_id, provider="github", project_id=GITHUB_PROJECT, issue_iid=GITHUB_ISSUE
         )
         service = make_github_service(
             db, fake, settings=github_settings(), stack=make_github_stack(fake)

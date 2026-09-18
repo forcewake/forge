@@ -17,7 +17,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings
-from forge.durable import FlowRun, FlowStatus, GateApproval, Outbox, RunSpec
+from forge.durable import (
+    consume_approval,
+    Controller,
+    FlowRun,
+    FlowStatus,
+    GateApproval,
+    Outbox,
+    RunSpec,
+)
 from forge.execution.github_actions import ActionsHandle, artifact_name_for
 from forge.factory.reviewer import ReviewVerdict
 from forge.integrations.github import GitHubAPIError
@@ -252,6 +260,7 @@ class TestGoDispatchesHarness:
                 .scalars()
                 .one()
             )
+        assert spec.schema_version == 3  # executable spec (R04/A02)
         assert spec.document["backend_config"] == {
             "backend": "ci_harness",
             "model": MODEL,
@@ -262,9 +271,68 @@ class TestGoDispatchesHarness:
             "harness_fallbacks": [],
             "budget_class": "standard",
             "selection_reason": "default",
+            # A02: the frozen Actions dispatch contract.
             "harness_workflow": WORKFLOW,
-            "driver": "claude-code",
         }
+
+    async def test_post_gate_model_drift_never_reaches_the_dispatch(self, db, fake):
+        """A02: the model input comes from the spec — a FORGE_HARNESS_MODEL
+        change after the freeze never alters the approved execution (a
+        crashed-leg resume re-drives the dispatch with the frozen route)."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        # Consume the gate and park the run mid-leg (the crashed-worker
+        # state whose recovery path re-drives the dispatch).
+        async with db() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            await consume_approval(session, gate.id, datetime.now(timezone.utc))
+            controller = Controller(session)
+            await controller.transition(run_id, FlowStatus.PROPOSING, reason="approved")
+            await session.commit()
+
+        service._settings.FORGE_HARNESS_MODEL = "post-gate-model"
+        await go(service, run_id)  # the resume re-drive
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["model"] == MODEL  # the frozen route
+
+    async def test_budget_exhausted_blocks_the_dispatch(self, db, fake):
+        """R13/A02: an exhausted budget starts no new episode — the dispatch
+        is the enforcement point the harness lane has."""
+        from sqlalchemy import select as _select
+
+        from forge.durable import RunBudget
+
+        settings = make_settings(
+            FORGE_BUDGET_PROFILES='{"standard": {"max_calls": 5, "wallclock_s": 3600}}'
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)  # the budget row opens pre-paid
+        async with db() as session:
+            budget = (
+                (await session.execute(_select(RunBudget).where(RunBudget.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            budget.status = "exhausted"
+            await session.commit()
+        fake.dispatch_inputs.clear()
+        clear_comments(fake)
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("budget_exhausted")
+        assert fake.dispatch_inputs == []  # no episode was dispatched
 
     async def test_builtin_lane_is_the_default_when_unset(self, db, fake):
         service = make_service(db, fake, settings=make_settings(FORGE_GITHUB_HARNESS_WORKFLOW=""))

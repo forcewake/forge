@@ -3,7 +3,9 @@
 Mirrors the GitHub gate machinery (:mod:`forge.runs.github_service`) onto
 FlowRun rows with ``provider='azure_devops'``: an ``/implement`` on a work
 item creates a durable run, plans, posts the PLAN as a markdown work-item
-comment, freezes the RunSpec (v2, harness selection included), opens the
+comment, freezes the executable RunSpec (v3 — task text, plan artifact,
+model route, verification contract and budgets, harness selection
+included), opens the
 pending decision (plan/base/spec/task digests + ``FORGE_DECISION_TTL_SECONDS``)
 and parks the run in ``waiting_approval``. An approver's ``/go <run-id>``
 consumes the decision exactly once and drives the publish leg. ``/cancel``
@@ -71,8 +73,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from forge.config import ForgeConfig, Settings
+from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
+    BudgetLimits,
     Controller,
     FlowRun,
     FlowStatus,
@@ -84,6 +87,7 @@ from forge.durable import (
     RunSpec,
     StepRun,
     as_aware_utc,
+    budget_block_reason,
     build_source_event_id,
     classify_probe,
     commit_matches,
@@ -92,9 +96,13 @@ from forge.durable import (
     due_intents,
     find_open_intent,
     is_valid,
+    load_budget_guard,
     mark_dispatched,
     message_with_marker,
     mint_operation_key,
+    open_budget,
+    open_budget_from_spec,
+    resolve_budget_limits,
     ProbeObservation,
     ProbeVerdict,
     record_approval,
@@ -111,7 +119,7 @@ from forge.factory.reviewer import (
     ReviewVerdict,
     review_with_retry,
 )
-from forge.factory.implementer import LLMImplementer
+from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.execution.azure_pipelines import (
     AzurePipelinesExecutor,
     AzurePipelinesHandle as ExecutorHandle,
@@ -138,12 +146,13 @@ from forge.runs.consistency import (
     ready_reason,
 )
 from forge.runs.harness_selection import (
+    BudgetCeilings,
+    resolve_available_drivers,
     SHIPPED_DRIVERS,
     HarnessSelection,
     compile_harness_selection,
     implementation_block,
     resolve_preference,
-    selection_from_spec_document,
     validate_preference,
 )
 from forge.runs.revival import (
@@ -163,13 +172,20 @@ from forge.runs.revival import (
     terminalize_failure,
     why_blocked_reply,
 )
+from forge.runs.spec import (
+    EXECUTABLE_SPEC_SCHEMA_VERSION,
+    ExecutableRunSpec,
+    SpecInvalid,
+    SpecLegacy,
+    load_verified_spec,
+)
 from forge.runs.verification import PRODUCER_AZURE_BUILD
 from forge.runs.service import (
-    RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
     _DECISION_TTL_FALLBACK_SECONDS,
     _GO_RE,
     _RETRY_RE,
+    budget_enforcement_for_backend,
     canonical_json_digest,
     plan_digest_of,
     task_digest_of,
@@ -651,6 +667,25 @@ class AzureRunService:
             )
             project_config = ProjectConfig()
         path_scope = list(project_config.implement_paths)
+        # F22/R13 (A02 parity): the run's numeric budget is resolved and
+        # opened BEFORE the first paid call — the class comes from the
+        # harness decision compiled at plan time (ADR-0023 §2) and the class
+        # names a numeric profile resolved AT FREEZE TIME; nothing
+        # configured → no ceilings. The guard binds to the stack's shared
+        # LLM client so the planner itself reserves.
+        harness_selection = self._compile_harness_selection()
+        budget_limits = self._budget_limits_for_class(harness_selection.budget_class)
+        if budget_limits is not None:
+            async with self._session_factory() as session:
+                await open_budget(
+                    session,
+                    run_id=run_id,
+                    wallclock_s=budget_limits.wallclock_s,
+                    max_calls=budget_limits.max_calls,
+                    max_tokens=budget_limits.max_tokens,
+                )
+                await session.commit()
+        await self._apply_run_budget(run_id)
         try:
             plan = await self._stack.planner.plan(
                 issue_title,
@@ -676,12 +711,12 @@ class AzureRunService:
         # (``handle_issue_edited``) digests the stripped text — a caller
         # passing raw HTML must freeze the comparable snapshot, not a
         # tag-encoding-sensitive one.
-        task_digest = task_digest_of(issue_title, _strip_html(issue_description))
+        task_description = _strip_html(issue_description)
+        task_digest = task_digest_of(issue_title, task_description)
         now = datetime.now(timezone.utc)
         base_sha = await self._read_base_sha()
-        # ADR-0023 §2: the harness decision is compiled at plan time and
-        # frozen into the RunSpec — part of what the gate approves.
-        harness_selection = self._compile_harness_selection()
+        plan_summary = self._plan_summary(plan)
+        plan_files_hint = self._plan_files_hint()
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -701,19 +736,46 @@ class AzureRunService:
                     "harness_selection": harness_selection.as_document(),
                     "plan": {
                         "digest": digest,
-                        "summary": self._plan_summary(plan),
-                        "files_hint": self._plan_files_hint(),
+                        "summary": plan_summary,
+                        "files_hint": plan_files_hint,
                     },
+                    # R13 §4 (A02 parity): the honest enforcement record —
+                    # what the frozen budget enforces on THIS lane, and
+                    # which ceilings ride in the spec. Absent when no
+                    # finite profile applies.
+                    **(
+                        {
+                            "budget": {
+                                "budget_class": harness_selection.budget_class,
+                                "enforcement": budget_enforcement_for_backend(
+                                    "ci_harness" if self._lane_pipeline_id() else "builtin"
+                                ),
+                                "max_calls": budget_limits.max_calls,
+                                "max_tokens": budget_limits.max_tokens,
+                                "wallclock_s": budget_limits.wallclock_s,
+                            }
+                        }
+                        if budget_limits is not None
+                        else {}
+                    ),
                 },
             )
-            # F14 (ADR-0018 §1): freeze the immutable RunSpec at plan
-            # acceptance — before the plan is published for approval.
+            # F14/R04 (ADR-0018 §1, A02): freeze the EXECUTABLE RunSpec at
+            # plan acceptance — the same typed v3 document as the GitLab
+            # and GitHub paths: the task text, the plan artifact, the model
+            # route, the path policy, the required checks, the budgets and
+            # the backend/driver. The gate binds its digest, so /go
+            # approves exactly the bytes the run will execute.
             spec_document = self._build_run_spec_document(
                 project_id=project_id,
                 issue_number=issue_number,
                 base_sha=base_sha,
-                plan_digest=digest,
+                task_title=issue_title,
+                task_description=task_description,
                 task_digest=task_digest,
+                plan_summary=plan_summary,
+                plan_files_hint=plan_files_hint,
+                plan_digest=digest,
                 allowed_paths=path_scope,
                 harness_selection=harness_selection,
             )
@@ -721,12 +783,22 @@ class AzureRunService:
             session.add(
                 RunSpec(
                     run_id=run_id,
-                    schema_version=RUN_SPEC_SCHEMA_VERSION,
+                    schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
                     document=spec_document,
                     digest=spec_digest,
                 )
             )
             run.spec_digest = spec_digest
+            await session.commit()
+
+        # F22 (ADR-0018 §5): open the run's budget from the spec (idempotent
+        # — a pre-paid open above already froze the limits; this only
+        # backfills the spec_digest provenance, and a no-profile run opens
+        # nothing).
+        async with self._session_factory() as session:
+            await open_budget_from_spec(
+                session, run_id=run_id, spec_document=spec_document, spec_digest=spec_digest
+            )
             await session.commit()
 
         await self._post_journaled_comment(
@@ -1956,19 +2028,27 @@ class AzureRunService:
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
         """One gate-approved publish cycle.
 
-        Pipelines lane (ADR-0024 §6): a connection onboarded for lane
-        execution (``FORGE_AZDO_LANE_PIPELINE_ID``) dispatches the harness
-        and parks in ``waiting_harness`` — the AZ-3 reconciler drives the
-        rest. Builtin (default): propose + publish synchronously as on
-        GitHub, ending at ``ready_for_human``.
+        Pipelines lane (ADR-0024 §6): the FROZEN backend is ``ci_harness``
+        (the connection was onboarded for lane execution at plan acceptance)
+        — the leg dispatches the harness and parks in ``waiting_harness`` —
+        the AZ-3 reconciler drives the rest. Builtin (default): propose +
+        publish synchronously as on GitHub, ending at ``ready_for_human``.
+
+        R04/A02: the frozen executable spec is THE approved input — the
+        task text, the plan artifact and the model route come from it, never
+        from live settings or a live work-item re-read. A missing, tampered
+        or legacy (v2) spec parks the run (``spec_invalid`` /
+        ``spec_legacy``), never a silent fallback.
         """
-        if self._lane_pipeline_id():
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
+        if spec.backend == "ci_harness":
             await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
             return
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            plan_summary, _ = _plan_evidence(run)
             base_sha = run.base_sha or ""
             plan_digest = run.plan_digest or ""
 
@@ -1981,7 +2061,10 @@ class AzureRunService:
             )
             return
 
-        issue_title = await self._read_work_item_title(issue_number)
+        # R04/A02: no live work-item re-read — the implementer executes the
+        # FROZEN task text the approver saw, whatever the work item shows
+        # now.
+        issue_title = spec.task_title
         # A minimal stub — the implementer only uses id/issue_iid/base_sha of
         # it (the same duck-typed contract GitHubPublishFlow relies on; typed
         # loosely at the call like the flow does).
@@ -1993,8 +2076,10 @@ class AzureRunService:
             changeset: ChangeSet = await proposer.propose(
                 run_stub,
                 issue_title,
-                plan_summary=plan_summary,
+                plan_summary=spec.plan_summary,
                 attempt_base=base_sha or None,
+                task_text=spec.task_text,
+                model_route=spec.model_route,
             )
         except Exception as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
@@ -2182,21 +2267,49 @@ class AzureRunService:
         work_item_id) → ``waiting_harness`` with the journaled
         :class:`AzurePipelinesHandle` in the run's evidence. The AZ-3
         reconciler polls from here — the wait is worker-free, like
-        ``waiting_ci``. The dispatched driver is the one frozen in the
-        RunSpec (ADR-0023 §6).
+        ``waiting_ci``.
+
+        R13: an exhausted budget (or a spent wall clock) starts no new
+        episode — the dispatch is the only enforcement point a
+        non-intercepted lane has, so it is checked before any I/O.
+
+        A02/R04: the lane pipeline id, the model input and the dispatched
+        driver come from the digest-verified executable spec (the frozen
+        pipeline contract) — never live settings. A missing/tampered spec
+        blocks the run (``spec_invalid``); a legacy v2 spec parks
+        ``spec_legacy: re-approval required``. *driver* overrides the frozen
+        selection for a fallback advance.
         """
+        # R13: dispatch-time budget gate (partial enforcement — episode
+        # count and wall clock are the axes this lane can honestly enforce).
+        block = await self._budget_episode_block(run_id)
+        if block is not None:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, block)
+            return
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
+        pipeline_id = spec.lane_pipeline_id
+        if pipeline_id is None:
+            # The frozen backend says ci_harness but the document names no
+            # lane pipeline — a corrupt dispatch contract, never a
+            # live-settings guess.
+            await self._to_terminal(
+                run_id, FlowStatus.FAILED, "backend_config: no lane pipeline id in the spec"
+            )
+            return
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             attempt_base = attempt_base_for(run)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
         if driver is None:
-            driver = await self._frozen_harness_driver(run_id) or self._harness_driver()
+            driver = spec.harness_driver
         branch = azure_factory_branch(issue_number, run_id)
         handle = AzurePipelinesHandle(
             provider="azure_devops",
             project=self._project,
             repo=self._repo,
-            pipeline_id=self._lane_pipeline_id() or 0,
+            pipeline_id=pipeline_id,
             run_id=0,
             branch=branch,
             attempt_base=attempt_base,
@@ -2225,7 +2338,9 @@ class AzureRunService:
                     "run_id": run_id,
                     "attempt_base": attempt_base,
                     "driver": driver,
-                    "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+                    # R04/A02: the model input is the route frozen in the
+                    # spec — the gate approved exactly this execution shape.
+                    "model": spec.harness_model,
                     "work_item_id": str(issue_number),
                     # Bounded verification-failure context on a repair
                     # re-dispatch; empty on cycle 1.
@@ -2314,22 +2429,6 @@ class AzureRunService:
                 run_id,
                 "taken_in_work_note",
             )
-
-    async def _frozen_harness_driver(self, run_id: str) -> str | None:
-        """The driver frozen at plan time (ADR-0023 §6), or None for a
-        pre-v2 RunSpec — None keeps the configured-backend default."""
-        async with self._session_factory() as session:
-            spec = (
-                (
-                    await session.execute(
-                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
-                    )
-                )
-                .scalars()
-                .first()
-            )
-        selection = selection_from_spec_document(spec.document if spec is not None else None)
-        return selection.harness if selection is not None else None
 
     async def _ensure_harness_branch(self, branch: str, attempt_base: str) -> None:
         """Cut the factory branch at the frozen attempt base; pre-existence is
@@ -2536,7 +2635,15 @@ class AzureRunService:
         still reaches the human, but the reason says ``unverified`` instead
         of implying builds passed (R02). The reason wording and the
         finalization iron checks come from :mod:`forge.runs.consistency`
-        (ADR-0027) — the GitLab leg's one source, not an Azure fork of it."""
+        (ADR-0027) — the GitLab leg's one source, not an Azure fork of it.
+
+        R04/A02: the review brief reads the FROZEN task title and plan
+        artifact from the executable spec — never a live work-item read. A
+        missing/tampered/legacy spec parks the run instead of guessing.
+        """
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -2551,8 +2658,8 @@ class AzureRunService:
         # R07 bounded step ``review``: a review already persisted for THIS
         # candidate sha is replayed — the model runs exactly once per
         # (run, candidate). A different sha legitimately re-reviews.
-        plan_summary, _ = await self._read_plan_evidence(run_id)
-        issue_title = await self._read_work_item_title(issue_number)
+        plan_summary = spec.plan_summary
+        issue_title = spec.task_title
         stored = await self._read_review_evidence(run_id)
         if (
             isinstance(stored, dict)
@@ -2660,8 +2767,14 @@ class AzureRunService:
         dispatch that never surfaces retries only up to
         ``FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS`` before the run parks
         blocked with the precise reason.
+
+        R04/A02: the timeout is the ``harness_timeout`` frozen in the spec;
+        a missing/tampered/legacy spec parks the run instead of guessing.
         """
         now = now or datetime.now(timezone.utc)
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             if run is None:
@@ -2700,7 +2813,7 @@ class AzureRunService:
             )
             logger.info("Run %s cancelled — harness evaluation stood down pre-poll", run_id[:8])
             return
-        timeout = int(getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800)
+        timeout = spec.harness_timeout
         started = _parse_journaled_time(journaled.started_at)
         if started is not None and as_aware_utc(now) > as_aware_utc(started) + timedelta(
             seconds=timeout
@@ -3053,8 +3166,19 @@ class AzureRunService:
         grant are evaluated LOCALLY before the provider is touched — a
         permanently erroring Builds API can keep the run waiting only up to
         ``FORGE_VERIFICATION_TIMEOUT_SECONDS``, never past it.
+
+        R04/A02: the frozen executable spec is read digest-verified on every
+        pass — it names the lane pipeline that is execution (excluded from
+        the verification surface) and carries the required-checks contract
+        (the check-proof semantics are a later issue; the REQUIRED list is
+        frozen now). A missing/tampered spec blocks the run
+        (``spec_invalid``); a legacy v2 spec parks
+        ``spec_legacy: re-approval required``.
         """
         now = now or datetime.now(timezone.utc)
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             if run is None:
@@ -3090,7 +3214,9 @@ class AzureRunService:
             return
 
         try:
-            builds = await self._candidate_builds(candidate_sha, since=waiting_since)
+            builds = await self._candidate_builds(
+                candidate_sha, since=waiting_since, lane_pipeline_id=spec.lane_pipeline_id
+            )
         except Exception:
             logger.exception("Builds read failed for %s — keeping it waiting", run_id[:8])
             return
@@ -3184,14 +3310,23 @@ class AzureRunService:
             verification_evidence=verification_fragment,
         )
 
-    async def _candidate_builds(self, candidate_sha: str, *, since: datetime | None) -> list[dict]:
+    async def _candidate_builds(
+        self,
+        candidate_sha: str,
+        *,
+        since: datetime | None,
+        lane_pipeline_id: int | None = None,
+    ) -> list[dict]:
         """Completed/running builds whose sourceVersion IS the candidate commit.
 
         The Builds API has no ``sourceVersion`` filter (research §6.6
         correction #1) — the commit correlation is client-side over the
         documented ``repositoryId``/``minTime``/``$top`` query, exactly like
         the executor's discovery. The lane pipeline is execution, not
-        verification, and is excluded (the GitHub harness-workflow rule).
+        verification, and is excluded (the GitHub harness-workflow rule) by
+        the pipeline id FROZEN in the spec — *lane_pipeline_id* (A02); a
+        live-settings read here would let a post-approval lane change move
+        the verification surface.
         """
         min_time = as_aware_utc(since) - timedelta(minutes=10) if since is not None else None
         builds = await self._stack.client.list_builds_by_repository(
@@ -3201,7 +3336,7 @@ class AzureRunService:
             top=25,
         )
         wanted = candidate_sha.lower()
-        lane = self._lane_pipeline_id()
+        lane = lane_pipeline_id
         matched: list[dict] = []
         for build in builds:
             if str(build.get("sourceVersion") or "").lower() != wanted:
@@ -3229,7 +3364,25 @@ class AzureRunService:
         with the bounded failure context riding as a dispatch input, so the
         lane agent fixes its own candidate. Cycles exhausted → an honest
         ``blocked(quality_contract)``.
+
+        R04/A02: the commit-cycle ceiling is the one frozen in the spec —
+        a post-approval settings change cannot extend the approved budget.
+        A missing/tampered/legacy spec parks the run instead of guessing.
         """
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return False
+        if spec.backend != "ci_harness":
+            # ADR-0015/A02: the frozen backend is builtin — the run has no
+            # harness repair leg, and a lane onboarded after the freeze must
+            # never upgrade it to a dispatch the gate did not approve.
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"quality_contract: {failure_reason} — the frozen builtin lane "
+                "has no repair dispatch",
+            )
+            return False
         async with self._session_factory() as session:
             controller = Controller(session)
             run = await self._get_run(session, run_id)
@@ -3240,7 +3393,7 @@ class AzureRunService:
             ):
                 return False
             next_cycle = (run.commit_cycle or 1) + 1
-            max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
+            max_cycles = spec.commit_cycles
             if next_cycle > max_cycles:
                 await self._to_terminal(
                     run_id,
@@ -3384,20 +3537,160 @@ class AzureRunService:
         driver id set is validated (tighten-only, ADR-0015). Without it the
         builtin lane dispatches no harness, so only the id set is validated.
 
-        TODO(ADR-0023 §5): pass the planner's structured proposal from
-        LLMPlanner.plan's output once that surface exists — same
-        integration point as the GitHub service. None keeps the compiler
-        defaults.
+        R31/A02 (GitLab parity): the compilable lanes are the project's
+        available-driver manifest (:func:`resolve_available_drivers`; unset
+        — the shipped driver set), so a driver the project did not onboard
+        is never selected — not by the preference, not by the planner's
+        proposal ({"harness", "budget_class", "reason"} from the stack
+        planner's ``last_plan``, honored as policy-constrained ranking).
+        R13/A02: the budget class's numeric profile resolves AT FREEZE TIME
+        and rides ON the selection — ``None`` (no finite profile) attaches
+        nothing.
         """
         preference = resolve_preference(self._config, self._settings)
         lane = self._lane_pipeline_id()
         validate_preference(preference, self._harness_driver() if lane else None)
-        return compile_harness_selection(
+        available = resolve_available_drivers(self._config, self._settings) or set(SHIPPED_DRIVERS)
+        selection = compile_harness_selection(
             preference,
             f"ci_harness:{self._harness_driver()}" if lane else "builtin",
-            set(SHIPPED_DRIVERS),
-            None,
+            available,
+            self._planner_harness_proposal(),
         )
+        limits = self._budget_limits_for_class(selection.budget_class)
+        if limits is not None:
+            selection = replace(
+                selection,
+                budget_ceilings=BudgetCeilings(
+                    max_calls=limits.max_calls,
+                    max_tokens=limits.max_tokens,
+                    wallclock_s=limits.wallclock_s,
+                ),
+            )
+        return selection
+
+    def _planner_harness_proposal(self) -> dict | None:
+        """R31: the planner's optional harness proposal, leniently read.
+
+        Mirrors the GitLab/GitHub discipline: the stack planner's
+        ``last_plan`` may carry ``harness`` / ``budget_class`` / ``reason``;
+        anything missing, non-string or empty yields no proposal. The
+        planner is never the authority — every field is re-validated by
+        :func:`compile_harness_selection`.
+        """
+        last_plan = getattr(self._stack.planner, "last_plan", None)
+        if not isinstance(last_plan, dict):
+            return None
+        proposal: dict[str, str] = {}
+        for key in ("harness", "budget_class", "reason"):
+            value = str(last_plan.get(key) or "").strip()
+            if value:
+                proposal[key] = value
+        return proposal or None
+
+    def _budget_profiles(self) -> dict[str, dict[str, Any]]:
+        """The configured numeric budget profiles (R13): forge.yml first
+        (``budget_profiles:``), else the FORGE_BUDGET_PROFILES JSON — the
+        same precedence as the GitLab lane."""
+        from_config = self._config.budget_profiles
+        if from_config:
+            return from_config
+        return parse_budget_profiles(
+            str(getattr(self._settings, "FORGE_BUDGET_PROFILES", "") or "")
+        )
+
+    def _budget_limits_for_class(self, budget_class: str) -> BudgetLimits | None:
+        """The numeric ceilings of *budget_class*'s profile, or ``None``.
+
+        Thin wrapper over :func:`forge.durable.budgets.resolve_budget_limits`
+        (unknown classes degrade to ``standard``; nothing configured → no
+        ceilings).
+        """
+        return resolve_budget_limits(self._budget_profiles(), budget_class)
+
+    async def _apply_run_budget(self, run_id: str) -> None:
+        """Bind the run's budget guard to the stack's factory agents (F22).
+
+        The stack's agents share one ``LLMClient``; the budget lives in the
+        database and is re-loaded per execution leg. ``None`` (no budget row
+        — unlimited run) clears any previous binding. Agents without an
+        ``LLMClient`` (stubs) are skipped.
+        """
+        guard = await load_budget_guard(self._session_factory, run_id)
+        for agent in (self._stack.planner, self._stack.implementer, self._stack.reviewer):
+            client = getattr(agent, "_llm", None)
+            if client is not None and hasattr(client, "set_budget"):
+                client.set_budget(guard)
+
+    async def _budget_episode_block(
+        self, run_id: str, *, now: datetime | None = None
+    ) -> str | None:
+        """R13: why no new work may start against this run's budget, or None.
+
+        The dispatch-time gate for the Pipelines lane (A02 parity with the
+        GitLab/GitHub lanes): its model calls happen inside the pipeline job
+        forge cannot intercept, so the wall clock and the start of new
+        episodes are enforced HERE, at the dispatch boundary.
+        """
+        async with self._session_factory() as session:
+            block = await budget_block_reason(session, run_id, now=now)
+            if block is not None:
+                # A wall-clock expiry flips the budget exhausted inside this
+                # session — commit so the stop is durable and visible.
+                await session.commit()
+            return block
+
+    async def _load_executable_spec(self, run_id: str) -> ExecutableRunSpec:
+        """The digest-verified executable spec for *run* (R04, A02 parity).
+
+        The one consumption read every post-approval leg shares: it
+        re-computes the canonical digest of the stored document and checks
+        it against both the row and the digest the gate froze into
+        ``run.spec_digest``. A missing, tampered or corrupt spec raises
+        :class:`SpecInvalid`; a legacy (pre-v3) row raises
+        :class:`SpecLegacy` (A02 policy: re-approval required, never a
+        silent v3 re-interpretation) — callers park the run either way;
+        there is no fallback to live settings.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            spec_digest = run.spec_digest
+            row = (
+                (
+                    await session.execute(
+                        select(RunSpec)
+                        .where(RunSpec.run_id == run_id)
+                        .order_by(RunSpec.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            document = row.document if row is not None else None
+            row_digest = str(row.digest) if row is not None else None
+            row_schema_version = int(row.schema_version) if row is not None else None
+        return load_verified_spec(
+            document=document,
+            digest=row_digest,
+            run_spec_digest=spec_digest,
+            schema_version=row_schema_version,
+        )
+
+    async def _spec_or_block(self, run_id: str) -> ExecutableRunSpec | None:
+        """The verified spec, or the run parked and ``None`` (A02 policy).
+
+        ``blocked(spec_legacy: re-approval required)`` for a pre-executable
+        stored spec; ``blocked(spec_invalid: ...)`` for a missing/tampered
+        one. Never falls back to live settings.
+        """
+        try:
+            return await self._load_executable_spec(run_id)
+        except SpecLegacy as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_legacy: {exc}")
+        except SpecInvalid as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
+        return None
 
     def _policy_digest(self) -> str:
         """ADR-0009 + ADR-0018 §1: bind the effective execution policy.
@@ -3427,51 +3720,71 @@ class AzureRunService:
         project_id: int,
         issue_number: int,
         base_sha: str,
-        plan_digest: str,
+        task_title: str,
+        task_description: str,
         task_digest: str,
+        plan_summary: str,
+        plan_files_hint: list[str],
+        plan_digest: str,
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
     ) -> dict:
-        """The immutable RunSpec document frozen at plan acceptance (F14).
+        """The immutable, EXECUTABLE RunSpec document (F14, R04, A02).
 
-        With the lane configured, backend_config carries the frozen
-        execution profile: backend ``ci_harness``, the lane pipeline id and
-        the driver — the dispatch inputs later come FROM this document.
+        The same typed v3 document the GitLab and GitHub lanes freeze
+        (:class:`~forge.runs.spec.ExecutableRunSpec`): the task text, the
+        plan artifact, the model route, the tool/path policy, the required
+        checks (the check-proof semantics are a later issue; the REQUIRED
+        list is frozen now), the budgets (lifecycle limits always; the R13
+        numeric ceilings when a finite profile resolves) and the
+        backend/driver. ``lane_pipeline_id`` freezes the Pipelines dispatch
+        contract so a spec change means a different lane run.
+        ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
+        runs. Post-approval legs read the stored document through
+        :meth:`_load_executable_spec` (digest-verified on every read), never
+        live Settings.
         """
         selection = harness_selection or self._compile_harness_selection()
         lane = self._lane_pipeline_id()
-        backend_config: dict = {
-            "backend": "ci_harness" if lane else "builtin",
-            "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
-            "target_branch": self._target_branch(),
-            **selection.as_document(),
-        }
-        if lane:
-            backend_config["lane_pipeline_id"] = lane
-            backend_config["driver"] = selection.harness
-        document: dict = {
-            "subject": {
-                "provider": "azure_devops",
-                "project": self._project,
-                "repo_full_name": self._repo_full_name,
-                "project_id": project_id,
-                "issue_iid": issue_number,
-            },
-            "source_base_oid": base_sha or "",
-            "plan_digest": plan_digest,
-            "task_digest": task_digest,
-            "policy_digest": self._policy_digest(),
-            "backend_config": backend_config,
-            "budgets": {
-                "commit_cycles": int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
-                "harness_timeout": int(
-                    getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800
-                ),
-            },
-        }
-        if allowed_paths:
-            document["allowed_paths"] = [str(glob) for glob in allowed_paths]
-        return document
+        backend = "ci_harness" if lane else "builtin"
+        # R13/A02: the budget class's numeric profile is resolved AT FREEZE
+        # TIME and stored IN the spec — the gate approves exactly these
+        # ceilings and the honest enforcement level of this lane. ``None``
+        # freezes no ceiling fields at all (byte-compatible).
+        limits = self._budget_limits_for_class(selection.budget_class)
+        enforcement = budget_enforcement_for_backend(backend) if limits is not None else ""
+        spec = ExecutableRunSpec.freeze(
+            provider="azure_devops",
+            project_id=project_id,
+            issue_iid=issue_number,
+            source_base_oid=base_sha or "",
+            task_title=task_title,
+            task_description=task_description,
+            plan_summary=plan_summary,
+            plan_files_hint=plan_files_hint,
+            plan_digest=plan_digest,
+            model_route=IMPLEMENTER_TIER,
+            policy_digest=self._policy_digest(),
+            required_jobs=self._required_jobs(),
+            allowed_paths=allowed_paths or [],
+            backend=backend,
+            harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            target_branch=self._target_branch(),
+            harness_driver=selection.harness,
+            harness_fallbacks=selection.fallbacks,
+            budget_class=selection.budget_class,
+            selection_reason=selection.reason,
+            commit_cycles=int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
+            harness_timeout=int(
+                getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800
+            ),
+            budget_max_calls=limits.max_calls if limits is not None else None,
+            budget_max_tokens=limits.max_tokens if limits is not None else None,
+            budget_wallclock_s=limits.wallclock_s if limits is not None else None,
+            budget_enforcement=enforcement,
+            lane_pipeline_id=lane,
+        )
+        return spec.to_document()
 
     async def _open_pending_decision(
         self,
@@ -3549,11 +3862,6 @@ class AzureRunService:
                 return []
         return []
 
-    async def _read_plan_evidence(self, run_id: str) -> tuple[str, list[str]]:
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            return _plan_evidence(run)
-
     async def _read_review_evidence(self, run_id: str) -> dict | None:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
@@ -3565,23 +3873,6 @@ class AzureRunService:
             run = await self._get_run(session, run_id)
             run.evidence = _merge_evidence(run.evidence, patch)
             await session.commit()
-
-    async def _read_work_item_title(self, issue_number: int) -> str:
-        """Fetch the work item title; fall back to a neutral label on read
-        failure."""
-        try:
-            work_item = await self._stack.client.get_work_item(self._project, issue_number)
-            fields = work_item.get("fields") or {}
-            title = str(fields.get("System.Title") or "")
-            if title:
-                return title
-        except Exception:
-            logger.warning(
-                "Could not read title of work item %s — using fallback",
-                issue_number,
-                exc_info=True,
-            )
-        return f"work item {issue_number}"
 
     def _plan_comment(
         self, run_id: str, plan: str, digest: str, harness_selection: HarnessSelection
@@ -4044,14 +4335,6 @@ def _parse_journaled_time(raw: str) -> datetime | None:
         return datetime.fromisoformat(raw)
     except (TypeError, ValueError):
         return None
-
-
-def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
-    """Read plan summary + files_hint back out of the run's evidence."""
-    plan = (run.evidence or {}).get("plan") or {}
-    summary = str(plan.get("summary") or "")
-    hints = [str(hint) for hint in (plan.get("files_hint") or [])]
-    return summary, hints
 
 
 def _admission_denied_comment(run_id: str, actor: str) -> str:

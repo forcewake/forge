@@ -653,6 +653,22 @@ class TestExecutableRunSpec:
         with pytest.raises(SpecInvalid, match="no spec document"):
             load_verified_spec(document=None, digest=None)
 
+    def test_legacy_row_raises_spec_legacy(self):
+        """A02 legacy policy: a pre-executable stored row raises SpecLegacy —
+        the re-approval-required signal, still caught as a SpecInvalid by
+        every fail-closed caller."""
+        from forge.runs.spec import SpecLegacy
+
+        document = self.make_spec().to_document()
+        with pytest.raises(SpecLegacy, match="re-approval required") as excinfo:
+            load_verified_spec(
+                document=document,
+                digest=sha256_of_document(document),
+                schema_version=2,
+            )
+        assert isinstance(excinfo.value, SpecInvalid)
+        assert "not executable" in str(excinfo.value)
+
     def test_type_garbage_is_spec_invalid_not_a_crash(self):
         """Corrupt numeric fields surface as SpecInvalid (blocked spec_invalid),
         never as a raw ValueError past the verified read."""
@@ -660,6 +676,33 @@ class TestExecutableRunSpec:
         document["budgets"]["commit_cycles"] = "garbage"
         with pytest.raises(SpecInvalid, match="unreadable"):
             ExecutableRunSpec.from_document(document)
+
+    def test_lane_dispatch_contract_round_trips(self):
+        """A02: the additive frozen dispatch-contract fields (the GitHub
+        Actions workflow filename / the Azure lane pipeline id) round-trip
+        through the document — and stay ABSENT for lane-less runs."""
+        gh = self.make_spec(backend="ci_harness", harness_workflow="forge-harness.github.yml")
+        parsed_gh = ExecutableRunSpec.from_document(gh.to_document())
+        assert parsed_gh.harness_workflow == "forge-harness.github.yml"
+        assert "harness_workflow" in gh.to_document()["backend_config"]
+        assert "lane_pipeline_id" not in gh.to_document()["backend_config"]
+
+        az = self.make_spec(backend="ci_harness", lane_pipeline_id=207)
+        parsed_az = ExecutableRunSpec.from_document(az.to_document())
+        assert parsed_az.lane_pipeline_id == 207
+        assert az.to_document()["backend_config"]["lane_pipeline_id"] == 207
+        assert "harness_workflow" not in az.to_document()["backend_config"]
+
+        bare = self.make_spec()
+        parsed_bare = ExecutableRunSpec.from_document(bare.to_document())
+        assert parsed_bare.harness_workflow == ""
+        assert parsed_bare.lane_pipeline_id is None
+        assert "harness_workflow" not in bare.to_document()["backend_config"]
+        assert "lane_pipeline_id" not in bare.to_document()["backend_config"]
+
+    def test_non_positive_lane_pipeline_id_is_spec_invalid(self):
+        with pytest.raises(SpecInvalid, match="lane_pipeline_id"):
+            self.make_spec(lane_pipeline_id=0)
 
 
 class TestSpecBudgetCeilings:

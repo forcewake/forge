@@ -6,6 +6,7 @@ fixtures — the GitLab gate semantics (plan comment, pending decision,
 cancel-as-revoke) exercised on the GitHub surface, no network, no model.
 """
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,10 +23,12 @@ from forge.durable import (
     FlowStatus,
     GateApproval,
     Outbox,
+    RunBudget,
     RunSpec,
     StepRun,
     as_aware_utc,
 )
+from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.reviewer import ReviewVerdict
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
@@ -223,7 +226,8 @@ class TestImplement:
         assert run.base_sha == BASE_HEAD  # the frozen base, pinned at plan time
         assert run.plan_digest
 
-        # The frozen RunSpec exists and its digest is what the decision binds.
+        # The frozen EXECUTABLE RunSpec (v3, A02) exists; its digest is what
+        # the decision binds.
         async with db() as session:
             spec = (
                 (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
@@ -231,8 +235,30 @@ class TestImplement:
                 .one()
             )
         assert spec.digest == run.spec_digest
+        assert spec.schema_version == 3
         assert spec.document["subject"]["provider"] == "github"
+        assert spec.document["subject"]["project_id"] == PROJECT_ID
+        assert spec.document["subject"]["issue_iid"] == ISSUE
         assert spec.document["source_base_oid"] == BASE_HEAD
+        # R04/A02: the executable content rides in the document.
+        assert spec.document["task"] == {
+            "title": ISSUE_TITLE,
+            "description": ISSUE_DESC,
+            "digest": task_digest_of(ISSUE_TITLE, ISSUE_DESC),
+        }
+        assert spec.document["plan"]["digest"] == run.plan_digest
+        assert spec.document["plan"]["summary"]
+        assert spec.document["model_route"] == {"tier": IMPLEMENTER_TIER}
+        assert spec.document["verification"] == {"required_jobs": []}
+        assert spec.document["budgets"] == {
+            "commit_cycles": 3,
+            "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
+        }
+        backend = spec.document["backend_config"]
+        assert backend["backend"] == "builtin"
+        assert backend["harness"] == "claude-code"
+        assert backend["model"] == make_settings().FORGE_HARNESS_MODEL
+        assert "harness_workflow" not in backend  # builtin — no frozen lane
 
         # The pending decision exists, carrying the plan/base/spec/task digests.
         async with db() as session:
@@ -1160,6 +1186,171 @@ class TestSupersededDraftPR:
 
         assert closed == 0
         assert fake.calls_of("close_pull_request") == []
+
+
+# ----------------------------------------------------------------------
+# A02: the executable spec v3 on the GitHub path
+# ----------------------------------------------------------------------
+
+
+class TestExecutableSpecA02:
+    """The GitHub lane freezes and consumes the SAME executable spec v3 as
+    the GitLab path: post-/go settings changes never alter execution, the
+    budget ceilings come from the R13 profiles, an un-onboarded driver is
+    never selected, and a legacy v2 spec parks re-approval-required."""
+
+    async def test_settings_drift_after_freeze_never_moves_the_spec(self, db, fake):
+        """The document (and its digest) frozen at plan acceptance is the
+        approved input — mutating the live settings afterwards moves
+        nothing."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="pytest",
+            FORGE_MAX_COMMIT_CYCLES=2,
+            FORGE_HARNESS_PREFERENCE="grok-build,claude-code",
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            session.expunge(spec)
+        frozen_digest = spec.digest
+        frozen_document = dict(spec.document)
+
+        settings.FORGE_REQUIRED_JOBS = ""
+        settings.FORGE_MAX_COMMIT_CYCLES = 9
+        settings.FORGE_HARNESS_PREFERENCE = "claude-code"
+        settings.FORGE_HARNESS_MODEL = "post-gate-model"
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document == frozen_document
+        assert spec.digest == frozen_digest
+        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+        assert spec.document["budgets"]["commit_cycles"] == 2
+        assert spec.document["backend_config"]["harness"] == "grok-build"
+
+    async def test_unavailable_driver_is_never_selected(self, db, fake):
+        """R31 manifest: a driver the project did not onboard is dropped
+        from the frozen chain — not selected by the preference."""
+        settings = make_settings(
+            FORGE_HARNESS_PREFERENCE="grok-build,claude-code",
+            FORGE_AVAILABLE_DRIVERS='["claude-code"]',
+        )
+        service = make_service(db, fake, settings=settings)
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        backend = spec.document["backend_config"]
+        assert backend["harness"] == "claude-code"
+        assert backend["harness_fallbacks"] == []  # grok-build is not onboarded
+
+    async def test_budget_profile_freezes_numeric_ceilings(self, db, fake):
+        """R13: the class's numeric profile resolves AT FREEZE TIME and
+        rides in the spec's budgets block with its honest enforcement
+        level (full — the builtin lane intercepts every call)."""
+        settings = make_settings(
+            FORGE_BUDGET_PROFILES='{"standard": {"max_calls": 40, "max_tokens": 500000,'
+            ' "wallclock_s": 3600}}',
+        )
+        service = make_service(db, fake, settings=settings)
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            run = await session.get(FlowRun, run_id)
+            budgets = (
+                (await session.execute(select(RunBudget).where(RunBudget.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["budgets"] == {
+            "commit_cycles": 3,
+            "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
+            "max_calls": 40,
+            "max_tokens": 500000,
+            "wallclock_s": 3600,
+            "enforcement": "full",
+        }
+        # The budget row was opened BEFORE the first paid call and bound to
+        # the frozen spec digest.
+        assert budgets.max_calls == 40
+        assert budgets.spec_digest == run.spec_digest
+        assert (run.evidence or {})["budget"]["enforcement"] == "full"
+
+    async def test_legacy_v2_spec_parks_reapproval_required(self, db, fake):
+        """A02 legacy policy: a run whose stored spec is v2 (created
+        pre-upgrade) is never silently executed as v3 — the next dispatch
+        leg parks blocked(spec_legacy: re-approval required)."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)  # the gate consumed the v3 spec digest
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+        # Rewrite the row into exactly what the pre-upgrade lane stored: a
+        # v2-shaped, digest-consistent document.
+        v2_document = {
+            "subject": {
+                "provider": "github",
+                "repo_full_name": REPO,
+                "project_id": PROJECT_ID,
+                "issue_iid": ISSUE,
+            },
+            "source_base_oid": BASE_HEAD,
+            "plan_digest": (await get_run(db, run_id)).plan_digest,
+            "task_digest": task_digest_of(ISSUE_TITLE, ISSUE_DESC),
+            "policy_digest": service._policy_digest(),
+            "backend_config": {
+                "backend": "builtin",
+                "model": make_settings().FORGE_HARNESS_MODEL,
+                "target_branch": "main",
+                "harness": "claude-code",
+                "harness_fallbacks": [],
+                "budget_class": "standard",
+                "selection_reason": "default",
+            },
+            "budgets": {"commit_cycles": 3, "harness_timeout": 1800},
+        }
+        v2_digest = hashlib.sha256(
+            json.dumps(v2_document, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            spec.schema_version = 2
+            spec.document = v2_document
+            spec.digest = v2_digest
+            run = await session.get(FlowRun, run_id)
+            run.spec_digest = v2_digest
+            await session.commit()
+        clear_comments(fake)
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("spec_legacy")
+        assert "re-approval required" in (run.status_reason or "")
 
 
 def test_gateway_commands_are_reachable_through_the_dispatch_guard():

@@ -7,6 +7,7 @@ work-item comment, pending decision, cancel-as-revoke, one active run)
 exercised on the Azure DevOps surface, no network, no model.
 """
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -25,10 +26,12 @@ from forge.durable import (
     FlowStatus,
     GateApproval,
     Outbox,
+    RunBudget,
     RunSpec,
     StepRun,
     as_aware_utc,
 )
+from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.llm import LLMError, LLMResult
 from forge.factory.reviewer import ReviewVerdict
 from forge.gateway.azure_webhook import normalize_workitem_comment
@@ -47,6 +50,7 @@ from forge.runs.azure_service import (
     AzurePipelinesHandle,
     AzurePRReviewer,
     AzureRunService,
+    _strip_html,
     azure_factory_branch,
     evaluate_azure_waiting_ci,
     evaluate_azure_waiting_harness,
@@ -660,7 +664,8 @@ class TestImplement:
         assert run.base_sha == BASE_HEAD  # the frozen base, pinned at plan time
         assert run.plan_digest
 
-        # The frozen RunSpec v2 exists; its digest is what the decision binds.
+        # The frozen EXECUTABLE RunSpec (v3, A02) exists; its digest is what
+        # the decision binds.
         async with db() as session:
             spec = (
                 (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
@@ -668,10 +673,28 @@ class TestImplement:
                 .one()
             )
         assert spec.digest == run.spec_digest
-        assert spec.schema_version == 2
+        assert spec.schema_version == 3
         assert spec.document["subject"]["provider"] == "azure_devops"
-        assert spec.document["subject"]["repo_full_name"] == REPO_FULL
+        assert spec.document["subject"]["project_id"] == PROJECT_ID
+        assert spec.document["subject"]["issue_iid"] == WORK_ITEM
         assert spec.document["source_base_oid"] == BASE_HEAD
+        # R04/A02: the executable content rides in the document.
+        assert spec.document["task"]["title"] == WORK_ITEM_TITLE
+        assert spec.document["task"]["description"] == _strip_html(WORK_ITEM_DESC_HTML)
+        assert spec.document["task"]["digest"] == task_digest_of(
+            WORK_ITEM_TITLE, _strip_html(WORK_ITEM_DESC_HTML)
+        )
+        assert spec.document["plan"]["digest"] == run.plan_digest
+        assert spec.document["plan"]["summary"]
+        assert spec.document["model_route"] == {"tier": IMPLEMENTER_TIER}
+        assert spec.document["verification"] == {"required_jobs": []}
+        assert spec.document["budgets"] == {
+            "commit_cycles": 3,
+            "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
+        }
+        assert spec.document["backend_config"]["backend"] == "builtin"
+        assert spec.document["backend_config"]["harness"] == "claude-code"
+        assert "lane_pipeline_id" not in spec.document["backend_config"]
 
         # The pending decision exists, carrying the plan/base/spec/task digests.
         async with db() as session:
@@ -740,7 +763,7 @@ class TestImplement:
         backend = spec.document["backend_config"]
         assert backend["backend"] == "ci_harness"
         assert backend["lane_pipeline_id"] == LANE_PIPELINE_ID
-        assert backend["driver"] == "claude-code"
+        assert backend["harness"] == "claude-code"
         (body,) = comments(fake)
         assert "## Implementation" in body and "**claude-code**" in body
 
@@ -1125,6 +1148,196 @@ class TestGoLane:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# A02: the executable spec v3 on the Azure DevOps path
+# ----------------------------------------------------------------------
+
+
+class TestExecutableSpecA02:
+    """The Azure DevOps lane freezes and consumes the SAME executable spec
+    v3 as the GitLab/GitHub paths: post-/go settings changes never alter
+    execution, the budget ceilings come from the R13 profiles, an
+    un-onboarded driver is never selected, and a legacy v2 spec parks
+    re-approval-required."""
+
+    async def test_settings_drift_after_freeze_never_moves_the_spec(self, db, fake):
+        settings = make_settings(
+            FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID,
+            FORGE_REQUIRED_JOBS="pytest",
+            FORGE_MAX_COMMIT_CYCLES=2,
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            session.expunge(spec)
+        frozen_digest = spec.digest
+        frozen_document = dict(spec.document)
+
+        settings.FORGE_REQUIRED_JOBS = ""
+        settings.FORGE_MAX_COMMIT_CYCLES = 9
+        settings.FORGE_AZDO_LANE_PIPELINE_ID = 999
+        settings.FORGE_HARNESS_MODEL = "post-gate-model"
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document == frozen_document
+        assert spec.digest == frozen_digest
+        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+        assert spec.document["budgets"]["commit_cycles"] == 2
+        assert spec.document["backend_config"]["lane_pipeline_id"] == LANE_PIPELINE_ID
+
+    async def test_unavailable_driver_is_never_selected(self, db, fake):
+        """R31 manifest: a driver the project did not onboard is dropped
+        from the frozen chain — not selected by the preference."""
+        settings = make_settings(
+            FORGE_HARNESS_PREFERENCE="grok-build,claude-code",
+            FORGE_AVAILABLE_DRIVERS='["claude-code"]',
+        )
+        service = make_service(db, fake, settings=settings)
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        backend = spec.document["backend_config"]
+        assert backend["harness"] == "claude-code"
+        assert backend["harness_fallbacks"] == []  # grok-build is not onboarded
+
+    async def test_budget_profile_freezes_numeric_ceilings(self, db, fake):
+        """R13: the class's numeric profile resolves AT FREEZE TIME and
+        rides in the spec's budgets block with its honest enforcement
+        level (full — the builtin lane intercepts every call)."""
+        settings = make_settings(
+            FORGE_BUDGET_PROFILES='{"standard": {"max_calls": 40, "max_tokens": 500000,'
+            ' "wallclock_s": 3600}}',
+        )
+        service = make_service(db, fake, settings=settings)
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            run = await session.get(FlowRun, run_id)
+            budgets = (
+                (await session.execute(select(RunBudget).where(RunBudget.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["budgets"] == {
+            "commit_cycles": 3,
+            "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
+            "max_calls": 40,
+            "max_tokens": 500000,
+            "wallclock_s": 3600,
+            "enforcement": "full",
+        }
+        # The budget row was opened BEFORE the first paid call and bound to
+        # the frozen spec digest.
+        assert budgets.max_calls == 40
+        assert budgets.spec_digest == run.spec_digest
+        assert (run.evidence or {})["budget"]["enforcement"] == "full"
+
+    async def test_budget_exhausted_blocks_the_lane_dispatch(self, db, fake):
+        """R13/A02: an exhausted budget starts no new episode — the dispatch
+        is the enforcement point the lane has."""
+        settings = make_settings(
+            FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID,
+            FORGE_BUDGET_PROFILES='{"standard": {"max_calls": 5, "wallclock_s": 3600}}',
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)  # the budget row opens pre-paid
+        async with db() as session:
+            budget = (
+                (await session.execute(select(RunBudget).where(RunBudget.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            budget.status = "exhausted"
+            await session.commit()
+        fake.pipeline_calls.clear()
+        clear_comments(fake)
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("budget_exhausted")
+        assert fake.pipeline_calls == []  # no episode was dispatched
+
+    async def test_legacy_v2_spec_parks_reapproval_required(self, db, fake):
+        """A02 legacy policy: a run whose stored spec is v2 (created
+        pre-upgrade) is never silently executed as v3 — the next dispatch
+        leg parks blocked(spec_legacy: re-approval required)."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)  # the gate consumed the v3 spec digest
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+        # Rewrite the row into exactly what the pre-upgrade lane stored: a
+        # v2-shaped, digest-consistent document.
+        v2_document = {
+            "subject": {
+                "provider": "azure_devops",
+                "project": PROJECT,
+                "repo_full_name": REPO_FULL,
+                "project_id": PROJECT_ID,
+                "issue_iid": WORK_ITEM,
+            },
+            "source_base_oid": BASE_HEAD,
+            "plan_digest": (await get_run(db, run_id)).plan_digest,
+            "task_digest": task_digest_of(WORK_ITEM_TITLE, _strip_html(WORK_ITEM_DESC_HTML)),
+            "policy_digest": service._policy_digest(),
+            "backend_config": {
+                "backend": "builtin",
+                "model": make_settings().FORGE_HARNESS_MODEL,
+                "target_branch": "main",
+                "harness": "claude-code",
+                "harness_fallbacks": [],
+                "budget_class": "standard",
+                "selection_reason": "default",
+            },
+            "budgets": {"commit_cycles": 3, "harness_timeout": 1800},
+        }
+        v2_digest = hashlib.sha256(
+            json.dumps(v2_document, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            spec.schema_version = 2
+            spec.document = v2_document
+            spec.digest = v2_digest
+            run = await session.get(FlowRun, run_id)
+            run.spec_digest = v2_digest
+            await session.commit()
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("spec_legacy")
+        assert "re-approval required" in (run.status_reason or "")
+
+
 class TestVerificationGate:
     async def test_green_build_drives_to_verified_ready(self, db, fake):
         """Succeeded builds of the candidate commit → review → ready, with
@@ -1207,17 +1420,29 @@ class TestVerificationGate:
     @pytest.mark.parametrize("result", ["failed", "canceled", "partiallySucceeded"])
     async def test_red_build_results_enter_repair(self, db, fake, result):
         """ADR-0008: not fully green blames the change — a bounded repair
-        cycle re-dispatches the lane with the failure as its context."""
-        service = make_service(db, fake)
-        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        cycle re-dispatches the lane with the failure as its context.
+
+        A02: the lane pipeline id is FROZEN in the spec — the repair
+        dispatches exactly that frozen contract (cycle 1's episode was the
+        lane dispatch; the red verification build enters cycle 2)."""
+        service = make_service(
+            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        )
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)  # episode 1: the frozen-lane dispatch
+        branch = azure_factory_branch(WORK_ITEM, run_id)
+        candidate_sha = fake.heads[branch]
+        # The lane candidate was published — the run waits for verification.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.WAITING_CI.value
+            run.candidate_shas = [candidate_sha]
+            await session.commit()
         fake.seed_build(source_version=candidate_sha, result=result)
         fake.pipeline_calls.clear()
 
-        # The reconciler runs with the lane onboarded — repairs re-dispatch it.
-        lane_service = make_service(
-            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
-        )
-        await lane_service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.WAITING_HARNESS.value
@@ -1232,6 +1457,25 @@ class TestVerificationGate:
             FlowStatus.PROPOSING.value,
             FlowStatus.WAITING_HARNESS.value,
         ]
+
+    async def test_builtin_frozen_run_is_never_upgraded_to_the_lane(self, db, fake):
+        """A02: the spec froze backend=builtin — a later lane onboarding
+        must not turn the run's repair into a lane dispatch the gate never
+        approved. The run parks blocked honestly instead."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, result="failed")
+
+        # The reconciler runs with the lane onboarded AFTER the freeze.
+        lane_service = make_service(
+            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        )
+        await lane_service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("quality_contract")
+        assert fake.pipeline_calls == []  # no dispatch against the live lane
 
     async def test_commit_cycles_exhausted_blocks_quality_contract(self, db, fake):
         service = make_service(db, fake, settings=make_settings(FORGE_MAX_COMMIT_CYCLES=2))
@@ -1268,9 +1512,25 @@ class TestVerificationGate:
 
     async def test_lane_build_is_execution_not_verification(self, db, fake):
         """The lane pipeline is excluded from the verification surface (the
-        GitHub harness-workflow rule): its build never verifies the candidate."""
-        service = make_service(db, fake)
-        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        GitHub harness-workflow rule): its build never verifies the candidate.
+
+        A02: the exclusion follows the lane id FROZEN in the run's spec — a
+        reconciler whose live settings name a different (or no) lane cannot
+        change what verifies the candidate."""
+        service = make_service(
+            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        )
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)
+        branch = azure_factory_branch(WORK_ITEM, run_id)
+        candidate_sha = fake.heads[branch]
+        # The lane candidate was published — the run waits for verification.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.WAITING_CI.value
+            run.candidate_shas = [candidate_sha]
+            await session.commit()
         # Only the lane's own build ran for the candidate commit.
         fake.seed_build(
             source_version=candidate_sha,
@@ -1278,10 +1538,10 @@ class TestVerificationGate:
             definition_name="forge-lane",
         )
 
-        lane_service = make_service(
-            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
-        )
-        await lane_service.evaluate_waiting_ci_one(
+        # A reconciler service with NO lane configured still excludes the
+        # lane build — the frozen contract, not live settings, decides.
+        plain_service = make_service(db, fake)
+        await plain_service.evaluate_waiting_ci_one(
             run_id, now=datetime.now(timezone.utc) + timedelta(seconds=301)
         )
 
