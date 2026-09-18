@@ -17,11 +17,19 @@ proves a path absent (create allowed); ``forbidden`` / ``unavailable`` /
 ``incomplete`` raise :class:`AuthoritativeReadError` so the run blocks with
 ``authoritative_read_failed:`` evidence instead of a failed read silently
 flipping an update into a create.
+
+R32: the prompt budget reserves the critical sections. Task/constraints and
+the repair diagnosis are assembled FIRST and are never truncated; file
+evidence is packed into the remaining budget (plan-touched files first, the
+biggest truncated first) and, when anything was cut, a machine-readable
+evidence budget report ends the prompt — a tail truncation can only ever
+consume evidence, never the diagnosis or the output contract.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import TYPE_CHECKING, Protocol
 
@@ -52,6 +60,38 @@ IMPLEMENTER_MAX_FILES = 8
 
 #: ...each capped at this many characters.
 IMPLEMENTER_MAX_FILE_CHARS = 6000
+
+#: Budget (chars) RESERVED for the repair diagnosis (R32). When a repair
+#: context is present it is mandatory context — the reason this attempt
+#: exists — so it is assembled BEFORE any file evidence and evidence packing
+#: can only take the non-negative remainder of the budget: no amount of
+#: evidence can ever push the repair text out of the prompt. The number is
+#: the floor the reservation guarantees; real repair briefs are already
+#: bounded upstream (the GitHub/Azure services pass <= 2000-char briefs, the
+#: auto-repair loop passes the ADR-0013-bounded context) and are included in
+#: full. Reported in the evidence budget report as ``repair_reserved_chars``.
+IMPLEMENTER_REPAIR_RESERVED_CHARS = 2000
+
+#: Below this much remaining evidence room a file is omitted WHOLE instead of
+#: sliced to a sliver (R32): a 40-char fragment is not evidence, and the
+#: budget report says the file was omitted so the gap is at least visible.
+IMPLEMENTER_MIN_EVIDENCE_SLICE_CHARS = 200
+
+#: Budget (chars) pre-reserved for the machine-readable evidence budget
+#: report whenever file evidence is present (R32). Subtracting it up front
+#: guarantees the report itself always fits inside the total budget, so the
+#: completeness note can never be truncated away by the same overflow it
+#: describes.
+IMPLEMENTER_EVIDENCE_NOTE_ALLOWANCE_CHARS = 1024
+
+#: Marker appended to a file block that was sliced to fit the budget (R32).
+_EVIDENCE_TRUNCATION_MARKER = "\n[... file truncated to fit the prompt budget]"
+
+#: Header line of the inlined file-evidence section (layout kept stable).
+_EVIDENCE_HEADER = "Current file contents:"
+
+#: Header line of the machine-readable completeness report (R32).
+_EVIDENCE_NOTE_HEADER = "Evidence budget report (machine-readable):"
 
 #: Hard safety cap (chars) for authoritative reads — the complete file texts
 #: materialization runs against. Over this, proposing fails with a
@@ -188,10 +228,15 @@ class LLMImplementer:
             branch=branch,
             commit_message=commit_message,
             repair_context=repair_context,
+            files_hint=files_hint,
         )
         result = await self._llm.complete(
             tier=model_route or IMPLEMENTER_TIER,
             system=_SYSTEM_PROMPT,
+            # R32: _build_user_prompt packs sections into the budget itself
+            # (mandatory parts first, evidence last), so this deterministic
+            # cut is only a pathological-input safety net — under normal
+            # assembly it is a no-op and can only ever shave evidence.
             user=truncate_chars(user, IMPLEMENTER_MAX_INPUT_CHARS),
             role="implementer",
             flow_run_id=run.id,
@@ -335,30 +380,81 @@ class LLMImplementer:
         branch: str,
         commit_message: str,
         repair_context: str,
+        files_hint: list[str] | None = None,
+        budget_chars: int = IMPLEMENTER_MAX_INPUT_CHARS,
     ) -> str:
-        sections = [
-            issue,
-            "",
-            f"Implementation plan (summary):\n{plan_summary or '(no plan summary available)'}",
-            "",
-            "Repository files (paths):\n" + "\n".join(paths),
-        ]
-        if contents:
-            file_blocks = "\n\n".join(
-                f"--- FILE: {path} ---\n{content}" for path, content in contents.items()
-            )
-            sections.append("")
-            sections.append(f"Current file contents:\n{file_blocks}")
-        sections.append("")
-        sections.append(f"Use branch: {branch}\nUse commit message: {commit_message}")
+        """Assemble the user prompt under a reserved-section budget (R32).
+
+        Section order and budget policy:
+
+        1. **Task and constraints** (mandatory, never truncated): the issue,
+           the plan summary, the repo tree, and the output contract (the
+           pinned branch and commit message). Always first.
+        2. **Repair diagnosis** (mandatory, reserved): on a repair cycle the
+           CI-failure context is the reason this attempt exists, so it is
+           assembled before any file evidence and consumes the budget before
+           evidence is packed — evidence can never push it out (floor:
+           :data:`IMPLEMENTER_REPAIR_RESERVED_CHARS`).
+        3. **Code evidence** (gets the REMAINDER): file blocks packed in
+           ranked order — plan-touched files first in hint order, then the
+           remaining files smallest-first so the biggest ones sit at the
+           budget boundary and are truncated/omitted first. A file that does
+           not fully fit is sliced only above
+           :data:`IMPLEMENTER_MIN_EVIDENCE_SLICE_CHARS`, otherwise omitted.
+        4. **Evidence budget report**: when any evidence was truncated or
+           omitted, a machine-readable JSON line listing included/truncated/
+           omitted files with their sizes ends the prompt, so the model (and
+           the logs) can see exactly how complete the evidence is.
+
+        Because every mandatory part is assembled before the evidence and the
+        evidence is packed to fit the remaining budget, a tail truncation
+        (the safety net in :meth:`propose`) can only ever consume evidence
+        and the report — never the diagnosis or the output contract.
+        """
+        head = "\n".join(
+            [
+                issue,
+                "",
+                f"Implementation plan (summary):\n{plan_summary or '(no plan summary available)'}",
+                "",
+                "Repository files (paths):\n" + "\n".join(paths),
+                "",
+                f"Use branch: {branch}\nUse commit message: {commit_message}",
+            ]
+        )
+
+        # Mandatory prefix: task + contract (+ repair diagnosis). Evidence
+        # never comes before this, so it can never push any of it out.
+        mandatory = head
+        repair_chars = 0
         if repair_context:
-            sections.append("")
-            sections.append(
-                "A previous attempt was committed and its CI failed. Propose a "
+            mandatory += (
+                "\n\n" + "A previous attempt was committed and its CI failed. Propose a "
                 "REPAIR: fix the failing code on top of the previous change.\n"
                 f"{repair_context}"
             )
-        return "\n".join(sections)
+            repair_chars = len(repair_context)
+
+        if not contents:
+            return mandatory
+
+        # Evidence gets the remainder. The report room is reserved up front so
+        # the completeness note can never be truncated by its own overflow,
+        # and the joining blank line is part of the evidence cost.
+        evidence_budget = (
+            budget_chars - len(mandatory) - 2 - IMPLEMENTER_EVIDENCE_NOTE_ALLOWANCE_CHARS
+        )
+        section, included, truncated, omitted = _pack_evidence(
+            contents, files_hint or [], max(0, evidence_budget)
+        )
+        prompt = mandatory + (("\n\n" + section) if section else "")
+
+        if truncated or omitted:
+            report = _evidence_budget_report(
+                budget_chars, repair_chars, included, truncated, omitted
+            )
+            prompt += "\n\n" + report
+        return prompt
 
 
 def _select_evidence_files(
@@ -393,6 +489,92 @@ def _select_evidence_files(
     return selected[:max_files]
 
 
+def _rank_evidence_paths(contents: dict[str, str], files_hint: list[str]) -> list[str]:
+    """Rank evidence files for budget-aware packing (R32).
+
+    Plan-touched files (the hint) come first in hint order; the remaining
+    files follow smallest-first, so the biggest ones sit at the budget
+    boundary and are the first to be truncated or dropped when evidence
+    runs out of room.
+    """
+    ranked: list[str] = []
+    seen: set[str] = set()
+    for hint in files_hint:
+        path = hint.strip()
+        if path and path in contents and path not in seen:
+            seen.add(path)
+            ranked.append(path)
+    ranked.extend(
+        sorted(
+            (path for path in contents if path not in seen),
+            key=lambda path: (len(contents[path]), path),
+        )
+    )
+    return ranked
+
+
+def _pack_evidence(
+    contents: dict[str, str],
+    files_hint: list[str],
+    budget: int,
+) -> tuple[str, list[dict[str, str | int]], list[dict[str, str | int]], list[dict[str, str | int]]]:
+    """Pack file evidence into *budget* chars (R32) and report what happened.
+
+    Returns the ``Current file contents:`` section (possibly empty) plus
+    per-file records for the budget report: ``included`` (whole file),
+    ``truncated`` (head kept, marker appended) and ``omitted`` (no room).
+    Files are packed in :func:`_rank_evidence_paths` order; once the budget
+    is exhausted every remaining file is recorded as omitted.
+    """
+    blocks: list[str] = []
+    included: list[dict[str, str | int]] = []
+    truncated: list[dict[str, str | int]] = []
+    omitted: list[dict[str, str | int]] = []
+    used = len(_EVIDENCE_HEADER) + 1  # header line + its newline
+    for path in _rank_evidence_paths(contents, files_hint):
+        text = contents[path]
+        prefix = f"--- FILE: {path} ---\n"
+        gap = 2 if blocks else 0  # blank line between file blocks
+        if used + gap + len(prefix) + len(text) <= budget:
+            blocks.append(prefix + text)
+            used += gap + len(prefix) + len(text)
+            included.append({"path": path, "chars": len(text)})
+            continue
+        room = budget - used - gap - len(prefix) - len(_EVIDENCE_TRUNCATION_MARKER)
+        if room >= IMPLEMENTER_MIN_EVIDENCE_SLICE_CHARS:
+            kept = truncate_chars(text, room)
+            blocks.append(prefix + kept + _EVIDENCE_TRUNCATION_MARKER)
+            # The slice consumed the budget exactly — nothing after it fits.
+            used += gap + len(prefix) + len(kept) + len(_EVIDENCE_TRUNCATION_MARKER)
+            truncated.append({"path": path, "kept_chars": len(kept), "full_chars": len(text)})
+        else:
+            omitted.append({"path": path, "full_chars": len(text)})
+    section = _EVIDENCE_HEADER + "\n" + "\n\n".join(blocks) if blocks else ""
+    return section, included, truncated, omitted
+
+
+def _evidence_budget_report(
+    budget_chars: int,
+    repair_chars: int,
+    included: list[dict[str, str | int]],
+    truncated: list[dict[str, str | int]],
+    omitted: list[dict[str, str | int]],
+) -> str:
+    """The machine-readable completeness note that ends an overflowed prompt.
+
+    Strict JSON on its own line: which evidence sections made it into the
+    prompt and at what size, which were cut or left out — per R32 the model
+    (and the run logs) can tell how complete the evidence it was shown is.
+    """
+    payload = {
+        "budget_chars": budget_chars,
+        "repair_reserved_chars": IMPLEMENTER_REPAIR_RESERVED_CHARS,
+        "repair_context_included_chars": repair_chars,
+        "evidence": {"included": included, "truncated": truncated, "omitted": omitted},
+    }
+    return _EVIDENCE_NOTE_HEADER + "\n" + json.dumps(payload, separators=(",", ":"))
+
+
 def _decode(raw_content: str, encoding: str | None = None) -> str:
     """Decode a GitLab repository-file payload to text.
 
@@ -415,11 +597,14 @@ def _decode(raw_content: str, encoding: str | None = None) -> str:
 __all__ = [
     "AuthoritativeReadError",
     "FORGE_MATERIALIZE_MAX_FILE_CHARS",
+    "IMPLEMENTER_EVIDENCE_NOTE_ALLOWANCE_CHARS",
     "IMPLEMENTER_MAX_INPUT_CHARS",
     "IMPLEMENTER_MAX_FILES",
     "IMPLEMENTER_MAX_FILE_CHARS",
     "IMPLEMENTER_MAX_TOKENS",
     "IMPLEMENTER_MAX_TREE_PATHS",
+    "IMPLEMENTER_MIN_EVIDENCE_SLICE_CHARS",
+    "IMPLEMENTER_REPAIR_RESERVED_CHARS",
     "IMPLEMENTER_TIER",
     "LLMImplementer",
     "MaterializationError",

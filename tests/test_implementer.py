@@ -1,4 +1,4 @@
-"""LLMImplementer authoritative-evidence policy (R14).
+"""LLMImplementer authoritative-evidence policy (R14) + prompt budgets (R32).
 
 The authoritative base contents behind materialization are typed reads
 (:meth:`RepositoryReader.read_blob`): ONLY a provider-confirmed ``not_found``
@@ -6,6 +6,11 @@ may treat a path as absent. A 403, a timeout or an undecodable payload must
 BLOCK the proposal with ``authoritative_read_failed`` evidence — never flip
 an update into a create. Evidence reads (tree, prompt files) stay lenient:
 incomplete evidence degrades the prompt, never the existence facts.
+
+R32: within the prompt, the repair diagnosis and the output contract are
+mandatory sections assembled before the file evidence — heavy evidence can
+truncate itself, never the instructions (deep coverage in
+``tests/test_prompt_budgets.py``).
 """
 
 import json
@@ -229,3 +234,25 @@ class TestAuthoritativeReadErrorType:
         assert isinstance(err, ME)
         assert err.detail == "src/app.py at base1234 read forbidden: 403"
         assert str(err).startswith("authoritative_read_failed:")
+
+
+class TestPromptSectionOrder:
+    """R32: repair diagnosis + output contract precede the file evidence."""
+
+    async def test_contract_and_repair_precede_evidence_without_overflow(
+        self, fake_gitlab, implementer_factory
+    ):
+        fake_gitlab.seed_file("src/app.py", "x = 1\n")
+        llm, implementer = implementer_factory(fake_gitlab, [create_draft("forge-demo/x.md")])
+
+        await implementer.propose(
+            make_run(), ISSUE_TITLE, files_hint=["src/app.py"], repair_context="CI failed: boom"
+        )
+
+        user = llm.calls_for("implementer")[0]["user"]
+        assert user.index("Use branch: ") < user.index("A previous attempt")
+        assert user.index("A previous attempt") < user.index("Current file contents:")
+        # Small inputs: the repair text is intact and no budget report runs.
+        assert "CI failed: boom" in user
+        assert "Evidence budget report" not in user
+        assert "Current file contents:\n--- FILE: src/app.py ---\nx = 1\n" in user
