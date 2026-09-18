@@ -6,6 +6,7 @@ reconcile_launch contract, correlation (2026 run-id response vs legacy
 discovery), artifact collection and failure classification, no network.
 """
 
+import hashlib
 import json
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 
+from forge.execution import github_actions as executor_module
 from forge.execution.github_actions import (
     ActionsHandle,
     GitHubActionsExecutor,
@@ -524,3 +526,191 @@ class TestExtraction:
             diff_text, meta = _extract_candidate(self._zip_bytes_with_prefix(prefix))
             assert meta["exit"] == "completed"
             assert "+x" in diff_text
+
+
+# ----------------------------------------------------------------------
+# Artifact download validation (R16): caps, closed allowlist, meta schema
+# gate, bounded retry then blocked
+# ----------------------------------------------------------------------
+
+
+def seed_success(fake: FakeGitHub) -> None:
+    """A completed-success Actions run (the candidate-collection path)."""
+    fake.seed_actions_run(
+        run_id=501,
+        head_branch=BRANCH,
+        head_sha=ATTEMPT_BASE,
+        status="completed",
+        conclusion="success",
+    )
+
+
+def v2_meta(diff_text: str, **overrides) -> dict:
+    """A schema-v2 meta whose manifest digest matches *diff_text*."""
+    meta = {
+        "schema_version": 2,
+        "run_id": FORGE_RUN_ID,
+        "attempt_id": "501:1",
+        "attempt_base_oid": ATTEMPT_BASE,
+        "driver": "claude-code",
+        "model": "glm-5.3-flash[1m]",
+        "exit": "completed",
+        "manifest_digest": "sha256:" + hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+        "usage": {"input_tokens": 120, "output_tokens": 45, "completeness": "aggregate"},
+    }
+    meta.update(overrides)
+    return meta
+
+
+class TestArtifactValidation:
+    @staticmethod
+    def _contract_entries(diff_text: str, meta: dict) -> dict[str, bytes]:
+        return {
+            "candidate.diff": diff_text.encode("utf-8"),
+            "candidate.meta.json": json.dumps(meta).encode("utf-8"),
+        }
+
+    async def _poll(self, monkeypatch, entries: dict[str, bytes], **caps: int):
+        """Seed a successful run + artifact, shrink any validation cap, poll."""
+        fake = FakeGitHub()
+        seed_success(fake)
+        fake.seed_actions_artifact(501, artifact_name_for(FORGE_RUN_ID), entries)
+        for name, value in caps.items():
+            monkeypatch.setattr(executor_module, name, value)
+        return fake, await make_executor(fake).poll(make_handle(run_id=501))
+
+    async def test_oversized_zip_is_blocked_after_exactly_one_retry(self, monkeypatch):
+        diff = create_diff("src/app.py", "print('implemented')\n")
+        fake, outcome = await self._poll(
+            monkeypatch,
+            self._contract_entries(diff, v2_meta(diff)),
+            MAX_ARTIFACT_ZIP_BYTES=64,
+        )
+
+        assert outcome.status == "failed"
+        # Blocked as infrastructure — the artifact delivery broke, which is
+        # not the code's fault (never burns a repair cycle).
+        assert outcome.failure_kind == "infrastructure"
+        assert "harness_artifact_invalid" in outcome.reason
+        # Bounded: exactly one retry, no infinite re-download loop.
+        assert len(fake.calls_of("download_artifact_zip")) == 2
+
+    async def test_oversized_uncompressed_content_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "print('implemented')\n")
+        _, outcome = await self._poll(
+            monkeypatch,
+            self._contract_entries(diff, v2_meta(diff)),
+            MAX_ARTIFACT_CONTENT_BYTES=32,
+        )
+
+        assert outcome.status == "failed"
+        assert "uncompressed" in outcome.reason
+
+    async def test_too_many_entries_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        entries = self._contract_entries(diff, v2_meta(diff))
+        entries["extra.txt"] = b"noise"
+        _, outcome = await self._poll(monkeypatch, entries, MAX_ARTIFACT_ENTRIES=2)
+
+        assert "entry cap" in outcome.reason
+
+    async def test_unexpected_extra_entry_is_rejected(self, monkeypatch):
+        """The allowlist is closed: an entry outside the contract files
+        fails the whole archive (the old matcher just ignored it)."""
+        diff = create_diff("src/app.py", "x\n")
+        entries = self._contract_entries(diff, v2_meta(diff))
+        entries["notes.txt"] = b"noise"
+        _, outcome = await self._poll(monkeypatch, entries)
+
+        assert "unexpected entry 'notes.txt'" in outcome.reason
+
+    async def test_duplicate_basename_is_rejected(self, monkeypatch):
+        """A shadowing copy of candidate.diff must never let the matcher
+        silently pick one of the two (the old next()-first-match flaw)."""
+        diff = create_diff("src/app.py", "x\n")
+        entries = self._contract_entries(diff, v2_meta(diff))
+        entries["forge/candidate.diff"] = diff.encode("utf-8")
+        _, outcome = await self._poll(monkeypatch, entries)
+
+        assert "duplicate entry for 'candidate.diff'" in outcome.reason
+
+    async def test_entry_escaping_the_archive_root_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        entries = self._contract_entries(diff, v2_meta(diff))
+        entries["../evil.txt"] = b"payload"
+        _, outcome = await self._poll(monkeypatch, entries)
+
+        assert "unsafe entry path" in outcome.reason
+
+    async def test_unknown_schema_version_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        meta = v2_meta(diff, schema_version=3)
+        _, outcome = await self._poll(monkeypatch, self._contract_entries(diff, meta))
+
+        assert outcome.status == "failed"
+        assert "schema_version" in outcome.reason
+
+    async def test_schema_version_junk_string_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        meta = v2_meta(diff, schema_version="latest")
+        _, outcome = await self._poll(monkeypatch, self._contract_entries(diff, meta))
+
+        assert "schema_version" in outcome.reason
+
+    async def test_v2_meta_with_matching_digest_is_accepted(self, monkeypatch):
+        """Schema v2 round trip: identity + digest + usage receipt pass, and
+        the receipt rides into the bundle (R23)."""
+        diff = create_diff("src/app.py", "print('implemented')\n")
+        _, outcome = await self._poll(monkeypatch, self._contract_entries(diff, v2_meta(diff)))
+
+        assert outcome.status == "change_candidate"
+        assert outcome.bundle is not None
+        assert outcome.bundle.usage is not None
+        assert outcome.bundle.usage.input_tokens == 120
+        assert outcome.bundle.usage.completeness == "aggregate"
+
+    async def test_v2_meta_with_a_substituted_diff_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        meta = v2_meta(diff, manifest_digest="sha256:" + "0" * 64)
+        _, outcome = await self._poll(monkeypatch, self._contract_entries(diff, meta))
+
+        assert "manifest_digest mismatch" in outcome.reason
+
+    async def test_v2_meta_without_a_digest_is_rejected(self, monkeypatch):
+        diff = create_diff("src/app.py", "x\n")
+        meta = v2_meta(diff)
+        del meta["manifest_digest"]
+        _, outcome = await self._poll(monkeypatch, self._contract_entries(diff, meta))
+
+        assert "manifest_digest" in outcome.reason
+
+    async def test_expired_artifact_is_blocked_without_a_download(self):
+        fake = FakeGitHub()
+        seed_success(fake)
+        diff = create_diff("src/app.py", "x\n")
+        fake.seed_actions_artifact(
+            501, artifact_name_for(FORGE_RUN_ID), self._contract_entries(diff, v2_meta(diff))
+        )
+        fake.actions_artifacts[501][0]["expired"] = True
+
+        outcome = await make_executor(fake).poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "infrastructure"
+        assert outcome.reason == "harness_candidate_expired"
+        assert fake.calls_of("download_artifact_zip") == []
+
+    async def test_declared_size_over_cap_blocks_before_download(self):
+        fake = FakeGitHub()
+        seed_success(fake)
+        diff = create_diff("src/app.py", "x\n")
+        fake.seed_actions_artifact(
+            501, artifact_name_for(FORGE_RUN_ID), self._contract_entries(diff, v2_meta(diff))
+        )
+        fake.actions_artifacts[501][0]["size_in_bytes"] = 10**9
+
+        outcome = await make_executor(fake).poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert "over the cap" in outcome.reason
+        assert fake.calls_of("download_artifact_zip") == []

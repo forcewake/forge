@@ -98,11 +98,47 @@ class TestWorkflowTemplateContract:
 
         assert upload["uses"].startswith("actions/upload-artifact@v4")
         assert upload["with"]["name"] == "forge-candidate-${{ inputs.run_id }}"
-        assert ".forge/candidate.diff" in upload["with"]["path"]
-        assert ".forge/candidate.meta.json" in upload["with"]["path"]
+        # R16: the STAGED NON-HIDDEN directory is uploaded — v4.4.0+
+        # upload-artifact excludes hidden files by default and the old
+        # .forge/ paths are a dot-directory, so a direct upload finds zero
+        # files and fails (if-no-files-found: error).
+        assert ".forge-output" in upload["with"]["path"]
+        assert ".forge/" not in upload["with"]["path"]
+        assert upload["with"]["if-no-files-found"] == "error"
         assert upload["if"] == "always()"  # the audit trail survives failures
         # The candidate diff is captured against the FROZEN attempt base.
         assert 'git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}"' in text
+
+    def test_emit_step_stages_a_clean_dir_and_builds_meta_v2_via_the_entry_point(self):
+        """The emit step stages only the candidate diff into a fresh
+        non-hidden directory and delegates the meta v2 build (identity,
+        manifest digest, usage receipt) to the same pinned forge entry
+        point — one schema, one test suite, never a heredoc copy."""
+        workflow = load_template()
+        steps = workflow["jobs"]["harness"]["steps"]
+        emit = next(step for step in steps if step.get("name") == "Emit candidate artifact")
+
+        assert emit["if"] == "always()"
+        run = emit["run"]
+        # Clean, non-hidden staging: nothing else can ride along.
+        assert "rm -rf .forge-output && mkdir -p .forge-output" in run
+        assert ".forge-output/candidate.diff" in run
+        assert ".forge/candidate.diff" not in run
+        # The meta is built by forge's entry point with the dispatched
+        # identity (attempt identity rides from the runner's GITHUB_* env).
+        assert "python -m forge.harness_entry --emit-meta" in run
+        assert '--forge-run-id "${{ inputs.run_id }}"' in run
+        assert '--attempt-base-oid "${{ inputs.attempt_base_oid }}"' in run
+        assert '--driver "${{ inputs.driver }}"' in run
+        assert '--model "${{ inputs.model }}"' in run
+        names = [step.get("name") for step in steps]
+        assert names.index("Emit candidate artifact") < names.index("Upload candidate")
+
+    def test_staging_directory_is_excluded_from_the_working_tree(self):
+        """The staging dir is lane infrastructure: locally excluded so it
+        can never leak into a `git add -A`."""
+        text = TEMPLATE.read_text()
+        assert '.forge-output/" >> .git/info/exclude' in text
 
     def test_driver_step_runs_the_harness_entry_point(self):
         workflow = load_template()

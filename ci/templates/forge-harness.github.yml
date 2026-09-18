@@ -86,6 +86,10 @@ jobs:
           # uv sync creates the workspace venv - lane infrastructure, never
           # a deliverable.
           echo ".venv/" >> .git/info/exclude 2>/dev/null || true
+          # The emit step's staging directory is lane infrastructure too —
+          # it must never leak into a git add (belt and braces: the emit
+          # step stages it only AFTER its own git add -A).
+          echo ".forge-output/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -176,29 +180,36 @@ jobs:
           # watcher state) is lane infrastructure, never a deliverable.
           rm -rf .codegraph .venv
           git add -A
+          # R16: stage the candidate in a clean NON-HIDDEN directory.
+          # upload-artifact@v4 (>= 4.4.0) excludes hidden files by default
+          # and the old .forge/ paths are a dot-directory — uploading them
+          # directly finds zero files and fails the upload. Only the two
+          # contract files are ever staged here; nothing else can ride
+          # along, so include-hidden-files stays unnecessary.
+          rm -rf .forge-output && mkdir -p .forge-output
           git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
-            > .forge/candidate.diff || true
-          python - <<'PY'
-          import json, os
-          meta = {
-              "attempt_base_oid": "${{ inputs.attempt_base_oid }}",
-              "run_id": "${{ inputs.run_id }}",
-              "driver": "${{ inputs.driver }}",
-              "model": "${{ inputs.model }}",
-              "exit": (open(".forge/exit").read().strip()
-                       if os.path.exists(".forge/exit") else "unknown"),
-              "completeness": "aggregate",
-          }
-          json.dump(meta, open(".forge/candidate.meta.json", "w"))
-          PY
+            > .forge-output/candidate.diff || true
+          # Meta schema v2 (schema_version, run + GitHub attempt identity,
+          # sha256 digest binding the meta to the exact diff bytes, usage
+          # receipt) is built by the same pinned forge the lane runs — one
+          # schema, one test suite, never a heredoc copy of it. The
+          # .forge/usage.json receipt rides INSIDE the meta so usage
+          # reaches the control plane with the candidate (R23).
+          python -m forge.harness_entry --emit-meta \
+            --forge-run-id "${{ inputs.run_id }}" \
+            --attempt-base-oid "${{ inputs.attempt_base_oid }}" \
+            --driver "${{ inputs.driver }}" \
+            --model "${{ inputs.model }}"
 
       - name: Upload candidate
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: forge-candidate-${{ inputs.run_id }}
-          path: |
-            .forge/candidate.diff
-            .forge/candidate.meta.json
+          # The staged non-hidden directory (R16): its two files land in
+          # the zip at the archive root under their basenames (the v4
+          # least-common-ancestor rule) — the exact layout the control
+          # plane's basename matcher consumes.
+          path: .forge-output
           if-no-files-found: error
           retention-days: 7

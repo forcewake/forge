@@ -7,6 +7,7 @@ posture, same hardened grok preamble. The subprocess is exercised end-to-end
 with a fake driver script, no CLIs and no network.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 
 from forge.harness_entry import (
     DRIVERS,
+    emit_candidate_meta,
     fetch_workitem,
     main,
     parse_usage,
@@ -487,6 +489,147 @@ class TestParseUsage:
         usage = parse_usage("claude-code", '{"type":"result","usage":{}}\n')
 
         assert usage is None
+
+
+# ----------------------------------------------------------------------
+# Candidate meta v2 emission (--emit-meta, R16/R23)
+# ----------------------------------------------------------------------
+
+
+class TestEmitCandidateMeta:
+    def test_writes_schema_v2_with_identity_digest_and_usage(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("GITHUB_RUN_ID", "501")
+        monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+        staged = tmp_path / ".forge-output"
+        staged.mkdir()
+        diff = staged / "candidate.diff"
+        diff.write_text("diff --git a/src/app.py b/src/app.py\n")
+        control = tmp_path / ".forge"
+        control.mkdir()
+        usage_path = control / "usage.json"
+        usage_path.write_text(json.dumps({"input_tokens": 42, "output_tokens": 7}))
+        exit_path = control / "exit"
+        exit_path.write_text("completed\n")
+
+        meta = emit_candidate_meta(
+            run_id="d" * 32,
+            attempt_base_oid="1" * 40,
+            driver="claude-code",
+            model="glm-5.3-flash[1m]",
+            diff_file=str(diff),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(exit_path),
+            usage_file=str(usage_path),
+        )
+
+        assert meta["schema_version"] == 2
+        assert meta["run_id"] == "d" * 32
+        assert meta["attempt_id"] == "501:3"  # GitHub's own run:attempt identity
+        assert meta["attempt_base_oid"] == "1" * 40
+        assert meta["driver"] == "claude-code"
+        assert meta["model"] == "glm-5.3-flash[1m]"
+        assert meta["exit"] == "completed"
+        # The digest binds the meta to the EXACT staged diff bytes — the
+        # control plane re-checks it after download (R16).
+        assert meta["manifest_digest"] == (
+            f"sha256:{hashlib.sha256(diff.read_bytes()).hexdigest()}"
+        )
+        # The usage receipt rides INSIDE the meta (R23).
+        assert meta["usage"] == {"input_tokens": 42, "output_tokens": 7}
+        written = json.loads((staged / "candidate.meta.json").read_text())
+        assert written == meta
+
+    def test_missing_usage_exit_and_env_degrade_to_unknown(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+        monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+        staged = tmp_path / ".forge-output"
+        staged.mkdir()
+        diff = staged / "candidate.diff"
+        diff.write_bytes(b"")
+
+        meta = emit_candidate_meta(
+            run_id="d" * 32,
+            attempt_base_oid="1" * 40,
+            driver="opencode",
+            model="",
+            diff_file=str(diff),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(tmp_path / ".forge" / "missing-exit"),
+            usage_file=str(tmp_path / ".forge" / "missing-usage.json"),
+        )
+
+        assert meta["usage"] is None  # unknown stays unknown, never zero
+        assert meta["exit"] == "unknown"
+        assert meta["attempt_id"] == ""  # no fabricated identity outside Actions
+
+    def test_non_object_usage_json_degrades_to_none(self, tmp_path: Path):
+        staged = tmp_path / ".forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"x")
+        usage_path = tmp_path / ".forge" / "usage.json"
+        usage_path.parent.mkdir()
+        usage_path.write_text("[1, 2, 3]")
+
+        meta = emit_candidate_meta(
+            run_id="r",
+            attempt_base_oid="b",
+            driver="claude-code",
+            model="",
+            diff_file=str(staged / "candidate.diff"),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(tmp_path / "nope"),
+            usage_file=str(usage_path),
+        )
+
+        assert meta["usage"] is None
+
+    def test_cli_emit_meta_writes_the_meta_and_exits_zero(self, tmp_path: Path, monkeypatch):
+        """The workflow's emit step: staged diff + ``--emit-meta`` with the
+        dispatched identity → meta v2 on disk, rc 0."""
+        monkeypatch.setenv("GITHUB_RUN_ID", "501")
+        monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+        staged = tmp_path / ".forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"diff --git\n")
+        control = tmp_path / ".forge"
+        control.mkdir()
+        (control / "usage.json").write_text(
+            json.dumps({"input_tokens": 42, "output_tokens": 7, "completeness": "aggregate"})
+        )
+        (control / "exit").write_text("completed\n")
+        monkeypatch.chdir(tmp_path)
+
+        rc = main(
+            [
+                "--emit-meta",
+                "--forge-run-id",
+                "d" * 32,
+                "--attempt-base-oid",
+                "1" * 40,
+                "--driver",
+                "claude-code",
+                "--model",
+                "glm-5.3-flash[1m]",
+            ]
+        )
+
+        assert rc == 0
+        meta = json.loads((staged / "candidate.meta.json").read_text())
+        assert meta["schema_version"] == 2
+        assert meta["attempt_id"] == "501:1"
+        assert meta["exit"] == "completed"
+        assert meta["usage"]["input_tokens"] == 42
+        assert meta["usage"]["completeness"] == "aggregate"
+
+    def test_cli_emit_meta_fails_loud_on_a_missing_diff(self, tmp_path: Path, monkeypatch):
+        """No staged diff → rc 1: the upload's if-no-files-found then turns
+        the lane into an infrastructure-class failure instead of shipping a
+        partial artifact."""
+        monkeypatch.chdir(tmp_path)
+
+        rc = main(["--emit-meta", "--forge-run-id", "d" * 32])
+
+        assert rc == 1
 
 
 # ----------------------------------------------------------------------

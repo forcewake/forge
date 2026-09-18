@@ -21,7 +21,13 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
 - it aggregates the driver's usage receipts into ``.forge/usage.json``
   (unknown stays unknown, never zero — F22 lite) and writes ``.forge/exit``
   (``completed`` | ``failed``), decoupled from the agent's own output so
-  the workflow can still upload the candidate artifact ``if: always()``.
+  the workflow can still upload the candidate artifact ``if: always()``;
+- it builds the candidate meta artifact (``--emit-meta``, R16/R23): schema
+  v2 identity + a sha256 digest binding the meta to the staged diff bytes
+  + the usage receipt inlined, so the control plane gets identity,
+  integrity, and spend with the candidate — written into the NON-hidden
+  ``.forge-output/`` staging directory the workflow uploads
+  (upload-artifact@v4 excludes hidden files by default).
 
 Brief transport (the dispatch-input size question, decided): the lane
 FETCHES its own brief content from the forge API — the approved plan is
@@ -42,6 +48,7 @@ credentials — the lane runs forge's CODE, never forge's state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -586,6 +593,83 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
     }
 
 
+#: Candidate meta schema version emitted by :func:`emit_candidate_meta` and
+#: accepted by the control plane
+#: (:mod:`forge.execution.github_actions` — v1 is the historical schemaless
+#: shape, v2 adds attempt identity + a diff digest + the usage receipt).
+META_SCHEMA_VERSION = 2
+
+
+def _attempt_identity() -> str:
+    """GitHub's own attempt identity, ``<run_id>:<run_attempt>``.
+
+    The runner injects both env vars on every job, so the lane gets its
+    attempt identity for free (no new dispatch input); empty outside
+    Actions (CLI/tests) — the meta then carries no identity rather than a
+    fabricated one.
+    """
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    return f"{run_id}:{attempt}" if run_id and attempt else ""
+
+
+def _load_json_object(path: Path) -> dict | None:
+    """Read *path* as a JSON object, or None.
+
+    Missing, unparsable, or non-object content is None — the usage receipt
+    is audit metadata, never worth failing the emit step over (unknown
+    stays unknown, never zero).
+    """
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def emit_candidate_meta(
+    *,
+    run_id: str,
+    attempt_base_oid: str,
+    driver: str,
+    model: str,
+    diff_file: str = ".forge-output/candidate.diff",
+    meta_file: str = ".forge-output/candidate.meta.json",
+    exit_file: str = ".forge/exit",
+    usage_file: str = ".forge/usage.json",
+) -> dict:
+    """Build and write the v2 ``candidate.meta.json`` beside the staged diff.
+
+    The "Emit candidate artifact" step's contract (R16/R23): schema_version
+    2, the forge run id + GitHub attempt identity, the frozen attempt base,
+    the driver/model route, the driver's exit classification, a sha256
+    digest BINDING the meta to the exact candidate.diff bytes (the control
+    plane re-checks it after download), and the aggregated usage receipt
+    from ``.forge/usage.json`` inlined as ``usage`` so spend reaches the
+    control plane with the candidate. Returns the written meta dict.
+    """
+    exit_path = Path(exit_file)
+    exit_status = (
+        exit_path.read_text(errors="replace").strip() if exit_path.is_file() else "unknown"
+    )
+    diff_bytes = Path(diff_file).read_bytes()
+    meta = {
+        "schema_version": META_SCHEMA_VERSION,
+        "run_id": run_id,
+        "attempt_id": _attempt_identity(),
+        "attempt_base_oid": attempt_base_oid,
+        "driver": driver,
+        "model": model,
+        "exit": exit_status,
+        "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
+        "usage": _load_json_object(Path(usage_file)),
+    }
+    output = Path(meta_file)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    return meta
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: provision the brief, run the driver, write usage + exit."""
     parser = argparse.ArgumentParser(
@@ -599,6 +683,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--usage-file", default=".forge/usage.json", help="usage receipt path")
     parser.add_argument(
         "--events-file", default=".forge/events.jsonl", help="normalized event log path"
+    )
+    parser.add_argument(
+        "--emit-meta",
+        action="store_true",
+        help="write the v2 candidate meta beside the staged diff (emit step)",
+    )
+    parser.add_argument("--forge-run-id", default=None, help="forge run id for --emit-meta")
+    parser.add_argument(
+        "--attempt-base-oid", default=None, help="frozen attempt base for --emit-meta"
+    )
+    parser.add_argument(
+        "--diff-file",
+        default=".forge-output/candidate.diff",
+        help="staged candidate diff path for --emit-meta",
+    )
+    parser.add_argument(
+        "--meta-file",
+        default=".forge-output/candidate.meta.json",
+        help="candidate meta output path for --emit-meta",
     )
     parser.add_argument(
         "--render-brief",
@@ -686,6 +789,29 @@ def main(argv: list[str] | None = None) -> int:
         brief_path.parent.mkdir(parents=True, exist_ok=True)
         brief_path.write_text(render_brief(body, plan))
         print(f"harness_entry: brief rendered at {brief_path}")
+        return 0
+
+    if args.emit_meta:
+        # The emit step's meta build (R16/R23): identity is passed through
+        # as dispatched (no DRIVERS validation — this is an audit record,
+        # not a driver invocation); a missing diff fails LOUD (rc 1) so the
+        # upload's if-no-files-found turns it into an infrastructure-class
+        # lane failure instead of a silent partial artifact.
+        try:
+            emit_candidate_meta(
+                run_id=args.forge_run_id or "",
+                attempt_base_oid=args.attempt_base_oid or "",
+                driver=driver,
+                model=model,
+                diff_file=args.diff_file,
+                meta_file=args.meta_file,
+                exit_file=str(exit_file),
+                usage_file=args.usage_file,
+            )
+        except OSError as exc:
+            print(f"harness_entry: emit-meta failed ({exc})", file=sys.stderr)
+            return 1
+        print(f"harness_entry: candidate meta written at {args.meta_file}")
         return 0
 
     if driver not in DRIVERS:

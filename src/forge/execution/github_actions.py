@@ -24,6 +24,7 @@ deadline breaches are ``harness_timeout`` — never the code's fault.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -49,6 +50,29 @@ ARTIFACT_NAME_PREFIX = "forge-candidate-"
 
 #: Log-tail bound when classifying a failed harness job.
 LOG_TAIL_CHARS = 8000
+
+#: R16 artifact-validation caps. forge POLICY — GitHub documents no
+#: per-artifact byte cap (only the shared storage quota): the compressed
+#: download is bounded before any parse (and against the REST
+#: ``size_in_bytes`` declaration before downloading at all), the total
+#: uncompressed content is bounded via ``ZipInfo.file_size`` BEFORE any
+#: ``read()`` (zip-bomb guard), and the archive may carry only a handful of
+#: entries.
+MAX_ARTIFACT_ZIP_BYTES = 50 * 1024 * 1024
+MAX_ARTIFACT_CONTENT_BYTES = 200 * 1024 * 1024
+MAX_ARTIFACT_ENTRIES = 4
+
+#: The exact basenames the candidate archive may carry (template contract).
+#: Entries match by basename — upload-artifact@v4 stores the searched paths
+#: under their least-common-ancestor prefix — but each EXACTLY ONCE: a
+#: duplicate basename must never shadow the real meta (R16).
+_CANDIDATE_BASENAMES = frozenset({"candidate.diff", "candidate.meta.json"})
+
+#: Meta schema versions the control plane accepts: 1 is the historical
+#: schemaless shape (no ``schema_version`` key), 2 adds attempt identity,
+#: the ``manifest_digest`` bind, and the usage receipt. Anything else —
+#: including junk strings — fails closed.
+_META_SCHEMA_VERSIONS = frozenset({1, 2})
 
 #: Run statuses that mean "keep waiting" (Actions lifecycle values).
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "in_progress", "pending", "requested", "waiting"})
@@ -274,7 +298,10 @@ class GitHubActionsExecutor:
 
         The attempt base compared against the artifact's meta comes from the
         TRUSTED handle (what forge pinned), never from the artifact alone;
-        the publisher re-checks it at the write boundary.
+        the publisher re-checks it at the write boundary. Download-side
+        validation (R16) is fail-closed: REST-declared size/expiry checks
+        before downloading, then a bounded download→extract with exactly one
+        retry before the candidate is blocked.
         """
         artifacts = await self._client.list_workflow_run_artifacts(
             handle.owner, handle.repo, handle.run_id
@@ -288,14 +315,27 @@ class GitHubActionsExecutor:
             # Retention expired before collection, or the upload never ran —
             # both mean the candidate is gone (research §2).
             return HarnessOutcome.failed("code", "harness_artifact_missing")
-        payload = await self._client.download_artifact_zip(
-            handle.owner, handle.repo, int(artifact["id"])
-        )
-
+        if artifact.get("expired") is True:
+            return HarnessOutcome.failed("infrastructure", "harness_candidate_expired")
+        declared = artifact.get("size_in_bytes")
+        if isinstance(declared, int) and declared > MAX_ARTIFACT_ZIP_BYTES:
+            return HarnessOutcome.failed(
+                "infrastructure",
+                f"harness_artifact_invalid: artifact declares {declared} bytes, over the cap",
+            )
         try:
-            diff_text, meta = _extract_candidate(payload)
-        except CandidateArchiveError as exc:
-            return HarnessOutcome.failed("code", f"harness_artifact_invalid: {exc}")
+            diff_text, meta = await self._download_and_extract(handle, artifact)
+        except CandidateArchiveError:
+            # One bounded retry — a truncated/corrupted download can be
+            # transient. A second invalid read BLOCKS the candidate as
+            # infrastructure (the artifact delivery broke, which is not the
+            # code's fault) instead of re-downloading forever on every poll.
+            try:
+                diff_text, meta = await self._download_and_extract(handle, artifact)
+            except CandidateArchiveError as retry_exc:
+                return HarnessOutcome.failed(
+                    "infrastructure", f"harness_artifact_invalid: {retry_exc}"
+                )
 
         # The template writes attempt_base_oid (contracts naming); accept
         # the short historical key too.
@@ -333,6 +373,15 @@ class GitHubActionsExecutor:
         if bundle.is_empty:
             return HarnessOutcome.failed("code", "harness_no_changes")
         return HarnessOutcome.change_candidate(bundle, summary=str(meta.get("summary") or ""))
+
+    async def _download_and_extract(
+        self, handle: ActionsHandle, artifact: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """One bounded download→extract pass (raises :class:`CandidateArchiveError`)."""
+        payload = await self._client.download_artifact_zip(
+            handle.owner, handle.repo, int(artifact["id"])
+        )
+        return _extract_candidate(payload)
 
     async def _classify_failure(self, handle: ActionsHandle) -> HarnessOutcome:
         """Failed workflow → code vs infrastructure, GitLab-lane patterns.
@@ -391,26 +440,89 @@ class CandidateArchiveError(Exception):
 def _extract_candidate(payload: bytes) -> tuple[str, dict[str, Any]]:
     """Extract (candidate.diff text, meta dict) from the artifact zip bytes.
 
-    upload-artifact@v4 stores the searched paths under their least-common-
-    ancestor prefix, so entries may appear with or without the ``.forge/``
-    prefix — matched by basename (research §2: the archive holds the
-    uploaded paths).
+    Validation posture (R16, fail closed before any parse): the compressed
+    zip is capped, the uncompressed content and entry count are capped via
+    ``ZipInfo`` BEFORE any ``read()`` (zip-bomb guard), and the entry
+    allowlist is CLOSED — entries match by basename (upload-artifact@v4
+    stores the searched paths under their least-common-ancestor prefix, so
+    they appear with or without the ``.forge/`` prefix) but each exactly
+    once, with duplicate basenames and everything else rejected. The meta
+    must then pass the schema gate (:func:`_check_meta_schema`).
     """
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        names = archive.namelist()
-        diff_name = next((n for n in names if n.rsplit("/", 1)[-1] == "candidate.diff"), None)
-        meta_name = next((n for n in names if n.rsplit("/", 1)[-1] == "candidate.meta.json"), None)
-        if diff_name is None or meta_name is None:
-            missing = CANDIDATE_DIFF_PATH if diff_name is None else CANDIDATE_META_PATH
-            raise CandidateArchiveError(f"{missing} not in the artifact archive")
-        diff_text = archive.read(diff_name).decode("utf-8", errors="replace")
+    if len(payload) > MAX_ARTIFACT_ZIP_BYTES:
+        raise CandidateArchiveError(
+            f"artifact zip is {len(payload)} bytes, over the {MAX_ARTIFACT_ZIP_BYTES}-byte cap"
+        )
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as exc:
+        raise CandidateArchiveError(f"artifact is not a valid zip: {exc}") from exc
+    with archive:
+        entries = [info for info in archive.infolist() if not info.is_dir()]
+        if len(entries) > MAX_ARTIFACT_ENTRIES:
+            raise CandidateArchiveError(
+                f"artifact archive carries {len(entries)} entries, over the "
+                f"{MAX_ARTIFACT_ENTRIES}-entry cap"
+            )
+        uncompressed = sum(info.file_size for info in entries)
+        if uncompressed > MAX_ARTIFACT_CONTENT_BYTES:
+            raise CandidateArchiveError(
+                f"artifact content is {uncompressed} bytes uncompressed, over the "
+                f"{MAX_ARTIFACT_CONTENT_BYTES}-byte cap"
+            )
+        by_basename: dict[str, zipfile.ZipInfo] = {}
+        for info in entries:
+            name = info.filename
+            if name.startswith("/") or ".." in name.split("/"):
+                raise CandidateArchiveError(f"unsafe entry path {name!r} in the artifact archive")
+            base = name.rsplit("/", 1)[-1]
+            if base not in _CANDIDATE_BASENAMES:
+                raise CandidateArchiveError(f"unexpected entry {name!r} in the artifact archive")
+            if base in by_basename:
+                raise CandidateArchiveError(f"duplicate entry for {base!r} in the artifact archive")
+            by_basename[base] = info
+        for base, contract_path in (
+            ("candidate.diff", CANDIDATE_DIFF_PATH),
+            ("candidate.meta.json", CANDIDATE_META_PATH),
+        ):
+            if base not in by_basename:
+                raise CandidateArchiveError(f"{contract_path} not in the artifact archive")
+        diff_bytes = archive.read(by_basename["candidate.diff"])
         try:
-            meta = json.loads(archive.read(meta_name).decode("utf-8"))
+            meta = json.loads(archive.read(by_basename["candidate.meta.json"]).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CandidateArchiveError(f"meta JSON unparseable: {exc}") from exc
     if not isinstance(meta, dict):
         raise CandidateArchiveError("meta JSON is not an object")
-    return diff_text, meta
+    _check_meta_schema(meta, diff_bytes)
+    return diff_bytes.decode("utf-8", errors="replace"), meta
+
+
+def _check_meta_schema(meta: dict[str, Any], diff_bytes: bytes) -> None:
+    """Gate the meta schema (v1/v2) and, for v2, the manifest digest bind.
+
+    v1 is the historical schemaless shape (no ``schema_version`` key). v2
+    must carry ``manifest_digest`` — the sha256 of the exact candidate.diff
+    bytes — so a substituted archive entry cannot pass silently (R16).
+    Unknown versions reject: fail closed.
+    """
+    raw: Any = meta.get("schema_version", 1)
+    if isinstance(raw, str):
+        try:
+            raw = int(raw)
+        except ValueError:
+            pass  # junk strings reject below with the original value
+    if isinstance(raw, bool) or raw not in _META_SCHEMA_VERSIONS:
+        raise CandidateArchiveError(f"unknown meta schema_version {meta.get('schema_version')!r}")
+    if raw == 1:
+        return
+    digest = hashlib.sha256(diff_bytes).hexdigest()
+    claimed = str(meta.get("manifest_digest") or "")
+    if claimed != f"sha256:{digest}":
+        raise CandidateArchiveError(
+            f"manifest_digest mismatch: meta claims {claimed or '<none>'}, "
+            f"diff hashes to sha256:{digest}"
+        )
 
 
 def _parse_started_at(raw: str) -> datetime | None:
