@@ -17,8 +17,8 @@ The matrix is parametrized over the publish paths the test fakes support —
 
 and over every policy-violating shape: denylisted CI config, the
 ``.github/`` prefix, lockfiles, absolute paths, ``..`` traversal,
-out-of-scope paths, too many files and oversized content. The positive
-control publishes EXACTLY the validated manifest.
+out-of-scope paths, too many files, oversized content and duplicate paths
+(R18). The positive control publishes EXACTLY the validated manifest.
 """
 
 import pytest
@@ -33,7 +33,7 @@ from forge.integrations.github_flow import (
 )
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
-from forge.repository.changeset import Change, ChangeSet, Operation
+from forge.repository.changeset import Change, ChangeSet, Operation, resolve_write_policy
 from forge.runs.candidate import bundle_from_changeset
 from forge.runs.publisher import (
     ValidatedCandidate,
@@ -92,6 +92,15 @@ SCENARIOS = [
         "lockfiles are denylisted",
         None,
         id="lockfile",
+    ),
+    pytest.param(
+        "duplicate_path",
+        # R18: two entries for one path — even under different spellings —
+        # are an ambiguous candidate, refused before any write.
+        lambda: _cs(create("dup/report.md", "one\n"), create("./dup//report.md", "two\n")),
+        "duplicate",
+        None,
+        id="duplicate_path",
     ),
     pytest.param(
         "absolute_path",
@@ -437,3 +446,58 @@ class TestAuthoritativeEvidence:
         assert "already exists in the base snapshot" in outcome.reason
         for mutation in GH_MUTATIONS:
             assert fake_github.calls_of(mutation) == []
+
+
+# ----------------------------------------------------------------------
+# R18: write profiles at the boundary
+# ----------------------------------------------------------------------
+
+
+class TestWriteProfileBoundary:
+    """The boundary accepts an explicit write policy (R18). The default is
+    the historical behavior (the matrix above); an explicit profile both
+    RELAXES exactly its own category and never escapes the sensitive-path
+    deny."""
+
+    async def test_dependency_update_publishes_the_lockfile(self):
+        """The R18 case: legitimate dependency work publishes under
+        ``dependency_update`` — the same candidate the default denies."""
+        bundle = bundle_from_changeset(
+            _cs(create("package-lock.json", "{}\n")), attempt_base_oid=GH_BASE_HEAD
+        )
+        with pytest.raises(Exception, match="lockfiles are denylisted"):
+            validate_candidate_bundle(
+                bundle,
+                base_contents={},
+                branch=github_factory_branch(ISSUE_IID, RUN_ID),
+                commit_message="forge: implement 7",
+            )
+
+        candidate = validate_candidate_bundle(
+            bundle,
+            base_contents={},
+            branch=github_factory_branch(ISSUE_IID, RUN_ID),
+            commit_message="forge: implement 7",
+            policy=resolve_write_policy("dependency_update"),
+        )
+        assert [c.path for c in candidate.changeset.changes] == ["package-lock.json"]
+
+    @pytest.mark.parametrize(
+        "profile", ["no_dependencies", "code_only", "dependency_update", "ci_change"]
+    )
+    async def test_pipeline_entrypoint_is_refused_under_every_profile(self, profile):
+        """The Azure hook: an onboarding-provided pipeline entrypoint stays
+        denied under EVERY profile — a candidate never rewrites the lane
+        that executes it (even where ci_change permits CI files)."""
+        policy = resolve_write_policy(profile, extra_denied_paths=["pipelines/build.yml"])
+        with pytest.raises(Exception, match="protected pipeline entrypoint"):
+            validate_candidate_bundle(
+                bundle_from_changeset(
+                    _cs(create("pipelines/build.yml", "steps: []\n")),
+                    attempt_base_oid=GH_BASE_HEAD,
+                ),
+                base_contents={},
+                branch=github_factory_branch(ISSUE_IID, RUN_ID),
+                commit_message="forge: implement 7",
+                policy=policy,
+            )

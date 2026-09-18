@@ -9,6 +9,8 @@ import yaml
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from forge.repository.changeset import BUILTIN_WRITE_PROFILES
+
 
 class Settings(BaseSettings):
     """Core settings loaded from environment / .env file."""
@@ -188,12 +190,27 @@ class Settings(BaseSettings):
     # GitLab username in FORGE_APPROVERS can never approve a GitHub run.
     FORGE_GITHUB_APPROVERS: str = ""
 
-    # Security findings (v0.7): when true, a /security verdict of "false
-    # positive" on a GITHUB finding also dismisses the remote alert via the
-    # alert PATCH APIs (research §4.2 enums, justification as the audit
-    # comment). Default false — forge records the verdict in its own triage
-    # store and leaves the provider alert untouched.
+    # Security findings (v0.7): when true, the privileged remote-dismissal
+    # action may dismiss the PROVIDER alert (research §4.2 enums) for a
+    # finding whose AUTHORITATIVE forge status is already `false_positive`
+    # — intent-journaled, with the justification as the audit comment.
+    # Default false. A model suggestion alone can never close a remote
+    # alert: the status must have been confirmed first (by an authorized
+    # triager or the auto-accept opt-in below), and every dismissal is
+    # journaled intent-first (R25).
     FORGE_SECURITY_REMOTE_DISMISS: bool = False
+
+    # R25 triage governance: when true, the /security pass promotes its own
+    # accepted AI suggestions into the authoritative `status` WITHOUT a
+    # human confirm. Default OFF — the AI verdict is a SUGGESTION
+    # (`suggested_verdict`) that an authorized actor confirms; only an
+    # explicit operator opt-in lets the machine confirm on their behalf.
+    FORGE_SECURITY_AUTO_ACCEPT: bool = False
+
+    # R25: comma-separated usernames authorized to confirm/reject AI triage
+    # suggestions (forge.findings.triage.confirm_finding_verdict). Empty —
+    # nobody may confirm, mirroring FORGE_APPROVERS' fail-closed default.
+    FORGE_SECURITY_TRIAGERS: str = ""
 
     # --- Azure DevOps source adapter (ADR-0024, AZ-2) ------------------------
     # Fail closed: the Azure DevOps webhook ingress is only mounted when
@@ -260,6 +277,28 @@ class Settings(BaseSettings):
     # (importing them here would close the runs-package import cycle, cf.
     # the harness_preference accessor).
     FORGE_DRIVER_VERSIONS: str = ""
+
+    # R18 write-policy profiles: JSON object of custom write profiles —
+    # name → {"denied_paths": [glob], "allowed_paths": [glob],
+    # "require_special_approval": bool}. Custom profiles extend the base
+    # denies tighten-only (lockfiles stay denied; use the built-in
+    # "dependency_update" for dependency work) and may never shadow a
+    # built-in name. Unset/empty — only the four built-in profiles exist and
+    # the default profile ("no_dependencies") is exactly the historical
+    # hardcoded behavior. Malformed JSON fails startup (fail closed, like
+    # FORGE_BUDGET_PROFILES). The forge.yml form (``write_profiles:``) wins
+    # when both are set.
+    FORGE_WRITE_PROFILES: str = ""
+
+    # R18 Azure sensitive paths: JSON object project key → pipeline
+    # entrypoint paths — {"azure_devops:42": ["ci/build.yml"]} — treated as
+    # denied paths under EVERY write profile (a candidate never rewrites
+    # its own execution lane). Azure's pipeline definition may be any file,
+    # so onboarding lists the real entrypoints instead of forge assuming
+    # "azure-pipelines.yml". Keys are "<provider>:<project_id>" (GitHub
+    # also accepts "github:<owner/repo>"). Malformed JSON fails startup.
+    # The forge.yml form (``pipeline_entrypoints:``) wins when both are set.
+    FORGE_PIPELINE_ENTRYPOINTS: str = ""
 
 
 def _positive_int_or_none(value: object, where: str) -> int | None:
@@ -345,6 +384,95 @@ def parse_driver_versions(raw: str | None) -> dict[str, str]:
     return versions
 
 
+def validate_write_profiles(raw: object) -> dict[str, dict[str, Any]]:
+    """Validate a write-profiles mapping (R18) — ``ValueError`` on any
+    defect, so a broken configuration fails startup instead of silently
+    changing the write boundary. Custom profiles may not shadow a built-in
+    name: a same-named override could silently RELAX the default policy."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("write_profiles must be a mapping of name → policy")
+    profiles: dict[str, dict[str, Any]] = {}
+    for name, entry in raw.items():
+        key = str(name).strip()
+        if not key:
+            raise ValueError("write_profiles entries must have non-empty names")
+        if key in BUILTIN_WRITE_PROFILES:
+            raise ValueError(
+                f"write_profiles[{key!r}] shadows a built-in profile — choose another name"
+            )
+        if not isinstance(entry, dict):
+            raise ValueError(f"write_profiles[{key!r}] must be a mapping of policy keys")
+        denied = entry.get("denied_paths") or []
+        allowed = entry.get("allowed_paths") or []
+        for field, value in (("denied_paths", denied), ("allowed_paths", allowed)):
+            if not isinstance(value, list) or not all(
+                isinstance(path, str) and path.strip() for path in value
+            ):
+                raise ValueError(
+                    f"write_profiles[{key!r}][{field}] must be a list of non-empty path globs"
+                )
+        special = entry.get("require_special_approval", False)
+        if not isinstance(special, bool):
+            raise ValueError(f"write_profiles[{key!r}][require_special_approval] must be a bool")
+        profiles[key] = {
+            "denied_paths": [str(path) for path in denied],
+            "allowed_paths": [str(path) for path in allowed],
+            "require_special_approval": special,
+        }
+    return profiles
+
+
+def parse_write_profiles(raw: str | None) -> dict[str, dict[str, Any]]:
+    """The FORGE_WRITE_PROFILES JSON form (R18) — ``ValueError`` when
+    malformed. Fail closed like FORGE_BUDGET_PROFILES: a profile JSON that
+    does not parse must abort startup, never degrade the write boundary."""
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_WRITE_PROFILES is not valid JSON: {exc}") from exc
+    return validate_write_profiles(data)
+
+
+def validate_pipeline_entrypoints(raw: object) -> dict[str, list[str]]:
+    """Validate a pipeline-entrypoints mapping (R18) — project key → list of
+    sensitive pipeline paths; ``ValueError`` on any defect."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("pipeline_entrypoints must be a mapping of project key → path list")
+    entrypoints: dict[str, list[str]] = {}
+    for key, paths in raw.items():
+        name = str(key).strip()
+        if not name:
+            raise ValueError("pipeline_entrypoints entries must have non-empty project keys")
+        if not isinstance(paths, list) or not all(
+            isinstance(path, str) and path.strip() for path in paths
+        ):
+            raise ValueError(
+                f"pipeline_entrypoints[{name!r}] must be a list of non-empty pipeline paths"
+            )
+        entrypoints[name] = [str(path) for path in paths]
+    return entrypoints
+
+
+def parse_pipeline_entrypoints(raw: str | None) -> dict[str, list[str]]:
+    """The FORGE_PIPELINE_ENTRYPOINTS JSON form (R18) — ``ValueError`` when
+    malformed (fail closed, like the other JSON settings)."""
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_PIPELINE_ENTRYPOINTS is not valid JSON: {exc}") from exc
+    return validate_pipeline_entrypoints(data)
+
+
 class ForgeConfig:
     """Optional YAML-based configuration loaded from forge.yml.
 
@@ -404,6 +532,15 @@ class ForgeConfig:
         # {"max_calls", "max_tokens", "wallclock_s"}; a run's budget class
         # names the profile frozen into its RunSpec.
         "budget_profiles": {},
+        # R18: named write-policy profiles — the forge.yml form of
+        # FORGE_WRITE_PROFILES (wins when both are set). Name →
+        # {"denied_paths", "allowed_paths", "require_special_approval"};
+        # built-in names may not be shadowed.
+        "write_profiles": {},
+        # R18: per-project sensitive pipeline entrypoints — the forge.yml
+        # form of FORGE_PIPELINE_ENTRYPOINTS (wins when both are set).
+        # Project key → list of pipeline paths denied under every profile.
+        "pipeline_entrypoints": {},
         "mcp_servers": {},
     }
 
@@ -496,6 +633,26 @@ class ForgeConfig:
         silently repaired into an unlimited run.
         """
         return validate_budget_profiles(self._data.get("budget_profiles"))
+
+    @property
+    def write_profiles(self) -> dict[str, dict[str, Any]]:
+        """``write_profiles`` — the custom write-policy profiles (R18).
+
+        Each entry maps a profile name to ``{"denied_paths", "allowed_paths",
+        "require_special_approval"}``; built-in names may not be shadowed and
+        invalid entries are refused with ``ValueError`` — a broken write
+        policy must fail startup, never silently change the boundary.
+        """
+        return validate_write_profiles(self._data.get("write_profiles"))
+
+    @property
+    def pipeline_entrypoints(self) -> dict[str, list[str]]:
+        """``pipeline_entrypoints`` — per-project sensitive pipeline paths
+        (R18). Project key (``"<provider>:<project_id>"``) → the pipeline
+        entrypoint paths denied under every write profile. Invalid entries
+        are refused with ``ValueError``.
+        """
+        return validate_pipeline_entrypoints(self._data.get("pipeline_entrypoints"))
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)

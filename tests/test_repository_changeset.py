@@ -3,14 +3,20 @@
 import pytest
 
 from forge.repository.changeset import (
+    BUILTIN_WRITE_PROFILES,
+    DEFAULT_WRITE_PROFILE,
     DENIED_PATHS,
     MAX_CHANGES,
     Change,
     ChangeSet,
+    MaterializationError,
     Operation,
     changeset_from_document,
     changeset_to_document,
     is_lockfile,
+    materialize,
+    normalize_repo_path,
+    resolve_write_policy,
     validate_changeset,
 )
 
@@ -213,6 +219,225 @@ class TestPathScope:
             _cs(_create("services/package-lock.json")), allowed_paths=["services/**"]
         )
         assert any("lockfiles are denylisted" in v for v in violations)
+
+
+class TestPathNormalization:
+    """R18: deny/scope checks run on the canonical spelling — equivalent
+    spellings of a path must not bypass (or spuriously fail) the policy."""
+
+    @pytest.mark.parametrize(
+        "spelling,canonical",
+        [
+            ("src/app.py", "src/app.py"),
+            ("./src/app.py", "src/app.py"),
+            ("src//app.py", "src/app.py"),
+            ("src/./app.py", "src/app.py"),
+            ("src\\app.py", "src/app.py"),
+            ("web\\./package-lock.json", "web/package-lock.json"),
+        ],
+    )
+    def test_equivalent_spellings_compare_equal(self, spelling, canonical):
+        assert normalize_repo_path(spelling) == canonical
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".gitlab-ci.yml",
+            "./.gitlab-ci.yml",
+            ".//.gitlab-ci.yml",
+            ".github/./workflows/pwn.yml",
+            "./.github/workflows/pwn.yml",
+            "web\\package-lock.json",
+            "./web/package-lock.json",
+            "sub/dir//uv.lock",
+        ],
+    )
+    def test_denylist_bypass_by_spelling_is_blocked(self, path):
+        violations = validate_changeset(_cs(_create(path)))
+        assert violations, path
+
+    def test_traversal_by_backslash_spelling_is_blocked(self):
+        # "..\\..\\escape" has no ".." '/'-segment — only the canonical form
+        # exposes the traversal.
+        violations = validate_changeset(_cs(_create("..\\..\\escape.txt")))
+        assert any("traversal" in v for v in violations)
+
+    def test_traversal_is_never_resolved_into_a_legal_path(self):
+        violations = validate_changeset(_cs(_create("src/../escape.txt")))
+        assert any("traversal" in v for v in violations)
+
+    def test_scope_check_runs_on_the_canonical_spelling(self):
+        # "./services/a.py" IS in scope — a spelling must not fail it either.
+        violations = validate_changeset(
+            _cs(_create("./services/a.py")), allowed_paths=["services/**"]
+        )
+        assert violations == []
+
+    def test_scope_escape_by_spelling_is_blocked(self):
+        violations = validate_changeset(
+            _cs(_create("./webapp/x.ts")), allowed_paths=["services/**"]
+        )
+        assert any("outside the allowed scope" in v for v in violations)
+
+    def test_canonical_paths_keep_the_exact_historical_verdicts(self):
+        # The normalization is invisible for already-canonical paths.
+        assert validate_changeset(_cs(_create("src/app.py"))) == []
+        assert validate_changeset(_cs(_create("/etc/passwd")))  # absolute
+        assert validate_changeset(_cs(_create("docs/./note.md"))) == []
+
+
+class TestDuplicatePaths:
+    """R18: two entries for one path are rejected — in materialization and
+    in validation — even when the spellings differ."""
+
+    def test_duplicate_create_paths_violate(self):
+        cs = _cs(_create("forge-demo/a.md"), _create("forge-demo/a.md"))
+        violations = validate_changeset(cs)
+        assert any("duplicate path" in v for v in violations)
+
+    def test_spelling_variant_duplicate_is_still_a_duplicate(self):
+        cs = _cs(_create("forge-demo/a.md"), _create("./forge-demo//a.md"))
+        violations = validate_changeset(cs)
+        assert any("duplicate path" in v for v in violations)
+        assert any("'forge-demo/a.md'" in v for v in violations)
+
+    def test_distinct_paths_stay_allowed(self):
+        cs = _cs(_create("forge-demo/a.md"), _create("forge-demo/b.md"))
+        assert validate_changeset(cs) == []
+
+    def test_materialize_rejects_duplicate_paths(self):
+        with pytest.raises(MaterializationError, match="duplicate path"):
+            materialize(
+                {
+                    "branch": "b",
+                    "commit_message": "m",
+                    "changes": [
+                        {"path": "a.md", "operation": "create", "content": "1"},
+                        {"path": "./a.md", "operation": "create", "content": "2"},
+                    ],
+                },
+                {},
+            )
+
+    def test_materialize_accepts_distinct_paths(self):
+        cs = materialize(
+            {
+                "branch": "b",
+                "commit_message": "m",
+                "changes": [
+                    {"path": "a.md", "operation": "create", "content": "1"},
+                    {"path": "b.md", "operation": "create", "content": "2"},
+                ],
+            },
+            {},
+        )
+        assert len(cs.changes) == 2
+
+
+class TestWriteProfileMatrix:
+    """R18: the four built-in profiles allow/deny exactly per spec. The
+    default profile IS today's behavior (zero regression)."""
+
+    #: (path, {profiles where the path is ALLOWED})
+    MATRIX = [
+        ("src/app.py", set(BUILTIN_WRITE_PROFILES)),
+        # Manifests are never denied today (only lockfiles are) — but they
+        # are not source either, so code_only excludes them.
+        ("pyproject.toml", {"no_dependencies", "dependency_update", "ci_change"}),
+        ("docs/readme.md", {"no_dependencies", "dependency_update", "ci_change"}),
+        ("package-lock.json", {"dependency_update"}),
+        ("web/Cargo.lock", {"dependency_update"}),
+        ("sub/dir/uv.lock", {"dependency_update"}),
+        (".gitlab-ci.yml", {"ci_change"}),
+        (".github/workflows/ci.yml", {"ci_change"}),
+        (".forge.yml", set()),  # forge's own config: denied under EVERY builtin
+    ]
+
+    def test_default_profile_is_no_dependencies(self):
+        assert DEFAULT_WRITE_PROFILE == "no_dependencies"
+        policy = resolve_write_policy(None)
+        assert policy.name == "no_dependencies"
+        assert policy.require_special_approval is False
+        assert policy.deny_lockfiles is True
+
+    @pytest.mark.parametrize("profile", BUILTIN_WRITE_PROFILES)
+    @pytest.mark.parametrize("path,allowed_in", MATRIX)
+    def test_matrix_verdict(self, profile, path, allowed_in):
+        violations = validate_changeset(_cs(_create(path)), policy=resolve_write_policy(profile))
+        assert (not violations) == (profile in allowed_in), (profile, path, violations)
+
+    def test_dependency_update_allows_the_lockfile_the_default_denies(self):
+        lockfile = _cs(_create("package-lock.json", "{}\n"))
+        assert validate_changeset(lockfile)  # no_dependencies: denied
+        assert validate_changeset(lockfile, policy=resolve_write_policy("dependency_update")) == []
+
+    def test_dependency_update_still_denies_ci_and_forge_config(self):
+        policy = resolve_write_policy("dependency_update")
+        for path in (".gitlab-ci.yml", ".forge.yml", ".github/workflows/x.yml"):
+            assert validate_changeset(_cs(_create(path)), policy=policy), path
+
+    def test_code_only_is_a_source_allowlist(self):
+        policy = resolve_write_policy("code_only")
+        assert validate_changeset(_cs(_create("deep/nested/module.py")), policy=policy) == []
+        violations = validate_changeset(_cs(_create("docs/design.md")), policy=policy)
+        assert any("outside the 'code_only' write profile" in v for v in violations)
+
+    def test_ci_change_requires_special_approval_flag(self):
+        assert resolve_write_policy("ci_change").require_special_approval is True
+
+    def test_unknown_profile_fails_closed(self):
+        with pytest.raises(ValueError, match="unknown write profile"):
+            resolve_write_policy("yolo")
+
+    def test_custom_profiles_extend_the_base_tighten_only(self):
+        custom = {
+            "vendor_locked": {
+                "denied_paths": ["vendor/**"],
+                "allowed_paths": ["vendor/public.txt"],
+                "require_special_approval": True,
+            }
+        }
+        policy = resolve_write_policy("vendor_locked", custom_profiles=custom)
+        assert validate_changeset(_cs(_create("src/app.py")), policy=policy) == []
+        # allowed_paths exempts from the profile's own deny globs...
+        assert validate_changeset(_cs(_create("vendor/public.txt")), policy=policy) == []
+        # ...but not from the base denies (forge config) or lockfiles.
+        assert validate_changeset(_cs(_create("vendor/uv.lock")), policy=policy)
+        assert validate_changeset(_cs(_create("vendor/.forge.yml")), policy=policy)
+        # the profile's own glob deny, and the operator gate flag:
+        internal = validate_changeset(_cs(_create("vendor/internal.py")), policy=policy)
+        assert any("denylisted pattern" in v for v in internal)
+        assert policy.require_special_approval is True
+
+    def test_custom_profile_cannot_shadow_a_builtin(self):
+        with pytest.raises(ValueError, match="shadows a built-in"):
+            resolve_write_policy("no_dependencies", custom_profiles={"no_dependencies": {}})
+
+    def test_extra_denied_paths_apply_under_every_profile(self):
+        # Azure-style pipeline entrypoints: sensitive under ALL profiles.
+        for profile in BUILTIN_WRITE_PROFILES:
+            policy = resolve_write_policy(profile, extra_denied_paths=["ci/build.yml"])
+            violations = validate_changeset(_cs(_create("ci/build.yml")), policy=policy)
+            assert any("protected pipeline entrypoint" in v for v in violations), profile
+
+    def test_entrypoint_is_denied_even_where_ci_change_permits(self):
+        # A project whose GitHub workflow file IS its pipeline entrypoint:
+        # ci_change ordinarily permits .github/* — the entrypoint stays
+        # protected regardless.
+        policy = resolve_write_policy(
+            "ci_change", extra_denied_paths=[".github/workflows/deploy.yml"]
+        )
+        assert validate_changeset(_cs(_create(".github/workflows/ci.yml")), policy=policy) == []
+        violations = validate_changeset(_cs(_create(".github/workflows/deploy.yml")), policy=policy)
+        assert any("protected pipeline entrypoint" in v for v in violations)
+
+    def test_builtins_read_the_live_module_denylist(self, monkeypatch):
+        # The historical monkeypatch contract: module constants shape the
+        # default policy.
+        from forge.repository import changeset
+
+        monkeypatch.setattr(changeset, "DENIED_PATHS", frozenset({"forbidden.txt"}))
+        assert validate_changeset(_cs(_create("forbidden.txt")))
 
 
 class TestDocumentRoundTrip:

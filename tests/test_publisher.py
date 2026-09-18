@@ -385,6 +385,226 @@ class TestPathScope:
         assert result.ok
 
 
+class TestWriteProfiles:
+    """R18 at the boundary: profile threading, the operator-approval gate,
+    provider-sensitive pipeline paths and duplicate-path rejection.
+
+    The default profile is byte-compatible with the hardcoded behavior
+    (``TestRejections`` above IS its matrix); these tests cover the knobs
+    a caller can now pass through the boundary.
+    """
+
+    @staticmethod
+    async def _noop_fetch(ref: str, paths: list[str]) -> dict[str, str]:
+        return {}
+
+    @staticmethod
+    async def _recording_publish(commit_shas: list[str]):
+        async def native(candidate: ValidatedCandidate) -> PublishResult:
+            commit_shas.append(candidate.changeset.branch)
+            return PublishResult(True, commit_sha="d" * 40)
+
+        return native
+
+    async def test_dependency_update_publishes_a_lockfile(self, db, fake_gitlab):
+        """The R18 point: lockfile work is legitimate — under
+        ``dependency_update`` it publishes; the default denies it."""
+        run = await persisted(db, make_run())
+        bundle = bundle_for(_create_diff("package-lock.json", "{}\n"))
+
+        denied = await publish(db, fake_gitlab, run, bundle)
+        assert not denied.ok
+        assert "lockfiles are denylisted" in denied.reason
+
+        writer = ChangesetWriter(fake_gitlab, db, PROJECT_ID)
+        allowed = await publish_candidate(
+            gitlab=fake_gitlab,
+            session_factory=db,
+            writer=writer,
+            run=run,
+            bundle=bundle,
+            write_profile="dependency_update",
+        )
+        assert allowed.ok
+        (commit_call,) = fake_gitlab.calls_of("create_commit")
+        (action,) = commit_call[1][2]
+        assert (action["action"], action["file_path"]) == ("create", "package-lock.json")
+
+    async def test_dependency_update_still_denies_ci_config(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        result = await publish(
+            db,
+            fake_gitlab,
+            run,
+            bundle_for(_create_diff(".gitlab-ci.yml", "rogue: true\n")),
+            write_profile="dependency_update",
+        )
+        assert not result.ok
+        assert "denylisted" in result.reason
+
+    async def test_spelling_variant_lockfile_is_still_denied(self, fake_gitlab):
+        with pytest.raises(PolicyViolation) as exc:
+            validate_candidate_bundle(
+                bundle_for(_create_diff("web\\package-lock.json", "{}\n")),
+                base_contents={},
+                branch="forge/7/abcd1234",
+                commit_message="m",
+            )
+        assert any("lockfiles are denylisted" in v for v in exc.value.violations)
+
+    async def test_ci_change_without_approval_is_refused(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        result = await publish(
+            db,
+            fake_gitlab,
+            run,
+            bundle_for(_create_diff(".gitlab-ci.yml", "stages: [x]\n")),
+            write_profile="ci_change",
+        )
+        assert not result.ok
+        assert "special_approval_required" in result.reason
+        assert "ci_change" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_ci_change_with_explicit_approval_publishes(self, fake_gitlab):
+        reached = []
+
+        async def native(candidate: ValidatedCandidate) -> PublishResult:
+            reached.append(candidate)
+            return PublishResult(True, commit_sha="d" * 40)
+
+        result = await publish_validated_candidate(
+            make_run(),
+            bundle_for(_create_diff(".gitlab-ci.yml", "stages: [x]\n")),
+            fetch_base_contents=self._noop_fetch,
+            native_publish=native,
+            write_profile="ci_change",
+            operator_approved=True,
+        )
+        assert result.ok
+        (candidate,) = reached
+        assert [c.path for c in candidate.changeset.changes] == [".gitlab-ci.yml"]
+
+    async def test_ci_change_session_run_proves_approval_with_its_frozen_spec(
+        self, db, fake_gitlab
+    ):
+        """An operator /go froze the RunSpec — that row IS the approval; a
+        session-backed ci_change run without any spec is refused."""
+        approved_run = await persisted(db, make_run(run_id="a" * 32, spec_digest="approved"))
+        async with db() as session:
+            session.add(RunSpec(run_id=approved_run.id, document={}, digest="approved"))
+            await session.commit()
+        ok = await publish(
+            db,
+            fake_gitlab,
+            approved_run,
+            bundle_for(_create_diff(".gitlab-ci.yml", "stages: [x]\n")),
+            write_profile="ci_change",
+        )
+        assert ok.ok
+
+        unapproved = await persisted(db, make_run(run_id="b" * 32, issue_iid=8))
+        refused = await publish(
+            db,
+            fake_gitlab,
+            unapproved,
+            bundle_for(_create_diff(".gitlab-ci.yml", "stages: [x]\n")),
+            write_profile="ci_change",
+        )
+        assert not refused.ok
+        assert "special_approval_required" in refused.reason
+
+    async def test_forge_config_stays_denied_under_ci_change(self, fake_gitlab):
+        result = await publish_validated_candidate(
+            make_run(),
+            bundle_for(_create_diff(".forge.yml", "rogue: true\n")),
+            fetch_base_contents=self._noop_fetch,
+            native_publish=await self._recording_publish([]),
+            write_profile="ci_change",
+            operator_approved=True,
+        )
+        assert not result.ok
+        assert "denylisted" in result.reason
+
+    async def test_pipeline_entrypoint_is_denied_under_every_profile(self, db, fake_gitlab):
+        """The Azure hook: the onboarding-provided pipeline entrypoint is a
+        sensitive path — even ci_change cannot publish it."""
+        run = await persisted(db, make_run())
+        bundle = bundle_for(_create_diff("ci/build.yml", "steps: []\n"))
+
+        for profile in (None, "ci_change", "dependency_update"):
+            result = await publish(
+                db,
+                fake_gitlab,
+                run,
+                bundle,
+                write_profile=profile,
+                sensitive_paths=["ci/build.yml"],
+                operator_approved=True,
+            )
+            assert not result.ok, profile
+            assert "protected pipeline entrypoint" in result.reason
+            assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_unknown_profile_fails_the_publication_closed(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        result = await publish(
+            db,
+            fake_gitlab,
+            run,
+            bundle_for(_create_diff("x.md", "hi\n")),
+            write_profile="typo_profile",
+        )
+        assert not result.ok
+        assert "write_policy_config_error" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_duplicate_bundle_paths_are_rejected(self, fake_gitlab):
+        diff = _create_diff("a.md", "one\n") + _create_diff("./a.md", "two\n")
+        with pytest.raises(CandidateError) as exc:
+            validate_candidate_bundle(
+                bundle_for(diff),
+                base_contents={},
+                branch="forge/7/abcd1234",
+                commit_message="m",
+            )
+        assert exc.value.reason == "duplicate_path"
+
+    async def test_duplicate_paths_reject_the_publication(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        diff = _create_diff("a.md", "one\n") + _create_diff("./a.md", "two\n")
+        result = await publish(db, fake_gitlab, run, bundle_for(diff))
+        assert not result.ok
+        assert "duplicate_path" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_custom_profile_threads_through_the_boundary(self, db, fake_gitlab):
+        """A forge.yml-defined profile reaches the boundary as parsed
+        config (the service passes ``config.write_profiles`` through)."""
+        run = await persisted(db, make_run())
+        custom = {"vendor_locked": {"denied_paths": ["vendor/**"], "allowed_paths": []}}
+        denied = await publish(
+            db,
+            fake_gitlab,
+            run,
+            bundle_for(_create_diff("vendor/helper.py", "x\n")),
+            write_profile="vendor_locked",
+            custom_write_profiles=custom,
+        )
+        assert not denied.ok
+        assert "denylisted pattern" in denied.reason
+
+        allowed = await publish(
+            db,
+            fake_gitlab,
+            run,
+            bundle_for(_create_diff("src/app.py", "x = 1\n")),
+            write_profile="vendor_locked",
+            custom_write_profiles=custom,
+        )
+        assert allowed.ok
+
+
 class TestBoundaryEntry:
     """publish_validated_candidate / validate_candidate_bundle (ADR-0026).
 

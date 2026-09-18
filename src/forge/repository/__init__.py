@@ -10,7 +10,10 @@ Public surface:
 """
 
 from forge.repository.changeset import (
+    BUILTIN_WRITE_PROFILES,
+    CODE_ONLY_SUFFIXES,
     DEFAULT_EXPECTED_MATCHES,
+    DEFAULT_WRITE_PROFILE,
     DENIED_PATHS,
     DENIED_PREFIXES,
     LOCKFILE_SUFFIX,
@@ -20,17 +23,23 @@ from forge.repository.changeset import (
     ChangeSet,
     MaterializationError,
     Operation,
+    WritePolicy,
     changeset_from_document,
     changeset_to_document,
     in_path_scope,
     is_lockfile,
     materialize,
+    normalize_repo_path,
+    resolve_write_policy,
     validate_changeset,
 )
 from forge.repository.writer import ChangesetWriter, WriteOutcome, WriteResult
 
 __all__ = [
+    "BUILTIN_WRITE_PROFILES",
+    "CODE_ONLY_SUFFIXES",
     "DEFAULT_EXPECTED_MATCHES",
+    "DEFAULT_WRITE_PROFILE",
     "DENIED_PATHS",
     "DENIED_PREFIXES",
     "LOCKFILE_SUFFIX",
@@ -42,11 +51,14 @@ __all__ = [
     "MaterializationError",
     "Operation",
     "WriteOutcome",
+    "WritePolicy",
     "WriteResult",
     "changeset_from_document",
     "changeset_to_document",
     "in_path_scope",
     "is_lockfile",
     "materialize",
+    "normalize_repo_path",
+    "resolve_write_policy",
     "validate_changeset",
 ]

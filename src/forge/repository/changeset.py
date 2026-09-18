@@ -13,7 +13,8 @@ policy configuration) can monkeypatch them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any
@@ -101,6 +102,233 @@ DEFAULT_EXPECTED_MATCHES = 1
 _OPERATION_ALIASES: dict[str, Operation] = {op.value: op for op in Operation}
 
 
+# --- Write-policy profiles (R18) ---------------------------------------------
+#
+# A profile names ONE write policy: what may never be written, what is
+# explicitly permitted despite a deny, and whether publishing under it needs
+# an extra operator gate. The builtins cover the common postures; custom
+# profiles arrive as parsed config (``forge.config.validate_write_profiles``)
+# and extend the base denies tighten-only. The default profile IS today's
+# behavior — ``no_dependencies`` — so an unconfigured deployment is
+# byte-compatible.
+
+
+#: The write profile used when nothing else is configured.
+DEFAULT_WRITE_PROFILE = "no_dependencies"
+
+#: The closed set of built-in profile names (custom profiles must not shadow
+#: them — a same-named override could silently RELAX the default).
+BUILTIN_WRITE_PROFILES: tuple[str, ...] = (
+    "no_dependencies",
+    "code_only",
+    "dependency_update",
+    "ci_change",
+)
+
+#: Source-code file suffixes writable under ``code_only`` — everything else
+#: (docs, manifests, lockfiles, images, CI) is outside that profile.
+CODE_ONLY_SUFFIXES: tuple[str, ...] = (
+    ".py",
+    ".pyi",
+    ".rb",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".swift",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".m",
+    ".mm",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".php",
+    ".pl",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".sql",
+    ".lua",
+    ".dart",
+    ".scala",
+    ".ex",
+    ".exs",
+    ".zig",
+    ".vue",
+    ".svelte",
+)
+
+#: fnmatch globs for the suffixes above (``*`` spans ``/`` in fnmatch, so a
+#: suffix glob matches at any depth).
+CODE_ONLY_GLOBS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in CODE_ONLY_SUFFIXES)
+
+#: CI files the ``ci_change`` profile permits despite the base denies: exactly
+#: what the base denylist names. Forge's own ``.forge.yml`` is never writable
+#: under any builtin — it is forge's control plane, not the project's CI.
+CI_PERMITTED_GLOBS: tuple[str, ...] = (".gitlab-ci.yml", ".github/*")
+
+
+@dataclass(frozen=True)
+class WritePolicy:
+    """One named write policy (R18) — the deny/permit knobs of a profile.
+
+    Checks run on the :func:`normalize_repo_path` form, so equivalent
+    spellings of a path can never split the verdict. ``denied_paths`` /
+    ``denied_prefixes`` mirror the module-level constants (builtins read them
+    at resolve time, so test monkeypatches keep working); ``denied_globs``
+    carries custom-profile denies; ``permitted_globs`` exempts a path from
+    the deny checks (never from the safety checks — absolute paths, ``..``
+    traversal and size caps apply under every profile); ``allowed_globs``,
+    when non-empty, is an allowlist beyond which nothing is writable.
+    """
+
+    name: str
+    denied_paths: frozenset[str]
+    denied_prefixes: tuple[str, ...]
+    #: Provider-sensitive paths (e.g. the project's pipeline entrypoints):
+    #: denied under EVERY profile — even where a permitted glob would lift
+    #: the ordinary denies. A candidate never rewrites its execution lane.
+    sensitive_paths: frozenset[str] = frozenset()
+    denied_globs: tuple[str, ...] = ()
+    permitted_globs: tuple[str, ...] = ()
+    allowed_globs: tuple[str, ...] = ()
+    deny_lockfiles: bool = True
+    #: Publishing under this profile requires the operator approver set
+    #: (``FORGE_APPROVERS`` and friends) — enforced by the publisher, which
+    #: refuses the publication when the run carries no operator-approved
+    #: frozen plan and the caller asserts no explicit approval.
+    require_special_approval: bool = False
+
+
+def normalize_repo_path(path: str) -> str:
+    """Canonical repo-relative spelling of *path* (R18).
+
+    Backslashes become slashes, duplicate slashes collapse and empty/``.```
+    segments are dropped, so ``./src/a.py``, ``src//a.py`` and
+    ``src\\a.py`` all compare equal to ``src/a.py`` — a policy bypass by
+    spelling is impossible. ``..`` is deliberately NOT resolved: traversal
+    is rejected outright by :func:`validate_changeset`, never laundered
+    into a legal path.
+    """
+    unified = path.replace("\\", "/")
+    parts = [part for part in unified.split("/") if part and part != "."]
+    return "/".join(parts)
+
+
+def _builtin_policy(name: str) -> WritePolicy:
+    """The built-in profile *name*, resolved from the LIVE module constants
+    (so a monkeypatched denylist shapes the builtins, as before)."""
+    if name == "no_dependencies":
+        return WritePolicy(
+            name=name,
+            denied_paths=DENIED_PATHS,
+            denied_prefixes=DENIED_PREFIXES,
+        )
+    if name == "code_only":
+        return WritePolicy(
+            name=name,
+            denied_paths=DENIED_PATHS,
+            denied_prefixes=DENIED_PREFIXES,
+            allowed_globs=CODE_ONLY_GLOBS,
+        )
+    if name == "dependency_update":
+        # Lockfiles and manifests are writable; everything else stays per
+        # the base denies (CI and forge's own config).
+        return WritePolicy(
+            name=name,
+            denied_paths=DENIED_PATHS,
+            denied_prefixes=DENIED_PREFIXES,
+            deny_lockfiles=False,
+        )
+    if name == "ci_change":
+        return WritePolicy(
+            name=name,
+            denied_paths=frozenset({".forge.yml"}),
+            denied_prefixes=(),
+            permitted_globs=CI_PERMITTED_GLOBS,
+            require_special_approval=True,
+        )
+    raise ValueError(f"unknown write profile {name!r}")  # pragma: no cover - guarded caller
+
+
+def _policy_from_custom(name: str, entry: Mapping[str, Any]) -> WritePolicy:
+    """A custom profile from parsed config (tighten-only over the base).
+
+    ``denied_paths`` entries are fnmatch globs ADDED to the base denies;
+    ``allowed_paths`` entries are globs EXEMPT from every deny check; a
+    true ``require_special_approval`` puts the profile behind the operator
+    approver gate. Lockfiles stay denied (a custom profile never relaxes
+    the base lockfile deny — use ``dependency_update`` for dependency work).
+    """
+    denied_globs = tuple(
+        normalize_repo_path(str(glob))
+        for glob in (entry.get("denied_paths") or [])
+        if str(glob).strip()
+    )
+    permitted_globs = tuple(
+        normalize_repo_path(str(glob))
+        for glob in (entry.get("allowed_paths") or [])
+        if str(glob).strip()
+    )
+    special = bool(entry.get("require_special_approval", False))
+    return WritePolicy(
+        name=name,
+        denied_paths=DENIED_PATHS,
+        denied_prefixes=DENIED_PREFIXES,
+        denied_globs=denied_globs,
+        permitted_globs=permitted_globs,
+        deny_lockfiles=True,
+        require_special_approval=special,
+    )
+
+
+def resolve_write_policy(
+    name: str | None = None,
+    *,
+    custom_profiles: Mapping[str, Mapping[str, Any]] | None = None,
+    extra_denied_paths: Sequence[str] = (),
+) -> WritePolicy:
+    """The effective :class:`WritePolicy` for profile *name* (R18).
+
+    *custom_profiles* is the parsed forge.yml / FORGE_WRITE_PROFILES mapping
+    (validated by ``forge.config.validate_write_profiles``); a custom name
+    must not shadow a builtin (``ValueError`` — an override could silently
+    relax the default). *extra_denied_paths* carries provider-sensitive
+    paths — e.g. the per-project Azure pipeline entrypoints from config —
+    which are denied under EVERY profile, including ``ci_change``: the
+    pipeline definition is the execution lane itself and forge never lets a
+    candidate rewrite it. Unknown names raise ``ValueError`` (fail closed),
+    never fall back to a more permissive profile.
+    """
+    key = (name or DEFAULT_WRITE_PROFILE).strip() or DEFAULT_WRITE_PROFILE
+    profiles = dict(custom_profiles or {})
+    if key in profiles and key in BUILTIN_WRITE_PROFILES:
+        raise ValueError(f"write profile {key!r} shadows a built-in profile — choose another name")
+    if key in BUILTIN_WRITE_PROFILES:
+        policy = _builtin_policy(key)
+    elif key in profiles:
+        policy = _policy_from_custom(key, profiles[key])
+    else:
+        known = ", ".join((*BUILTIN_WRITE_PROFILES, *sorted(profiles)))
+        raise ValueError(f"unknown write profile {key!r} (known profiles: {known})")
+    sensitive = frozenset(
+        normalize_repo_path(str(path)) for path in extra_denied_paths if str(path).strip()
+    )
+    if sensitive:
+        policy = replace(policy, sensitive_paths=frozenset(policy.sensitive_paths) | sensitive)
+    return policy
+
+
 def is_lockfile(path: str) -> bool:
     """Return True when *path* looks like a dependency lockfile."""
     name = path.rsplit("/", 1)[-1].lower()
@@ -157,8 +385,19 @@ def materialize(cs_raw: dict[str, Any], git_base: dict[str, str]) -> ChangeSet:
     attempt_base_oid = raw_attempt_base if isinstance(raw_attempt_base, str) else None
 
     changes: list[Change] = []
+    seen_paths: set[str] = set()
     for raw in raw_changes:
-        changes.append(_materialize_change(raw, git_base))
+        change = _materialize_change(raw, git_base)
+        canonical = normalize_repo_path(change.path)
+        if canonical and canonical in seen_paths:
+            # Two actions for one path in one commit is ambiguous for the
+            # Commits API (R18) — a spelling difference does not hide it.
+            raise MaterializationError(
+                f"change {change.path!r}: duplicate path ({canonical!r}) — "
+                f"one action per path per changeset"
+            )
+        seen_paths.add(canonical)
+        changes.append(change)
     return ChangeSet(
         branch=branch,
         commit_message=commit_message,
@@ -219,6 +458,7 @@ def validate_changeset(
     cs: ChangeSet,
     git_base: dict[str, str] | None = None,
     allowed_paths: list[str] | None = None,
+    policy: WritePolicy | None = None,
 ) -> list[str]:
     """Validate *cs* against the write policy and return all violations.
 
@@ -240,7 +480,13 @@ def validate_changeset(
     forge-side resolution: coding CLIs load them natively for the paths they
     touch (complex-projects.md §1.3) — the scope check stays purely on the
     write boundary.
+
+    *policy* (R18) selects the write profile; ``None`` resolves the default
+    ``no_dependencies`` profile, which is exactly the historical hardcoded
+    behavior. All deny/scope checks run on :func:`normalize_repo_path`
+    spellings, and two changes addressing one canonical path are a violation.
     """
+    effective = policy if policy is not None else resolve_write_policy()
     violations: list[str] = []
 
     if not cs.commit_message.strip():
@@ -252,6 +498,7 @@ def validate_changeset(
     if len(cs.changes) > MAX_CHANGES:
         violations.append(f"changeset contains {len(cs.changes)} changes (max {MAX_CHANGES})")
 
+    seen_paths: set[str] = set()
     for change in cs.changes:
         where = f"change {change.path!r} ({change.operation.value})"
 
@@ -259,22 +506,48 @@ def validate_changeset(
             violations.append("change path must not be empty")
             continue
 
-        if change.path.startswith("/") or (len(change.path) > 1 and change.path[1] == ":"):
+        canonical = normalize_repo_path(change.path)
+
+        if canonical and canonical in seen_paths:
+            violations.append(f"{where}: duplicate path ({canonical!r} is changed more than once)")
+        seen_paths.add(canonical)
+
+        if change.path.startswith(("/", "\\")) or (len(change.path) > 1 and change.path[1] == ":"):
             violations.append(f"{where}: absolute paths are not allowed")
 
-        if ".." in change.path.split("/"):
+        if ".." in canonical.split("/"):
             violations.append(f"{where}: path traversal ('..') is not allowed")
 
-        if change.path in DENIED_PATHS:
-            violations.append(f"{where}: path is denylisted")
+        # Provider-sensitive paths (pipeline entrypoints) are denied even
+        # where a profile's permitted glob would lift the ordinary denies.
+        if canonical in effective.sensitive_paths:
+            violations.append(f"{where}: path is a protected pipeline entrypoint")
+            permitted = False
+        else:
+            permitted = any(fnmatchcase(canonical, glob) for glob in effective.permitted_globs)
 
-        if any(change.path.startswith(prefix) for prefix in DENIED_PREFIXES):
-            violations.append(f"{where}: path is under a denylisted prefix")
+        if not permitted:
+            if canonical in effective.denied_paths:
+                violations.append(f"{where}: path is denylisted")
 
-        if is_lockfile(change.path):
-            violations.append(f"{where}: lockfiles are denylisted")
+            if any(canonical.startswith(prefix) for prefix in effective.denied_prefixes):
+                violations.append(f"{where}: path is under a denylisted prefix")
 
-        if allowed_paths and not in_path_scope(change.path, allowed_paths):
+            if any(fnmatchcase(canonical, glob) for glob in effective.denied_globs):
+                violations.append(f"{where}: path matches a denylisted pattern")
+
+            if effective.deny_lockfiles and is_lockfile(canonical):
+                violations.append(f"{where}: lockfiles are denylisted")
+
+        if effective.allowed_globs and not any(
+            fnmatchcase(canonical, glob) for glob in effective.allowed_globs
+        ):
+            violations.append(
+                f"{where}: path is outside the {effective.name!r} write profile "
+                f"(only the profile's paths are writable)"
+            )
+
+        if allowed_paths and not in_path_scope(canonical, allowed_paths):
             violations.append(
                 f"{where}: path is outside the allowed scope "
                 f"(allowed_paths: {', '.join(allowed_paths)})"

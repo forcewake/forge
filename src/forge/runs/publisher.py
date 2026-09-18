@@ -48,9 +48,9 @@ with zero commit-API calls.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,6 +65,9 @@ from forge.repository import (
     ChangeSet,
     Operation,
     WriteOutcome,
+    WritePolicy,
+    normalize_repo_path,
+    resolve_write_policy,
     validate_changeset,
 )
 from forge.repository.writer import BranchDriftError, ChangesetWriter
@@ -159,6 +162,7 @@ def validate_candidate_bundle(
     branch: str,
     commit_message: str,
     allowed_paths: Sequence[str] = (),
+    policy: WritePolicy | None = None,
 ) -> ValidatedCandidate:
     """The pure publication-boundary check, shared by EVERY backend (ADR-0026).
 
@@ -167,11 +171,15 @@ def validate_candidate_bundle(
        verified BEFORE anything is applied, ``intended_digest`` AFTER — the
        R08/R09 guarantees run on every path, builtin included;
     2. :func:`validate_changeset` — denied paths/prefixes/lockfiles, change
-       count and size caps, existence rules, and the *allowed_paths* globs;
+       count and size caps, existence rules, and the *allowed_paths* globs,
+       under the write profile *policy* (R18; ``None`` = the default
+       ``no_dependencies`` profile, the historical behavior);
     3. the R14 create rule: a create publishes only against a CONFIRMED
        absence. Callers feed *base_contents* from the strict typed reads,
        so presence in the mapping means the provider said the file exists —
-       a create over it is a violation, not a silent overwrite.
+       a create over it is a violation, not a silent overwrite;
+    4. one action per path (R18): two bundle entries for one canonical path
+       are a ``duplicate_path`` rejection before anything is applied.
 
     Raises :class:`CandidateError` (materialization/digest failures) or
     :class:`PolicyViolation` (write-policy violations). Returns the
@@ -180,6 +188,7 @@ def validate_candidate_bundle(
     """
     if bundle.is_empty:
         raise CandidateError("empty_candidate", "candidate contains no changes")
+    _reject_duplicate_paths(bundle)
     entries = tuple(bundle.materialize(base_contents))
     changeset = manifest_to_changeset(
         entries,
@@ -187,7 +196,12 @@ def validate_candidate_bundle(
         commit_message=commit_message,
         attempt_base_oid=bundle.attempt_base_oid,
     )
-    violations = validate_changeset(changeset, base_contents, allowed_paths=list(allowed_paths))
+    violations = validate_changeset(
+        changeset,
+        base_contents,
+        allowed_paths=list(allowed_paths),
+        policy=policy,
+    )
     violations.extend(
         f"change {entry.path!r} (create): file already exists in the base snapshot"
         for entry in entries
@@ -201,6 +215,24 @@ def validate_candidate_bundle(
         changeset=changeset,
         allowed_paths=tuple(allowed_paths),
     )
+
+
+def _reject_duplicate_paths(bundle: CandidateBundle) -> None:
+    """Refuse a bundle with two entries for one canonical path (R18).
+
+    The bundle doctrine is exactly ONE representation per file (R08); a
+    repeated path — even under a different spelling (``./a.py`` vs ``a.py``)
+    — is an ambiguous candidate and is rejected before any base read.
+    """
+    seen: set[str] = set()
+    for path in bundle.paths:
+        canonical = normalize_repo_path(path)
+        if canonical and canonical in seen:
+            raise CandidateError(
+                "duplicate_path",
+                f"{path}: duplicate path ({canonical!r}) — one entry per path per candidate",
+            )
+        seen.add(canonical)
 
 
 @dataclass(frozen=True)
@@ -242,6 +274,19 @@ def publication_grant_valid(run: FlowRun, generation: int | None) -> bool:
     return True
 
 
+async def _latest_spec_row(session: AsyncSession, run: FlowRun) -> RunSpec | None:
+    """The run's freshest RunSpec row, or ``None`` when it has none."""
+    return (
+        (
+            await session.execute(
+                select(RunSpec).where(RunSpec.run_id == run.id).order_by(RunSpec.id.desc()).limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
 async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
     """Whether the frozen RunSpec's digest still equals the run's spec digest.
 
@@ -251,15 +296,7 @@ async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
     """
     if not run.spec_digest:
         return True
-    row = (
-        (
-            await session.execute(
-                select(RunSpec).where(RunSpec.run_id == run.id).order_by(RunSpec.id.desc()).limit(1)
-            )
-        )
-        .scalars()
-        .first()
-    )
+    row = await _latest_spec_row(session, run)
     if row is None:
         return True
     return str(row.digest) == run.spec_digest
@@ -271,21 +308,50 @@ async def spec_allowed_paths(session: AsyncSession, run: FlowRun) -> list[str]:
     Monorepo path scoping (v0.7, complex-projects.md §1): empty/missing —
     the run is unscoped and every path is in scope.
     """
-    row = (
-        (
-            await session.execute(
-                select(RunSpec).where(RunSpec.run_id == run.id).order_by(RunSpec.id.desc()).limit(1)
-            )
-        )
-        .scalars()
-        .first()
-    )
+    row = await _latest_spec_row(session, run)
     if row is None:
         return []
     raw = (row.document or {}).get("allowed_paths")
     if not isinstance(raw, list):
         return []
     return [str(glob) for glob in raw if str(glob).strip()]
+
+
+def run_project_keys(run: FlowRun) -> tuple[str, ...]:
+    """The config keys identifying *run*'s project (R18 pipeline hooks).
+
+    ``"<provider>:<project_id>"`` always; a GitHub run additionally answers
+    to ``"github:<owner/repo>"`` — the human-readable subject identity.
+    """
+    provider = str(getattr(run, "provider", "") or "gitlab")
+    keys = [f"{provider}:{run.project_id}"]
+    repo = str(getattr(run, "github_repo_full_name", "") or "")
+    if repo:
+        keys.append(f"github:{repo}")
+    return tuple(keys)
+
+
+def sensitive_paths_for_run(
+    run: FlowRun,
+    pipeline_entrypoints: Mapping[str, Sequence[str]] | None,
+) -> list[str]:
+    """The configured sensitive pipeline paths for *run*'s project (R18).
+
+    Looks *run*'s :func:`run_project_keys` up in the parsed
+    ``pipeline_entrypoints`` config (forge.yml / FORGE_PIPELINE_ENTRYPOINTS)
+    and returns the union of the matches, de-duplicated in order. Azure's
+    pipeline definition may be any file, so onboarding names the real
+    entrypoints instead of forge assuming ``azure-pipelines.yml``.
+    """
+    if not pipeline_entrypoints:
+        return []
+    paths: list[str] = []
+    for key in run_project_keys(run):
+        for path in pipeline_entrypoints.get(key, ()):
+            text = str(path).strip()
+            if text:
+                paths.append(text)
+    return list(dict.fromkeys(paths))
 
 
 async def _fetch_base_contents(
@@ -381,6 +447,10 @@ async def publish_validated_candidate(
     commit_message: str | None = None,
     allowed_paths: Sequence[str] | None = None,
     fence_check: FenceCheck | None = None,
+    write_profile: str | None = None,
+    custom_write_profiles: Mapping[str, Mapping[str, Any]] | None = None,
+    sensitive_paths: Sequence[str] | None = None,
+    operator_approved: bool | None = None,
 ) -> PublishResult:
     """Validate and publish *candidate* for *run* — THE boundary (ADR-0026).
 
@@ -405,10 +475,25 @@ async def publish_validated_candidate(
     bound) pins the publication-grant generation it was minted under: a
     cancel that bumped the run's generation after the claim fences the
     reservation out even before the flag flips (R10).
+
+    Write-policy profile knobs (R18, all defaulting to today's behavior):
+
+    - *write_profile* names the profile (a builtin or a custom profile from
+      *custom_write_profiles* — the parsed forge.yml / FORGE_WRITE_PROFILES
+      mapping); ``None`` = the default ``no_dependencies`` profile;
+    - *sensitive_paths* carries the project's onboarding-provided pipeline
+      entrypoints (see :func:`sensitive_paths_for_run`); they are denied
+      under EVERY profile;
+    - *operator_approved* explicitly asserts the operator-approver gate for
+      profiles with ``require_special_approval`` (``ci_change``). When
+      ``None``, a session-backed run proves the gate with its frozen RunSpec
+      row (an operator /go froze it); transport callers without a session
+      must assert it explicitly — absent proof refuses the publication.
     """
     claim: ExecutionClaim | None = current_claim()
     claim_generation = claim.cancellation_generation if claim is not None else None
 
+    spec_present = False
     if session_factory is not None:
         # Fresh trusted state: the run row as it is NOW, not as the caller
         # saw it.
@@ -418,6 +503,7 @@ async def publish_validated_candidate(
                 return PublishResult(False, "run_not_found")
             spec_ok = await _spec_digest_matches(session, fresh)
             spec_paths = await spec_allowed_paths(session, fresh)
+            spec_present = await _latest_spec_row(session, fresh) is not None
     else:
         fresh = run
         spec_ok = True
@@ -444,6 +530,28 @@ async def publish_validated_candidate(
     if fence_check is not None and not await fence_check():
         return PublishResult(False, "fence_invalid")
 
+    # The effective write policy (R18): profile + provider-sensitive paths.
+    # A broken configuration fails the publication with a clear reason —
+    # it never degrades to a more permissive policy.
+    try:
+        policy = resolve_write_policy(
+            write_profile,
+            custom_profiles=custom_write_profiles,
+            extra_denied_paths=sensitive_paths or (),
+        )
+    except ValueError as exc:
+        return PublishResult(False, f"write_policy_config_error: {exc}")
+    if policy.require_special_approval and operator_approved is None:
+        # No explicit assertion: the frozen RunSpec row IS the proof (an
+        # operator /go — FORGE_APPROVERS-gated — froze the plan).
+        operator_approved = session_factory is not None and spec_present
+    if policy.require_special_approval and not operator_approved:
+        return PublishResult(
+            False,
+            f"special_approval_required: write profile {policy.name!r} requires "
+            f"approval from the operator approver set",
+        )
+
     # Materialize against authoritative base contents (no truncation) and
     # run the shared policy — the one validation, every backend.
     try:
@@ -455,6 +563,7 @@ async def publish_validated_candidate(
             commit_message=commit_message
             or f"forge: implement {fresh.issue_iid or 0} (run {short_run_id(fresh.id)})",
             allowed_paths=scope,
+            policy=policy,
         )
     except CandidateError as exc:
         return PublishResult(False, f"{exc.reason}: {exc}")
@@ -472,11 +581,12 @@ async def publish_validated_candidate(
     result = await native_publish(validated)
     if result.ok:
         logger.info(
-            "Published candidate for run %s at %s (base %s, %d change(s))",
+            "Published candidate for run %s at %s (base %s, %d change(s), profile %s)",
             fresh.id[:8],
             (result.commit_sha or "?")[:8],
             attempt_base[:8],
             len(validated.changeset.changes),
+            policy.name,
         )
         # R10 best-effort completion: the remote commit already started (or
         # landed) — never rolled back, but a grant revoked DURING the commit
@@ -507,6 +617,10 @@ async def publish_candidate(
     bundle: CandidateBundle,
     commit_message: str | None = None,
     fence_check: FenceCheck | None = None,
+    write_profile: str | None = None,
+    custom_write_profiles: Mapping[str, Mapping[str, Any]] | None = None,
+    sensitive_paths: Sequence[str] | None = None,
+    operator_approved: bool | None = None,
 ) -> PublishResult:
     """Validate and publish *bundle* for *run* via the GitLab transport.
 
@@ -516,7 +630,8 @@ async def publish_candidate(
     :class:`ChangesetWriter` apply are GitLab's. The writer is pinned to
     the frozen attempt base (``start_ref = expected_head``) — in the
     proposal-only model nothing else ever pushed, so the guarded apply
-    proves the branch did not move.
+    proves the branch did not move. The write-policy profile knobs (R18)
+    pass straight through to the shared entry.
     """
 
     async def _fetch(base_ref: str, paths: list[str]) -> dict[str, str]:
@@ -554,4 +669,8 @@ async def publish_candidate(
         native_publish=_write,
         commit_message=commit_message,
         fence_check=fence_check,
+        write_profile=write_profile,
+        custom_write_profiles=custom_write_profiles,
+        sensitive_paths=sensitive_paths,
+        operator_approved=operator_approved,
     )
