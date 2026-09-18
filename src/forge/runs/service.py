@@ -107,6 +107,7 @@ from forge.runs.backends import (
     fetch_git_base,
     is_harness_backend,
 )
+from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
 from forge.runs.candidate import AttemptContext
 from forge.runs.ci_contract import classify_failure
 from forge.runs.harness_selection import (
@@ -164,6 +165,13 @@ RUN_SPEC_SCHEMA_VERSION = 2
 _RESUMABLE_ADVANCE_STATUSES = frozenset(
     {"proposing", "validating", "committing", "ensuring_draft_mr"}
 )
+
+#: R07: pre-gate states a crashed ``/implement`` leaves its OWN run in. A
+#: re-delivered or re-claimed ``start_run`` command resumes that run from its
+#: persisted plan checkpoint instead of forking a duplicate (which the
+#: one-active-run invariant would refuse, stranding the mid-planning run with
+#: its gate never opened).
+_RESUMABLE_PLAN_STATUSES = frozenset({"preflight", "planning"})
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
@@ -372,6 +380,37 @@ class RunService:
         # this guard covers two distinct comments (observed live in M3).
         active = await self._find_active_run(project_id, issue_iid)
         if active is not None:
+            if active.status in _RESUMABLE_PLAN_STATUSES:
+                # R07: a crashed /implement left its own run mid-planning —
+                # the re-claimed command step RESUMES it from the persisted
+                # plan checkpoint (``_plan_and_publish`` replays the result
+                # when the model call already completed; it plans for the
+                # first time when the crash preceded any persisted output).
+                # Anything else (a stranger's duplicate comment) keeps the
+                # refusal below.
+                admission = check_admission(
+                    self._settings, self._config, project_id, author_username
+                )
+                if admission.allowed:
+                    logger.info(
+                        "Run %s found %s after a crash — resuming planning from its checkpoint",
+                        active.id[:8],
+                        active.status,
+                    )
+                    await self._plan_and_publish(
+                        active.id,
+                        project_id=project_id,
+                        issue_iid=issue_iid,
+                        issue_title=issue_title,
+                        issue_description=issue_description,
+                        author_username=author_username,
+                    )
+                    return active.id
+                logger.warning(
+                    "Run %s is stuck mid-planning and @%s is not admitted — left untouched",
+                    active.id[:8],
+                    author_username,
+                )
             await self._post_journaled_note(
                 project_id,
                 issue_iid,
@@ -447,13 +486,45 @@ class RunService:
             )
             return run_id
 
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_iid=issue_iid,
+            issue_title=issue_title,
+            issue_description=issue_description,
+            author_username=author_username,
+        )
+        return run_id
+
+    async def _plan_and_publish(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_iid: int,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """The planning leg: plan (or replay its checkpoint), freeze, publish.
+
+        R07 bounded step ``plan``: the planner's output is persisted under
+        ``(run_id, cycle=1, step="plan", input_digest)`` the moment the call
+        returns — BEFORE the plan comment, the pending decision or any
+        transition is scheduled — so a crashed leg replays the persisted
+        plan and never calls the model a second time. A moved input (an
+        edited issue, a changed path scope) changes the digest and
+        legitimately re-plans.
+
+        Shared by the fresh ``/implement`` path and the interrupted-start
+        resume in :meth:`start_run`; every stage it ends with is idempotent
+        (see :meth:`_finish_plan_publication`).
+        """
         # F22/R13: the run's numeric budget is resolved and opened BEFORE the
-        # first paid call. The budget class comes from the harness decision
-        # (compiled at plan time, ADR-0023 §2 — it does not depend on the
-        # plan text), the class names a numeric profile resolved AT FREEZE
-        # TIME, and the ceilings freeze into the RunSpec below. Opening the
-        # row first is what makes the PLANNER itself reserve; without a
-        # finite profile nothing is opened (unlimited run, byte-compatible).
+        # first paid call (idempotent per run — a resumed leg finds the
+        # frozen row). The budget class comes from the harness decision
+        # (compiled at plan time, ADR-0023 §2), and the class names a numeric
+        # profile resolved AT FREEZE TIME; nothing configured → no ceilings.
         harness_selection = self._compile_harness_selection()
         budget_limits = self._budget_limits_for_class(harness_selection.budget_class)
         if budget_limits is not None:
@@ -484,136 +555,262 @@ class RunService:
             )
             project_config = ProjectConfig()
         path_scope = list(project_config.implement_paths)
-        try:
-            plan = await self._planner.plan(
-                issue_title,
-                issue_description,
-                flow_run_id=run_id,
-                path_scope=path_scope or None,
-            )
-        except (LLMError, LLMResponseError) as exc:
-            # R13: a budget refusal never contacts the provider and never
-            # unblocks by retrying the same run — classify it visibly as
-            # blocked(budget_exhausted), not a planning failure.
-            if str(exc) == BUDGET_EXHAUSTED:
-                await self._to_terminal(
-                    run_id,
-                    FlowStatus.BLOCKED,
-                    f"{BUDGET_EXHAUSTED}: planner refused — run budget cannot grant a call",
-                )
-            else:
-                await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
-            raise
-        digest = plan_digest_of(plan)
-        task_digest = task_digest_of(issue_title, issue_description)
-        now = datetime.now(timezone.utc)
-        plan_summary = self._plan_summary(plan)
-        plan_files_hint = self._plan_files_hint()
 
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.PLANNING)
-            run = await self._get_run(session, run_id)
-            run.plan_digest = digest
-            base_sha = run.base_sha = await self._read_base_sha(project_id)
-            # ADR-0015: the backend choice is frozen at run start so the run
-            # survives restarts with the backend it was created with. The
-            # harness selection rides beside it (ADR-0023): "backend" stays
-            # the backend-name string the reconcilers dispatch on.
-            run.evidence = _merge_evidence(
-                run.evidence,
-                {
-                    "backend": self._backend_name(),
-                    "harness_selection": harness_selection.as_document(),
-                    "plan": {
-                        "digest": digest,
-                        "summary": plan_summary,
-                        "files_hint": plan_files_hint,
-                    },
-                    # R13 §4: the honest enforcement record — what the frozen
-                    # budget actually enforces on THIS lane, and which ceilings
-                    # ride in the spec. Absent when no finite profile applies.
-                    **(
-                        {
-                            "budget": {
-                                "budget_class": harness_selection.budget_class,
-                                "enforcement": budget_enforcement_for_backend(self._backend_name()),
-                                "max_calls": budget_limits.max_calls,
-                                "max_tokens": budget_limits.max_tokens,
-                                "wallclock_s": budget_limits.wallclock_s,
-                            }
-                        }
-                        if budget_limits is not None
-                        else {}
-                    ),
+        plan_input_digest = step_input_digest(
+            {
+                "title": issue_title,
+                "description": issue_description,
+                "path_scope": path_scope,
+            }
+        )
+        checkpoint = await load_step_output(
+            self._session_factory,
+            run_id=run_id,
+            step="plan",
+            input_digest=plan_input_digest,
+        )
+        if checkpoint is not None and str(checkpoint.get("plan") or ""):
+            plan = str(checkpoint["plan"])
+            digest = str(checkpoint.get("plan_digest") or plan_digest_of(plan))
+            task_digest = str(
+                checkpoint.get("task_digest") or task_digest_of(issue_title, issue_description)
+            )
+            logger.info(
+                "Run %s replays its persisted plan checkpoint — no second model call",
+                run_id[:8],
+            )
+        else:
+            try:
+                plan = await self._planner.plan(
+                    issue_title,
+                    issue_description,
+                    flow_run_id=run_id,
+                    path_scope=path_scope or None,
+                )
+            except (LLMError, LLMResponseError) as exc:
+                # R13: a budget refusal never contacts the provider and never
+                # unblocks by retrying the same run — classify it visibly as
+                # blocked(budget_exhausted), not a planning failure.
+                if str(exc) == BUDGET_EXHAUSTED:
+                    await self._to_terminal(
+                        run_id,
+                        FlowStatus.BLOCKED,
+                        f"{BUDGET_EXHAUSTED}: planner refused — run budget cannot grant a call",
+                    )
+                else:
+                    await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
+                raise
+            digest = plan_digest_of(plan)
+            task_digest = task_digest_of(issue_title, issue_description)
+            # R07 CHECKPOINT FIRST: the paid plan result becomes durable
+            # before anything else is scheduled. Everything after this write
+            # is replayable; the model call is not.
+            await record_step_output(
+                self._session_factory,
+                run_id=run_id,
+                step="plan",
+                input_digest=plan_input_digest,
+                output={
+                    "plan": plan,
+                    "plan_digest": digest,
+                    "task_digest": task_digest,
+                    "summary": self._plan_summary(plan),
+                    "files_hint": self._plan_files_hint(),
                 },
             )
-            # F14/R04 (ADR-0018 §1): freeze the EXECUTABLE RunSpec at plan
-            # acceptance — before the plan is published. The document carries
-            # the task text, plan artifact, model route, path policy,
-            # verification contract and budgets; the gate binds its digest,
-            # so /go approves exactly the bytes the run will execute.
-            spec_document = self._build_run_spec_document(
-                project_id=project_id,
-                issue_iid=issue_iid,
-                base_sha=base_sha,
-                task_title=issue_title,
-                task_description=issue_description,
-                task_digest=task_digest,
-                plan_summary=plan_summary,
-                plan_files_hint=plan_files_hint,
-                plan_digest=digest,
-                allowed_paths=path_scope,
-                harness_selection=harness_selection,
-            )
-            spec_digest = canonical_json_digest(spec_document)
-            session.add(
-                RunSpec(
-                    run_id=run_id,
-                    schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
-                    document=spec_document,
-                    digest=spec_digest,
-                )
-            )
-            run.spec_digest = spec_digest
-            await session.commit()
 
-        # F22: open the run's budget from the spec (idempotent) so the
-        # planning + factory legs reserve against real limits.
-        from forge.durable import open_budget_from_spec
-
-        async with self._session_factory() as session:
-            await open_budget_from_spec(
-                session, run_id=run_id, spec_document=spec_document, spec_digest=spec_digest
-            )
-            await session.commit()
-
-        await self._post_journaled_note(
-            project_id,
-            issue_iid,
-            self._plan_comment(run_id, plan, digest, harness_selection),
-            run_id,
-            "post_plan_note",
-        )
-
-        # F15 (ADR-0018 §2): the pending decision is created when the plan is
-        # published — carrying the plan/task/spec digests and an absolute
-        # deadline. /go consumes THIS row; it no longer creates one.
-        await self._open_pending_decision(
+        await self._finish_plan_publication(
             run_id,
             project_id=project_id,
             issue_iid=issue_iid,
-            plan_digest=digest,
-            base_sha=base_sha,
+            issue_title=issue_title,
+            issue_description=issue_description,
+            author_username=author_username,
+            plan=plan,
+            digest=digest,
             task_digest=task_digest,
-            spec_digest=spec_digest,
-            now=now,
+            path_scope=path_scope,
+            harness_selection=harness_selection,
+            budget_limits=budget_limits,
         )
 
+    async def _finish_plan_publication(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_iid: int,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+        plan: str,
+        digest: str,
+        task_digest: str,
+        path_scope: list[str],
+        harness_selection: HarnessSelection,
+        budget_limits: BudgetLimits | None,
+    ) -> None:
+        """Publish the plan for approval — every stage idempotent (R07).
+
+        A crashed leg re-entering here finds its earlier stages persisted
+        (frozen RunSpec + evidence, the plan-note journal, the pending
+        decision) and performs only the missing ones, so the run ends at
+        ``waiting_approval`` exactly once, with one plan comment and one
+        gate row.
+        """
+        now = datetime.now(timezone.utc)
+        spec_document: dict | None = None
+        spec_digest = ""
+        base_sha = ""
+        plan_refrozen = False
         async with self._session_factory() as session:
             controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.WAITING_APPROVAL)
-            await session.commit()
+            run = await self._get_run(session, run_id)
+            if run.spec_digest and run.plan_digest == digest:
+                # A crashed attempt already froze THIS plan's spec — replay
+                # its decision, never a re-derivation from live settings
+                # (R04). A digest that differs means the frozen spec belongs
+                # to a different (pre-approval, un-executed) plan: the run
+                # re-freezes below, exactly like the issue-edit replan.
+                spec_digest = run.spec_digest
+                base_sha = run.base_sha or ""
+            else:
+                plan_refrozen = True
+                if run.status == FlowStatus.PREFLIGHT.value:
+                    await controller.transition(run_id, FlowStatus.PLANNING)
+                run.plan_digest = digest
+                base_sha = run.base_sha = await self._read_base_sha(project_id)
+                plan_summary = self._plan_summary(plan)
+                plan_files_hint = self._plan_files_hint()
+                # ADR-0015: the backend choice is frozen at run start so the
+                # run survives restarts with the backend it was created with.
+                # The harness selection rides beside it (ADR-0023): "backend"
+                # stays the backend-name string the reconcilers dispatch on.
+                run.evidence = _merge_evidence(
+                    run.evidence,
+                    {
+                        "backend": self._backend_name(),
+                        "harness_selection": harness_selection.as_document(),
+                        "plan": {
+                            "digest": digest,
+                            "summary": plan_summary,
+                            "files_hint": plan_files_hint,
+                        },
+                        # R13 §4: the honest enforcement record — what the
+                        # frozen budget actually enforces on THIS lane, and
+                        # which ceilings ride in the spec. Absent when no
+                        # finite profile applies.
+                        **(
+                            {
+                                "budget": {
+                                    "budget_class": harness_selection.budget_class,
+                                    "enforcement": budget_enforcement_for_backend(
+                                        self._backend_name()
+                                    ),
+                                    "max_calls": budget_limits.max_calls,
+                                    "max_tokens": budget_limits.max_tokens,
+                                    "wallclock_s": budget_limits.wallclock_s,
+                                }
+                            }
+                            if budget_limits is not None
+                            else {}
+                        ),
+                    },
+                )
+                # F14/R04 (ADR-0018 §1): freeze the EXECUTABLE RunSpec at plan
+                # acceptance — before the plan is published. The document
+                # carries the task text, plan artifact, model route, path
+                # policy, verification contract and budgets; the gate binds
+                # its digest, so /go approves exactly the bytes the run will
+                # execute.
+                spec_document = self._build_run_spec_document(
+                    project_id=project_id,
+                    issue_iid=issue_iid,
+                    base_sha=base_sha,
+                    task_title=issue_title,
+                    task_description=issue_description,
+                    task_digest=task_digest,
+                    plan_summary=plan_summary,
+                    plan_files_hint=plan_files_hint,
+                    plan_digest=digest,
+                    allowed_paths=path_scope,
+                    harness_selection=harness_selection,
+                )
+                spec_digest = canonical_json_digest(spec_document)
+                session.add(
+                    RunSpec(
+                        run_id=run_id,
+                        schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
+                        document=spec_document,
+                        digest=spec_digest,
+                    )
+                )
+                run.spec_digest = spec_digest
+                await session.commit()
+
+        if spec_document is None:
+            # Reload the FROZEN document by its bound digest (``RunSpec.id``
+            # is a random hex id, not an ordering key — the digest is the
+            # only honest lookup for "the spec this run executes").
+            async with self._session_factory() as session:
+                row = (
+                    (
+                        await session.execute(
+                            select(RunSpec)
+                            .where(RunSpec.run_id == run_id, RunSpec.digest == spec_digest)
+                            .limit(1)
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                spec_document = row.document if row is not None else None
+
+        # F22: open the run's budget from the spec (idempotent) so the
+        # planning + factory legs reserve against real limits.
+        if spec_document is not None:
+            from forge.durable import open_budget_from_spec
+
+            async with self._session_factory() as session:
+                await open_budget_from_spec(
+                    session, run_id=run_id, spec_document=spec_document, spec_digest=spec_digest
+                )
+                await session.commit()
+
+        # The plan note: journaled like every external write; a leg that
+        # already posted it (its journal row succeeded) never re-posts —
+        # unless the plan itself was re-frozen (input digest moved), in
+        # which case the stale comment must not be the approval surface.
+        if plan_refrozen or not await self._action_succeeded(run_id, "post_plan_note"):
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                self._plan_comment(run_id, plan, digest, harness_selection),
+                run_id,
+                "post_plan_note",
+            )
+
+        # F15 (ADR-0018 §2): the pending decision is created when the plan is
+        # published — carrying the plan/task/spec digests and an absolute
+        # deadline. /go consumes THIS row; it no longer creates one. A
+        # crashed leg's row stands — never a second gate for one plan (a
+        # re-frozen plan opens a fresh decision bound to the NEW digests).
+        if plan_refrozen or not await self._gate_exists(run_id):
+            await self._open_pending_decision(
+                run_id,
+                project_id=project_id,
+                issue_iid=issue_iid,
+                plan_digest=digest,
+                base_sha=base_sha,
+                task_digest=task_digest,
+                spec_digest=spec_digest,
+                now=now,
+            )
+
+        try:
+            await self._transition(run_id, FlowStatus.WAITING_APPROVAL)
+        except InvalidTransition:
+            pass  # a crashed leg already parked the run at the gate
 
         logger.info(
             "Run %s started for project %d issue !%s (by @%s) — waiting for /go",
@@ -622,7 +819,6 @@ class RunService:
             issue_iid,
             author_username,
         )
-        return run_id
 
     async def _apply_run_budget(self, run_id: str) -> None:
         """Bind the run's budget guard to the factory agents (F22).
@@ -1166,6 +1362,45 @@ class RunService:
                 .first()
             )
         return gate is not None and gate.consumed_at is not None
+
+    async def _action_succeeded(self, run_id: str, action_kind: str) -> bool:
+        """Whether a journaled external write of *kind* already succeeded (R07).
+
+        The replay predicate for the notify-shaped steps: a crashed leg's
+        re-entry finds the succeeded journal row and skips the remote call
+        instead of posting the same note twice.
+        """
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog.id)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == action_kind,
+                            ActionLog.status == "succeeded",
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return row is not None
+
+    async def _gate_exists(self, run_id: str) -> bool:
+        """Whether a pending decision row already exists for the run (R07)."""
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(GateApproval.id).where(GateApproval.flow_run_id == run_id).limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return row is not None
 
     async def _revoke_publication_grant(self, run_id: str) -> None:
         """Cancel-as-revoke's durable core (F13, ADR-0018 §4).
@@ -2050,31 +2285,97 @@ class RunService:
     # ------------------------------------------------------------------
 
     async def evaluate_waiting_ci(self, now: datetime | None = None) -> None:
-        """One reconciler pass over every run parked in ``waiting_ci``.
+        """One reconciler pass over every run parked in ``waiting_ci`` — plus
+        the runs a crashed pass stranded in ``evaluating_ci`` or ``reviewing``
+        (R07: their verdict and review are replayed from the persisted
+        evidence, so the resume never re-derives — and never re-pays for —
+        an already-recorded result).
 
         R03: the scan is provider-scoped — GitHub/Azure runs are driven by
         their own reconcilers and would 404 against the GitLab reads here.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
-            run_ids = (
-                (
-                    await session.execute(
-                        select(FlowRun.id).where(
-                            FlowRun.provider == "gitlab",
-                            FlowRun.status == FlowStatus.WAITING_CI.value,
-                        )
+            rows = (
+                await session.execute(
+                    select(FlowRun.id, FlowRun.status).where(
+                        FlowRun.provider == "gitlab",
+                        FlowRun.status.in_(
+                            [
+                                FlowStatus.WAITING_CI.value,
+                                FlowStatus.EVALUATING_CI.value,
+                                FlowStatus.REVIEWING.value,
+                            ]
+                        ),
                     )
                 )
-                .scalars()
-                .all()
-            )
-        for run_id in run_ids:
+            ).all()
+        for run_id, status in rows:
             try:
-                await self._evaluate_one(run_id, now)
+                if status == FlowStatus.REVIEWING.value:
+                    await self._resume_review(run_id)
+                else:
+                    await self._evaluate_one(run_id, now)
             except Exception:
                 # One broken run must not stall the reconciler loop.
                 logger.exception("Reconcile pass failed for run %s", run_id[:8])
+
+    async def _resume_review(self, run_id: str) -> None:
+        """Re-drive a run stranded in ``reviewing`` by a crashed pass (R07).
+
+        A crash between the REVIEWING move and the ready transition used to
+        strand the run: no scanner picked ``reviewing`` up. The resume feeds
+        ``_review_and_ready`` from the run's persisted evidence — a review
+        already recorded for the candidate is replayed there without a
+        second model call; a crash before the review simply lets the
+        reviewer run its first (and only) pass.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            if run.status != FlowStatus.REVIEWING.value:
+                return  # moved on or cancelled elsewhere — superseded
+            project_id = run.project_id
+            issue_iid = run.issue_iid
+            mr_iid = run.mr_iid
+            candidate_shas = list(run.candidate_shas or [])
+            base_sha = run.base_sha or ""
+            plan_digest = run.plan_digest or ""
+            cancel_requested = bool(run.cancel_requested)
+            verification = dict((run.evidence or {}).get("verification") or {})
+            pipeline_evidence = dict((run.evidence or {}).get("pipeline") or {})
+        if cancel_requested:
+            logger.info("Run %s cancelled — stranded review pass stood down", run_id[:8])
+            return
+        candidate_sha = candidate_shas[-1] if candidate_shas else ""
+        if not candidate_sha:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, "reviewing without candidate sha")
+            return
+        pipeline = SimpleNamespace(
+            id=pipeline_evidence.get("id"),
+            status=str(pipeline_evidence.get("status") or "unknown"),
+            web_url=pipeline_evidence.get("url"),
+        )
+        # R02: the recorded verdict is trusted only when it is still bound to
+        # THIS candidate; anything else re-enters the review leg honestly.
+        verified = (
+            str(verification.get("status") or "") == "passed"
+            and str(verification.get("tested_oid") or "") == candidate_sha
+        )
+        warnings = (
+            [] if verified else ["No verification profile configured — pipeline success only."]
+        )
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_iid=issue_iid,
+            mr_iid=mr_iid,
+            candidate_sha=candidate_sha,
+            base_sha=base_sha,
+            pipeline=pipeline,
+            plan_digest=plan_digest,
+            verified=verified,
+            verification_warnings=warnings,
+        )
 
     async def _evaluate_one(self, run_id: str, now: datetime) -> None:
         async with self._session_factory() as session:
@@ -2086,6 +2387,7 @@ class RunService:
             # 404 against a foreign provider.
             if getattr(run, "provider", "gitlab") != "gitlab":
                 return
+            entry_status = run.status
             candidate_shas = list(run.candidate_shas or [])
             mr_iid = run.mr_iid
             plan_digest = run.plan_digest or ""
@@ -2120,8 +2422,14 @@ class RunService:
         # forever in an active state), a run past its deadline parks
         # blocked(ci_timeout) without a single provider call, so a
         # permanently erroring GitLab API can never hold a run past its
-        # FORGE_CI_WAIT_SECONDS budget.
-        if deadline is not None and as_aware_utc(now) > as_aware_utc(deadline):
+        # FORGE_CI_WAIT_SECONDS budget. A run a crashed pass already moved to
+        # ``evaluating_ci`` has CONCLUDED its wait — the deadline governs the
+        # wait, not the verdict, so it is not re-applied on the resume.
+        if (
+            entry_status == FlowStatus.WAITING_CI.value
+            and deadline is not None
+            and as_aware_utc(now) > as_aware_utc(deadline)
+        ):
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
             return
 
@@ -2153,9 +2461,16 @@ class RunService:
         if pipeline.status in _CI_ACTIVE_STATUSES:
             return  # keep waiting — the next tick re-checks
 
-        await self._transition(
-            run_id, FlowStatus.EVALUATING_CI, reason=f"pipeline {pipeline.id} {pipeline.status}"
-        )
+        try:
+            await self._transition(
+                run_id,
+                FlowStatus.EVALUATING_CI,
+                reason=f"pipeline {pipeline.id} {pipeline.status}",
+            )
+        except InvalidTransition:
+            # R07: a crashed pass already made this move (the run was
+            # scanned in ``evaluating_ci``) — resume on the evidence below.
+            pass
         await self._merge_run_evidence(
             run_id,
             {
@@ -2280,51 +2595,77 @@ class RunService:
         run still reaches the human, but the ready reason and the evidence
         comment say ``unverified`` instead of implying checks passed (R02).
         """
-        await self._transition(run_id, FlowStatus.REVIEWING, reason="readonly review of candidate")
+        try:
+            await self._transition(
+                run_id, FlowStatus.REVIEWING, reason="readonly review of candidate"
+            )
+        except InvalidTransition:
+            # R07: a crashed pass already made the move — resume this leg
+            # from the persisted state instead of dying on the re-entry.
+            pass
 
         # F22/R13: the reviewer's model calls reserve against the run budget
         # too — the leg rebinds the guard itself (the serving instance may be
         # fresh; see _advance_proposal).
         await self._apply_run_budget(run_id)
 
+        # R07 bounded step ``review``: a review already persisted for THIS
+        # candidate sha is replayed — the reviewer (a paid model call) runs
+        # exactly once per (run, cycle, candidate). A different sha (a new
+        # candidate after a repair) legitimately re-reviews.
         plan_summary, _ = await self._read_plan_evidence(run_id)
-        try:
-            review = await self._reviewer.review(
-                project_id=project_id,
-                issue_title=await self._read_issue_title(project_id, issue_iid),
-                plan_summary=plan_summary,
-                base_sha=base_sha,
-                candidate_sha=candidate_sha,
-                flow_run_id=run_id,
+        stored = await self._read_review_evidence(run_id)
+        if (
+            isinstance(stored, dict)
+            and stored.get("sha") == candidate_sha
+            and str(stored.get("verdict") or "")
+        ):
+            verdict = str(stored.get("verdict") or "")
+            summary = str(stored.get("summary") or "")
+            findings = _findings_from_evidence(stored.get("findings"))
+            logger.info(
+                "Run %s replays its persisted review of %s — no second model call",
+                run_id[:8],
+                candidate_sha[:8],
             )
-        except (LLMError, LLMResponseError, GitLabAPIError) as exc:
-            # R13: a budget refusal is not a review failure — the reviewer
-            # never ran, and the run parks visibly blocked(budget_exhausted).
-            if str(exc) == BUDGET_EXHAUSTED:
-                await self._to_terminal(
-                    run_id,
-                    FlowStatus.BLOCKED,
-                    f"{BUDGET_EXHAUSTED}: reviewer refused — run budget cannot grant a call",
+        else:
+            try:
+                review = await self._reviewer.review(
+                    project_id=project_id,
+                    issue_title=await self._read_issue_title(project_id, issue_iid),
+                    plan_summary=plan_summary,
+                    base_sha=base_sha,
+                    candidate_sha=candidate_sha,
+                    flow_run_id=run_id,
                 )
-            else:
-                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
-            return
+            except (LLMError, LLMResponseError, GitLabAPIError) as exc:
+                # R13: a budget refusal is not a review failure — the reviewer
+                # never ran, and the run parks visibly blocked(budget_exhausted).
+                if str(exc) == BUDGET_EXHAUSTED:
+                    await self._to_terminal(
+                        run_id,
+                        FlowStatus.BLOCKED,
+                        f"{BUDGET_EXHAUSTED}: reviewer refused — run budget cannot grant a call",
+                    )
+                else:
+                    await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+                return
 
-        verdict = str(getattr(review, "verdict", ""))
-        summary = str(getattr(review, "summary", ""))
-        findings = [_finding_dict(raw) for raw in (getattr(review, "findings", ()) or ())]
-        review_evidence = {
-            "review": {
-                "verdict": verdict,
-                "sha": candidate_sha,  # ADR-0008: the review approves THIS sha
-                "summary": summary,
-                "findings": findings,
+            verdict = str(getattr(review, "verdict", ""))
+            summary = str(getattr(review, "summary", ""))
+            findings = [_finding_dict(raw) for raw in (getattr(review, "findings", ()) or ())]
+            review_evidence = {
+                "review": {
+                    "verdict": verdict,
+                    "sha": candidate_sha,  # ADR-0008: the review approves THIS sha
+                    "summary": summary,
+                    "findings": findings,
+                }
             }
-        }
-        await self._merge_run_evidence(run_id, review_evidence)
+            await self._merge_run_evidence(run_id, review_evidence)
+            stored = await self._read_review_evidence(run_id)
 
         # Self-check: the recorded review must be bound to the candidate sha.
-        stored = await self._read_review_evidence(run_id)
         if stored is None or stored.get("sha") != candidate_sha:
             await self._to_terminal(
                 run_id,
@@ -3821,6 +4162,13 @@ def _finding_dict(raw: Any) -> dict:
         "file": str(getattr(raw, "file", "")),
         "note": str(getattr(raw, "note", "")),
     }
+
+
+def _findings_from_evidence(raw: Any) -> list[dict]:
+    """The findings list of a PERSISTED review (R07 replay shape)."""
+    if not isinstance(raw, list):
+        return []
+    return [_finding_dict(entry) for entry in raw if isinstance(entry, dict)]
 
 
 def _review_mr_comment(verdict: str, summary: str, findings: list[dict]) -> str:

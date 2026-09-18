@@ -170,7 +170,17 @@ class TestTransactionalIngress:
             assert len(inbox) == 1
             assert inbox[0].source_event_id == source_event_id
             assert inbox[0].event_type == "run_command"
-            steps = (await session.execute(select(StepRun))).scalars().all()
+            steps = (
+                (
+                    await session.execute(
+                        # R07: the run's checkpoint rows (checkpoint:*) share
+                        # the table; the ingress contract is about COMMAND steps.
+                        select(StepRun).where(StepRun.step_name.notlike("checkpoint:%"))
+                    )
+                )
+                .scalars()
+                .all()
+            )
         assert len(steps) == 1
         step = steps[0]
         assert step.step_name == "start_run"
@@ -224,7 +234,16 @@ class TestTransactionalIngress:
 
         async with app.state.session_factory() as session:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
-            steps = (await session.execute(select(StepRun))).scalars().all()
+            steps = (
+                (
+                    await session.execute(
+                        # R07 checkpoint rows share step_runs; count commands.
+                        select(StepRun).where(StepRun.step_name.notlike("checkpoint:%"))
+                    )
+                )
+                .scalars()
+                .all()
+            )
             runs = (await session.execute(select(FlowRun))).scalars().all()
         assert len(inbox) == 1
         assert len(steps) == 1

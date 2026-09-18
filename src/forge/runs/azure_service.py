@@ -2304,51 +2304,82 @@ class AzureRunService:
         ``verified=False`` (no CI built the candidate) is honest: the run
         still reaches the human, but the reason says ``unverified`` instead
         of implying builds passed (R02)."""
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(
-                run_id, FlowStatus.REVIEWING, reason="readonly review of the PR diff"
-            )
-            await session.commit()
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                await controller.transition(
+                    run_id, FlowStatus.REVIEWING, reason="readonly review of the PR diff"
+                )
+                await session.commit()
+        except InvalidTransition:
+            # R07: a crashed pass already made the move — resume the leg.
+            pass
 
+        # R07 bounded step ``review``: a review already persisted for THIS
+        # candidate sha is replayed — the model runs exactly once per
+        # (run, candidate). A different sha legitimately re-reviews.
         plan_summary, _ = await self._read_plan_evidence(run_id)
         issue_title = await self._read_work_item_title(issue_number)
-        try:
-            review = await self._stack.reviewer.review(
-                project=self._project,
-                repo=self._repo,
-                pr_id=pr_id or 0,
-                issue_title=issue_title,
-                plan_summary=plan_summary,
-                base_sha=base_sha,
-                candidate_sha=candidate_sha,
-                flow_run_id=run_id,
-            )
-        except (LLMError, LLMResponseError) as exc:
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
-            return
-
-        verdict = str(getattr(review, "verdict", ""))
-        summary = str(getattr(review, "summary", ""))
-        findings = [
-            {"severity": str(f.severity), "file": str(f.file), "note": str(f.note)}
-            for f in (getattr(review, "findings", ()) or ())
-        ]
-        # ADR-0008: the review approves THIS sha.
-        await self._merge_run_evidence(
-            run_id,
-            {
-                "review": {
-                    "verdict": verdict,
-                    "sha": candidate_sha,
-                    "summary": summary,
-                    "findings": findings,
+        stored = await self._read_review_evidence(run_id)
+        if (
+            isinstance(stored, dict)
+            and stored.get("sha") == candidate_sha
+            and str(stored.get("verdict") or "")
+        ):
+            verdict = str(stored.get("verdict") or "")
+            summary = str(stored.get("summary") or "")
+            raw_findings = stored.get("findings")
+            findings = [
+                {
+                    "severity": str(f.get("severity")),
+                    "file": str(f.get("file")),
+                    "note": str(f.get("note")),
                 }
-            },
-        )
+                for f in (raw_findings or [])
+                if isinstance(f, dict)
+            ]
+            logger.info(
+                "Azure DevOps run %s replays its persisted review of %s — no second model call",
+                run_id[:8],
+                candidate_sha[:8],
+            )
+        else:
+            try:
+                review = await self._stack.reviewer.review(
+                    project=self._project,
+                    repo=self._repo,
+                    pr_id=pr_id or 0,
+                    issue_title=issue_title,
+                    plan_summary=plan_summary,
+                    base_sha=base_sha,
+                    candidate_sha=candidate_sha,
+                    flow_run_id=run_id,
+                )
+            except (LLMError, LLMResponseError) as exc:
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+                return
+
+            verdict = str(getattr(review, "verdict", ""))
+            summary = str(getattr(review, "summary", ""))
+            findings = [
+                {"severity": str(f.severity), "file": str(f.file), "note": str(f.note)}
+                for f in (getattr(review, "findings", ()) or ())
+            ]
+            # ADR-0008: the review approves THIS sha.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "review": {
+                        "verdict": verdict,
+                        "sha": candidate_sha,
+                        "summary": summary,
+                        "findings": findings,
+                    }
+                },
+            )
+            stored = await self._read_review_evidence(run_id)
 
         # Self-check: the recorded review must be bound to the candidate sha.
-        stored = await self._read_review_evidence(run_id)
         if stored is None or stored.get("sha") != candidate_sha:
             await self._to_terminal(
                 run_id,
@@ -3878,9 +3909,7 @@ async def evaluate_azure_publication_intents(
         )
     for repo_full_name in await _repos_with_due_publication_intents(session_factory):
         if "/" not in repo_full_name:
-            logger.warning(
-                "Publication intent with malformed repo %r — skipping", repo_full_name
-            )
+            logger.warning("Publication intent with malformed repo %r — skipping", repo_full_name)
             continue
         project, repo_name = repo_full_name.split("/", 1)
         stack = stack_factory(project, repo_name)

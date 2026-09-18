@@ -50,7 +50,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from types import SimpleNamespace
+from typing import Any, Callable
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -91,6 +92,7 @@ from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.llm import LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS
+from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import (
     GitHubAgents,
     GitHubPublishOutcome,
@@ -98,10 +100,18 @@ from forge.integrations.github_flow import (
     github_factory_branch,
 )
 from forge.orchestrator.project_config import ProjectConfig, load_project_config
-from forge.repository import Change, ChangeSet, Operation, validate_changeset
+from forge.repository import (
+    Change,
+    ChangeSet,
+    Operation,
+    changeset_from_document,
+    changeset_to_document,
+    validate_changeset,
+)
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
+from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
@@ -143,6 +153,17 @@ _VERIFICATION_NOTE = (
 #: probe says "nothing landed, head intact" — the run's own publish leg owns
 #: the re-dispatch; the scanner just stops polling the provider hot.
 _INTENT_PROBE_BACKOFF_SECONDS = 60
+
+#: R07: post-gate states a crashed worker leaves a run in. A re-delivered or
+#: re-claimed ``/go`` command re-drives the publish leg (the recovery
+#: driver) instead of ignoring the duplicate: ``_advance_publish`` probes the
+#: durable publication intent first (R11), so the re-drive adopts a landed
+#: commit, resolves a moved ref, or re-dispatches with the SAME operation key
+#: — and its propose checkpoint (``_propose_for_publish``) means the
+#: re-dispatch never calls the model a second time.
+_RESUMABLE_PUBLISH_STATUSES = frozenset(
+    {"proposing", "validating", "committing", "ensuring_draft_mr"}
+)
 
 
 class GitHubRunService:
@@ -410,6 +431,7 @@ class GitHubRunService:
             return
         run_id = match.group(1).lower()
         now = now or datetime.now(timezone.utc)
+        resuming = False
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
@@ -425,7 +447,33 @@ class GitHubRunService:
                     "GitHub /go for run %s posted on a different issue — ignoring", run_id[:8]
                 )
                 return
-            if run.status != FlowStatus.WAITING_APPROVAL.value:
+            if run.status in _RESUMABLE_PUBLISH_STATUSES:
+                # R07: the gate is consumed and a crashed worker left the run
+                # mid-publish; the re-claimed command step is the recovery
+                # driver. The leg below probes the publication intent before
+                # any commit-API call (R11) and replays the propose
+                # checkpoint — the resume never re-pays for derived work.
+                gate = (
+                    (
+                        await session.execute(
+                            select(GateApproval)
+                            .where(GateApproval.flow_run_id == run.id)
+                            .order_by(GateApproval.id.desc())
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if gate is not None and gate.consumed_at is not None:
+                    resuming = True
+                else:
+                    logger.info(
+                        "GitHub /go for run %s in %s with an unconsumed gate — ignoring",
+                        run_id[:8],
+                        run.status,
+                    )
+                    return
+            elif run.status != FlowStatus.WAITING_APPROVAL.value:
                 # Already advanced (or terminal) — duplicate /go delivery.
                 logger.info(
                     "GitHub /go for run %s in status %s — ignoring duplicate",
@@ -434,66 +482,76 @@ class GitHubRunService:
                 )
                 return
 
-            # ADR-0009: authority comes from trusted configuration.
-            if author_username not in self._approvers():
-                logger.info(
-                    "GitHub /go from @%s who is not in the GitHub approver list — ignoring",
-                    author_username,
-                )
-                return
-
-            gate = (
-                (
-                    await session.execute(
-                        select(GateApproval)
-                        .where(GateApproval.flow_run_id == run.id)
-                        .order_by(GateApproval.id.desc())
+            if not resuming:
+                # ADR-0009: authority comes from trusted configuration.
+                if author_username not in self._approvers():
+                    logger.info(
+                        "GitHub /go from @%s who is not in the GitHub approver list — ignoring",
+                        author_username,
                     )
-                )
-                .scalars()
-                .first()
-            )
-            if gate is None:
-                logger.info("No pending decision for GitHub run %s — ignoring /go", run_id[:8])
-                return
-            if not is_valid(
-                gate,
-                now,
-                plan_digest=run.plan_digest or "",
-                base_sha=run.base_sha or "",
-                policy_digest=self._policy_digest(),
-                spec_digest=run.spec_digest,
-            ):
-                # The comment thread is the only operator surface on GitHub:
-                # an expired or drifted decision blocks the run visibly.
-                expired = as_aware_utc(gate.expires_at) <= as_aware_utc(now)
-                reason = (
-                    "decision_expired: the approval window closed — run /implement again"
-                    if expired
-                    else "decision_drift: the approved plan/policy changed — run /implement again"
-                )
-                await self._transition_in_session(session, run.id, FlowStatus.BLOCKED, reason)
-                await self._post_journaled_note(
-                    project_id,
-                    issue_number,
-                    f"Run `{run_id[:8]}` was **blocked**: {reason}.\n\n"
-                    "*This is an automated message.*",
-                    run_id,
-                    "decision_expired" if expired else "decision_drift",
-                )
-                logger.info("GitHub decision for run %s expired/drifted — blocked", run_id[:8])
-                return
+                    return
 
-            # The decision was opened anonymously at plan publication; the
-            # consuming approver's login is recorded on the transition reason.
-            try:
-                await consume_approval(session, gate.id, now)
-            except GateAlreadyConsumed:
-                logger.info("GitHub gate for run %s already consumed — ignoring", run_id[:8])
-                return
-            await self._transition_in_session(
-                session, run.id, FlowStatus.PROPOSING, f"approved by @{author_username}"
+                gate = (
+                    (
+                        await session.execute(
+                            select(GateApproval)
+                            .where(GateApproval.flow_run_id == run.id)
+                            .order_by(GateApproval.id.desc())
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if gate is None:
+                    logger.info("No pending decision for GitHub run %s — ignoring /go", run_id[:8])
+                    return
+                if not is_valid(
+                    gate,
+                    now,
+                    plan_digest=run.plan_digest or "",
+                    base_sha=run.base_sha or "",
+                    policy_digest=self._policy_digest(),
+                    spec_digest=run.spec_digest,
+                ):
+                    # The comment thread is the only operator surface on GitHub:
+                    # an expired or drifted decision blocks the run visibly.
+                    expired = as_aware_utc(gate.expires_at) <= as_aware_utc(now)
+                    reason = (
+                        "decision_expired: the approval window closed — run /implement again"
+                        if expired
+                        else "decision_drift: the approved plan/policy changed — run /implement again"
+                    )
+                    await self._transition_in_session(session, run.id, FlowStatus.BLOCKED, reason)
+                    await self._post_journaled_note(
+                        project_id,
+                        issue_number,
+                        f"Run `{run_id[:8]}` was **blocked**: {reason}.\n\n"
+                        "*This is an automated message.*",
+                        run_id,
+                        "decision_expired" if expired else "decision_drift",
+                    )
+                    logger.info("GitHub decision for run %s expired/drifted — blocked", run_id[:8])
+                    return
+
+                # The decision was opened anonymously at plan publication; the
+                # consuming approver's login is recorded on the transition reason.
+                try:
+                    await consume_approval(session, gate.id, now)
+                except GateAlreadyConsumed:
+                    logger.info("GitHub gate for run %s already consumed — ignoring", run_id[:8])
+                    return
+                await self._transition_in_session(
+                    session, run.id, FlowStatus.PROPOSING, f"approved by @{author_username}"
+                )
+
+        if resuming:
+            logger.info(
+                "GitHub run %s found %s after a worker crash — resuming the publish leg",
+                run_id[:8],
+                run.status,
             )
+            await self._advance_publish(run_id, project_id=project_id, issue_number=issue_number)
+            return
 
         logger.info(
             "GitHub gate for run %s consumed by @%s — publishing", run_id[:8], author_username
@@ -882,13 +940,9 @@ class GitHubRunService:
                 )
             return True
         if verdict is ProbeVerdict.UNKNOWN:
-            await self._complete_intent(
-                intent.id, "unknown", remote_result={"matches": hits}
-            )
+            await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
             if run.status in self._PUBLISHING_STATUSES:
-                await self._to_terminal(
-                    intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome"
-                )
+                await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
                 issue_number = run.issue_iid or 0
                 await self._post_journaled_note(
                     int(run.project_id),
@@ -1435,19 +1489,37 @@ class GitHubRunService:
             await session.commit()
             return intent
 
-    async def _probe_intent(
-        self, intent: PublicationIntent
-    ) -> tuple[ProbeVerdict, list[str]]:
+    async def _probe_intent(self, intent: PublicationIntent) -> tuple[ProbeVerdict, list[str]]:
         """Classify one intent's outcome against the live remote (read-only).
 
         The identity tuple per the research doc: exactly one commit carrying
         this intent's ``(forge-op:<key>)`` marker whose parent list equals
         the intent-time expected parent proves the effect landed.
+
+        A provider-confirmed 404 on the branch reads is NOT inconclusive:
+        nothing can have landed on a branch that provably does not exist —
+        the verdict is REDISPATCH (the run's leg re-creates the branch and
+        re-dispatches with the SAME key). Any other read failure stays
+        UNKNOWN — no dispatch may be derived from it.
         """
         owner, repo = self._owner, self._repo
         try:
             head = await self._stack.client.get_branch_head(owner, repo, intent.target_ref)
             commits = await self._stack.client.list_commits(owner, repo, intent.target_ref)
+        except GitHubAPIError as exc:
+            if exc.status_code == 404:
+                logger.info(
+                    "Publication-intent probe: branch %r is confirmed absent — "
+                    "nothing landed (redispatch)",
+                    intent.target_ref,
+                )
+                return ProbeVerdict.REDISPATCH, []
+            logger.exception(
+                "Publication-intent probe read failed for %s@%s",
+                intent.target_ref,
+                self._repo_full_name,
+            )
+            return ProbeVerdict.UNKNOWN, []
         except Exception:
             # A failed probe read is inconclusive, not negative — no dispatch
             # may be derived from it.
@@ -1520,9 +1592,13 @@ class GitHubRunService:
                 },
             )
         elif outcome.drift:
-            await self._complete_intent(intent_id, "duplicated", remote_result={"reason": outcome.reason})
+            await self._complete_intent(
+                intent_id, "duplicated", remote_result={"reason": outcome.reason}
+            )
         else:
-            await self._complete_intent(intent_id, "failed", remote_result={"reason": outcome.reason})
+            await self._complete_intent(
+                intent_id, "failed", remote_result={"reason": outcome.reason}
+            )
 
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
         """One gate-approved publish cycle, ending at ``ready_for_human``.
@@ -1559,9 +1635,7 @@ class GitHubRunService:
         branch = github_factory_branch(issue_number, run_id)
         expected_head = base_sha or None
         run_row = await self._load_run(run_id)
-        intent = await self._publication_intent(
-            run_row, branch=branch, expected_head=expected_head
-        )
+        intent = await self._publication_intent(run_row, branch=branch, expected_head=expected_head)
         if intent is None:
             intent = await self._record_publication_intent(
                 run_row, branch=branch, expected_head=expected_head
@@ -1614,9 +1688,7 @@ class GitHubRunService:
                 )
                 return
             elif verdict is ProbeVerdict.UNKNOWN:
-                await self._complete_intent(
-                    intent.id, "unknown", remote_result={"matches": hits}
-                )
+                await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
                 await self._post_journaled_note(
                     project_id,
@@ -1634,14 +1706,28 @@ class GitHubRunService:
 
         await self._mark_intent_dispatched(intent)
         issue_title = await self._read_issue_title(issue_number)
-        outcome = await self._stack.flow.publish_proposal(
+        # R07 bounded step ``propose``: the publish leg proposes through the
+        # checkpoint store — a REDISPATCH re-drive (a crashed attempt whose
+        # intent probe proved nothing landed) replays the persisted manifest
+        # with the SAME operation key instead of calling the model again.
+        expected_head = base_sha or await self._stack.client.get_branch_head(
+            self._owner, self._repo, self._target_branch()
+        )
+        changeset = await self._propose_for_publish(
+            run_id,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            plan_summary=plan_summary,
+            expected_head=expected_head,
+        )
+        outcome = await self._stack.flow.publish_changeset(
             owner=self._owner,
             repo=self._repo,
             issue_number=issue_number,
             run_id=run_id,
-            issue_title=issue_title,
-            plan_summary=plan_summary,
-            expected_head=base_sha or None,
+            changeset=changeset,
+            base_branch=self._target_branch(),
+            expected_head=expected_head or None,
             operation_key=intent.operation_key,
         )
         await self._complete_intent_from_outcome(intent.id, outcome)
@@ -1667,6 +1753,62 @@ class GitHubRunService:
             # run (R10).
             return
         await self._finish_publish_leg(run_id, project_id, issue_number, outcome, plan_digest)
+
+    async def _propose_for_publish(
+        self,
+        run_id: str,
+        *,
+        issue_number: int,
+        issue_title: str,
+        plan_summary: str,
+        expected_head: str | None,
+    ) -> ChangeSet:
+        """The builtin lane's ``propose`` step, checkpointed (R07).
+
+        The proposal manifest is persisted under
+        ``(run_id, cycle=1, step="propose", input_digest)`` the moment the
+        proposer returns — before the publish mutation is scheduled — so a
+        re-driven leg replays the manifest instead of re-calling the model.
+        A moved base (or edited plan summary) changes the digest and
+        legitimately re-proposes.
+        """
+        digest = step_input_digest(
+            {"base": expected_head or "", "issue": issue_number, "plan_summary": plan_summary}
+        )
+        recorded = await load_step_output(
+            self._session_factory, run_id=run_id, step="propose", input_digest=digest
+        )
+        if recorded is not None:
+            changeset = changeset_from_document(recorded.get("manifest"))
+            if changeset is not None:
+                logger.info(
+                    "GitHub run %s replays its persisted proposal (%d changes) — no second "
+                    "model call",
+                    run_id[:8],
+                    len(changeset.changes),
+                )
+                return changeset
+        # The implementer only reads id/issue_iid/base_sha off the run (the
+        # same minimal stub ``GitHubPublishFlow.publish_proposal`` passed).
+        run_stub: Any = SimpleNamespace(
+            id=run_id, issue_iid=issue_number, project_id=0, base_sha=expected_head or ""
+        )
+        changeset = await self._stack.implementer.propose(
+            run_stub,
+            issue_title,
+            plan_summary=plan_summary,
+            attempt_base=expected_head,
+        )
+        # CHECKPOINT FIRST: the paid proposal becomes durable before the
+        # publish mutation (and its intent machinery) is scheduled.
+        await record_step_output(
+            self._session_factory,
+            run_id=run_id,
+            step="propose",
+            input_digest=digest,
+            output={"manifest": changeset_to_document(changeset)},
+        )
+        return changeset
 
     async def _finish_publish_leg(
         self,
@@ -2571,9 +2713,7 @@ class GitHubRunService:
                 )
                 return
             elif verdict is ProbeVerdict.UNKNOWN:
-                await self._complete_intent(
-                    intent.id, "unknown", remote_result={"matches": hits}
-                )
+                await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
                 await self._post_journaled_note(
                     project_id,
@@ -2839,6 +2979,52 @@ class GitHubRunService:
             verified=True,
         )
 
+    async def resume_verification(self, run_id: str) -> None:
+        """Re-drive a run stranded in ``evaluating_ci``/``reviewing`` (R07).
+
+        A crashed verification pass used to strand the run: the scanner only
+        picked ``waiting_ci`` up. The resume walks from the run's PERSISTED
+        evidence — the checks verdict (bound to the candidate sha) and the
+        review, which ``_review_and_ready`` replays without a second model
+        call. A crash before either result was recorded simply lets that
+        step run its first (and only) pass here.
+        """
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            if run.status not in (FlowStatus.EVALUATING_CI.value, FlowStatus.REVIEWING.value):
+                return  # moved on/cancelled elsewhere — superseded, never revived
+            candidate_shas = list(run.candidate_shas or [])
+            candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
+            verification = dict((run.evidence or {}).get("verification") or {})
+            cancel_requested = bool(run.cancel_requested)
+            project_id = run.project_id
+            issue_number = run.issue_iid or 0
+        if cancel_requested:
+            logger.info("GitHub run %s cancelled — stranded verification stood down", run_id[:8])
+            return
+        if not candidate_sha:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
+            )
+            return
+        # R02: the recorded verdict counts only when bound to THIS candidate.
+        verified = (
+            str(verification.get("status") or "") == "passed"
+            and str(verification.get("candidate_sha") or verification.get("tested_oid") or "")
+            == candidate_sha
+        )
+        await self._review_and_ready(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            pr_number=run.mr_iid or 0,
+            candidate_sha=candidate_sha,
+            base_sha=run.base_sha or "",
+            verified=verified,
+        )
+
     async def _review_and_ready(
         self,
         run_id: str,
@@ -2855,51 +3041,82 @@ class GitHubRunService:
         `verified=False` (no independent CI configured) is honest: the run
         still reaches the human, but the reason and evidence say
         `unverified` instead of implying checks passed (R02)."""
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(
-                run_id, FlowStatus.REVIEWING, reason="readonly review of the PR diff"
-            )
-            await session.commit()
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                await controller.transition(
+                    run_id, FlowStatus.REVIEWING, reason="readonly review of the PR diff"
+                )
+                await session.commit()
+        except InvalidTransition:
+            # R07: a crashed pass already made the move — resume the leg.
+            pass
 
+        # R07 bounded step ``review``: a review already persisted for THIS
+        # candidate sha is replayed — the model runs exactly once per
+        # (run, candidate). A different sha legitimately re-reviews.
         plan_summary, _ = await self._read_plan_evidence(run_id)
         issue_title = await self._read_issue_title(issue_number)
-        try:
-            review = await self._stack.reviewer.review(
-                owner=self._owner,
-                repo=self._repo,
-                pr_number=pr_number or 0,
-                issue_title=issue_title,
-                plan_summary=plan_summary,
-                base_sha=base_sha,
-                candidate_sha=candidate_sha,
-                flow_run_id=run_id,
-            )
-        except (LLMError, LLMResponseError) as exc:
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
-            return
-
-        verdict = str(getattr(review, "verdict", ""))
-        summary = str(getattr(review, "summary", ""))
-        findings = [
-            {"severity": str(f.severity), "file": str(f.file), "note": str(f.note)}
-            for f in (getattr(review, "findings", ()) or ())
-        ]
-        # ADR-0008: the review approves THIS sha.
-        await self._merge_run_evidence(
-            run_id,
-            {
-                "review": {
-                    "verdict": verdict,
-                    "sha": candidate_sha,
-                    "summary": summary,
-                    "findings": findings,
+        stored = await self._read_review_evidence(run_id)
+        if (
+            isinstance(stored, dict)
+            and stored.get("sha") == candidate_sha
+            and str(stored.get("verdict") or "")
+        ):
+            verdict = str(stored.get("verdict") or "")
+            summary = str(stored.get("summary") or "")
+            raw_findings = stored.get("findings")
+            findings = [
+                {
+                    "severity": str(f.get("severity")),
+                    "file": str(f.get("file")),
+                    "note": str(f.get("note")),
                 }
-            },
-        )
+                for f in (raw_findings or [])
+                if isinstance(f, dict)
+            ]
+            logger.info(
+                "GitHub run %s replays its persisted review of %s — no second model call",
+                run_id[:8],
+                candidate_sha[:8],
+            )
+        else:
+            try:
+                review = await self._stack.reviewer.review(
+                    owner=self._owner,
+                    repo=self._repo,
+                    pr_number=pr_number or 0,
+                    issue_title=issue_title,
+                    plan_summary=plan_summary,
+                    base_sha=base_sha,
+                    candidate_sha=candidate_sha,
+                    flow_run_id=run_id,
+                )
+            except (LLMError, LLMResponseError) as exc:
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+                return
+
+            verdict = str(getattr(review, "verdict", ""))
+            summary = str(getattr(review, "summary", ""))
+            findings = [
+                {"severity": str(f.severity), "file": str(f.file), "note": str(f.note)}
+                for f in (getattr(review, "findings", ()) or ())
+            ]
+            # ADR-0008: the review approves THIS sha.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "review": {
+                        "verdict": verdict,
+                        "sha": candidate_sha,
+                        "summary": summary,
+                        "findings": findings,
+                    }
+                },
+            )
+            stored = await self._read_review_evidence(run_id)
 
         # Self-check: the recorded review must be bound to the candidate sha.
-        stored = await self._read_review_evidence(run_id)
         if stored is None or stored.get("sha") != candidate_sha:
             await self._to_terminal(
                 run_id,
@@ -3490,7 +3707,10 @@ async def evaluate_github_waiting_ci(
     stack_factory: Callable[[str, str], GitHubAgents] | None = None,
     now: datetime | None = None,
 ) -> None:
-    """One verification pass over every GitHub run parked in `waiting_ci`.
+    """One verification pass over every GitHub run parked in `waiting_ci` —
+    plus the runs a crashed pass stranded in `evaluating_ci`/`reviewing`
+    (R07: resumed from the persisted evidence; the review replay never
+    calls the model a second time).
 
     The twin of `evaluate_github_waiting_harness` for the R02 gate: PR
     checks on the candidate sha decide whether the run continues to review
@@ -3511,7 +3731,13 @@ async def evaluate_github_waiting_ci(
                 await session.execute(
                     select(FlowRun).where(
                         FlowRun.provider == "github",
-                        FlowRun.status == FlowStatus.WAITING_CI.value,
+                        FlowRun.status.in_(
+                            [
+                                FlowStatus.WAITING_CI.value,
+                                FlowStatus.EVALUATING_CI.value,
+                                FlowStatus.REVIEWING.value,
+                            ]
+                        ),
                     )
                 )
             )
@@ -3532,7 +3758,10 @@ async def evaluate_github_waiting_ci(
             repo_full_name=repo_full_name,
         )
         try:
-            await service.evaluate_waiting_ci_one(run.id, now=now)
+            if run.status == FlowStatus.WAITING_CI.value:
+                await service.evaluate_waiting_ci_one(run.id, now=now)
+            else:
+                await service.resume_verification(run.id)
         except Exception:
             logger.exception("GitHub verification reconcile failed for run %s", run.id[:8])
 
@@ -3763,9 +3992,7 @@ async def evaluate_github_publication_intents(
             await service.resolve_publication_intents(now=now)
         except Exception:
             # One broken repo must not stall the recovery pass.
-            logger.exception(
-                "Publication-intent recovery failed for %s", repo_full_name
-            )
+            logger.exception("Publication-intent recovery failed for %s", repo_full_name)
         finally:
             aclose = getattr(stack.client, "aclose", None)
             if aclose is not None:
@@ -3799,9 +4026,7 @@ async def run_github_publication_intents_reconciler(
         return
 
     shutdown_event = shutdown_event or asyncio.Event()
-    logger.info(
-        "GitHub publication-intent reconciler started (interval=%ss)", interval_seconds
-    )
+    logger.info("GitHub publication-intent reconciler started (interval=%ss)", interval_seconds)
     while not shutdown_event.is_set():
         try:
             await evaluate_github_publication_intents(
