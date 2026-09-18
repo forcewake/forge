@@ -9,10 +9,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
-from forge.durable import Controller, FlowRun, FlowStatus, Outbox
+from forge.durable import Controller, FlowRun, FlowStatus, Outbox, RunSpec
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.runs import RunService, run_reconciler
+from forge.runs.spec import (
+    EXECUTABLE_SPEC_SCHEMA_VERSION,
+    ExecutableRunSpec,
+    canonical_json_digest,
+)
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
 from tests.fixtures.fake_gitlab import FakeGitLab
 
@@ -64,8 +69,53 @@ def service(db, fake_gitlab):
     )
 
 
+async def seed_executable_spec(
+    db, run_id: str, *, issue_iid: int = ISSUE_IID, commit_cycles: int = 3
+) -> str:
+    """Freeze the executable RunSpec row ``start_run`` would have written (R04).
+
+    The reconciler consumes ONLY digest-verified specs — a synthesized
+    waiting_ci run needs the row + the run-bound digest to be executable.
+    """
+    spec = ExecutableRunSpec.freeze(
+        provider="gitlab",
+        project_id=PROJECT_ID,
+        issue_iid=issue_iid,
+        source_base_oid="base-sha-1",
+        task_title="Add a widget",
+        task_description="",
+        plan_summary="Plan summary.",
+        plan_files_hint=(),
+        plan_digest="a" * 64,
+        model_route="code",
+        policy_digest="b" * 64,
+        required_jobs=(),
+        backend="builtin",
+        harness_model="test-model",
+        target_branch="main",
+        harness_driver="claude-code",
+        commit_cycles=commit_cycles,
+        harness_timeout=1800,
+    )
+    document = spec.to_document()
+    digest = canonical_json_digest(document)
+    async with db() as session:
+        session.add(
+            RunSpec(
+                run_id=run_id,
+                schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
+                document=document,
+                digest=digest,
+            )
+        )
+        run = await session.get(FlowRun, run_id)
+        run.spec_digest = digest
+        await session.commit()
+    return digest
+
+
 async def make_waiting_ci_run(
-    db, fake_gitlab: FakeGitLab | None = None, *, issue_iid: int = ISSUE_IID
+    db, fake_gitlab: FakeGitLab | None = None, *, issue_iid: int = ISSUE_IID, commit_cycles: int = 3
 ) -> str:
     """Create a run parked in waiting_ci with a candidate sha (as /go leaves it)."""
     run_id = uuid4().hex
@@ -92,6 +142,7 @@ async def make_waiting_ci_run(
         run.mr_iid = mr_iid
         run.candidate_shas = [SHA]
         await session.commit()
+    await seed_executable_spec(db, run_id, issue_iid=issue_iid, commit_cycles=commit_cycles)
     return run_id
 
 
@@ -208,7 +259,7 @@ class TestEvaluateWaitingCi:
             implementer=StubImplementer(),
             reviewer=StubReviewer(),
         )
-        run_id = await make_waiting_ci_run(db, fake_gitlab)
+        run_id = await make_waiting_ci_run(db, fake_gitlab, commit_cycles=1)
         fake_gitlab.seed_commit(branch_for(run_id), SHA, "forge: implement 7")
         pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch_for(run_id)))["id"]
         fake_gitlab.set_pipeline_status(pipeline_id, "failed", SHA)

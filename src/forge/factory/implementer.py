@@ -112,6 +112,8 @@ class LLMImplementer:
         files_hint: list[str] | None = None,
         repair_context: str = "",
         attempt_base: str | None = None,
+        task_text: str | None = None,
+        model_route: str | None = None,
     ) -> ChangeSet:
         """Return a materialized :class:`ChangeSet` for *run*.
 
@@ -121,6 +123,15 @@ class LLMImplementer:
         extends that commit instead of rolling it back. None reads the
         pinned base as before.
 
+        *task_text* is the FROZEN task snapshot from the executable RunSpec
+        (R04, ADR-0018 §1): when given, it is the task prompt verbatim and
+        the live issue is never re-read — the run executes exactly the text
+        the approver saw, even if the issue has since drifted. None keeps
+        the legacy live-read behavior (pre-spec callers).
+
+        *model_route* is the model tier frozen in the RunSpec; None keeps
+        the implementer's default tier.
+
         Raises :class:`MaterializationError` when the model's draft cannot be
         applied exactly against the base snapshot, and LLM errors propagate
         from the client.
@@ -128,7 +139,11 @@ class LLMImplementer:
         base_sha = attempt_base or run.base_sha or "HEAD"
         paths = await self._tree_paths(run.project_id, base_sha)
         contents = await self._evidence_contents(run.project_id, base_sha, paths, files_hint or [])
-        issue = await self._read_issue(run.project_id, run.issue_iid, issue_title)
+        issue = (
+            task_text
+            if task_text is not None
+            else await self._read_issue(run.project_id, run.issue_iid, issue_title)
+        )
 
         # Trusted identity: whatever the model says, these pin the commit.
         branch = factory_branch(run.issue_iid, run.id)
@@ -144,7 +159,7 @@ class LLMImplementer:
             repair_context=repair_context,
         )
         result = await self._llm.complete(
-            tier=IMPLEMENTER_TIER,
+            tier=model_route or IMPLEMENTER_TIER,
             system=_SYSTEM_PROMPT,
             user=truncate_chars(user, IMPLEMENTER_MAX_INPUT_CHARS),
             role="implementer",

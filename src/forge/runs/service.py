@@ -34,7 +34,6 @@ run — the service never blind-retries a write.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -70,7 +69,7 @@ from forge.durable import (
 )
 from forge.durable.budgets import BudgetGuard
 from forge.durable.controller import TERMINAL_STATUSES
-from forge.factory.implementer import LLMImplementer
+from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
@@ -106,7 +105,7 @@ from forge.runs.harness_selection import (
     selection_from_spec_document,
     validate_preference,
 )
-from forge.runs.publisher import publish_candidate, spec_allowed_paths
+from forge.runs.publisher import publish_candidate
 from forge.runs.revival import (
     build_retry_context,
     evaluate_revivals,
@@ -114,6 +113,14 @@ from forge.runs.revival import (
     resolve_retry_target,
     retry_rejection,
     terminalize_failure,
+)
+from forge.runs.spec import (
+    EXECUTABLE_SPEC_SCHEMA_VERSION,
+    ExecutableRunSpec,
+    SpecInvalid,
+    canonical_json_digest,
+    load_verified_spec,
+    task_text_digest,
 )
 from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import (
@@ -128,9 +135,12 @@ logger = logging.getLogger(__name__)
 #: How long a recorded gate approval stays consumable (ADR-0009 expiry).
 GATE_TTL_SECONDS = 3600
 
-#: ADR-0018 §1 (F14): schema version of the RunSpec document written here.
-#: v2 (ADR-0023): backend_config carries the frozen harness selection —
-#: ``harness``, ``harness_fallbacks``, ``budget_class``, ``selection_reason``.
+#: ADR-0018 §1 (F14): schema version of the RunSpec document. The GitLab lane
+#: freezes the EXECUTABLE spec (v3, :mod:`forge.runs.spec`) — task text, plan
+#: artifact, model route, verification contract and budgets ride beside the
+#: digests, and every consumption read verifies the document's digest. The
+#: GitHub/Azure lanes still freeze pre-executable v2 documents (their
+#: consumption propagates in a later wave), which is why this stays 2.
 RUN_SPEC_SCHEMA_VERSION = 2
 
 #: ADR-0017 §3: pre-CI states a crashed worker leaves a run in after the gate
@@ -151,12 +161,7 @@ def task_digest_of(title: str, description: str) -> str:
     digest at READY time means the issue changed after approval, which is
     noted in the evidence comment instead of silently executed.
     """
-    return hashlib.sha256(f"{title or ''}\n{description or ''}".encode("utf-8")).hexdigest()
-
-
-def canonical_json_digest(document: dict) -> str:
-    """sha256 over the canonical (sorted-key) JSON of *document*."""
-    return hashlib.sha256(json.dumps(document, sort_keys=True).encode("utf-8")).hexdigest()
+    return task_text_digest(title, description)
 
 
 #: Pipeline statuses that mean "keep waiting" in the reconciler tick.
@@ -444,6 +449,8 @@ class RunService:
         digest = plan_digest_of(plan)
         task_digest = task_digest_of(issue_title, issue_description)
         now = datetime.now(timezone.utc)
+        plan_summary = self._plan_summary(plan)
+        plan_files_hint = self._plan_files_hint()
         # ADR-0023 §2: the harness decision is compiled at plan time and
         # frozen into the RunSpec — part of what the gate approves.
         harness_selection = self._compile_harness_selection()
@@ -465,19 +472,26 @@ class RunService:
                     "harness_selection": harness_selection.as_document(),
                     "plan": {
                         "digest": digest,
-                        "summary": self._plan_summary(plan),
-                        "files_hint": self._plan_files_hint(),
+                        "summary": plan_summary,
+                        "files_hint": plan_files_hint,
                     },
                 },
             )
-            # F14 (ADR-0018 §1): freeze the immutable RunSpec at plan
-            # acceptance — before the plan is published for approval.
+            # F14/R04 (ADR-0018 §1): freeze the EXECUTABLE RunSpec at plan
+            # acceptance — before the plan is published. The document carries
+            # the task text, plan artifact, model route, path policy,
+            # verification contract and budgets; the gate binds its digest,
+            # so /go approves exactly the bytes the run will execute.
             spec_document = self._build_run_spec_document(
                 project_id=project_id,
                 issue_iid=issue_iid,
                 base_sha=base_sha,
-                plan_digest=digest,
+                task_title=issue_title,
+                task_description=issue_description,
                 task_digest=task_digest,
+                plan_summary=plan_summary,
+                plan_files_hint=plan_files_hint,
+                plan_digest=digest,
                 allowed_paths=path_scope,
                 harness_selection=harness_selection,
             )
@@ -485,7 +499,7 @@ class RunService:
             session.add(
                 RunSpec(
                     run_id=run_id,
-                    schema_version=RUN_SPEC_SCHEMA_VERSION,
+                    schema_version=EXECUTABLE_SPEC_SCHEMA_VERSION,
                     document=spec_document,
                     digest=spec_digest,
                 )
@@ -1201,6 +1215,12 @@ class RunService:
                     logger.info("Gate for run %s already consumed — ignoring", run_id[:8])
                     return
 
+                # R04 (ADR-0018 §1): consuming the gate binds the run to the
+                # executable RunSpec the pending decision froze — the advance
+                # legs below execute ONLY its digest-verified content (frozen
+                # task text, plan, model route, verification contract,
+                # budgets). A spec that no longer matches this digest is
+                # blocked(spec_invalid), never re-read from live settings.
                 await controller.transition(
                     run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
                 )
@@ -1309,7 +1329,6 @@ class RunService:
         """
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            plan_summary, files_hint = self._plan_evidence(run)
             # F02/R06: ONE context owns this attempt's bases — the implementer
             # reads and materializes at ``attempt_base``, update/delete
             # existence is validated against the SAME snapshot, and the writer
@@ -1321,6 +1340,18 @@ class RunService:
             attempt = AttemptContext.of(run)
             entry_status = run.status
             recorded_attempt = (run.evidence or {}).get("attempt")
+
+        # R04 (ADR-0018 §1): the executable spec is THE approved input — the
+        # frozen task text, plan artifact, model route and path policy come
+        # from it, never from live Settings or a live issue re-read. A
+        # missing or tampered spec blocks the run (never a silent fallback).
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except SpecInvalid as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
+            return
+        plan_summary, files_hint = spec.plan_summary, list(spec.plan_files_hint)
+        await self._record_spec_drift(project_id, run_id, spec)
         mid_leg = entry_status in {"validating", "committing", "ensuring_draft_mr"}
         # ADR-0017 §3 (R06): mid-leg, the persisted record — not a fresh
         # re-derivation — says what this attempt actually started from.
@@ -1344,12 +1375,14 @@ class RunService:
                 previous_candidate=previous if isinstance(previous, str) else None,
             )
 
-        issue_title = await self._read_issue_title(project_id, run)
         # ADR-0017 §3 (R06): a walk that re-enters its own attempt adopts the
         # manifest it already materialized for THIS cycle at THIS base — same
         # changes, no second paid proposal. Anything else (first proposal, a
         # new repair cycle, a stale or absent record) proposes at the attempt
         # base as before.
+        # R04: no live issue re-read — the implementer executes the FROZEN
+        # task text the approver saw, whatever the issue shows now (drift is
+        # recorded as ``spec_drift`` evidence above, never re-read into work).
         changeset = (
             changeset_from_document(recorded_attempt.get("manifest"))
             if isinstance(recorded_attempt, dict)
@@ -1368,11 +1401,13 @@ class RunService:
             try:
                 changeset = await self._implementer.propose(
                     run,
-                    issue_title,
+                    spec.task_title,
                     plan_summary=plan_summary,
                     files_hint=files_hint,
                     repair_context=repair_context,
                     attempt_base=attempt.attempt_base,
+                    task_text=spec.task_text,
+                    model_route=spec.model_route,
                 )
             except MaterializationError as exc:
                 # No fuzzy matching, ever (ADR-0001): an inapplicable proposal is
@@ -1404,7 +1439,8 @@ class RunService:
         # The run's frozen RunSpec ``allowed_paths`` scope (v0.7 monorepo
         # scoping) is enforced here too — the builtin path is the second of
         # the two write boundaries (the trusted publisher is the other).
-        allowed_paths = await self._read_spec_allowed_paths(run_id)
+        # R04: the scope comes from the digest-verified spec, not a raw read.
+        allowed_paths = list(spec.allowed_paths)
         # R06: existence is checked at the ATTEMPT base — the snapshot the
         # proposal was materialized against. The frozen source base would
         # report a cycle-1 created file as missing and block a legitimate
@@ -1555,11 +1591,21 @@ class RunService:
         fallback the run is already ``waiting_harness`` — it stays parked,
         only the handle moves (ADR-0004 has no waiting_harness self-loop).
         """
+        # R04: the brief, the task title and the dispatched driver come from
+        # the digest-verified executable spec — never live settings and never
+        # a live issue re-read. A missing/tampered spec blocks the run.
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except SpecInvalid as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
+            return
+        await self._record_spec_drift(project_id, run_id, spec)
+
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            plan_summary, _ = self._plan_evidence(run)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
 
+        plan_summary = spec.plan_summary
         brief = plan_summary
         if repair_context:
             brief = (
@@ -1567,9 +1613,9 @@ class RunService:
                 f" ({repair_reason or 'code failure'})\n\n{repair_context}"
             )
 
-        issue_title = await self._read_issue_title(project_id, run)
+        issue_title = spec.task_title
         if driver is None:
-            driver = await self._frozen_harness_driver(run_id)
+            driver = spec.harness_driver
         try:
             backend = self._harness_backend(project_id, driver=driver)
         except ValueError as exc:
@@ -1668,22 +1714,6 @@ class RunService:
             pipeline_id,
             driver or "configured",
         )
-
-    async def _frozen_harness_driver(self, run_id: str) -> str | None:
-        """The driver frozen at plan time (ADR-0023 §6), or None for a
-        pre-v2 RunSpec — None keeps the configured-backend default."""
-        async with self._session_factory() as session:
-            spec = (
-                (
-                    await session.execute(
-                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
-                    )
-                )
-                .scalars()
-                .first()
-            )
-        selection = selection_from_spec_document(spec.document if spec is not None else None)
-        return selection.harness if selection is not None else None
 
     def _backend_name(self) -> str:
         """The configured implementer backend (ADR-0015), frozen per run."""
@@ -1921,6 +1951,17 @@ class RunService:
             cancel_requested = bool(run.cancel_requested)
             deadline = await self._waiting_ci_deadline(session, run_id)
 
+        # R04: the verification contract (required jobs) and the commit-cycle
+        # budget are frozen in the executable spec — post-approval evaluation
+        # never consults live settings for them. A missing/tampered spec
+        # blocks the run instead of guessing what "verified" means.
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except SpecInvalid as exc:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
+            return
+        profile = VerificationProfile(required_jobs=spec.required_jobs)
+
         candidate_sha = candidate_shas[-1] if candidate_shas else None
         if not candidate_sha:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "waiting_ci without candidate sha")
@@ -1997,11 +2038,11 @@ class RunService:
 
         if pipeline.status == "success":
             # F19 (ADR-0018 §5): the verification profile decides what
-            # "verified" means. R02 honesty: an empty profile never presents
+            # "verified" means — R04: the profile frozen in the spec, not the
+            # live settings. R02 honesty: an empty profile never presents
             # pipeline success as verified — the run still reaches review,
             # but the evidence records status="unverified" and the ready
             # reason says so.
-            profile = VerificationProfile.from_settings(self._settings)
             ok, contract_reason = evaluate_verification(pipeline, jobs, profile)
             if not ok:
                 # ADR-0008: a green icon without the required jobs is not done.
@@ -2061,7 +2102,8 @@ class RunService:
             return
 
         cycle = await self._read_commit_cycle(run_id)
-        max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
+        # R04: the commit-cycle budget is frozen in the spec at plan time.
+        max_cycles = spec.commit_cycles
         if cycle >= max_cycles:
             await self._to_terminal(
                 run_id,
@@ -2898,46 +2940,126 @@ class RunService:
         project_id: int,
         issue_iid: int | None,
         base_sha: str,
-        plan_digest: str,
+        task_title: str,
+        task_description: str,
         task_digest: str,
+        plan_summary: str,
+        plan_files_hint: list[str],
+        plan_digest: str,
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
     ) -> dict:
-        """The immutable RunSpec document frozen at plan acceptance (F14).
+        """The immutable, EXECUTABLE RunSpec document (R04, ADR-0018 §1).
+
+        Frozen at plan acceptance — before the plan is published — so the
+        gate approves exactly what the run will execute: the task text, the
+        plan artifact, the model route, the tool/path policy, the
+        verification contract, the budgets and the backend/driver. Post-
+        approval legs read this document through
+        :meth:`_load_executable_spec` (digest-verified on every read), never
+        live Settings.
 
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
-        runs — an unscoped project's document is byte-identical to the
-        pre-v0.7 shape, so its digest is unchanged.
-
-        ADR-0023 §3: ``backend_config`` also freezes the harness decision
-        (selected driver, fallback tail, budget class, selection reason).
+        runs. ADR-0023 §3: ``backend_config`` also freezes the harness
+        decision (selected driver, fallback tail, budget class, reason).
         """
         selection = harness_selection or self._compile_harness_selection()
-        document: dict = {
-            "subject": {"project_id": project_id, "issue_iid": issue_iid},
-            "source_base_oid": base_sha or "",
-            "plan_digest": plan_digest,
-            "task_digest": task_digest,
-            "policy_digest": self._policy_digest(),
-            # ADR-0018: the resolved backend config travels with the spec —
-            # live Settings may not silently change an approved run's
-            # execution. ADR-0023: the frozen harness chain rides beside it.
-            "backend_config": {
-                "backend": self._backend_name(),
-                "model": str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
-                "target_branch": self._target_branch(),
-                **selection.as_document(),
+        spec = ExecutableRunSpec.freeze(
+            provider="gitlab",
+            project_id=project_id,
+            issue_iid=issue_iid,
+            source_base_oid=base_sha or "",
+            task_title=task_title,
+            task_description=task_description,
+            plan_summary=plan_summary,
+            plan_files_hint=plan_files_hint,
+            plan_digest=plan_digest,
+            model_route=IMPLEMENTER_TIER,
+            policy_digest=self._policy_digest(),
+            required_jobs=self._required_jobs(),
+            allowed_paths=allowed_paths or [],
+            backend=self._backend_name(),
+            harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
+            target_branch=self._target_branch(),
+            harness_driver=selection.harness,
+            harness_fallbacks=selection.fallbacks,
+            budget_class=selection.budget_class,
+            selection_reason=selection.reason,
+            commit_cycles=int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
+            harness_timeout=int(
+                getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800
+            ),
+        )
+        return spec.to_document()
+
+    async def _load_executable_spec(self, run_id: str) -> ExecutableRunSpec:
+        """The digest-verified executable spec for *run* (R04, ADR-0018 §1).
+
+        The one consumption read every post-approval leg shares: it
+        re-computes the canonical digest of the stored document and checks it
+        against both the row and the digest the gate froze into
+        ``run.spec_digest``. A missing, tampered, corrupt or legacy spec
+        raises :class:`SpecInvalid` — callers park the run
+        ``blocked(spec_invalid)``; there is no fallback to live settings.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            spec_digest = run.spec_digest
+            row = (
+                (
+                    await session.execute(
+                        select(RunSpec)
+                        .where(RunSpec.run_id == run_id)
+                        .order_by(RunSpec.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            document = row.document if row is not None else None
+            row_digest = str(row.digest) if row is not None else None
+            row_schema_version = int(row.schema_version) if row is not None else None
+        return load_verified_spec(
+            document=document,
+            digest=row_digest,
+            run_spec_digest=spec_digest,
+            schema_version=row_schema_version,
+        )
+
+    async def _record_spec_drift(
+        self, project_id: int, run_id: str, spec: ExecutableRunSpec
+    ) -> None:
+        """Record ``spec_drift`` evidence when the issue text moved on.
+
+        R04 reapproval semantics: the run executes the FROZEN task text
+        either way — the drift is recorded, never a blocking path (#29's
+        auto-replan owns keeping issues fresh). Unavailable evidence (no
+        issue, read failure) records nothing rather than guessing.
+        """
+        if spec.issue_iid is None:
+            return
+        try:
+            issue = await self._gitlab.get_issue(project_id, spec.issue_iid)
+        except GitLabAPIError:
+            return
+        live_digest = task_text_digest(issue.title, issue.description or "")
+        if live_digest == spec.task_digest:
+            return
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "spec_drift": {
+                    "frozen_task_digest": spec.task_digest,
+                    "live_task_digest": live_digest,
+                    "issue_iid": spec.issue_iid,
+                }
             },
-            "budgets": {
-                "commit_cycles": int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
-                "harness_timeout": int(
-                    getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800
-                ),
-            },
-        }
-        if allowed_paths:
-            document["allowed_paths"] = [str(glob) for glob in allowed_paths]
-        return document
+        )
+        logger.warning(
+            "Run %s: issue text drifted after approval — executing the frozen task",
+            run_id[:8],
+        )
 
     async def _open_pending_decision(
         self,
@@ -3078,12 +3200,6 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             return run.commit_cycle or 1
-
-    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
-        """The RunSpec's frozen ``allowed_paths`` globs ([] when unscoped)."""
-        async with self._session_factory() as session:
-            run = await self._get_run(session, run_id)
-            return await spec_allowed_paths(session, run)
 
     async def _read_issue_iid(self, run_id: str) -> int | None:
         async with self._session_factory() as session:

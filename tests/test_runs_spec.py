@@ -1,8 +1,15 @@
-"""Stage B2 (ADR-0018): RunSpec, pending decision with deadline, admission.
+"""Stage B2 (ADR-0018) + R04: the executable RunSpec, pending decision, admission.
 
 - F14: the immutable RunSpec is frozen at plan acceptance — canonical JSON
   document + digest, mirrored into ``run.spec_digest`` — before the plan note
   is posted. The extended policy digest binds the effective execution policy.
+- R04: the spec is an EXECUTABLE immutable input, not just a digest — it
+  carries the frozen task text, the plan artifact, the model route, the path
+  policy, the verification contract and the budgets. Post-approval legs read
+  it digest-verified (a tampered/missing spec blocks ``spec_invalid``, never
+  a silent fallback to live settings); the implementer executes the frozen
+  task text, whatever the issue shows now (drift is recorded as
+  ``spec_drift`` evidence).
 - F15: the pending decision is created at plan publication carrying the
   plan/task/spec digests and an absolute deadline; ``/go`` consumes THAT row;
   expiry or spec/policy drift invalidates it; issue-text drift after approval
@@ -11,6 +18,7 @@
   BEFORE the planner — a denial never burns a model call.
 """
 
+import dataclasses
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -23,9 +31,16 @@ from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings
 from forge.durable import Controller, FlowRun, FlowStatus, GateApproval, RunSpec
+from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.models.base import Base
 from forge.runs import RunService
 from forge.runs.service import task_digest_of
+from forge.runs.spec import (
+    EXECUTABLE_SPEC_SCHEMA_VERSION,
+    ExecutableRunSpec,
+    SpecInvalid,
+    load_verified_spec,
+)
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
@@ -71,6 +86,18 @@ class RecordingPlanner(StubPlanner):
     async def plan(self, *args, **kwargs) -> str:
         self.calls += 1
         return await super().plan(*args, **kwargs)
+
+
+class RecordingImplementer(StubImplementer):
+    """Records the frozen-spec inputs the service passes to propose (R04)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls: list[dict] = []
+
+    async def propose(self, run, issue_title, **kwargs):
+        self.calls.append({"issue_title": issue_title, **kwargs})
+        return await super().propose(run, issue_title, **kwargs)
 
 
 def make_service(db, fake_gitlab, *, settings=None, planner=None) -> RunService:
@@ -147,6 +174,24 @@ async def get_spec(db, run_id: str) -> RunSpec | None:
         return spec
 
 
+async def replace_spec(db, run_id: str, document: dict, *, digest: str | None = None) -> None:
+    """Rewrite the stored spec row (tamper tests); JSON needs reassignment."""
+    async with db() as session:
+        spec = (
+            (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id))).scalars().one()
+        )
+        spec.document = document
+        if digest is not None:
+            spec.digest = digest
+        await session.commit()
+
+
+async def spec_document_of(db, run_id: str) -> dict:
+    spec = await get_spec(db, run_id)
+    assert spec is not None
+    return dict(spec.document)
+
+
 async def drive_to_waiting_ci(service, fake_gitlab: FakeGitLab, db) -> str:
     """start_run → /go → committed candidate waiting for CI."""
     run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
@@ -174,15 +219,32 @@ class TestRunSpec:
         spec = await get_spec(db, run_id)
         assert spec is not None
         assert spec.run_id == run_id
-        assert spec.schema_version == 2  # ADR-0023: harness selection in backend_config
+        assert spec.schema_version == EXECUTABLE_SPEC_SCHEMA_VERSION
         assert run.spec_digest == spec.digest
 
         document = spec.document
-        assert document["subject"] == {"project_id": PROJECT_ID, "issue_iid": ISSUE_IID}
+        assert document["subject"] == {
+            "provider": "gitlab",
+            "project_id": PROJECT_ID,
+            "issue_iid": ISSUE_IID,
+        }
         assert document["source_base_oid"] == "base-sha-1"  # run.base_sha
         assert document["plan_digest"] == run.plan_digest
         assert document["task_digest"] == task_digest_of(ISSUE_TITLE, ISSUE_DESC)
         assert document["policy_digest"] == service._policy_digest()
+        # R04: the executable content — the frozen task text, the plan
+        # artifact, the model route and the verification contract — rides in
+        # the document the digest covers.
+        assert document["task"] == {
+            "title": ISSUE_TITLE,
+            "description": ISSUE_DESC,
+            "digest": task_digest_of(ISSUE_TITLE, ISSUE_DESC),
+        }
+        assert document["plan"]["digest"] == run.plan_digest
+        assert document["plan"]["summary"]
+        assert document["plan"]["files_hint"] == []
+        assert document["model_route"] == {"tier": IMPLEMENTER_TIER}
+        assert document["verification"] == {"required_jobs": []}
         # ADR-0023: the frozen harness decision rides in backend_config —
         # default preference ⇒ the configured backend's driver alone.
         assert document["backend_config"] == {
@@ -198,6 +260,11 @@ class TestRunSpec:
 
         # The digest is the sha256 over the canonical (sorted-key) JSON.
         assert spec.digest == sha256_of_document(document)
+
+        # The frozen document parses into the typed spec, round-trip.
+        typed = ExecutableRunSpec.from_document(document)
+        assert typed.to_document() == document
+        assert typed.task_text == f"{ISSUE_TITLE}\n{ISSUE_DESC}"
 
         # ADR-0023: the selection is also visible in the run's evidence at
         # run start ("backend" stays the reconciler's backend-name string).
@@ -515,3 +582,351 @@ class TestPathScope:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value
         assert "outside the allowed scope" in (run.status_reason or "")
+
+
+class TestExecutableRunSpec:
+    """Unit contract of the typed executable spec (R04, forge.runs.spec)."""
+
+    @staticmethod
+    def make_spec(**overrides) -> ExecutableRunSpec:
+        values = dict(
+            provider="gitlab",
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            source_base_oid="base-sha-1",
+            task_title=ISSUE_TITLE,
+            task_description=ISSUE_DESC,
+            plan_summary="Plan summary.",
+            plan_files_hint=("src/app.py",),
+            plan_digest="a" * 64,
+            model_route="code",
+            policy_digest="b" * 64,
+            required_jobs=("pytest",),
+            backend="builtin",
+            harness_model="glm-5.3-flash[1m]",
+            target_branch="main",
+            harness_driver="claude-code",
+            commit_cycles=3,
+            harness_timeout=1800,
+        )
+        values.update(overrides)
+        return ExecutableRunSpec.freeze(**values)
+
+    def test_schema_version_is_present_and_executable(self):
+        spec = self.make_spec()
+        assert spec.schema_version == EXECUTABLE_SPEC_SCHEMA_VERSION == 3
+        assert ExecutableRunSpec.from_document(spec.to_document()).schema_version == 3
+
+    def test_round_trip_preserves_every_field(self):
+        spec = self.make_spec(allowed_paths=("services/**",), harness_fallbacks=("grok-build",))
+        parsed = ExecutableRunSpec.from_document(spec.to_document())
+        assert parsed == spec
+
+    def test_task_digest_binds_the_text(self):
+        """A tampered task text cannot survive a verified parse."""
+        spec = self.make_spec()
+        document = spec.to_document()
+        document["task"]["title"] = "Tampered title"
+        with pytest.raises(SpecInvalid, match="task artifact"):
+            ExecutableRunSpec.from_document(document)
+
+    def test_pre_executable_schema_is_refused(self):
+        spec = self.make_spec()
+        with pytest.raises(SpecInvalid, match="not executable"):
+            dataclasses.replace(spec, schema_version=2)
+
+    def test_verified_read_detects_digest_mismatch(self):
+        document = self.make_spec().to_document()
+        with pytest.raises(SpecInvalid, match="digest mismatch"):
+            load_verified_spec(document=document, digest="f" * 64)
+
+    def test_verified_read_enforces_the_gate_binding(self):
+        document = self.make_spec().to_document()
+        with pytest.raises(SpecInvalid, match="gate-approved"):
+            load_verified_spec(
+                document=document,
+                digest=sha256_of_document(document),
+                run_spec_digest="f" * 64,
+            )
+
+    def test_verified_read_refuses_missing_document(self):
+        with pytest.raises(SpecInvalid, match="no spec document"):
+            load_verified_spec(document=None, digest=None)
+
+    def test_type_garbage_is_spec_invalid_not_a_crash(self):
+        """Corrupt numeric fields surface as SpecInvalid (blocked spec_invalid),
+        never as a raw ValueError past the verified read."""
+        document = self.make_spec().to_document()
+        document["budgets"]["commit_cycles"] = "garbage"
+        with pytest.raises(SpecInvalid, match="unreadable"):
+            ExecutableRunSpec.from_document(document)
+
+
+class TestFrozenExecution:
+    """R04: post-approval legs execute the FROZEN spec, never live config."""
+
+    async def test_issue_edited_after_go_implementer_receives_frozen_text(
+        self, service, fake_gitlab, db
+    ):
+        """The exact R04 regression: the issue drifts after the freeze, the
+        implementer still executes the text the approver saw."""
+        implementer = RecordingImplementer()
+        service._implementer = implementer
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        fake_gitlab.seed_issue(ISSUE_IID, "A different task", "The body moved on.")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # proceeds, not blocked
+        (call,) = implementer.calls
+        assert call["task_text"] == f"{ISSUE_TITLE}\n{ISSUE_DESC}"
+        assert call["issue_title"] == ISSUE_TITLE
+        assert call["plan_summary"]  # plan artifact from the spec
+        assert call["model_route"] == IMPLEMENTER_TIER
+        # The drift after approval is recorded as evidence — not executed,
+        # not a blocking path (#29 owns issue freshness).
+        drift = run.evidence["spec_drift"]
+        assert drift["frozen_task_digest"] == task_digest_of(ISSUE_TITLE, ISSUE_DESC)
+        assert drift["live_task_digest"] == task_digest_of("A different task", "The body moved on.")
+
+    async def test_no_drift_records_no_spec_drift_evidence(self, service, fake_gitlab, db):
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert "spec_drift" not in (run.evidence or {})
+
+    async def test_tampered_spec_blocks_execution(self, service, fake_gitlab, db):
+        """A stored spec whose bytes no longer match its digest blocks the
+        run as spec_invalid — never a silent fallback to live settings."""
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        document = await spec_document_of(db, run_id)
+        document["task"] = {**document["task"], "title": "Tampered task"}
+        await replace_spec(db, run_id, document)
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("spec_invalid")
+        assert (await get_gate(db, run_id)).consumed_at is not None  # gate was spent
+
+    async def test_forged_digest_still_blocked_by_the_gate_binding(self, service, db):
+        """A consistent (document, digest) pair that is NOT the digest the
+        pending decision froze is equally spec_invalid."""
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        document = await spec_document_of(db, run_id)
+        document["task"] = {
+            "title": "Tampered task",
+            "description": "Rewritten after the fact.",
+            "digest": task_digest_of("Tampered task", "Rewritten after the fact."),
+        }
+        document["task_digest"] = document["task"]["digest"]
+        await replace_spec(db, run_id, document, digest=sha256_of_document(document))
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "gate-approved" in (run.status_reason or "")
+
+    async def test_missing_spec_blocks_execution(self, service, db):
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            await session.delete(spec)
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("spec_invalid")
+
+    async def test_legacy_spec_is_not_executable(self, service, db):
+        """A pre-executable (v2) spec row has no verified executable shape —
+        fail closed, never re-derive the task from the live issue."""
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            spec.schema_version = 2
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "not executable" in (run.status_reason or "")
+
+    async def test_corrupt_spec_blocks_at_the_verification_read(self, service, fake_gitlab, db):
+        """The verified read runs at EVERY consumption point — tamper after
+        the commit and the CI evaluation blocks instead of judging green."""
+        run_id = await drive_to_waiting_ci(service, fake_gitlab, db)
+        document = await spec_document_of(db, run_id)
+        document["verification"] = {"required_jobs": ["never-seeded-job"]}
+        await replace_spec(db, run_id, document)
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("spec_invalid")
+
+    async def test_frozen_verification_contract_survives_setting_drift(self, db, fake_gitlab):
+        """The required jobs come from the spec: relaxing the live setting
+        after the gate consumed the frozen contract cannot soften it."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="pytest")
+        service = make_service(db, fake_gitlab, settings=settings)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+        spec = await get_spec(db, run_id)
+        assert spec is not None
+        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        service._settings.FORGE_REQUIRED_JOBS = ""  # drift AFTER approval
+        branch = factory_branch(ISSUE_IID, run_id)
+        sha = (await get_run(db, run_id)).candidate_shas[-1]
+        fake_gitlab.seed_commit(branch, sha, "forge commit")
+        pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
+        fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)  # no pytest job
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("quality_contract")
+
+    async def test_empty_frozen_contract_never_adopts_a_later_requirement(
+        self, service, fake_gitlab, db
+    ):
+        """The converse: the spec froze no required jobs, so a requirement
+        added to live settings after approval cannot retro-block — the run
+        is honestly labeled unverified, not re-judged by live config."""
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        service._settings.FORGE_REQUIRED_JOBS = "pytest"  # drift AFTER approval
+        branch = factory_branch(ISSUE_IID, run_id)
+        sha = (await get_run(db, run_id)).candidate_shas[-1]
+        fake_gitlab.seed_commit(branch, sha, "forge commit")
+        pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
+        fake_gitlab.set_pipeline_status(pipeline_id, "success", sha)  # no pytest job
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.evidence["verification"]["status"] == "unverified"
+
+    async def test_frozen_commit_cycle_budget_survives_setting_drift(self, db, fake_gitlab):
+        settings = make_settings(FORGE_MAX_COMMIT_CYCLES=1)
+        service = make_service(db, fake_gitlab, settings=settings)
+        run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+        service._settings.FORGE_MAX_COMMIT_CYCLES = 5  # drift AFTER approval
+        branch = factory_branch(ISSUE_IID, run_id)
+        sha = (await get_run(db, run_id)).candidate_shas[-1]
+        fake_gitlab.seed_commit(branch, sha, "forge commit")
+        pipeline_id = (await fake_gitlab.create_pipeline(PROJECT_ID, branch))["id"]
+        fake_gitlab.set_pipeline_status(pipeline_id, "failed", sha)
+        fake_gitlab.set_pipeline_jobs(
+            pipeline_id,
+            [{"id": 1, "name": "pytest", "status": "failed", "failure_reason": "script_error"}],
+        )
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("commit_cycles_exhausted")
+        assert "1 of 1" in (run.status_reason or "")
+
+
+class TestImplementerFrozenInputs:
+    """R04 at the agent seam: task_text skips the live issue read; the
+    model route overrides the tier."""
+
+    CREATE_DRAFT = json.dumps(
+        {
+            "branch": "model/chose/this",
+            "commit_message": "model's own message",
+            "changes": [
+                {"path": "forge-demo/feature.md", "operation": "create", "content": "# feature\n"}
+            ],
+        }
+    )
+
+    @staticmethod
+    def make_run() -> FlowRun:
+        return FlowRun(
+            id=uuid4().hex, project_id=PROJECT_ID, issue_iid=ISSUE_IID, base_sha="base-sha-1"
+        )
+
+    async def make_implementer(self, fake_gitlab: FakeGitLab):
+        from tests.fixtures.fake_llm import FakeLLM
+
+        from forge.factory.implementer import LLMImplementer
+
+        llm = FakeLLM(script=[self.CREATE_DRAFT])
+        return llm, LLMImplementer(llm, gitlab=fake_gitlab)
+
+    async def test_task_text_is_executed_verbatim_without_live_issue_read(self, fake_gitlab):
+        llm, implementer = await self.make_implementer(fake_gitlab)
+
+        await implementer.propose(
+            self.make_run(),
+            ISSUE_TITLE,
+            task_text=f"{ISSUE_TITLE}\n{ISSUE_DESC}",
+            model_route=IMPLEMENTER_TIER,
+        )
+
+        call = llm.calls_for("implementer")[0]
+        assert call["tier"] == IMPLEMENTER_TIER
+        assert f"{ISSUE_TITLE}\n{ISSUE_DESC}" in call["user"]
+        assert fake_gitlab.calls_of("get_issue") == []  # no live issue re-read
+
+    async def test_model_route_overrides_the_default_tier(self, fake_gitlab):
+        llm, implementer = await self.make_implementer(fake_gitlab)
+
+        await implementer.propose(
+            self.make_run(), ISSUE_TITLE, task_text="T\nB", model_route="code-strong"
+        )
+
+        assert llm.calls_for("implementer")[0]["tier"] == "code-strong"
+
+    async def test_without_task_text_the_live_issue_is_read(self, fake_gitlab):
+        llm, implementer = await self.make_implementer(fake_gitlab)
+
+        await implementer.propose(self.make_run(), ISSUE_TITLE)
+
+        assert llm.calls_for("implementer")[0]["user"].startswith(f"Issue title: {ISSUE_TITLE}")
+        assert fake_gitlab.calls_of("get_issue")

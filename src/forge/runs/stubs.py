@@ -79,7 +79,11 @@ class StubImplementer:
         files_hint: list[str] | None = None,
         repair_context: str = "",
         attempt_base: str | None = None,
+        task_text: str | None = None,
+        model_route: str | None = None,
     ) -> ChangeSet:
+        # ``task_text``/``model_route`` are the R04 frozen-spec inputs the
+        # service passes; the stub ignores them and proposes deterministically.
         short_id = short_run_id(run.id)
         path = f"forge-demo/run-{short_id}.md"
         # Placeholder digest reference: M1 has no plan text stored on the run,

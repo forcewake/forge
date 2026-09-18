@@ -20,6 +20,9 @@ Public surface:
   Tier-1 auto-revive / Tier-2 ``/retry`` revival of dead runs.
 - :mod:`forge.runs.admission` — the ADR-0018 §3 pre-spend admission check.
 - :mod:`forge.runs.verification` — the F19 verification profile.
+- :mod:`forge.runs.spec` — the executable RunSpec (R04, ADR-0018 §1): the
+  typed frozen input every post-approval leg consumes, digest-verified on
+  every read.
 """
 
 from forge.runs.admission import AdmissionDecision, approvers_for, check_admission
@@ -45,6 +48,7 @@ from forge.runs.publisher import FenceCheck, PublishResult, publish_candidate
 from forge.runs.reconciler import run_reconciler
 from forge.runs.revival import classify_terminal_failure, revival_backoff_seconds
 from forge.runs.service import GATE_TTL_SECONDS, RunService, execute_run_command
+from forge.runs.spec import EXECUTABLE_SPEC_SCHEMA_VERSION, ExecutableRunSpec, SpecInvalid
 from forge.runs.stubs import (
     StubImplementer,
     StubPlanner,
@@ -63,6 +67,8 @@ __all__ = [
     "CandidateBundle",
     "CandidateError",
     "ChangeManifestEntry",
+    "EXECUTABLE_SPEC_SCHEMA_VERSION",
+    "ExecutableRunSpec",
     "FenceCheck",
     "GATE_TTL_SECONDS",
     "HarnessOutcome",
@@ -70,6 +76,7 @@ __all__ = [
     "ImplementerBackend",
     "PublishResult",
     "RunService",
+    "SpecInvalid",
     "StubImplementer",
     "StubPlanner",
     "StubReviewer",
