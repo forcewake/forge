@@ -116,7 +116,11 @@ from forge.runs.revival import (
     terminalize_failure,
 )
 from forge.runs.stubs import factory_branch, plan_digest_of
-from forge.runs.verification import VerificationProfile
+from forge.runs.verification import (
+    PRODUCER_GITLAB_PIPELINE,
+    VerificationProfile,
+    VerificationResult,
+)
 from forge.runs.verification import evaluate as evaluate_verification
 
 logger = logging.getLogger(__name__)
@@ -1663,8 +1667,10 @@ class RunService:
 
         if pipeline.status == "success":
             # F19 (ADR-0018 §5): the verification profile decides what
-            # "verified" means. An empty profile lets the run proceed, but
-            # the evidence comment must carry the warning.
+            # "verified" means. R02 honesty: an empty profile never presents
+            # pipeline success as verified — the run still reaches review,
+            # but the evidence records status="unverified" and the ready
+            # reason says so.
             profile = VerificationProfile.from_settings(self._settings)
             ok, contract_reason = evaluate_verification(pipeline, jobs, profile)
             if not ok:
@@ -1675,10 +1681,27 @@ class RunService:
                 )
                 return
             verification_warnings: list[str] = []
-            if not profile.required_jobs:
+            if profile.required_jobs:
+                verdict = VerificationResult.passed(
+                    candidate_sha,
+                    PRODUCER_GITLAB_PIPELINE,
+                    summary=contract_reason,
+                    surface=tuple(
+                        {"name": job.name, "status": job.status}
+                        for job in jobs
+                        if job.name in set(profile.required_jobs)
+                    ),
+                )
+            else:
                 verification_warnings.append(
                     "No verification profile configured — pipeline success only."
                 )
+                verdict = VerificationResult.unverified(
+                    candidate_sha,
+                    PRODUCER_GITLAB_PIPELINE,
+                    summary="no verification profile configured — pipeline success only",
+                )
+            await self._merge_run_evidence(run_id, {"verification": verdict.as_evidence()})
             await self._review_and_ready(
                 run_id,
                 project_id=project_id,
@@ -1688,6 +1711,7 @@ class RunService:
                 base_sha=base_sha,
                 pipeline=pipeline,
                 plan_digest=plan_digest,
+                verified=verdict.verified,
                 verification_warnings=verification_warnings,
             )
             return
@@ -1732,9 +1756,15 @@ class RunService:
         base_sha: str,
         pipeline,
         plan_digest: str,
+        verified: bool = True,
         verification_warnings: list[str] | None = None,
     ) -> None:
-        """checks passed → reviewing → ready_for_human (ADR-0008 review leg)."""
+        """checks passed → reviewing → ready_for_human (ADR-0008 review leg).
+
+        ``verified=False`` (an empty verification profile) is honest: the
+        run still reaches the human, but the ready reason and the evidence
+        comment say ``unverified`` instead of implying checks passed (R02).
+        """
         await self._transition(run_id, FlowStatus.REVIEWING, reason="readonly review of candidate")
 
         plan_summary, _ = await self._read_plan_evidence(run_id)
@@ -1801,10 +1831,15 @@ class RunService:
         if drift is not None:
             warnings.append(drift)
 
-        reason = (
-            "checks passed; review raised concerns — merge is a human decision"
-            if verdict == "concerns"
-            else "checks passed; merge is a human decision"
+        reason = " · ".join(
+            part
+            for part in (
+                "unverified — no verification profile configured" if not verified else None,
+                "review raised concerns — merge is a human decision"
+                if verdict == "concerns"
+                else "checks passed; merge is a human decision",
+            )
+            if part
         )
         await self._transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
 
@@ -1824,6 +1859,7 @@ class RunService:
                 plan_digest,
                 review_summary=summary,
                 warnings=warnings,
+                verified=verified,
             ),
             run_id,
             "post_evidence_note",
@@ -2706,12 +2742,20 @@ class RunService:
         plan_digest: str,
         review_summary: str | None = None,
         warnings: list[str] | None = None,
+        verified: bool = True,
     ) -> str:
         pipeline_url = pipeline.web_url or "(pipeline url unavailable)"
         review_line = ""
         if review_summary:
             review_line = f"- **Review:** {review_summary}\n"
         warning_lines = "".join(f"⚠️ {warning}\n" for warning in (warnings or []))
+        # R02 honesty: an unverified run is labeled as such, never implied green.
+        closing = (
+            "All checks passed for this exact SHA. Merging is a human decision."
+            if verified
+            else "This run is **unverified** — no verification profile is configured "
+            "(pipeline success only). Merging is a human decision."
+        )
         return (
             "## Forge run ready for human review\n\n"
             f"- **Merge request:** {mr_url}\n"
@@ -2720,7 +2764,7 @@ class RunService:
             f"{review_line}"
             f"- **Plan digest:** `{plan_digest}`\n\n"
             f"{warning_lines}"
-            "All checks passed for this exact SHA. Merging is a human decision.\n\n"
+            f"{closing}\n\n"
             "*This is an automated message.*"
         )
 

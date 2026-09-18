@@ -26,8 +26,18 @@ Azure-specific deviations, all deliberate:
   dispatches the lane via the Runs API with string templateParameters
   (run_id / attempt_base / driver / model / work_item_id) and parks the run
   in ``waiting_harness`` with a journaled :class:`AzurePipelinesHandle` —
-  the reconciler that polls it arrives with AZ-3. Empty → the builtin
-  in-worker proposer path as on GitHub.
+  the reconciler polls it and adopts the candidate through the SAME trusted
+  publisher. Empty → the builtin in-worker proposer path as on GitHub.
+- **Verification gate (R02)**: every publication parks in ``waiting_ci`` —
+  the PR's builds are an independent verification gate. The reconciler
+  pass (``evaluate_waiting_ci_one`` / :func:`evaluate_azure_waiting_ci`)
+  polls the Builds API for completed builds of the candidate commit (the
+  lane pipeline itself is execution, not verification, and is excluded),
+  and only a verified (or honestly unverified) run continues to review.
+  Red → repair-in-place via ``_begin_repair`` while commit cycles remain,
+  else ``blocked(quality_contract)``; green → review; no builds after the
+  grace window → review as **unverified**, labeled as such in the evidence
+  and the ready reason.
 - **The trusted publisher maps to the native CAS** (ADR-0024 §4): publish =
   create branch (``oldObjectId`` = 40 zeros) then one push with
   ``expected_old_sha`` — a moved head is rejected with
@@ -125,6 +135,7 @@ from forge.runs.revival import (
     retry_rejection,
     terminalize_failure,
 )
+from forge.runs.verification import PRODUCER_AZURE_BUILD, VerificationResult
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -138,12 +149,27 @@ from forge.runs.service import (
 
 logger = logging.getLogger(__name__)
 
-#: The verification surface note while the AZ-3 reconciler/executor is not
-#: wired: Azure Repos ignores YAML ``pr:`` triggers — PR CI is governed by
-#: branch policies ("Build validation"), the ADR-0008 enforcement point.
+#: The verification surface note (R02): Azure Repos ignores YAML ``pr:``
+#: triggers — PR CI is governed by branch policies ("Build validation") and
+#: any pipeline building the candidate commit. The run parks in
+#: ``waiting_ci`` until those builds conclude (or is honestly labeled
+#: unverified when none exist).
 _VERIFICATION_NOTE = (
     "Branch-policy Build validation on the PR is the verification surface — "
-    "no required checks are enforced yet."
+    "the run waits for the candidate commit's builds before review."
+)
+
+#: Build ``status`` values that mean the build has not concluded yet
+#: (research §6.2: ``state``/``result`` in the Runs API, ``status``/
+#: ``result`` on the Build object).
+_ACTIVE_BUILD_STATUSES: frozenset[str] = frozenset(
+    {"notStarted", "inProgress", "postponed", "cancelling"}
+)
+
+#: Build ``result`` values that blame the change (ADR-0008): not fully green
+#: is not green — ``partiallySucceeded`` fails branch-policy validation too.
+_RED_BUILD_RESULTS: frozenset[str] = frozenset(
+    {"failed", "canceled", "partiallySucceeded", "abandoned"}
 )
 
 
@@ -1186,19 +1212,9 @@ class AzureRunService:
                 reason=f"Draft PR #{outcome.pr_id} for {commit_oid[:8]}",
             )
             await session.commit()
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
-            await session.commit()
-
-        await self._review_and_ready(
-            run_id,
-            project_id=project_id,
-            issue_number=issue_number,
-            pr_id=outcome.pr_id,
-            candidate_sha=commit_oid,
-            base_sha=base_sha,
-        )
+        # R02: STOP at waiting_ci. The PR's builds are an independent
+        # verification gate — the Azure reconciler polls this run and only a
+        # verified (or honestly unverified) run continues to review.
 
     # ------------------------------------------------------------------
     # Pipelines lane leg (ADR-0024 §6): dispatch → waiting_harness
@@ -1518,8 +1534,13 @@ class AzureRunService:
         pr_id: int | None,
         candidate_sha: str,
         base_sha: str,
+        verified: bool = True,
     ) -> None:
-        """No required checks enforced → reviewing → ready_for_human."""
+        """Reviewing → ready_for_human.
+
+        ``verified=False`` (no CI built the candidate) is honest: the run
+        still reaches the human, but the reason says ``unverified`` instead
+        of implying builds passed (R02)."""
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(
@@ -1573,10 +1594,15 @@ class AzureRunService:
             )
             return
 
-        reason = (
-            "review raised concerns — merge is a human decision"
-            if verdict == "concerns"
-            else "merge is a human decision"
+        reason = " · ".join(
+            part
+            for part in (
+                "unverified — no CI configured" if not verified else None,
+                "review raised concerns — merge is a human decision"
+                if verdict == "concerns"
+                else "merge is a human decision",
+            )
+            if part
         )
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -1820,7 +1846,6 @@ class AzureRunService:
             await session.commit()
 
         plan_digest = run.plan_digest or ""
-        base_sha = run.base_sha or ""
         await self._post_journaled_comment(
             project_id,
             issue_number,
@@ -1837,19 +1862,231 @@ class AzureRunService:
                 reason=f"Draft PR #{publish_outcome.pr_id} for {commit_oid[:8]}",
             )
             await session.commit()
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            await controller.transition(run_id, FlowStatus.EVALUATING_CI, reason=_VERIFICATION_NOTE)
-            await session.commit()
+        # R02: STOP at waiting_ci. The published candidate's builds are an
+        # independent verification gate (the lane run was execution, not
+        # verification) — the Azure reconciler polls this run and only a
+        # verified (or honestly unverified) run continues to review.
 
+    # ------------------------------------------------------------------
+    # Verification gate (R02): the waiting_ci reconciler pass
+    # ------------------------------------------------------------------
+
+    async def evaluate_waiting_ci_one(self, run_id: str, now: datetime | None = None) -> None:
+        """One verification pass over a waiting_ci run (R02).
+
+        The candidate commit's builds are an independent gate: pending →
+        keep waiting (bounded); any red build → ADR-0008 repair-in-place
+        while commit cycles remain, else ``blocked(quality_contract)``; all
+        green → review; NO builds at all after the grace window → review as
+        honestly **unverified** (evidence records it; the ready reason says
+        so — never presented as verified).
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None:
+                return
+            if run.status != FlowStatus.WAITING_CI.value:
+                return  # cancelled/advanced elsewhere — superseded, never revived
+            candidate_shas = list(run.candidate_shas or [])
+            candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
+            issue_number = run.issue_iid or 0
+            project_id = run.project_id
+            waiting_since = run.updated_at
+
+        if not candidate_sha:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
+            )
+            return
+
+        try:
+            builds = await self._candidate_builds(candidate_sha, since=waiting_since)
+        except Exception:
+            logger.exception("Builds read failed for %s — keeping it waiting", run_id[:8])
+            return
+
+        if not builds:
+            # RACE GUARD: a just-pushed branch's CI build takes a few seconds
+            # to queue (branch policies create the validation build on PR
+            # creation). Hold the run for a grace window before declaring
+            # not_configured — a deliberate 0 must stay 0.
+            _raw = getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", None)
+            grace = 120 if _raw is None else int(_raw)
+            started = as_aware_utc(waiting_since) if waiting_since is not None else None
+            now_aware = as_aware_utc(now)
+            if started is not None and (now_aware - started).total_seconds() < grace:
+                return  # keep waiting — builds may still queue
+            # No CI build ran for this candidate — proceed to review as
+            # honestly unverified (R02: never presented as verified).
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": VerificationResult.not_configured(
+                        candidate_sha,
+                        PRODUCER_AZURE_BUILD,
+                        summary="no CI build ran for the candidate commit",
+                    ).as_evidence()
+                },
+            )
+            logger.info("No CI builds configured for %s — review as unverified", run_id[:8])
+            await self._transition(
+                run_id, FlowStatus.EVALUATING_CI, reason="no CI configured — unverified"
+            )
+            await self._review_and_ready(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                pr_id=run.mr_iid,
+                candidate_sha=candidate_sha,
+                base_sha=run.base_sha or "",
+                verified=False,
+            )
+            return
+
+        pending = [b for b in builds if str(b.get("status") or "") in _ACTIVE_BUILD_STATUSES]
+        if pending:
+            # Deadline: verification must converge (R17 — bounded waiting).
+            deadline = int(
+                getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800
+            )
+            started = as_aware_utc(waiting_since) if waiting_since is not None else None
+            if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
+                await self._to_terminal(
+                    run_id, FlowStatus.BLOCKED, "verification_timeout: builds did not conclude"
+                )
+            return
+
+        red = [b for b in builds if str(b.get("result") or "") in _RED_BUILD_RESULTS]
+        if red:
+            # ADR-0008: an independent build failure blames the change —
+            # bounded repair while cycles remain, else an honest blocked
+            # state with the failing build names.
+            names = ", ".join(sorted({_build_name(b) for b in red}))
+            await self._begin_repair(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                failure_kind="code",
+                failure_reason=f"builds failed ({names})",
+            )
+            return
+
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "verification": VerificationResult.passed(
+                    candidate_sha,
+                    PRODUCER_AZURE_BUILD,
+                    summary="all candidate builds succeeded",
+                    surface=tuple(
+                        {"name": _build_name(b), "result": str(b.get("result") or "")}
+                        for b in builds
+                    ),
+                ).as_evidence()
+            },
+        )
+        await self._transition(
+            run_id, FlowStatus.EVALUATING_CI, reason="candidate builds succeeded"
+        )
         await self._review_and_ready(
             run_id,
             project_id=project_id,
             issue_number=issue_number,
-            pr_id=publish_outcome.pr_id,
-            candidate_sha=commit_oid,
-            base_sha=base_sha,
+            pr_id=run.mr_iid,
+            candidate_sha=candidate_sha,
+            base_sha=run.base_sha or "",
+            verified=True,
         )
+
+    async def _candidate_builds(self, candidate_sha: str, *, since: datetime | None) -> list[dict]:
+        """Completed/running builds whose sourceVersion IS the candidate commit.
+
+        The Builds API has no ``sourceVersion`` filter (research §6.6
+        correction #1) — the commit correlation is client-side over the
+        documented ``repositoryId``/``minTime``/``$top`` query, exactly like
+        the executor's discovery. The lane pipeline is execution, not
+        verification, and is excluded (the GitHub harness-workflow rule).
+        """
+        min_time = as_aware_utc(since) - timedelta(minutes=10) if since is not None else None
+        builds = await self._stack.client.list_builds_by_repository(
+            self._project,
+            self._repo,
+            min_time=min_time,
+            top=25,
+        )
+        wanted = candidate_sha.lower()
+        lane = self._lane_pipeline_id()
+        matched: list[dict] = []
+        for build in builds:
+            if str(build.get("sourceVersion") or "").lower() != wanted:
+                continue
+            if lane is not None and _build_definition_id(build) == lane:
+                continue
+            matched.append(build)
+        return matched
+
+    async def _begin_repair(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        failure_kind: str,
+        failure_reason: str,
+    ) -> bool:
+        """Red-dispatch the lane as a bounded repair cycle (ADR-0008).
+
+        The exact GitHub ``_begin_repair`` semantics on the Pipelines lane:
+        only while commit cycles remain; the walk is
+        waiting_ci → evaluating_ci → proposing (graph-legal edges); the
+        cycle counter bumps durably and ``_advance_harness`` re-dispatches
+        with the bounded failure context riding as a dispatch input, so the
+        lane agent fixes its own candidate. Cycles exhausted → an honest
+        ``blocked(quality_contract)``.
+        """
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await self._get_run(session, run_id)
+            if run.cancel_requested or run.status in (
+                FlowStatus.CANCELLED,
+                FlowStatus.FAILED,
+                FlowStatus.BLOCKED,
+            ):
+                return False
+            next_cycle = (run.commit_cycle or 1) + 1
+            max_cycles = int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3)
+            if next_cycle > max_cycles:
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"quality_contract: {failure_reason} — commit cycles exhausted",
+                )
+                return False
+            run.commit_cycle = next_cycle
+            await controller.transition(
+                run_id, FlowStatus.EVALUATING_CI, reason=f"repair cycle {next_cycle}"
+            )
+            await controller.transition(
+                run_id,
+                FlowStatus.PROPOSING,
+                reason=f"repair cycle {next_cycle}: {failure_reason}",
+            )
+            await session.commit()
+
+        bounded = f"{failure_kind}: {failure_reason}"[:2000]
+        logger.info(
+            "Run %s enters repair cycle %d — re-dispatching the lane",
+            run_id[:8],
+            next_cycle,
+        )
+        await self._advance_harness(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            repair_context=bounded,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2532,6 +2769,26 @@ async def _link_work_item_to_pr(
     return True
 
 
+def _build_definition_id(build: dict) -> int | None:
+    """The pipeline definition id of a Build object (``definition.id``)."""
+    definition = build.get("definition")
+    if not isinstance(definition, dict):
+        return None
+    raw = definition.get("id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_name(build: dict) -> str:
+    """The human name of a build (definition name, else the build id)."""
+    definition = build.get("definition")
+    if isinstance(definition, dict) and definition.get("name"):
+        return str(definition["name"])
+    return f"build {build.get('id') or '?'}"
+
+
 def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
     """Shallow-merge *patch* into the run's evidence blob."""
     merged = dict(evidence or {})
@@ -2633,6 +2890,7 @@ __all__ = [
     "AzureRunService",
     "azure_factory_branch",
     "build_azure_agents",
+    "evaluate_azure_waiting_ci",
     "execute_azure_run_command",
     "evaluate_azure_revival",
 ]
@@ -2647,13 +2905,15 @@ async def run_azure_harness_reconciler(
     shutdown_event: asyncio.Event | None = None,
     stack_factory: Callable[[str, str], AzureAgents] | None = None,
 ) -> None:
-    """Periodic tick driving the Pipelines lane to convergence.
+    """Periodic tick driving the Pipelines lane AND the R02 gate to convergence.
 
     The twin of :func:`forge.runs.github_service.run_github_harness_reconciler`:
     a plain asyncio task for the worker's ``asyncio.gather``. Exits
-    immediately when the Azure adapter is disabled, carries no credentials,
-    or has no lane pipeline — a deployment that never dispatches lanes
-    never pays for it.
+    immediately when the Azure adapter is disabled or carries no
+    credentials. Deliberately NOT gated on the lane pipeline: since R02 the
+    builtin lane also parks in ``waiting_ci``, so every AzDO deployment
+    needs the verification pass (the harness pass itself no-ops when no
+    lane runs exist).
     """
     import asyncio
 
@@ -2665,8 +2925,6 @@ async def run_azure_harness_reconciler(
         azure_credentials_from_settings(settings)
     except ValueError:
         logger.info("Azure credentials not configured — harness reconciler not started")
-        return
-    if not getattr(settings, "FORGE_AZDO_LANE_PIPELINE_ID", None):
         return
 
     if stack_factory is None:
@@ -2685,6 +2943,13 @@ async def run_azure_harness_reconciler(
             # A failed pass must never kill the reconciler task.
             logger.exception("Azure DevOps harness reconciler pass failed")
         try:
+            # R02 verification gate: the waiting_ci runs' builds decide.
+            await evaluate_azure_waiting_ci(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("Azure verification reconciler pass failed")
+        try:
             # Tier-1 auto-revive: re-dispatch runs whose transient-failure
             # backoff has elapsed (forge.runs.revival).
             await evaluate_azure_revival(
@@ -2698,6 +2963,77 @@ async def run_azure_harness_reconciler(
         except asyncio.TimeoutError:
             pass
     logger.info("Azure DevOps harness reconciler stopped")
+
+
+async def evaluate_azure_waiting_ci(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """One verification pass over every AzDO run parked in `waiting_ci` (R02).
+
+    The twin of `evaluate_github_waiting_ci`: builds of the candidate
+    commit decide whether the run continues to review (verified, or
+    honestly unverified when no CI built it) or repairs/blocks.
+    """
+    from sqlalchemy import select
+
+    from forge.durable.controller import FlowStatus
+    from forge.durable.models import FlowRun
+
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731
+            settings, session_factory, p, r
+        )
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "azure_devops",
+                        FlowRun.status == FlowStatus.WAITING_CI.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for run in runs:
+        run_id = run.id
+        # Subject identity resolution: the journaled handle is the lane
+        # dispatch's pin; the builtin lane carries the subject block it froze
+        # at plan time; the column is the legacy fallback.
+        handle_raw = str(((run.evidence or {}).get("harness") or {}).get("handle") or "")
+        repo = ""
+        try:
+            if handle_raw:
+                parsed = AzurePipelinesHandle.from_json(handle_raw)
+                repo = f"{parsed.project}/{parsed.repo}"
+        except Exception:
+            repo = ""
+        repo = (
+            repo
+            or str((run.evidence or {}).get("subject", {}).get("repo_full_name") or "").strip()
+            or str(run.github_repo_full_name or "").strip()
+        )
+        if "/" not in repo:
+            logger.warning("AzDO waiting_ci run %s without repo identity", run_id[:8])
+            continue
+        project, repo_name = repo.split("/", 1)
+        service = AzureRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(project, repo_name),
+            repo_full_name=repo,
+        )
+        try:
+            await service.evaluate_waiting_ci_one(run_id, now=now)
+        except Exception:
+            logger.exception("AzDO verification reconcile failed for run %s", run_id[:8])
 
 
 async def evaluate_azure_waiting_harness(

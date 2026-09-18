@@ -47,6 +47,7 @@ from forge.runs.azure_service import (
     AzurePRReviewer,
     AzureRunService,
     azure_factory_branch,
+    evaluate_azure_waiting_ci,
     execute_azure_run_command,
     _resolve_repo_name,
 )
@@ -83,6 +84,7 @@ def make_settings(**overrides) -> Settings:
         FORGE_AZDO_APPROVERS="dev@fabrikam.example",
         FORGE_AZDO_ORG_URL="https://dev.azure.com/fabrikam",
         FORGE_AZDO_LANE_PIPELINE_ID=None,
+        FORGE_VERIFICATION_GRACE_SECONDS=0,  # hermetic: grace needs a sleep
         DATABASE_URL="sqlite+aiosqlite:///:memory:",
     )
     values.update(overrides)
@@ -113,9 +115,13 @@ class FakeAzureDevOps:
         self.repositories: list[dict] | None = []
         self.pipeline_calls: list[dict] = []
         self.cancelled_builds: list[int] = []
+        # Build objects as the Builds API returns them (R02 verification):
+        # seeded with seed_build, listed newest-queue-time first.
+        self.builds: list[dict] = []
         self.calls: list[tuple[str, tuple]] = []
         self._next_oid = 1
         self._next_pr = 500
+        self._next_build = 300
 
     # -- seeding --------------------------------------------------------------
 
@@ -135,6 +141,29 @@ class FakeAzureDevOps:
 
     def seed_snapshot(self, sha: str, files: dict[str, str]) -> None:
         self.snapshots[sha] = dict(files)
+
+    def seed_build(
+        self,
+        *,
+        source_version: str,
+        definition_id: int = 42,
+        definition_name: str = "CI",
+        status: str = "completed",
+        result: str | None = "succeeded",
+    ) -> dict:
+        """Queue one Build object for the R02 verification surface."""
+        self._next_build += 1
+        build = {
+            "id": self._next_build,
+            "definition": {"id": definition_id, "name": definition_name},
+            "sourceVersion": source_version,
+            "sourceBranch": "refs/heads/main",
+            "status": status,
+            "result": result,
+            "queueTime": f"2026-09-15T10:{self._next_build % 60:02d}:00Z",
+        }
+        self.builds.append(build)
+        return build
 
     def fail_next_push(self) -> None:
         self._push_failure = True  # type: ignore[attr-defined]
@@ -353,6 +382,25 @@ class FakeAzureDevOps:
         self.cancelled_builds.append(build_id)
         return {"status": "cancelling"}
 
+    async def list_builds_by_repository(
+        self,
+        project: str,
+        repo_id: str,
+        *,
+        definitions: list[int] | None = None,
+        min_time: datetime | None = None,
+        top: int = 25,
+    ) -> list[dict]:
+        """Documented-params Builds query; the fake ignores the window."""
+        self.calls.append(
+            ("list_builds_by_repository", (project, repo_id, tuple(definitions or ())))
+        )
+        builds = list(reversed(self.builds))  # newest queue time first
+        if definitions:
+            wanted = {int(d) for d in definitions}
+            builds = [b for b in builds if int(b["definition"]["id"]) in wanted]
+        return builds[:top]
+
     # -- items / trees (the reader + reviewer surface) --------------------------
 
     async def get_item(
@@ -537,6 +585,32 @@ def comments(fake: FakeAzureDevOps) -> list[str]:
 
 def clear_comments(fake: FakeAzureDevOps) -> None:
     fake.work_item_comments[WORK_ITEM] = []
+
+
+async def outbox_targets(db, run_id: str) -> list[str]:
+    """The journaled transition targets, in order (the durable walk)."""
+    async with db() as session:
+        return [
+            row.payload["to"]
+            for row in (
+                await session.execute(
+                    select(Outbox).where(Outbox.flow_run_id == run_id).order_by(Outbox.id)
+                )
+            )
+            .scalars()
+            .all()
+        ]
+
+
+async def drive_to_waiting_ci(service: AzureRunService, fake: FakeAzureDevOps) -> tuple[str, str]:
+    """start_run → /go on the builtin lane → the run parked in waiting_ci.
+
+    Returns (run_id, candidate_sha)."""
+    run_id = await start(service)
+    clear_comments(fake)
+    await go(service, run_id)
+    branch = azure_factory_branch(WORK_ITEM, run_id)
+    return run_id, fake.heads[branch]
 
 
 # ----------------------------------------------------------------------
@@ -745,7 +819,9 @@ class TestApproverScoping:
 
 
 class TestGoBuiltin:
-    async def test_go_publishes_and_reaches_ready_for_human(self, db, fake):
+    async def test_go_publishes_and_parks_in_waiting_ci(self, db, fake):
+        """R02: the publish leg STOPS at waiting_ci — the PR's builds are an
+        independent verification gate; no review before a verdict."""
         reviewer = StubAzureReviewer()
         service = make_service(db, fake, stack=make_stack(fake, reviewer=reviewer))
         run_id = await start(service)
@@ -754,7 +830,7 @@ class TestGoBuiltin:
         await go(service, run_id)
 
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status == FlowStatus.WAITING_CI.value
 
         # The decision was consumed exactly once.
         async with db() as session:
@@ -797,14 +873,10 @@ class TestGoBuiltin:
         assert fake.heads[branch] in evidence_notes[0]
         assert "Build validation" in evidence_notes[0]
 
-        # The readonly review ran over the PR diff and is bound to the sha.
-        (review_call,) = reviewer.calls
-        assert review_call["pr_id"] == pr["pullRequestId"]
-        assert review_call["candidate_sha"] == fake.heads[branch]
-        assert evidence["review"]["sha"] == fake.heads[branch]
-        assert evidence["review"]["verdict"] == "ok"
+        # R02: no review ran yet — the verification gate owns the next step.
+        assert reviewer.calls == []
 
-        # The run walked waiting_ci → evaluating_ci → reviewing → ready.
+        # The publish leg's last hop is waiting_ci, nothing further.
         async with db() as session:
             targets = [
                 row.payload["to"]
@@ -816,12 +888,7 @@ class TestGoBuiltin:
                 .scalars()
                 .all()
             ]
-        assert targets[-4:] == [
-            FlowStatus.WAITING_CI.value,
-            FlowStatus.EVALUATING_CI.value,
-            FlowStatus.REVIEWING.value,
-            FlowStatus.READY_FOR_HUMAN.value,
-        ]
+        assert targets[-1] == FlowStatus.WAITING_CI.value
 
     async def test_work_item_is_linked_to_the_draft_pr(self, db, fake):
         """research §4.6: the reliable link is the WIT ArtifactLink PATCH."""
@@ -870,7 +937,7 @@ class TestGoBuiltin:
 
         assert fake.calls_of("create_draft_pr") == []
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status == FlowStatus.WAITING_CI.value
         assert run.mr_iid == 4242
         # The link still lands on the ADOPTED PR (its ids come off the payload).
         (link,) = fake.work_item_links
@@ -890,7 +957,7 @@ class TestGoBuiltin:
 
         assert len(fake.calls_of("push_commits")) == pushes_after_first
         run = await get_run(db, run_id)
-        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status == FlowStatus.WAITING_CI.value
 
     async def test_go_after_ttl_blocks_decision_expired(self, db, fake):
         settings = make_settings(FORGE_DECISION_TTL_SECONDS=3600)
@@ -1024,6 +1091,221 @@ class TestGoLane:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value  # 400 config error: fatal, no auto-retry
         assert "harness_start_failed" in (run.status_reason or "")
+
+
+# ----------------------------------------------------------------------
+# R02 verification gate: waiting_ci runs are driven by their builds
+# ----------------------------------------------------------------------
+
+
+class TestVerificationGate:
+    async def test_green_build_drives_to_verified_ready(self, db, fake):
+        """Succeeded builds of the candidate commit → review → ready, with
+        the unified verification evidence and NO unverified label."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha)
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert run.status_reason == "merge is a human decision"  # no unverified label
+        verification = (run.evidence or {})["verification"]
+        # The unified R02 evidence shape (the same keys on every provider).
+        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
+        assert verification["status"] == "passed"
+        assert verification["tested_oid"] == candidate_sha
+        assert verification["producer"] == "azure-build"
+        assert verification["surface"] == [{"name": "CI", "result": "succeeded"}]
+        # The run walked waiting_ci → evaluating_ci → reviewing → ready.
+        assert (await outbox_targets(db, run_id))[-3:] == [
+            FlowStatus.EVALUATING_CI.value,
+            FlowStatus.REVIEWING.value,
+            FlowStatus.READY_FOR_HUMAN.value,
+        ]
+
+    async def test_builds_from_any_definition_verify(self, db, fake):
+        """Branch-policy Build validation, repo CI — any non-lane definition
+        that built the exact candidate sha verifies it."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, definition_id=77, definition_name="validate")
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.evidence or {})["verification"]["status"] == "passed"
+
+    async def test_build_for_a_different_sha_is_ignored(self, db, fake):
+        """ADR-0008: a verdict approves THIS commit — another branch's green
+        build must never verify the candidate."""
+        service = make_service(db, fake)
+        run_id, _candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version="d" * 40, result="succeeded")
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        # No build for the candidate → grace → honestly unverified.
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.evidence or {})["verification"]["status"] == "not_configured"
+        assert "unverified" in (run.status_reason or "")
+
+    async def test_no_builds_after_grace_is_honestly_unverified(self, db, fake):
+        settings = make_settings(FORGE_VERIFICATION_GRACE_SECONDS=300)
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+
+        # Inside the grace window: keep waiting — builds may still queue.
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+        # Past the grace: review as honestly unverified (R02).
+        await service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=301)
+        )
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert "unverified" in (run.status_reason or "")
+        verification = (run.evidence or {})["verification"]
+        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
+        assert verification["status"] == "not_configured"
+        assert verification["tested_oid"] == candidate_sha
+        assert verification["producer"] == "azure-build"
+
+    @pytest.mark.parametrize("result", ["failed", "canceled", "partiallySucceeded"])
+    async def test_red_build_results_enter_repair(self, db, fake, result):
+        """ADR-0008: not fully green blames the change — a bounded repair
+        cycle re-dispatches the lane with the failure as its context."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, result=result)
+        fake.pipeline_calls.clear()
+
+        # The reconciler runs with the lane onboarded — repairs re-dispatch it.
+        lane_service = make_service(
+            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        )
+        await lane_service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        assert run.commit_cycle == 2
+        (dispatch,) = fake.pipeline_calls
+        assert dispatch["pipeline_id"] == LANE_PIPELINE_ID
+        repair_context = dispatch["template_parameters"]["repair_context"]
+        assert repair_context.startswith("code: builds failed")
+        assert "CI" in repair_context  # the failing build's name
+        assert (await outbox_targets(db, run_id))[-3:] == [
+            FlowStatus.EVALUATING_CI.value,
+            FlowStatus.PROPOSING.value,
+            FlowStatus.WAITING_HARNESS.value,
+        ]
+
+    async def test_commit_cycles_exhausted_blocks_quality_contract(self, db, fake):
+        service = make_service(db, fake, settings=make_settings(FORGE_MAX_COMMIT_CYCLES=2))
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.commit_cycle = 2  # the last cycle is already spent
+            await session.commit()
+        fake.seed_build(source_version=candidate_sha, result="failed")
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("quality_contract")
+        assert "builds failed" in (run.status_reason or "")
+        assert fake.pipeline_calls == []  # no further dispatch
+
+    async def test_pending_build_waits_then_blocks_on_verification_timeout(self, db, fake):
+        settings = make_settings(FORGE_VERIFICATION_TIMEOUT_SECONDS=600)
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, status="inProgress", result=None)
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+        await service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=601)
+        )
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason == "verification_timeout: builds did not conclude"
+
+    async def test_lane_build_is_execution_not_verification(self, db, fake):
+        """The lane pipeline is excluded from the verification surface (the
+        GitHub harness-workflow rule): its build never verifies the candidate."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        # Only the lane's own build ran for the candidate commit.
+        fake.seed_build(
+            source_version=candidate_sha,
+            definition_id=LANE_PIPELINE_ID,
+            definition_name="forge-lane",
+        )
+
+        lane_service = make_service(
+            db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        )
+        await lane_service.evaluate_waiting_ci_one(
+            run_id, now=datetime.now(timezone.utc) + timedelta(seconds=301)
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        # Excluding the lane build leaves NO verification surface — honest.
+        assert (run.evidence or {})["verification"]["status"] == "not_configured"
+        assert "unverified" in (run.status_reason or "")
+
+    async def test_run_advanced_elsewhere_is_left_alone(self, db, fake):
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, result="failed")
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.CANCELLED.value
+            await session.commit()
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value  # superseded, never revived
+
+
+class TestWorkerVerificationPass:
+    async def test_pass_drives_every_waiting_ci_run(self, db, fake):
+        """The module-level pass (the reconciler tick) drives each parked run
+        through its own repo's service — the evaluate_github_waiting_ci twin."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha)
+
+        await evaluate_azure_waiting_ci(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            stack_factory=lambda p, r: make_stack(fake),
+            now=datetime.now(timezone.utc),
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.evidence or {})["verification"]["status"] == "passed"
+
+    async def test_pass_is_a_noop_without_waiting_ci_runs(self, db, fake):
+        await evaluate_azure_waiting_ci(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            stack_factory=lambda p, r: make_stack(fake),
+        )
+
+        assert fake.calls == []
 
 
 # ----------------------------------------------------------------------

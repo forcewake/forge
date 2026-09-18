@@ -1,10 +1,15 @@
-"""Stage B2 (F19, ADR-0018 §5): the verification profile.
+"""Stage B2 (F19, ADR-0018 §5) + R02 honest labeling: the verification profile.
 
 - The profile is built from FORGE_REQUIRED_JOBS (sorted tuple) with a
   freshness window; ``evaluate`` keeps the quality contract's (ok, reason)
   shape.
-- An EMPTY profile lets the run proceed, but the evidence comment carries the
-  "no verification profile configured" warning.
+- R02: an EMPTY profile never presents pipeline success as verified — the
+  run still reaches ready_for_human, but the evidence records
+  ``verification.status="unverified"`` (the unified
+  :class:`~forge.runs.verification.VerificationResult` shape), the ready
+  reason says unverified and the evidence comment carries the warning.
+  A non-empty profile records ``passed`` only when every required job
+  succeeded for the EXACT candidate sha.
 - Post-review freshness: if the branch head moved past the reviewed candidate
   before the run went ready, the run is blocked ``candidate_drift_after_review``.
 """
@@ -20,7 +25,13 @@ from forge.gitlab.schemas import Job, Pipeline
 from forge.models.base import Base
 from forge.runs import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
-from forge.runs.verification import DEFAULT_FRESHNESS_WINDOW_SECONDS, VerificationProfile, evaluate
+from forge.runs.verification import (
+    DEFAULT_FRESHNESS_WINDOW_SECONDS,
+    PRODUCER_GITLAB_PIPELINE,
+    VerificationProfile,
+    VerificationResult,
+    evaluate,
+)
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
 
@@ -74,6 +85,35 @@ class DriftingReviewer(StubReviewer):
     async def review(self, **kwargs):
         self._fake.seed_commit(self._branch, "human-sha", "human push during review")
         return await super().review(**kwargs)
+
+
+class TestVerificationResult:
+    """R02: the ONE evidence shape every provider records."""
+
+    def test_as_evidence_carries_the_unified_keys(self):
+        result = VerificationResult.passed(
+            "a" * 40,
+            PRODUCER_GITLAB_PIPELINE,
+            summary="quality contract satisfied",
+            surface=({"name": "test", "status": "success"},),
+        )
+        evidence = result.as_evidence()
+        assert set(evidence) >= {"status", "tested_oid", "observed_at", "producer"}
+        assert evidence["status"] == "passed"
+        assert evidence["tested_oid"] == "a" * 40
+        assert evidence["producer"] == PRODUCER_GITLAB_PIPELINE
+        assert evidence["surface"] == [{"name": "test", "status": "success"}]
+
+    def test_only_a_passed_verdict_is_verified(self):
+        assert VerificationResult.passed("a" * 40, "x").verified is True
+        for status in (
+            VerificationResult.pending,
+            VerificationResult.failed,
+            VerificationResult.unknown,
+            VerificationResult.not_configured,
+            VerificationResult.unverified,
+        ):
+            assert status("a" * 40, "x").verified is False
 
 
 class TestVerificationProfile:
@@ -143,7 +183,9 @@ async def drive_to_green_pipeline(service, fake_gitlab: FakeGitLab, db) -> tuple
 
 
 class TestEmptyProfileEvidence:
-    async def test_empty_profile_labels_the_evidence_comment(self, db, fake_gitlab):
+    async def test_empty_profile_is_honestly_unverified(self, db, fake_gitlab):
+        """R02: an empty profile never presents pipeline success as verified —
+        the run still reaches the human, labeled unverified everywhere."""
         service = make_service(db, fake_gitlab)  # FORGE_REQUIRED_JOBS="" by default
         run_id, _branch = await drive_to_green_pipeline(service, fake_gitlab, db)
 
@@ -151,11 +193,20 @@ class TestEmptyProfileEvidence:
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        # The ready reason says unverified (the honest form, R02).
+        assert "unverified" in (run.status_reason or "")
+        # The evidence records the unified VerificationResult shape.
+        verification = (run.evidence or {})["verification"]
+        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
+        assert verification["status"] == "unverified"
+        assert verification["tested_oid"] == run.candidate_shas[-1]
+        assert verification["producer"] == PRODUCER_GITLAB_PIPELINE
         notes = [note["body"] for note in fake_gitlab.notes if "Forge run ready" in note["body"]]
         assert notes, "evidence comment posted"
         assert "⚠️ No verification profile configured — pipeline success only." in notes[0]
+        assert "**unverified**" in notes[0]
 
-    async def test_nonempty_profile_succeeds_without_the_warning(self, db, fake_gitlab):
+    async def test_nonempty_profile_verifies_and_records_passed(self, db, fake_gitlab):
         settings = make_settings(FORGE_REQUIRED_JOBS="test")
         service = make_service(db, fake_gitlab, settings=settings)
         run_id, _branch = await drive_to_green_pipeline(service, fake_gitlab, db)
@@ -169,8 +220,15 @@ class TestEmptyProfileEvidence:
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        assert (run.status_reason or "").startswith("checks passed")
+        verification = (run.evidence or {})["verification"]
+        assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
+        assert verification["status"] == "passed"
+        assert verification["tested_oid"] == run.candidate_shas[-1]
+        assert verification["producer"] == PRODUCER_GITLAB_PIPELINE
         notes = [note["body"] for note in fake_gitlab.notes if "Forge run ready" in note["body"]]
         assert notes and "No verification profile" not in notes[0]
+        assert "All checks passed" in notes[0]
 
 
 class TestPostReviewFreshness:
