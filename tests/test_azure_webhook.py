@@ -361,6 +361,149 @@ class TestWorkitemCommands:
         assert response.json()["run_command"] is True
 
 
+class TestWorkitemUpdated:
+    """#29 lifecycle commands off ``workitem.updated``: edit → issue_edited,
+    trigger tag gone → unlabeled (the detection's honest limits are pinned
+    in the unit tests)."""
+
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=azure_settings(tmp_path))
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    async def post(self, client, app, name: str):
+        body = load_payload(name)
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        return response, inbox, steps
+
+    async def test_text_edit_normalizes_to_issue_edited(self, app, client: AsyncClient):
+        response, inbox, steps = await self.post(client, app, "workitem_updated_edited.json")
+
+        assert response.status_code == 202
+        assert response.json()["run_command"] is True
+        assert len(inbox) == 1 and len(steps) == 1
+        payload = inbox[0].payload
+        assert payload["command"] == "issue_edited"
+        assert payload["provider"] == "azure_devops"
+        assert payload["connection_id"] == f"azure_devops:{ORG_URL}:{PROJECT}"
+        assert payload["repo_full_name"] == ""  # resolved lazily by the run service
+        assert payload["issue_number"] == WORK_ITEM
+        assert payload["issue_is_pr"] is False
+        assert payload["issue_title"] == "Ship the flux capacitor"
+        # System.Description travels RAW (HTML) — the run service strips it
+        # before digesting, the same way start_run freezes the snapshot.
+        assert "<p>" in payload["issue_body"]
+        assert payload["issue_title_present"] is True
+        assert payload["issue_description_present"] is True
+        assert payload["author_username"] == "dev@fabrikam.example"
+        assert payload["note_id"].startswith(f"edit:{WORK_ITEM}:")
+        # The wake task is stamped with the ACTUAL inbox identity.
+        assert steps[0].source_event_id == inbox[0].source_event_id
+        assert steps[0].status == "scheduled"
+        (task,) = app.state.task_queue.submit.await_args[0]
+        assert task.task_type == "run_command"
+        assert task.metadata["command"] == "issue_edited"
+        assert task.metadata["source_event_id"] == inbox[0].source_event_id
+
+    async def test_trigger_tag_absent_normalizes_to_unlabeled(self, app, client: AsyncClient):
+        response, inbox, _ = await self.post(client, app, "workitem_updated_tag_removed.json")
+
+        assert response.status_code == 202
+        assert response.json()["run_command"] is True
+        payload = inbox[0].payload
+        assert payload["command"] == "unlabeled"
+        assert payload["issue_number"] == WORK_ITEM
+        assert payload["tags"] == ["ci-cleanup"]
+        assert payload["note_id"].startswith(f"unlabel:{WORK_ITEM}:")
+
+    async def test_trigger_tag_present_normalizes_to_issue_edited(self, app, client: AsyncClient):
+        """The tag set carrying the trigger label is NOT a removal — the
+        delivery is an edit."""
+        payload = load_json("workitem_updated_edited.json")
+        payload["resource"]["fields"]["System.Tags"] = "forge; ci-cleanup"
+        body = json.dumps(payload).encode()
+        resp = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert resp.status_code == 202
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+        assert inbox[0].payload["command"] == "issue_edited"
+
+    async def test_case_insensitive_trigger_label_match(self, app, client: AsyncClient):
+        payload = load_json("workitem_updated_edited.json")
+        payload["resource"]["fields"]["System.Tags"] = "Forge"
+        body = json.dumps(payload).encode()
+        await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+        assert inbox[0].payload["command"] == "issue_edited"
+
+    async def test_no_tags_field_is_an_edit_not_an_unlabel(self, app, client: AsyncClient):
+        """A work item without tags never routes unlabeled (the fixture's
+        System.Tags key is dropped, not emptied)."""
+        payload = load_json("workitem_updated_tag_removed.json")
+        del payload["resource"]["fields"]["System.Tags"]
+        body = json.dumps(payload).encode()
+        await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+        assert inbox[0].payload["command"] == "issue_edited"
+        assert inbox[0].payload["issue_description_present"] is True
+
+    async def test_bot_update_is_skipped(self, app, client: AsyncClient):
+        payload = load_json("workitem_updated_edited.json")
+        payload["resource"]["fields"]["System.ChangedBy"] = "forge-bot@fabrikam.example"
+        body = json.dumps(payload).encode()
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert response.json() == {"status": "skipped", "reason": "bot-loop"}
+        async with app.state.session_factory() as session:
+            inbox = (await session.execute(select(EventInbox))).scalars().all()
+        assert inbox == []
+
+    async def test_redelivered_update_is_deduplicated(self, app, client: AsyncClient):
+        first, inbox, _ = await self.post(client, app, "workitem_updated_edited.json")
+        body = load_payload("workitem_updated_edited.json")
+        second = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert first.json().get("run_command") is True
+        assert second.json()["deduplicated"] is True
+        assert len(inbox) == 1
+
+    async def test_a_new_edit_is_not_swallowed_by_the_first(self, app, client: AsyncClient):
+        """The A→B→A inbox-collision guard: two genuinely different updates
+        of one work item must each schedule their step (the rev bumps)."""
+        await self.post(client, app, "workitem_updated_edited.json")
+        payload = load_json("workitem_updated_edited.json")
+        payload["resource"]["rev"] = 14
+        payload["resource"]["fields"]["System.Title"] = "Ship the flux capacitor, fast"
+        body = json.dumps(payload).encode()
+        await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+            steps = list((await session.execute(select(StepRun))).scalars().all())
+        assert len(inbox) == 2
+        assert len(steps) == 2
+        assert {step.source_event_id for step in steps} == {row.source_event_id for row in inbox}
+
+
 class TestPRCommentCommands:
     @pytest.fixture()
     async def app(self, tmp_path):
@@ -675,6 +818,47 @@ class TestUnitNormalizers:
         payload = {"resourceContainers": {"collection": {"baseUrl": "https://server/tfs/"}}}
         assert org_from_payload(payload) == "https://server/tfs"
         assert org_from_payload({}) == ""
+
+    def test_workitem_updated_unit_normalization(self):
+        import hashlib
+
+        from forge.gateway.azure_webhook import normalize_workitem_updated
+
+        edited = normalize_workitem_updated(load_json("workitem_updated_edited.json"))
+        assert edited is not None
+        assert edited["command"] == "issue_edited"
+        assert edited["delivery_key"] == (
+            f"edit:{WORK_ITEM}:"
+            + hashlib.sha256(
+                b"Ship the flux capacitor\n<p>Users <b>cannot</b> reset."
+                b" The reset mail bounces with SMTP 550.</p>"
+            ).hexdigest()
+            + ":12"
+        )
+
+        unlabel = normalize_workitem_updated(load_json("workitem_updated_tag_removed.json"))
+        assert unlabel is not None
+        assert unlabel["command"] == "unlabeled"
+        assert unlabel["delivery_key"] == f"unlabel:{WORK_ITEM}:13"
+
+        # A work item WITHOUT tags never routes unlabeled.
+        no_tags = load_json("workitem_updated_edited.json")
+        untagged = normalize_workitem_updated(no_tags)
+        assert untagged is not None and untagged["command"] == "issue_edited"
+
+        # A sparse delivery (changed-fields-only subscription) flags the
+        # missing fields instead of digesting empty strings blindly.
+        sparse = load_json("workitem_updated_edited.json")
+        del sparse["resource"]["fields"]["System.Title"]
+        del sparse["resource"]["fields"]["System.Description"]
+        sparse_command = normalize_workitem_updated(sparse)
+        assert sparse_command is not None
+        assert sparse_command["issue_title_present"] is False
+        assert sparse_command["issue_description_present"] is False
+        assert sparse_command["issue_title"] == ""
+        assert sparse_command["issue_body"] == ""
+
+        assert normalize_workitem_updated({"resource": {}}) is None
 
 
 class TestNoRedisFallback:

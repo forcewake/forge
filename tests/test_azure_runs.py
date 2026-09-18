@@ -8,6 +8,7 @@ exercised on the Azure DevOps surface, no network, no model.
 """
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,9 +49,11 @@ from forge.runs.azure_service import (
     AzureRunService,
     azure_factory_branch,
     evaluate_azure_waiting_ci,
+    evaluate_azure_waiting_harness,
     execute_azure_run_command,
     _resolve_repo_name,
 )
+from forge.runs.service import task_digest_of
 from forge.runs.stubs import StubImplementer, StubPlanner
 
 FIXTURES = Path(__file__).parent / "fixtures" / "azure_payloads"
@@ -1822,3 +1825,455 @@ class TestUnitHelpers:
             == "b" * 40
         )
         assert _push_new_object_id({}) == ""
+
+
+# ----------------------------------------------------------------------
+# #29 lifecycle commands on the AzDO surface: work-item-edit replan +
+# trigger-tag-off cancel — the mirror of the GitHub handlers
+# ----------------------------------------------------------------------
+
+
+async def edit_item(
+    service: AzureRunService,
+    *,
+    body: str,
+    title: str = WORK_ITEM_TITLE,
+    author: str = "dev@fabrikam.example",
+) -> str | None:
+    return await service.handle_issue_edited(
+        project_id=PROJECT_ID,
+        issue_number=WORK_ITEM,
+        issue_title=title,
+        issue_body=body,
+        author_username=author,
+    )
+
+
+class TestIssueEdited:
+    async def test_edit_while_waiting_approval_replans(self, db, fake):
+        service = make_service(db, fake)
+        stale_id = await start(service)
+        clear_comments(fake)
+        new_body = "<p>Users <b>cannot</b> reset. The reset mail bounces with SMTP 550.</p>"
+
+        new_id = await edit_item(service, body=new_body)
+
+        assert new_id is not None and new_id != stale_id
+        stale = await get_run(db, stale_id)
+        fresh = await get_run(db, new_id)
+        # The stale run is cancelled DURABLY: grant revoked, not just parked.
+        assert stale.status == FlowStatus.CANCELLED.value
+        assert stale.cancel_requested is True
+        assert fresh.status == FlowStatus.WAITING_APPROVAL.value
+
+        # The fresh run's frozen snapshot digests the STRIPPED new text.
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == new_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["task_digest"] == task_digest_of(
+            WORK_ITEM_TITLE, "Users cannot reset. The reset mail bounces with SMTP 550."
+        )
+
+        # The plan comment went out again, plus the regeneration note.
+        bodies = comments(fake)
+        assert len([b for b in bodies if "Forge plan" in b]) == 1
+        (note,) = [b for b in bodies if "stale" in b]
+        assert stale_id[:8] in note and new_id[:8] in note
+
+        # The stale run's gate was never consumed by the replan.
+        async with db() as session:
+            gates = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == stale_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert gates and all(gate.consumed_at is None for gate in gates)
+
+    async def test_redelivered_edit_is_a_no_op(self, db, fake):
+        """A redelivered edit (fresh run's snapshot already IS that text)
+        must not spawn a third run or re-post anything."""
+        service = make_service(db, fake)
+        await start(service)
+        new_body = "<p>The work item, edited once.</p>"
+        first = await edit_item(service, body=new_body)
+        comments_after_first = len(comments(fake))
+
+        second = await edit_item(service, body=new_body)
+
+        assert second == first
+        assert len(comments(fake)) == comments_after_first
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2  # the stale run + the replan, nothing more
+
+    async def test_sparse_delivery_repairs_text_with_one_api_read(self, db, fake):
+        """A 'changed fields only' subscription may omit untouched fields —
+        the handler restores the authoritative text with ONE get_work_item
+        read instead of digesting empty strings as if they were blanked.
+        The unchanged text then matches the snapshot: no replan."""
+        service = make_service(db, fake)
+        await start(service)
+        clear_comments(fake)
+
+        result = await edit_item(service, title="", body="")
+
+        assert result is not None  # the waiting run still owns the work item
+        assert fake.calls_of("get_work_item")  # the ONE API read happened
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 1  # no replan: the text matches the snapshot
+        assert comments(fake) == []
+
+    async def test_gate_consumed_but_still_waiting_posts_note_only(self, db, fake):
+        """The "gate already consumed" guard: an edit in the consume→commit
+        window must never cancel an approved run."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        async with db() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            gate.consumed_at = datetime.now(timezone.utc)
+            await session.commit()
+        clear_comments(fake)
+
+        result = await edit_item(service, body="<p>an edited body</p>")
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert run.cancel_requested is False
+        (note,) = comments(fake)
+        assert "not** in the approved plan" in note
+
+    async def test_mid_flight_edit_notes_once_and_does_not_yank(self, db, fake):
+        service = make_service(db, fake)
+        run_id, _candidate = await drive_to_waiting_ci(service, fake)
+        notes_before = len(comments(fake))
+
+        result = await edit_item(service, body="<p>edited while the run executes</p>")
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.cancel_requested is False
+        # ONE informational note; the ready-for-review comment was already out.
+        bodies = comments(fake)
+        assert len(bodies) == notes_before + 1
+        assert "in flight" in bodies[-1]
+
+    async def test_non_admitted_edit_is_ignored(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        result = await edit_item(service, body="<p>vandalism</p>", author="mallory@x.example")
+
+        assert result is None
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert comments(fake) == []
+
+    async def test_edited_command_dispatch_replans(self, db, fake):
+        """The gateway-normalized command drives the service end to end."""
+        service = make_service(db, fake)
+        stale_id = await start(service)
+        metadata = {
+            "command": "issue_edited",
+            "provider": "azure_devops",
+            "project": PROJECT,
+            "repo_full_name": REPO_FULL,
+            "project_id": PROJECT_ID,
+            "issue_number": WORK_ITEM,
+            "issue_title": WORK_ITEM_TITLE,
+            "issue_body": "<p>dispatched edit body</p>",
+            "author_username": "dev@fabrikam.example",
+            "note_text": "",
+            "note_id": "edit:142:abc:12",
+        }
+
+        await execute_azure_run_command(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            metadata,
+            stack_factory=lambda project, repo: make_stack(fake),
+        )
+
+        stale = await get_run(db, stale_id)
+        assert stale.status == FlowStatus.CANCELLED.value
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2
+        assert any(run.status == FlowStatus.WAITING_APPROVAL.value for run in runs)
+
+
+class TestLabelOff:
+    async def test_tag_removal_cancels_the_gate_waiting_run(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=WORK_ITEM, author_username="dev@fabrikam.example"
+        )
+
+        assert cancelled == 1
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert run.cancel_requested is True
+        (note,) = comments(fake)
+        assert "cancelled" in note and "tag" in note
+
+    async def test_tag_removal_leaves_a_past_gate_run_alone(self, db, fake):
+        service = make_service(db, fake)
+        run_id, _candidate = await drive_to_waiting_ci(service, fake)
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=WORK_ITEM, author_username="dev@fabrikam.example"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+
+    async def test_non_approver_tag_removal_is_ignored(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_number=WORK_ITEM, author_username="mallory@x.example"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert comments(fake) == []
+
+    async def test_unlabeled_command_dispatch_cancels(self, db, fake):
+        """The gateway-normalized command drives the service end to end."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        metadata = {
+            "command": "unlabeled",
+            "provider": "azure_devops",
+            "project": PROJECT,
+            "repo_full_name": REPO_FULL,
+            "project_id": PROJECT_ID,
+            "issue_number": WORK_ITEM,
+            "author_username": "dev@fabrikam.example",
+            "note_text": "",
+            "note_id": "unlabel:142:13",
+        }
+
+        await execute_azure_run_command(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            metadata,
+            stack_factory=lambda project, repo: make_stack(fake),
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert run.cancel_requested is True
+
+
+# ----------------------------------------------------------------------
+# R17 on the AzDO surface: deadlines/cancel checked BEFORE provider I/O,
+# and discovery bounded
+# ----------------------------------------------------------------------
+
+
+class TestAzureVerificationDeadlineBeforeIO:
+    async def test_verification_timeout_fires_without_builds_call(self, db, fake):
+        """The Builds API has been dead the whole wait: the deadline is
+        evaluated locally and blocks without asking the provider again."""
+        settings = make_settings(FORGE_VERIFICATION_TIMEOUT_SECONDS=600)
+        service = make_service(db, fake, settings=settings)
+        run_id, _candidate = await drive_to_waiting_ci(service, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            await session.commit()
+
+        builds_reads = len(fake.calls_of("list_builds_by_repository"))
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason == "verification_timeout: builds did not conclude"
+        assert len(fake.calls_of("list_builds_by_repository")) == builds_reads
+
+    async def test_cancel_requested_ignores_the_late_pass(self, db, fake):
+        """F13: the grant was revoked mid-wait — no provider call, no publish."""
+        service = make_service(db, fake)
+        run_id, _candidate = await drive_to_waiting_ci(service, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancel_requested = True
+            await session.commit()
+        builds_reads = len(fake.calls_of("list_builds_by_repository"))
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # terminal stays /cancel's
+        assert len(fake.calls_of("list_builds_by_repository")) == builds_reads
+
+
+class TestAzureHarnessDeadlineBeforeIO:
+    async def _waiting_harness_run(self, db, fake):
+        settings = make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        return service, run_id
+
+    async def _age_journaled_handle(self, db, run_id: str, *, seconds: int) -> None:
+        """Rewind the journaled handle's started_at — the deadline rides on it."""
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            harness = dict(run.evidence["harness"])
+            handle = AzurePipelinesHandle.from_json(harness["handle"])
+            aged = replace(
+                handle,
+                started_at=(datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(),
+            )
+            harness["handle"] = aged.to_json()
+            run.evidence = {**run.evidence, "harness": harness}
+            await session.commit()
+
+    async def test_expired_deadline_blocks_without_any_provider_call(self, db, fake):
+        """The journaled deadline passed: the run parks blocked on
+        harness_timeout even though the Pipelines API errors on every call —
+        and the failing API is never asked (discovery/poll not reached)."""
+        service, run_id = await self._waiting_harness_run(db, fake)
+        # Age relative to the EFFECTIVE budget (the environment may override
+        # the config default) so the deadline is provably behind.
+        await self._age_journaled_handle(
+            db,
+            run_id,
+            seconds=make_settings().FORGE_HARNESS_TIMEOUT_SECONDS + 1,
+        )
+
+        async def provider_forbidden(*args, **kwargs):
+            raise AssertionError("provider called after the harness deadline expired")
+
+        fake.get_run = provider_forbidden  # type: ignore[method-assign]
+        builds_reads = len(fake.calls_of("list_builds_by_repository"))
+
+        await service.evaluate_waiting_harness_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "harness_timeout" in (run.status_reason or "")
+        assert len(fake.calls_of("list_builds_by_repository")) == builds_reads
+
+    async def test_cancel_requested_stands_down_pre_poll(self, db, fake):
+        """F13: a revoked grant stops the harness evaluation before the
+        provider is touched — the late candidate would be superseded."""
+        service, run_id = await self._waiting_harness_run(db, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancel_requested = True
+            await session.commit()
+        builds_reads = len(fake.calls_of("list_builds_by_repository"))
+
+        await service.evaluate_waiting_harness_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value  # NOT advanced, NOT terminalized
+        assert run.evidence["superseded"] == {
+            "reason": "cancelled",
+            "attempt_base": BASE_HEAD,
+        }
+        assert len(fake.calls_of("list_builds_by_repository")) == builds_reads
+
+
+class TestAzureBoundedDiscovery:
+    async def _uncorrelated_waiting_harness_run(self, db, fake):
+        """A lane run whose journaled handle never correlated (the legacy
+        empty-202 shape): run_id 0 — discovery owns the correlation."""
+        settings = make_settings(
+            FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID,
+            FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS=3,
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            harness = dict(run.evidence["harness"])
+            handle = AzurePipelinesHandle.from_json(harness["handle"])
+            harness["handle"] = replace(handle, run_id=0).to_json()
+            harness["run_id"] = None
+            run.evidence = {**run.evidence, "harness": harness}
+            await session.commit()
+        discovery_calls = len(fake.calls_of("list_builds_by_repository"))
+        return service, run_id, discovery_calls
+
+    async def test_unknown_dispatch_blocks_after_the_attempt_cap(self, db, fake):
+        """Discovery retries exactly up to FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS,
+        then the run parks blocked with the precise 'dispatch never observed'
+        reason instead of polling until heat death."""
+        service, run_id, discovery_calls = await self._uncorrelated_waiting_harness_run(db, fake)
+
+        for _ in range(3):
+            await service.evaluate_waiting_harness_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "dispatch never observed" in (run.status_reason or "")
+        assert "harness_infrastructure" in (run.status_reason or "")
+        assert len(fake.calls_of("list_builds_by_repository")) == discovery_calls + 3
+
+        # The blocked run is out of the reconciler's set — no further calls.
+        await evaluate_azure_waiting_harness(
+            make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID),
+            ForgeConfig(),
+            db,
+            stack_factory=lambda project, repo: make_stack(fake),
+        )
+        assert len(fake.calls_of("list_builds_by_repository")) == discovery_calls + 3
+
+    async def test_attempts_reset_when_the_run_surfaces(self, db, fake):
+        """Discovery is bounded but not eager: within the cap a run that
+        surfaces later is adopted, the counter resets, and the lane completes."""
+        service, run_id, discovery_calls = await self._uncorrelated_waiting_harness_run(db, fake)
+
+        await service.evaluate_waiting_harness_one(run_id, now=datetime.now(timezone.utc))
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_HARNESS.value
+        assert (await get_run(db, run_id)).evidence["harness"]["discovery_attempts"] == 1
+
+        # The pipeline run shows up in the Builds API afterwards — on the
+        # dispatched branch, carrying forge's run id (the discovery match).
+        branch = azure_factory_branch(WORK_ITEM, run_id)
+        build = fake.seed_build(source_version=fake.heads[branch], definition_id=LANE_PIPELINE_ID)
+        build["sourceBranch"] = f"refs/heads/{branch}"
+        build["templateParameters"] = {"run_id": run_id}
+
+        await service.evaluate_waiting_harness_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.evidence["harness"]["run_id"] == build["id"]
+        assert run.evidence["harness"]["discovery_attempts"] == 0

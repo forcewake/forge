@@ -68,6 +68,9 @@ EXPECTED_FIXTURES = {
     "pr_commented_on_implement.json",
     "workitem_commented_go.json",
     "build_complete_succeeded.json",
+    # #29 lifecycle fixtures (workitem.updated → issue_edited / unlabeled).
+    "workitem_updated_edited.json",
+    "workitem_updated_tag_removed.json",
 }
 
 
@@ -1672,6 +1675,8 @@ def test_fixture_inventory_is_complete():
         ("pr_commented_on.json", "ms.vss-code.git-pullrequest-comment-event"),
         ("build_complete_failed.json", "build.complete"),
         ("workitem_commented_implement.json", "workitem.commented"),
+        ("workitem_updated_edited.json", "workitem.updated"),
+        ("workitem_updated_tag_removed.json", "workitem.updated"),
     ],
 )
 def test_webhook_fixtures_carry_envelope_and_event_type(name: str, event_type: str):

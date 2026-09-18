@@ -20,6 +20,7 @@ from sqlalchemy.pool import StaticPool
 from forge.config import Settings
 from forge.durable import ActionLog, FlowRun, FlowStatus, LLMCall
 from forge.durable.identity import factory_branch
+from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
 from forge.runs import RunService
@@ -548,3 +549,91 @@ class TestHarnessRepairInterplay:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.BLOCKED.value
         assert run.status_reason.startswith("commit_cycles_exhausted")
+
+
+# ----------------------------------------------------------------------
+# R17 on the GitLab harness lane: deadline/cancel evaluated LOCALLY,
+# before any provider I/O
+# ----------------------------------------------------------------------
+
+
+class TestHarnessDeadlineBeforeIO:
+    @staticmethod
+    def _fail_jobs(fake_gitlab: FakeGitLab) -> None:
+        """Make every job read fail, while still recording the attempt."""
+
+        async def always_500(project_id, pipeline_id):
+            fake_gitlab.calls.append(("list_pipeline_jobs", (project_id, pipeline_id)))
+            raise GitLabAPIError(500, "gitlab is down")
+
+        fake_gitlab.list_pipeline_jobs = always_500  # type: ignore[method-assign]
+
+    async def test_expired_deadline_blocks_without_any_provider_call(
+        self, service, fake_gitlab, db
+    ):
+        """The journaled deadline passed: the run parks blocked on
+        harness_timeout even though the GitLab API errors on every call —
+        and the failing API is never asked (poll is not reached)."""
+        run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
+        seed_forge_agent_job(fake_gitlab, pipeline_id, status="running")
+        self._fail_jobs(fake_gitlab)
+        started_at = json.loads((await get_run(db, run_id)).evidence["harness"]["handle"])[
+            "started_at"
+        ]
+        late = datetime.fromisoformat(started_at) + timedelta(
+            seconds=make_settings().FORGE_HARNESS_TIMEOUT_SECONDS + 1
+        )
+        job_reads = len(fake_gitlab.calls_of("list_pipeline_jobs"))
+
+        await service.evaluate_waiting_harness(now=late)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "harness_timeout" in (run.status_reason or "")
+        assert len(fake_gitlab.calls_of("list_pipeline_jobs")) == job_reads
+
+    async def test_poll_failure_cannot_extend_the_deadline(self, service, fake_gitlab, db):
+        """A poll error keeps the run waiting only until the journaled
+        deadline — the next evaluation's deadline check fires without I/O."""
+        run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
+        seed_forge_agent_job(fake_gitlab, pipeline_id, status="running")
+        self._fail_jobs(fake_gitlab)
+        reads_while_alive = len(fake_gitlab.calls_of("list_pipeline_jobs"))
+
+        # While the deadline is ahead, the poll error just keeps it waiting.
+        await service.evaluate_waiting_harness()
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_HARNESS.value
+        reads = len(fake_gitlab.calls_of("list_pipeline_jobs"))
+        assert reads > reads_while_alive
+
+        # Once it is behind, the deadline fires — no provider call needed.
+        started_at = json.loads((await get_run(db, run_id)).evidence["harness"]["handle"])[
+            "started_at"
+        ]
+        late = datetime.fromisoformat(started_at) + timedelta(
+            seconds=make_settings().FORGE_HARNESS_TIMEOUT_SECONDS + 1
+        )
+        await service.evaluate_waiting_harness(now=late)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "harness_timeout" in (run.status_reason or "")
+        assert len(fake_gitlab.calls_of("list_pipeline_jobs")) == reads
+
+    async def test_cancel_requested_stands_down_pre_poll(self, service, fake_gitlab, db):
+        """F13: a revoked grant stops the harness evaluation before the
+        provider is touched — the late candidate would be superseded. The
+        terminal transition stays /cancel's (the GitHub stand-down mirror)."""
+        run_id, pipeline_id, _branch = await start_and_go(service, db, fake_gitlab)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancel_requested = True
+            await session.commit()
+        job_reads = len(fake_gitlab.calls_of("list_pipeline_jobs"))
+
+        await service.evaluate_waiting_harness()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value  # NOT advanced, NOT terminalized
+        assert run.evidence["superseded"]["reason"] == "cancelled"
+        assert len(fake_gitlab.calls_of("list_pipeline_jobs")) == job_reads
