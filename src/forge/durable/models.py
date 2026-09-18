@@ -109,10 +109,14 @@ class EventInbox(Base):
     handler_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
-#: ADR-0017 (F12): one active run per (project, issue). Terminal statuses live
-#: in the predicate as a literal list (mirrors Controller.TERMINAL_STATUSES —
-#: a unit test asserts the two stay in sync); ``ready_for_human`` is terminal
-#: per ADR-0004, so it does NOT block a fresh /implement.
+#: ADR-0017 (F12), R03: one active run per (provider, project, issue). The
+#: provider leads the key because numeric subject ids are only unique WITHIN
+#: a provider — a GitLab ``project_id=5`` and a GitHub repository internal
+#: id ``5`` are unrelated subjects and must never collide. Terminal statuses
+#: live in the predicate as a literal list (mirrors
+#: Controller.TERMINAL_STATUSES — a unit test asserts the two stay in sync);
+#: ``ready_for_human`` is terminal per ADR-0004, so it does NOT block a
+#: fresh /implement.
 _TERMINAL_STATUS_PREDICATE = text(
     "status NOT IN ('ready_for_human', 'blocked', 'failed', 'cancelled')"
 )
@@ -126,6 +130,7 @@ class FlowRun(Base):
         _status_check("ck_flow_runs_status", FLOW_STATUSES),
         Index(
             "uq_active_run_per_issue",
+            "provider",
             "project_id",
             "issue_iid",
             unique=True,
@@ -137,10 +142,16 @@ class FlowRun(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
     project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     issue_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    #: E3a: which integration owns the subject — ``gitlab`` (default) or
-    #: ``github``. For GitHub runs ``project_id`` is the webhook's numeric
-    #: repository id and ``issue_iid`` the issue number, so the partial
-    #: unique index below enforces one active run per (repo, issue) too.
+    #: R03: which integration owns the subject — ``gitlab`` (default),
+    #: ``github`` or ``azure_devops``. NOT NULL with a server default of
+    #: ``gitlab`` because forge started GitLab-only: legacy rows keep their
+    #: lane without a backfill decision. For non-GitLab runs ``project_id``
+    #: carries the provider's numeric subject id (GitHub repository id, AzDO
+    #: project id) and ``issue_iid`` the issue/PR number or work-item id —
+    #: numerically disjoint namespaces, so the partial unique index
+    #: ``uq_active_run_per_issue`` above keys on (provider, project_id,
+    #: issue_iid) to enforce one active run per subject PER PROVIDER
+    #: (migration 012 rebuilt it that way).
     provider: Mapped[str] = mapped_column(
         String(20), nullable=False, default="gitlab", server_default="gitlab"
     )

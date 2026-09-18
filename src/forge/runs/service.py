@@ -357,7 +357,14 @@ class RunService:
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
-                session.add(FlowRun(id=run_id, project_id=project_id, issue_iid=issue_iid))
+                session.add(
+                    FlowRun(
+                        id=run_id,
+                        project_id=project_id,
+                        issue_iid=issue_iid,
+                        provider="gitlab",
+                    )
+                )
                 await controller.transition(run_id, FlowStatus.PREFLIGHT)
                 await session.commit()
         except IntegrityError:
@@ -549,6 +556,11 @@ class RunService:
     async def _find_active_run(self, project_id: int, issue_iid: int | None) -> FlowRun | None:
         """The latest non-terminal run for the issue, or None.
 
+        R03: scoped to THIS service's provider — ``project_id`` is a
+        provider-local numeric id, so a GitHub/Azure run with the same
+        numbers is a different subject and must never block a GitLab
+        /implement.
+
         *issue_iid* may be None (a note webhook without issue context); the
         query then matches issue-less runs, which never collide in practice.
         """
@@ -559,6 +571,7 @@ class RunService:
                     await session.execute(
                         select(FlowRun)
                         .where(
+                            FlowRun.provider == "gitlab",
                             FlowRun.project_id == project_id,
                             FlowRun.issue_iid == issue_iid,
                             FlowRun.status.notin_(terminal),
@@ -629,17 +642,24 @@ class RunService:
                     return
             elif len(requested) == 32:
                 run = await session.get(FlowRun, requested)
-                if run is None or run.project_id != project_id or run.issue_iid != issue_iid:
+                if (
+                    run is None
+                    or run.provider != "gitlab"
+                    or run.project_id != project_id
+                    or run.issue_iid != issue_iid
+                ):
                     logger.info("/cancel references unknown run %s — ignoring", requested[:8])
                     return
             else:
                 # Short id (plan comments show the 8-char form): resolve by
                 # prefix among the issue's runs; ambiguity means no action.
+                # R03: provider-scoped like every subject lookup above.
                 runs = (
                     (
                         await session.execute(
                             select(FlowRun)
                             .where(
+                                FlowRun.provider == "gitlab",
                                 FlowRun.project_id == project_id,
                                 FlowRun.issue_iid == issue_iid,
                                 FlowRun.id.like(f"{requested}%"),
@@ -1563,13 +1583,20 @@ class RunService:
     # ------------------------------------------------------------------
 
     async def evaluate_waiting_ci(self, now: datetime | None = None) -> None:
-        """One reconciler pass over every run parked in ``waiting_ci``."""
+        """One reconciler pass over every run parked in ``waiting_ci``.
+
+        R03: the scan is provider-scoped — GitHub/Azure runs are driven by
+        their own reconcilers and would 404 against the GitLab reads here.
+        """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
             run_ids = (
                 (
                     await session.execute(
-                        select(FlowRun.id).where(FlowRun.status == FlowStatus.WAITING_CI.value)
+                        select(FlowRun.id).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.status == FlowStatus.WAITING_CI.value,
+                        )
                     )
                 )
                 .scalars()
@@ -2016,13 +2043,20 @@ class RunService:
     # ------------------------------------------------------------------
 
     async def evaluate_waiting_harness(self, now: datetime | None = None) -> None:
-        """One reconciler pass over every run parked in ``waiting_harness``."""
+        """One reconciler pass over every run parked in ``waiting_harness``.
+
+        R03: provider-scoped like ``evaluate_waiting_ci`` — the GitLab CI
+        backend cannot poll an Actions/Pipelines handle.
+        """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
             run_ids = (
                 (
                     await session.execute(
-                        select(FlowRun.id).where(FlowRun.status == FlowStatus.WAITING_HARNESS.value)
+                        select(FlowRun.id).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.status == FlowStatus.WAITING_HARNESS.value,
+                        )
                     )
                 )
                 .scalars()
@@ -2361,12 +2395,18 @@ class RunService:
         started — no ``post_evidence_note`` action row exists. A note whose
         posting DID begin has a journal row and is left alone: its outcome is
         the journal's to answer, never a blind re-post (ADR-0005).
+
+        R03: provider-scoped — the recovery note is posted through the GitLab
+        client, so only GitLab runs belong in this scan.
         """
         async with self._session_factory() as session:
             runs = (
                 (
                     await session.execute(
-                        select(FlowRun).where(FlowRun.status == FlowStatus.READY_FOR_HUMAN.value)
+                        select(FlowRun).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.status == FlowStatus.READY_FOR_HUMAN.value,
+                        )
                     )
                 )
                 .scalars()
