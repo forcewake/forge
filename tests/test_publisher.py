@@ -16,8 +16,15 @@ from forge.durable import ActionLog, FlowRun, RunSpec
 from forge.durable.identity import factory_branch
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
-from forge.runs.candidate import parse_unified_diff
-from forge.runs.publisher import publish_candidate
+from forge.runs.candidate import CandidateError, parse_unified_diff
+from forge.runs.publisher import (
+    PolicyViolation,
+    PublishResult,
+    ValidatedCandidate,
+    publish_candidate,
+    publish_validated_candidate,
+    validate_candidate_bundle,
+)
 from tests.fixtures.fake_gitlab import FakeGitLab
 
 PROJECT_ID = 42
@@ -324,6 +331,18 @@ def _create_diff(path: str, content: str) -> str:
     )
 
 
+def _modify_diff(path: str, old: str, new: str) -> str:
+    """A `git diff` fragment replacing one line of an existing file."""
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1,1 +1,1 @@\n"
+        f"-{old}\n"
+        f"+{new}\n"
+    )
+
+
 class TestPathScope:
     """RunSpec-driven path scoping at the publisher (v0.7 monorepo)."""
 
@@ -363,3 +382,109 @@ class TestPathScope:
         run = await persisted(db, make_run())
         result = await publish(db, fake_gitlab, run, bundle_for(_create_diff("any/where.md", "x")))
         assert result.ok
+
+
+class TestBoundaryEntry:
+    """publish_validated_candidate / validate_candidate_bundle (ADR-0026).
+
+    The application-service entry owns run-state → materialization → policy
+    → the injected native adapter; the adapter receives a ValidatedCandidate
+    or nothing at all.
+    """
+
+    @staticmethod
+    async def _noop_fetch(ref: str, paths: list[str]) -> dict[str, str]:
+        return {}
+
+    async def test_pure_check_returns_the_validated_wrapper(self, fake_gitlab):
+        candidate = validate_candidate_bundle(
+            bundle_for(_create_diff("forge-demo/x.md", "hello\n")),
+            base_contents={},
+            branch="forge/7/abcd1234",
+            commit_message="forge: implement 7",
+        )
+        assert isinstance(candidate, ValidatedCandidate)
+        assert [c.path for c in candidate.changeset.changes] == ["forge-demo/x.md"]
+        assert candidate.manifest[0].new_content == "hello\n"
+        assert candidate.allowed_paths == ()
+
+    async def test_pure_check_raises_candidate_error_on_bad_patch(self, fake_gitlab):
+        fake_gitlab.seed_file("src/mod.py", "reality\n")
+        with pytest.raises(CandidateError) as exc:
+            validate_candidate_bundle(
+                bundle_for(_modify_diff("src/mod.py", "fantasy", "changed")),
+                base_contents={"src/mod.py": "reality\n"},
+                branch="forge/7/abcd1234",
+                commit_message="m",
+            )
+        assert exc.value.reason == "patch_does_not_apply"
+
+    async def test_pure_check_raises_policy_violation_on_denylist(self, fake_gitlab):
+        with pytest.raises(PolicyViolation) as exc:
+            validate_candidate_bundle(
+                bundle_for(_create_diff(".github/workflows/pwn.yml", "x\n")),
+                base_contents={},
+                branch="forge/7/abcd1234",
+                commit_message="m",
+            )
+        assert any("denylisted prefix" in v for v in exc.value.violations)
+
+    async def test_adapter_receives_a_validated_candidate(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        seen = []
+
+        async def native(candidate: ValidatedCandidate) -> PublishResult:
+            seen.append(candidate)
+            return PublishResult(True, commit_sha="d" * 40)
+
+        result = await publish_validated_candidate(
+            run,
+            bundle_for(_create_diff("forge-demo/x.md", "hello\n")),
+            session_factory=db,
+            fetch_base_contents=self._noop_fetch,
+            native_publish=native,
+        )
+
+        assert result.ok and result.commit_sha == "d" * 40
+        (candidate,) = seen
+        assert isinstance(candidate, ValidatedCandidate)
+        assert candidate.changeset.changes[0].path == "forge-demo/x.md"
+
+    async def test_rejected_candidate_never_reaches_the_adapter(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        reached = []
+
+        async def native(candidate: ValidatedCandidate) -> PublishResult:
+            reached.append(candidate)
+            return PublishResult(True, commit_sha="d" * 40)
+
+        result = await publish_validated_candidate(
+            run,
+            bundle_for(_create_diff("package-lock.json", "{}\n")),
+            session_factory=db,
+            fetch_base_contents=self._noop_fetch,
+            native_publish=native,
+        )
+
+        assert not result.ok
+        assert "changeset_invalid" in result.reason
+        assert reached == []  # the violating candidate never reached a write
+
+    async def test_publisher_routes_through_the_boundary_entry(self, db, fake_gitlab, monkeypatch):
+        real = publish_validated_candidate
+        calls = []
+
+        async def spy(run, candidate, **kwargs):
+            calls.append((run.id, candidate))
+            return await real(run, candidate, **kwargs)
+
+        monkeypatch.setattr("forge.runs.publisher.publish_validated_candidate", spy)
+        run = await persisted(db, make_run())
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_create_diff("forge-demo/x.md", "hello\n"))
+        )
+
+        assert result.ok
+        (seen_run_id, seen_bundle) = calls[0]
+        assert seen_run_id == run.id
+        assert seen_bundle.attempt_base_oid == BASE_SHA

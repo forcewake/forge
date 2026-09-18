@@ -1,7 +1,10 @@
-"""Trusted publisher (ADR-0016 §2): the single write boundary for candidates.
+"""Trusted publisher (ADR-0016 §2, ADR-0026): THE write boundary for candidates.
 
-Every backend candidate — builtin ChangeSets and harness artifacts alike —
-crosses this boundary before anything reaches GitLab. The publisher:
+Every candidate — builtin ChangeSets and harness artifacts alike, on every
+provider — crosses this boundary before anything reaches a commit API. The
+application-service entry :func:`publish_validated_candidate` owns the
+sequence (validate → fence → native adapter); the pure policy half is
+:func:`validate_candidate_bundle`, shared by every backend:
 
 1. checks the candidate's diff base against the run's frozen attempt base
    (cycle 1 → approved source base; repair → last verified candidate);
@@ -9,24 +12,29 @@ crosses this boundary before anything reaches GitLab. The publisher:
    (the spec frozen at plan acceptance is the one being executed) and a
    caller-supplied Stage-B-style fence callable;
 3. materializes the bundle against AUTHORITATIVE full base contents
-   (no truncation; strict hunk application with no fuzz);
+   (no truncation; strict hunk application with no fuzz) — the R08/R09
+   ``base_blob_digest``/``intended_digest`` verification runs here;
 4. validates the resulting ChangeSet against the write policy
    (:func:`validate_changeset` — denied paths, lockfiles, size caps,
    existence rules) and the RunSpec's frozen ``allowed_paths`` scope
    (v0.7 monorepo path scoping: any change outside the globs is rejected);
-5. writes through the journaled, reconcilable :class:`ChangesetWriter`
-   with ``start_ref = expected_head = attempt base`` — the factory branch
-   already sits at the attempt base in the proposal-only model, so the
-   guarded apply proves the branch did not move.
+5. hands a :class:`ValidatedCandidate` — the capability token only the
+   boundary can issue — to the native adapter for the journaled,
+   reconcilable write (GitLab: :class:`ChangesetWriter` with
+   ``start_ref = expected_head = attempt base``).
 
 The publisher never executes candidate content and never trusts the
-harness's claims; a rejected candidate is reported, not repaired.
+harness's claims; a rejected candidate is reported, not repaired. The
+negative conformance suite (``tests/test_publication_boundary.py``) is the
+enforcement: every publish path must refuse a policy-violating candidate
+with zero commit-API calls.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -63,6 +71,109 @@ _OPERATION_MAP: dict[str, Operation] = {
     "modify": Operation.UPDATE,
     "delete": Operation.DELETE,
 }
+
+#: Fetches the AUTHORITATIVE full content of *paths* at *base_ref* (the
+#: provider-side half of materialization). Missing paths are absent from the
+#: result; a base file over the materialization cap raises
+#: :class:`CandidateError` (``file_too_large``).
+BaseContentFetcher = Callable[[str, list[str]], Awaitable[dict[str, str]]]
+
+
+class PolicyViolation(Exception):
+    """The publication boundary rejected a candidate on write policy.
+
+    ``violations`` are the human-readable strings from
+    :func:`validate_changeset` — reported to the run's evidence, never
+    repaired and never narrowed to "just the first one".
+    """
+
+    def __init__(self, violations: list[str]) -> None:
+        self.violations = violations
+        super().__init__("; ".join(violations))
+
+
+@dataclass(frozen=True)
+class ValidatedCandidate:
+    """A candidate that crossed the publication boundary (ADR-0026).
+
+    Constructed ONLY by :func:`validate_candidate_bundle` after strict
+    materialization + policy validation passed; provider transports accept
+    nothing else. Carrying this type IS the capability to publish — there
+    is no unvalidated route into a commit API.
+    """
+
+    bundle: CandidateBundle
+    #: The completed manifest (full contents) the digests were verified on.
+    manifest: tuple[ChangeManifestEntry, ...]
+    #: The native-adapter payload mapped 1:1 from the manifest.
+    changeset: ChangeSet
+    #: The frozen scope the paths were validated against (empty = unscoped).
+    allowed_paths: tuple[str, ...]
+
+
+def manifest_to_changeset(
+    entries: Iterable[ChangeManifestEntry],
+    *,
+    branch: str,
+    commit_message: str,
+    attempt_base_oid: str = "",
+) -> ChangeSet:
+    """Map a completed manifest onto the write-path :class:`ChangeSet`."""
+    return ChangeSet(
+        branch=branch,
+        commit_message=commit_message,
+        changes=[
+            Change(
+                path=entry.path,
+                operation=_OPERATION_MAP[entry.operation],
+                content=entry.new_content,
+            )
+            for entry in entries
+        ],
+        attempt_base_oid=attempt_base_oid or None,
+    )
+
+
+def validate_candidate_bundle(
+    bundle: CandidateBundle,
+    *,
+    base_contents: dict[str, str],
+    branch: str,
+    commit_message: str,
+    allowed_paths: Sequence[str] = (),
+) -> ValidatedCandidate:
+    """The pure publication-boundary check, shared by EVERY backend (ADR-0026).
+
+    1. strict materialization of *bundle* against *base_contents* (the
+       authoritative full texts at the attempt base): ``base_blob_digest``
+       verified BEFORE anything is applied, ``intended_digest`` AFTER — the
+       R08/R09 guarantees run on every path, builtin included;
+    2. :func:`validate_changeset` — denied paths/prefixes/lockfiles, change
+       count and size caps, existence rules, and the *allowed_paths* globs.
+
+    Raises :class:`CandidateError` (materialization/digest failures) or
+    :class:`PolicyViolation` (write-policy violations). Returns the
+    :class:`ValidatedCandidate` wrapper — the only thing a transport may
+    write.
+    """
+    if bundle.is_empty:
+        raise CandidateError("empty_candidate", "candidate contains no changes")
+    entries = tuple(bundle.materialize(base_contents))
+    changeset = manifest_to_changeset(
+        entries,
+        branch=branch,
+        commit_message=commit_message,
+        attempt_base_oid=bundle.attempt_base_oid,
+    )
+    violations = validate_changeset(changeset, base_contents, allowed_paths=list(allowed_paths))
+    if violations:
+        raise PolicyViolation(violations)
+    return ValidatedCandidate(
+        bundle=bundle,
+        manifest=entries,
+        changeset=changeset,
+        allowed_paths=tuple(allowed_paths),
+    )
 
 
 @dataclass(frozen=True)
@@ -161,38 +272,57 @@ async def _fetch_base_contents(
     return contents
 
 
-async def publish_candidate(
-    *,
-    gitlab: GitLabClient,
-    session_factory: async_sessionmaker[AsyncSession],
-    writer: ChangesetWriter,
+async def publish_validated_candidate(
     run: FlowRun,
-    bundle: CandidateBundle,
+    candidate: CandidateBundle,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    fetch_base_contents: BaseContentFetcher,
+    native_publish: Callable[[ValidatedCandidate], Awaitable["PublishResult"]],
+    branch: str | None = None,
     commit_message: str | None = None,
+    allowed_paths: Sequence[str] | None = None,
     fence_check: FenceCheck | None = None,
 ) -> PublishResult:
-    """Validate and publish *bundle* for *run* (ADR-0016 §2).
+    """Validate and publish *candidate* for *run* — THE boundary (ADR-0026).
 
-    Returns a :class:`PublishResult`; the caller decides what a rejection
-    means for the run (block / fail / supersede). Never raises for candidate
-    content — rejections are reported.
+    The single application-service entry every provider×backend publishes
+    through: run-state checks → strict materialization + write policy → the
+    injected *native_publish* adapter (the journaled, reconcilable write).
+    The adapter receives a :class:`ValidatedCandidate` or nothing at all —
+    a rejected candidate never reaches it, so a rejection leaves the remote
+    untouched by construction.
+
+    *session_factory* enables the fresh-run leg (run existence, RunSpec
+    digest, frozen ``allowed_paths`` from the spec when *allowed_paths* is
+    None); transport callers without a session run the checks they own
+    service-side. Never raises for candidate content — rejections are
+    returned as a failed :class:`PublishResult` with a machine-readable
+    reason; the caller decides what that means for the run.
     """
-    # Fresh trusted state: the run row as it is NOW, not as the caller saw it.
-    async with session_factory() as session:
-        fresh = await session.get(FlowRun, run.id)
-        if fresh is None:
-            return PublishResult(False, "run_not_found")
-        spec_ok = await _spec_digest_matches(session, fresh)
-        allowed_paths = await spec_allowed_paths(session, fresh)
+    if session_factory is not None:
+        # Fresh trusted state: the run row as it is NOW, not as the caller
+        # saw it.
+        async with session_factory() as session:
+            fresh = await session.get(FlowRun, run.id)
+            if fresh is None:
+                return PublishResult(False, "run_not_found")
+            spec_ok = await _spec_digest_matches(session, fresh)
+            spec_paths = await spec_allowed_paths(session, fresh)
+    else:
+        fresh = run
+        spec_ok = True
+        spec_paths = []
+    scope = list(allowed_paths) if allowed_paths is not None else spec_paths
 
     attempt_base = attempt_base_for(fresh)
-    if bundle.attempt_base_oid != attempt_base:
+    if candidate.attempt_base_oid != attempt_base:
         return PublishResult(
             False,
             "candidate_base_mismatch: candidate diff base "
-            f"{bundle.attempt_base_oid[:8] or '<none>'}, expected {attempt_base[:8] or '<none>'}",
+            f"{candidate.attempt_base_oid[:8] or '<none>'}, expected {attempt_base[:8] or '<none>'}",
         )
-    if bundle.is_empty:
+    if candidate.is_empty:
         return PublishResult(False, "empty_candidate")
 
     # Publication grant (F13/ADR-0018 §4): a cancelled run has none.
@@ -205,55 +335,82 @@ async def publish_candidate(
     if fence_check is not None and not await fence_check():
         return PublishResult(False, "fence_invalid")
 
-    # Materialize against authoritative base contents (no truncation).
+    # Materialize against authoritative base contents (no truncation) and
+    # run the shared policy — the one validation, every backend.
     try:
-        base_contents = await _fetch_base_contents(
-            gitlab, fresh.project_id, attempt_base, bundle.paths
+        base_contents = await fetch_base_contents(attempt_base, candidate.paths)
+        validated = validate_candidate_bundle(
+            candidate,
+            base_contents=base_contents,
+            branch=branch or factory_branch(fresh.issue_iid, fresh.id),
+            commit_message=commit_message
+            or f"forge: implement {fresh.issue_iid or 0} (run {short_run_id(fresh.id)})",
+            allowed_paths=scope,
         )
-        entries: list[ChangeManifestEntry] = bundle.materialize(base_contents)
     except CandidateError as exc:
         return PublishResult(False, f"{exc.reason}: {exc}")
+    except PolicyViolation as exc:
+        return PublishResult(False, "changeset_invalid: " + "; ".join(exc.violations))
 
-    changeset = ChangeSet(
-        branch=factory_branch(fresh.issue_iid, fresh.id),
-        commit_message=commit_message
-        or f"forge: implement {fresh.issue_iid or 0} (run {short_run_id(fresh.id)})",
-        changes=[
-            Change(
-                path=entry.path,
-                operation=_OPERATION_MAP[entry.operation],
-                content=entry.new_content,
-            )
-            for entry in entries
-        ],
-        attempt_base_oid=attempt_base,
-    )
-    violations = validate_changeset(changeset, base_contents, allowed_paths=allowed_paths)
-    if violations:
-        return PublishResult(False, "changeset_invalid: " + "; ".join(violations))
-
-    # Journaled, reconcilable write pinned to the frozen attempt base: in the
-    # proposal-only model nothing else ever pushed, so the live branch head
-    # IS the attempt base — the guarded apply proves it stayed that way.
-    try:
-        result = await writer.apply(
-            fresh.id,
-            changeset,
-            start_ref=attempt_base,
-            expected_head=attempt_base,
+    result = await native_publish(validated)
+    if result.ok:
+        logger.info(
+            "Published candidate for run %s at %s (base %s, %d change(s))",
+            fresh.id[:8],
+            (result.commit_sha or "?")[:8],
+            attempt_base[:8],
+            len(validated.changeset.changes),
         )
-    except BranchDriftError as exc:
-        return PublishResult(False, f"branch_drift: {exc}")
-    except GitLabAPIError as exc:
-        return PublishResult(False, f"commit_failed: {exc}")
+    return result
 
-    if result.outcome is WriteOutcome.UNKNOWN or not result.commit_sha:
-        return PublishResult(False, "commit_unknown_outcome", unknown_outcome=True)
-    logger.info(
-        "Published candidate for run %s at %s (base %s, %d change(s))",
-        fresh.id[:8],
-        result.commit_sha[:8],
-        attempt_base[:8],
-        len(changeset.changes),
+
+async def publish_candidate(
+    *,
+    gitlab: GitLabClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    writer: ChangesetWriter,
+    run: FlowRun,
+    bundle: CandidateBundle,
+    commit_message: str | None = None,
+    fence_check: FenceCheck | None = None,
+) -> PublishResult:
+    """Validate and publish *bundle* for *run* via the GitLab transport.
+
+    The GitLab-native binding of :func:`publish_validated_candidate`
+    (ADR-0026): the run-state, materialization and policy legs are shared;
+    only the base-content reads and the journaled
+    :class:`ChangesetWriter` apply are GitLab's. The writer is pinned to
+    the frozen attempt base (``start_ref = expected_head``) — in the
+    proposal-only model nothing else ever pushed, so the guarded apply
+    proves the branch did not move.
+    """
+
+    async def _fetch(base_ref: str, paths: list[str]) -> dict[str, str]:
+        return await _fetch_base_contents(gitlab, run.project_id, base_ref, paths)
+
+    async def _write(validated: ValidatedCandidate) -> PublishResult:
+        attempt_base = validated.bundle.attempt_base_oid
+        try:
+            result = await writer.apply(
+                run.id,
+                validated.changeset,
+                start_ref=attempt_base,
+                expected_head=attempt_base,
+            )
+        except BranchDriftError as exc:
+            return PublishResult(False, f"branch_drift: {exc}")
+        except GitLabAPIError as exc:
+            return PublishResult(False, f"commit_failed: {exc}")
+        if result.outcome is WriteOutcome.UNKNOWN or not result.commit_sha:
+            return PublishResult(False, "commit_unknown_outcome", unknown_outcome=True)
+        return PublishResult(True, commit_sha=result.commit_sha)
+
+    return await publish_validated_candidate(
+        run,
+        bundle,
+        session_factory=session_factory,
+        fetch_base_contents=_fetch,
+        native_publish=_write,
+        commit_message=commit_message,
+        fence_check=fence_check,
     )
-    return PublishResult(True, commit_sha=result.commit_sha)

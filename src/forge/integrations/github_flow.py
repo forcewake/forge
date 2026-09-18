@@ -8,8 +8,10 @@ the bridge pieces the service reuses:
 - :func:`build_github_agents` — ensures the GitHubClient / repository reader
   / planner / implementer / reviewer construction (the LLM agents run
   against GitHub through the duck-typed reader);
-- :class:`GitHubPublishFlow` — the publish leg: ensure factory branch,
-  branch-CAS commit (``expectedHeadOid``), Draft PR find-by-head-first;
+- :class:`GitHubPublishFlow` — the publish leg: the ADR-0026 publication
+  boundary (every candidate crosses strict materialization + write policy
+  BEFORE any commit-API call), branch-CAS commit (``expectedHeadOid``),
+  Draft PR find-by-head-first;
 - :class:`GitHubPRReviewer` — the readonly review of the published PR diff.
 
 Write-path semantics (ADR-0016 §3/§4 adapted to GitHub): the factory branch
@@ -18,7 +20,14 @@ against (that read + ``expectedHeadOid`` IS the concurrency contract —
 GitLab's ``last_commit_id`` file-level CAS becomes a branch-wide CAS here),
 and the Draft PR is created with ``draft: true``. The branch CAS turns a
 would-be duplicate commit into ``STALE_DATA`` — surfaced as a drift outcome,
-never a silent retry (research §3.4).
+never a silent retry (research §3.4). Since ADR-0026 the SAME trusted
+boundary guards every provider×backend: ``publish_proposal`` wraps the
+proposal with :func:`bundle_from_changeset` and materializes it against
+authoritative base contents (R08/R09 digest verification), and
+:func:`validate_changeset` policy + ``allowed_paths`` run before the first
+mutation — a violating candidate is a blocked outcome with zero commit-API
+calls, and :meth:`GitHubPublishFlow.publish_validated` accepts only the
+boundary's :class:`~forge.runs.publisher.ValidatedCandidate` wrapper.
 """
 
 from __future__ import annotations
@@ -26,14 +35,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import logging
 
 from forge.config import Settings
 from forge.durable import short_run_id
-from forge.factory.implementer import LLMImplementer
+from forge.factory.implementer import (
+    FORGE_MATERIALIZE_MAX_FILE_CHARS,
+    LLMImplementer,
+)
 from forge.factory.llm import LLMClient
 from forge.factory.planner import LLMPlanner
 from forge.factory.reviewer import (
@@ -53,6 +65,8 @@ from forge.integrations.github import (
     GitHubStaticCredentials,
 )
 from forge.repository.changeset import ChangeSet, Operation
+from forge.runs.candidate import CandidateBundle, CandidateError, bundle_from_changeset
+from forge.runs.publisher import PolicyViolation, ValidatedCandidate, validate_candidate_bundle
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -87,13 +101,30 @@ class GitHubPublishOutcome:
     pr_number: int | None = None
     pr_url: str | None = None
     pr_draft: bool | None = None
-    #: STALE_DATA: a concurrent writer moved the branch — reported, never
-    #: retried silently (ADR-0016 §3).
+    #: The blocked-class outcome (ADR-0016 §3 / ADR-0026): a concurrent
+    #: writer moved the branch (``branch_drift`` — reported, never retried
+    #: silently) OR the publication boundary rejected the candidate — the
+    #: run may not publish onto this base, so callers land it in BLOCKED,
+    #: never retry it.
     drift: bool = False
+    #: True when the ADR-0026 boundary rejected the candidate: ``reason``
+    #: starts with ``candidate_invalid`` / ``changeset_invalid`` and ZERO
+    #: commit-API calls were made.
+    invalid: bool = False
+
+
+class BaseContentReader(Protocol):
+    """The full-content read surface the boundary materializes against.
+
+    :class:`~forge.integrations.github.GitHubRepositoryReader` satisfies it;
+    the test fakes duck-type it directly.
+    """
+
+    async def read_text(self, file_path: str, ref: str = "HEAD") -> str: ...
 
 
 class GitHubPublishFlow:
-    """Publish one candidate to GitHub: branch CAS commit, then Draft PR."""
+    """Publish one candidate to GitHub: boundary, branch CAS commit, Draft PR."""
 
     def __init__(
         self,
@@ -101,10 +132,12 @@ class GitHubPublishFlow:
         proposer: Any | None = None,
         *,
         base_branch: str = "main",
+        reader: BaseContentReader | None = None,
     ) -> None:
         self._client = client
         self._proposer = proposer
         self._base_branch = base_branch
+        self._reader = reader
 
     async def publish_proposal(
         self,
@@ -117,6 +150,7 @@ class GitHubPublishFlow:
         plan_summary: str = "",
         base_branch: str | None = None,
         expected_head: str | None = None,
+        allowed_paths: list[str] | None = None,
     ) -> GitHubPublishOutcome:
         """Builtin-implementer leg: propose against the frozen base, publish.
 
@@ -127,7 +161,12 @@ class GitHubPublishFlow:
 
         ``expected_head`` is the FROZEN base the plan was approved against —
         pinned by the gate at plan time. When omitted the base head is read
-        live (the caller owns that decision).
+        live (the caller owns that decision). ``allowed_paths`` is the
+        RunSpec's frozen scope; the proposal crosses the SAME ADR-0026
+        publication boundary as every other backend — policy validation
+        (``validate_changeset`` / denied paths / size caps / the scope) and
+        R08/R09 digest verification run BEFORE any commit-API call, and a
+        violation is a blocked outcome with zero mutations (review R01).
         """
         if self._proposer is None:
             raise ValueError("publish_proposal requires a proposer")
@@ -143,14 +182,17 @@ class GitHubPublishFlow:
             plan_summary=plan_summary,
             attempt_base=expected_head,
         )
-        return await self.publish_changeset(
+        bundle = bundle_from_changeset(changeset, attempt_base_oid=expected_head)
+        return await self._publish_bundle(
             owner,
             repo,
             issue_number=issue_number,
             run_id=run_id,
-            changeset=changeset,
+            bundle=bundle,
+            commit_message=changeset.commit_message,
             base_branch=base,
             expected_head=expected_head,
+            allowed_paths=allowed_paths,
         )
 
     async def publish_changeset(
@@ -165,8 +207,17 @@ class GitHubPublishFlow:
         expected_head: str | None = None,
         title: str | None = None,
         body: str | None = None,
+        allowed_paths: list[str] | None = None,
     ) -> GitHubPublishOutcome:
-        """Ensure the factory branch, CAS-commit the changeset, ensure Draft PR.
+        """Boundary-validate *changeset*, ensure the factory branch, commit.
+
+        The legacy transport entry: like every candidate (ADR-0026) it is
+        NEVER trusted on its caller's claim of validation — it is wrapped
+        into a :class:`~forge.runs.candidate.CandidateBundle`
+        (:func:`bundle_from_changeset`) and re-run through the shared
+        boundary (materialization + policy + scope) before the first
+        mutation; a violating changeset is refused with zero commit-API
+        calls.
 
         ``expected_head`` pins the base (fetched by the caller when the
         proposal was materialized against it); otherwise the base head is
@@ -175,7 +226,53 @@ class GitHubPublishFlow:
         fails the CAS and surfaces as a drift outcome.
         """
         base = base_branch or self._base_branch
+        if expected_head is None:
+            expected_head = await self._client.get_branch_head(owner, repo, base)
+        bundle = bundle_from_changeset(changeset, attempt_base_oid=expected_head)
+        return await self._publish_bundle(
+            owner,
+            repo,
+            issue_number=issue_number,
+            run_id=run_id,
+            bundle=bundle,
+            commit_message=changeset.commit_message,
+            base_branch=base,
+            expected_head=expected_head,
+            allowed_paths=allowed_paths,
+            title=title,
+            body=body,
+        )
+
+    async def publish_validated(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        issue_number: int,
+        run_id: str,
+        candidate: ValidatedCandidate,
+        base_branch: str | None = None,
+        expected_head: str | None = None,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> GitHubPublishOutcome:
+        """Commit an ALREADY-VALIDATED candidate (ADR-0026 transport contract).
+
+        The only route from a candidate to the commit API: the
+        :class:`~forge.runs.publisher.ValidatedCandidate` wrapper is issued
+        exclusively by the publication boundary, and a raw ``ChangeSet`` is
+        refused here by type — an unvalidated candidate cannot reach a
+        write.
+        """
+        if not isinstance(candidate, ValidatedCandidate):
+            raise TypeError(
+                "publish_validated requires a ValidatedCandidate issued by the "
+                "publication boundary (ADR-0026); route raw ChangeSets through "
+                "publish_changeset / publish_proposal"
+            )
+        base = base_branch or self._base_branch
         branch = github_factory_branch(issue_number, run_id)
+        changeset = candidate.changeset
         if expected_head is None:
             expected_head = await self._client.get_branch_head(owner, repo, base)
 
@@ -248,6 +345,104 @@ class GitHubPublishFlow:
             pr_url=pr.get("html_url") if pr else None,
             pr_draft=bool(pr.get("draft")) if pr else None,
         )
+
+    async def _publish_bundle(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        issue_number: int,
+        run_id: str,
+        bundle: CandidateBundle,
+        commit_message: str,
+        base_branch: str,
+        expected_head: str,
+        allowed_paths: list[str] | None = None,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> GitHubPublishOutcome:
+        """The publication boundary of the GitHub transport (ADR-0026).
+
+        Every candidate crosses :func:`validate_candidate_bundle` here —
+        strict materialization against authoritative base contents read at
+        the frozen *expected_head* (R08/R09 digest verification) plus the
+        write policy and *allowed_paths* scope — BEFORE any commit-API
+        call. A rejection is the blocked-class outcome with zero mutations.
+        """
+        branch = github_factory_branch(issue_number, run_id)
+        try:
+            base_contents = await self._base_contents(owner, repo, expected_head, bundle.paths)
+            candidate = validate_candidate_bundle(
+                bundle,
+                base_contents=base_contents,
+                branch=branch,
+                commit_message=commit_message,
+                allowed_paths=allowed_paths or [],
+            )
+        except CandidateError as exc:
+            return GitHubPublishOutcome(
+                ok=False,
+                reason=f"candidate_invalid: {exc.reason}: {exc}",
+                expected_head_oid=expected_head,
+                branch=branch,
+                drift=True,
+                invalid=True,
+            )
+        except PolicyViolation as exc:
+            return GitHubPublishOutcome(
+                ok=False,
+                reason="changeset_invalid: " + "; ".join(exc.violations),
+                expected_head_oid=expected_head,
+                branch=branch,
+                drift=True,
+                invalid=True,
+            )
+        return await self.publish_validated(
+            owner,
+            repo,
+            issue_number=issue_number,
+            run_id=run_id,
+            candidate=candidate,
+            base_branch=base_branch,
+            expected_head=expected_head,
+            title=title,
+            body=body,
+        )
+
+    def _reader_for(self, owner: str, repo: str) -> BaseContentReader:
+        """The full-content reader: the injected one, the client's own reader
+        surface (the duck-typed fakes), or a fresh repository reader."""
+        if self._reader is not None:
+            return self._reader
+        if getattr(self._client, "read_text", None) is not None:
+            return cast(BaseContentReader, self._client)
+        return GitHubRepositoryReader(self._client, owner, repo)
+
+    async def _base_contents(
+        self, owner: str, repo: str, ref: str, paths: list[str]
+    ) -> dict[str, str]:
+        """Authoritative full-content reads at the frozen base (no truncation).
+
+        Missing paths are absent from the result — validation reports
+        create/update/delete existence against it. A base file over the
+        materialization cap rejects the candidate (``file_too_large``),
+        exactly like the GitLab publisher's fetch (ADR-0016 §2).
+        """
+        reader = self._reader_for(owner, repo)
+        contents: dict[str, str] = {}
+        for path in dict.fromkeys(paths):
+            try:
+                text = await reader.read_text(path, ref=ref)
+            except GitHubAPIError:
+                continue  # not in the snapshot — validation reports existence
+            if len(text) > FORGE_MATERIALIZE_MAX_FILE_CHARS:
+                raise CandidateError(
+                    "file_too_large",
+                    f"{path}: base content is {len(text)} chars at {ref[:8]}, over the "
+                    f"materialization cap of {FORGE_MATERIALIZE_MAX_FILE_CHARS}",
+                )
+            contents[path] = text
+        return contents
 
     async def _ensure_branch(self, owner: str, repo: str, branch: str, sha: str) -> bool:
         """Create the factory branch at *sha*; tolerate pre-existence.
@@ -444,6 +639,7 @@ def build_github_agents(
         client,
         proposer=implementer,
         base_branch=str(getattr(settings, "FORGE_TARGET_BRANCH", "main") or "main"),
+        reader=reader,
     )
     return GitHubAgents(
         client=client,

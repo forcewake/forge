@@ -6,7 +6,10 @@ forge.runs.github_service (covered by tests/test_github_runs.py). These
 tests drive :class:`GitHubPublishFlow` and :class:`GitHubPRReviewer` over
 :class:`tests.fixtures.fake_github.FakeGitHub` — the in-memory fake mirrors
 the parsed client semantics (branch-wide CAS included), so the concurrency
-contract is exercised without any network.
+contract is exercised without any network. Since ADR-0026 the flow is also
+the GitHub side of the single publication boundary: every candidate crosses
+strict materialization + write policy before any commit-API call
+(tests/test_publication_boundary.py is the cross-path conformance suite).
 """
 
 import pytest
@@ -23,6 +26,9 @@ from tests.fixtures.fake_github import FakeGitHub
 REPO = "acme/acme-widget"
 BASE_HEAD = "1" * 40
 RUN_ID = "abcd1234" + "0" * 24  # 32-hex, like a FlowRun id
+
+#: The commit-API mutations the boundary must never reach on a rejection.
+MUTATIONS = ("create_branch", "create_commit_on_branch", "create_draft_pr")
 
 
 @pytest.fixture()
@@ -294,6 +300,180 @@ class TestProposalLeg:
             fake.heads[REPO]["forge/42/abcd1234"].endswith(outcome.commit_oid or "")
             or fake.heads[REPO]["forge/42/abcd1234"] == outcome.commit_oid
         )
+
+
+class StubProposer:
+    """Returns one fixed changeset, recording what it was asked."""
+
+    def __init__(self, changeset: ChangeSet):
+        self.changeset = changeset
+        self.calls: list[dict] = []
+
+    async def propose(self, run, issue_title, *, plan_summary="", attempt_base=None):
+        self.calls.append({"issue_title": issue_title, "attempt_base": attempt_base})
+        return self.changeset
+
+
+class TestPublicationBoundary:
+    """The GitHub side of the ADR-0026 boundary (review R01).
+
+    A violating candidate is the blocked-class outcome with ZERO commit-API
+    calls — whatever entry it arrived through — and the write leg accepts
+    only the boundary's ValidatedCandidate wrapper.
+    """
+
+    async def _assert_refused(self, fake: FakeGitHub, outcome, fragment: str):
+        assert outcome.ok is False
+        assert outcome.invalid is True
+        assert fragment in outcome.reason
+        # Blocked-class: callers land it in BLOCKED, never retry.
+        assert outcome.drift is True
+        # Zero mutations — the branch was never even created.
+        for mutation in MUTATIONS:
+            assert fake.calls_of(mutation) == []
+
+    async def test_denylisted_ci_path_is_refused_with_zero_writes(self, fake: FakeGitHub):
+        rogue = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="rogue",
+            changes=[Change(path=".gitlab-ci.yml", operation=Operation.CREATE, content="x")],
+        )
+        flow = make_flow(fake, proposer=StubProposer(rogue))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        await self._assert_refused(fake, outcome, "changeset_invalid")
+        assert "denylisted" in outcome.reason
+
+    async def test_github_workflow_prefix_is_refused(self, fake: FakeGitHub):
+        rogue = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="rogue",
+            changes=[
+                Change(path=".github/workflows/pwn.yml", operation=Operation.CREATE, content="x")
+            ],
+        )
+        flow = make_flow(fake, proposer=StubProposer(rogue))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        await self._assert_refused(fake, outcome, "denylisted prefix")
+
+    async def test_out_of_scope_path_is_refused(self, fake: FakeGitHub):
+        proposal = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="scoped run",
+            changes=[Change(path="web/x.ts", operation=Operation.CREATE, content="hi\n")],
+        )
+        flow = make_flow(fake, proposer=StubProposer(proposal))
+
+        outcome = await flow.publish_proposal(
+            owner="acme",
+            repo="acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            issue_title="t",
+            allowed_paths=["services/**"],
+        )
+
+        await self._assert_refused(fake, outcome, "outside the allowed scope")
+
+    async def test_too_many_files_are_refused(self, fake: FakeGitHub):
+        flood = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="flood",
+            changes=[
+                Change(path=f"dir/f{i}.txt", operation=Operation.CREATE, content="x")
+                for i in range(21)
+            ],
+        )
+        flow = make_flow(fake, proposer=StubProposer(flood))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        await self._assert_refused(fake, outcome, "max 20")
+
+    async def test_oversized_file_is_refused(self, fake: FakeGitHub):
+        big = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="big",
+            changes=[
+                Change(path="big.txt", operation=Operation.CREATE, content="x" * (256 * 1024 + 1))
+            ],
+        )
+        flow = make_flow(fake, proposer=StubProposer(big))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        await self._assert_refused(fake, outcome, "bytes")
+
+    async def test_update_of_missing_file_is_candidate_invalid(self, fake: FakeGitHub):
+        # A builtin proposal is FULL contents per file — an "update" of a
+        # file that does not exist at the frozen base cannot be completed
+        # against an authoritative base (R08) — blocked, zero writes.
+        fantasy = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="fantasy",
+            changes=[Change(path="src/ghost.py", operation=Operation.UPDATE, content="x")],
+        )
+        flow = make_flow(fake, proposer=StubProposer(fantasy))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        await self._assert_refused(fake, outcome, "candidate_invalid")
+
+    async def test_transport_refuses_a_violating_changeset_directly(self, fake: FakeGitHub):
+        """Direct bridge invocation cannot publish an unvalidated candidate."""
+        flow = make_flow(fake)
+        rogue = ChangeSet(
+            branch=github_factory_branch(42, RUN_ID),
+            commit_message="rogue",
+            changes=[Change(path=".forge.yml", operation=Operation.CREATE, content="x")],
+        )
+
+        outcome = await flow.publish_changeset(
+            "acme", "acme-widget", issue_number=42, run_id=RUN_ID, changeset=rogue
+        )
+
+        await self._assert_refused(fake, outcome, "changeset_invalid")
+
+    async def test_write_leg_requires_the_validated_wrapper(self, fake: FakeGitHub):
+        """The commit API is reachable only through the boundary's wrapper."""
+        flow = make_flow(fake)
+
+        with pytest.raises(TypeError, match="ValidatedCandidate"):
+            await flow.publish_validated(
+                "acme",
+                "acme-widget",
+                issue_number=42,
+                run_id=RUN_ID,
+                candidate=changeset(),  # type: ignore[arg-type]
+            )
+        for mutation in MUTATIONS:
+            assert fake.calls_of(mutation) == []
+
+    async def test_valid_proposal_publishes_exactly_the_manifest(self, fake: FakeGitHub):
+        flow = make_flow(fake, proposer=StubProposer(changeset()))
+
+        outcome = await flow.publish_proposal(
+            owner="acme", repo="acme-widget", issue_number=42, run_id=RUN_ID, issue_title="t"
+        )
+
+        assert outcome.ok is True
+        # Exactly the validated manifest landed — no more, no less.
+        assert fake.files[REPO]["src/feature.py"] == "VALUE = 1\n"
+        assert fake.files[REPO]["src/app.py"] == "print('hello')\n"
+        assert set(fake.files[REPO]) == {"src/app.py", "README.md", "src/feature.py"}
 
 
 class TestPRReviewer:
