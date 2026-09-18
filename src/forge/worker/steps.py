@@ -12,9 +12,16 @@ that commit:
   single writer). The claim grants a lease (owner + expiry) and bumps the
   per-row monotonic ``fence_token``, and snapshots the bound run's
   cancellation generation (R10) when the step already has one.
-- **Execute** (§8): external calls happen OUTSIDE any DB transaction; a
-  per-task heartbeat renews the lease; a renewal hitting 0 rows means
-  ownership was lost and aborts the in-flight step immediately. The
+- **Execute** (§8): external calls happen OUTSIDE any DB transaction; the
+  claim is RE-VALIDATED immediately before the handler (A05: a lease that
+  died while the claim sat queued is requeued — or parked dead per attempts —
+  instead of executing unowned), and a per-task heartbeat renews the lease.
+  The heartbeat is SUPERVISED: a renewal hitting 0 rows OR RAISING fails the
+  handler — the remaining effects stop at the next checkpoint (the guarded
+  write boundaries refuse a dead claim) and the step is failed into a
+  recoverable retry. Shutdown cancellation and lease loss are distinct: a
+  worker-teardown CancelledError records nothing (the reaper owns the row),
+  a lease loss records the failure and raises :class:`LeaseLostError`. The
   :class:`~forge.durable.claims.ExecutionClaim` minted from the claim is
   bound as the task's ambient context for the whole dispatch, so the write
   boundaries (publisher grant, guarded transitions) can pin the fence —
@@ -29,6 +36,8 @@ that commit:
   the zombie's old token can no longer commit); failures reschedule with
   exponential backoff + full jitter and park as ``dead`` after
   ``max_attempts``, keeping the last error (poison pill — never deleted).
+  A shutdown worker hands its never-started pre-claimed steps back to the
+  queue un-failed (A05) instead of leaving them to rot on expiring leases.
 
 The legacy Redis queue (orchestrator events, flow steps) is untouched; for
 run commands Redis is demoted to a wake-up accelerator (``STEP_WAKE_KEY``),
@@ -41,6 +50,7 @@ import asyncio
 import hashlib
 import logging
 import random
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -50,7 +60,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.claims import ExecutionClaim, bind_claim
-from forge.durable.controller import TERMINAL_STATUSES
+from forge.durable.controller import TERMINAL_STATUSES, as_aware_utc
 from forge.durable.models import FlowRun, StepRun
 from forge.runs import execute_run_command
 
@@ -77,12 +87,35 @@ STEP_BACKOFF_CAP_SECONDS = 300
 #: reconciler learns to consult it; recorded from day one).
 STEP_DEADLINE_SECONDS = 900
 
-STEP_CLAIM_BATCH = 5
+#: A05: the shipped worker executes claims SEQUENTIALLY, so it must hold
+#: exactly one lease at a time — claiming a batch it cannot run concurrently
+#: left the unstarted steps rotting on leases that expired mid-execution of
+#: the previous one, and the worker then started them with dead claims. Raise
+#: this only together with a bounded-parallel executor that heartbeats every
+#: in-flight claim; every claim is re-validated immediately before its
+#: handler either way.
+STEP_CLAIM_BATCH = 1
 STEP_POLL_INTERVAL = 5.0
 STEP_REAP_INTERVAL = 30.0
 
 #: Redis wake-up key (accelerator only — losing it costs one poll interval).
 STEP_WAKE_KEY = "forge:steps:wake"
+
+#: Recorded when an attempt is accounted as lost before its handler ran —
+#: the eager requeue of a stale claim (A05) parks a step that exhausted its
+#: budget this way with the same evidence the reaper would have written.
+_EXPIRED_BEFORE_HANDLER_ERROR = "lease_expired: attempts exhausted before the handler ran"
+
+
+class LeaseLostError(RuntimeError):
+    """The execution lost its step lease mid-flight (A05).
+
+    Raised when the supervised heartbeat observed the ownership loss (a
+    renewal matched 0 rows, or the renewal itself failed) and the handler was
+    aborted. Deliberately NOT a ``CancelledError``: worker shutdown and lease
+    loss must stay distinguishable — shutdown records nothing, a lease loss
+    fails the step into a recoverable retry.
+    """
 
 
 @dataclass(frozen=True)
@@ -301,15 +334,18 @@ async def renew_step_lease(
     """
     async with session_factory() as session:
         async with session.begin():
-            result = await session.execute(
-                update(StepRun)
-                .where(
-                    StepRun.id == claimed.id,
-                    StepRun.lease_owner == claimed.owner,
-                    StepRun.fence_token == claimed.fence_token,
-                    StepRun.status == STEP_RUNNING,
-                )
-                .values(lease_expires_at=_utcnow() + timedelta(seconds=seconds))
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(
+                        StepRun.id == claimed.id,
+                        StepRun.lease_owner == claimed.owner,
+                        StepRun.fence_token == claimed.fence_token,
+                        StepRun.status == STEP_RUNNING,
+                    )
+                    .values(lease_expires_at=_utcnow() + timedelta(seconds=seconds))
+                ),
             )
             return result.rowcount == 1
 
@@ -323,14 +359,17 @@ async def complete_step(
     """Fenced success: 0 rows updated means this owner was fenced — abandon."""
     async with session_factory() as session:
         async with session.begin():
-            result = await session.execute(
-                update(StepRun)
-                .where(
-                    StepRun.id == claimed.id,
-                    StepRun.fence_token == claimed.fence_token,
-                    StepRun.status == STEP_RUNNING,
-                )
-                .values(status=STEP_SUCCEEDED, finished_at=_utcnow(), output=output)
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(
+                        StepRun.id == claimed.id,
+                        StepRun.fence_token == claimed.fence_token,
+                        StepRun.status == STEP_RUNNING,
+                    )
+                    .values(status=STEP_SUCCEEDED, finished_at=_utcnow(), output=output)
+                ),
             )
             return result.rowcount == 1
 
@@ -518,6 +557,138 @@ def _bound_run_id(claimed: ClaimedStep) -> str | None:
     return str(raw) if raw else None
 
 
+async def _stale_claim_reason(
+    session_factory: async_sessionmaker[AsyncSession],
+    claimed: ClaimedStep,
+) -> str | None:
+    """Why *claimed* no longer owns its step row, or ``None`` while it does (A05).
+
+    The pre-handler-entry re-validation: the row must still show ``running``
+    under THIS owner and fence token with a live unexpired lease — a claim
+    that died while queued (the batch>1 queuing case) or was reaped and
+    reassigned while the worker was busy must never reach the handler. The
+    effect-side siblings of this check are the A04 guarded CASes and the
+    publisher's reservation-time ownership validation.
+    """
+    async with session_factory() as session:
+        row = await session.get(StepRun, claimed.id)
+    if row is None:
+        return "step row vanished"
+    if row.status != STEP_RUNNING:
+        return f"step is {row.status!r}, not running"
+    if row.lease_owner != claimed.owner:
+        return f"lease owner is {row.lease_owner!r}, not {claimed.owner!r}"
+    if int(row.fence_token) != claimed.fence_token:
+        return f"fence moved to {row.fence_token}"
+    if row.lease_expires_at is None or as_aware_utc(row.lease_expires_at) <= _utcnow():
+        return "lease expired"
+    return None
+
+
+async def _requeue_expired_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    claimed: ClaimedStep,
+) -> str:
+    """Fenced requeue of a claim whose lease died BEFORE its handler ran (A05).
+
+    The reaper's semantics, scoped to this one row: the expired-lease attempt
+    is bumped once and a step that exhausts its poison-pill budget parks
+    ``dead`` — so a claim cannot be requeued into a busy loop. Fenced on
+    (this owner, this fence, ``running``, expired lease): a row the reaper
+    already reaped, or that another worker already re-claimed, matches 0 rows
+    and is left entirely alone.
+
+    Returns ``"scheduled"``, ``"dead"`` or ``"fenced"``.
+    """
+    now = _utcnow()
+    ownership = (
+        StepRun.id == claimed.id,
+        StepRun.lease_owner == claimed.owner,
+        StepRun.fence_token == claimed.fence_token,
+        StepRun.status == STEP_RUNNING,
+        StepRun.lease_expires_at < now,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = (
+                await session.execute(
+                    select(StepRun.attempt, StepRun.max_attempts).where(*ownership)
+                )
+            ).first()
+            if row is None:
+                return "fenced"  # someone else (reaper / new owner) manages the row now
+            new_attempt = int(row.attempt) + 1
+            if new_attempt >= int(row.max_attempts):
+                await session.execute(
+                    update(StepRun)
+                    .where(*ownership)
+                    .values(
+                        status=STEP_DEAD,
+                        attempt=new_attempt,
+                        finished_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        output=case(
+                            (
+                                StepRun.output.is_(None),
+                                type_coerce(
+                                    {"error": _EXPIRED_BEFORE_HANDLER_ERROR}, StepRun.output.type
+                                ),
+                            ),
+                            else_=StepRun.output,
+                        ),
+                    )
+                )
+                return "dead"
+            await session.execute(
+                update(StepRun)
+                .where(*ownership)
+                .values(
+                    status=STEP_SCHEDULED,
+                    attempt=new_attempt,
+                    due_at=now,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+            return "scheduled"
+
+
+async def _release_unstarted_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    claimed: ClaimedStep,
+) -> bool:
+    """Hand a claimed-but-NEVER-STARTED step back to the queue (A05 shutdown).
+
+    A worker holding a claim it will not run (SIGTERM mid-pass, task
+    cancelled) must neither leave the row leased-and-rotting nor mark it
+    failed — nothing was attempted, so there is no attempt bump and no error.
+    Fenced on this claim's owner+fence+``running``: a row the reaper already
+    reaped or another worker re-claimed is never clobbered. The fence token
+    stays — it bumps only on the lease-granting claim.
+    """
+    async with session_factory() as session:
+        async with session.begin():
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(
+                        StepRun.id == claimed.id,
+                        StepRun.lease_owner == claimed.owner,
+                        StepRun.fence_token == claimed.fence_token,
+                        StepRun.status == STEP_RUNNING,
+                    )
+                    .values(
+                        status=STEP_SCHEDULED,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                ),
+            )
+            return result.rowcount == 1
+
+
 async def _superseded_evidence(
     session_factory: async_sessionmaker[AsyncSession],
     claimed: ClaimedStep,
@@ -560,37 +731,91 @@ async def execute_claimed_step(
     settings: Any,
     forge_config: Any,
     claimed: ClaimedStep,
+    *,
+    heartbeat_interval: float = STEP_LEASE_RENEW_INTERVAL,
 ) -> None:
-    """Execute one claimed step (claim → call → fenced commit; research §8).
+    """Execute one claimed step (re-validate → call → fenced commit; §8, A05).
 
-    The external call runs outside any DB transaction. The per-task
-    heartbeat renews the lease and cancels this execution the moment a
-    renewal hits 0 rows (ownership lost). Completion/failure are fenced —
-    a fenced owner abandons silently. The claim is bound as the task's
-    ambient :class:`~forge.durable.claims.ExecutionClaim` for the dispatch,
-    so effectful handlers and the publication boundary fence against THIS
-    execution (R10).
+    The claim is RE-VALIDATED immediately before the handler: a step whose
+    lease died while its claim sat queued is requeued (or parked dead per
+    attempts) instead of executing unowned. The external call runs outside
+    any DB transaction. The per-task heartbeat is SUPERVISED: a renewal that
+    hits 0 rows — or RAISES (DB down) — fails the handler; the remaining
+    effects stop at the handler's next checkpoint (the A04 guarded write
+    boundaries refuse a dead claim), the step is failed into a recoverable
+    retry and :class:`LeaseLostError` is raised. A CancelledError that is NOT
+    a lease loss — worker shutdown/process teardown — propagates untouched
+    and records nothing (the reaper owns the row). Completion/failure are
+    fenced — a fenced owner abandons silently. The claim is bound as the
+    task's ambient :class:`~forge.durable.claims.ExecutionClaim` for the
+    dispatch, so effectful handlers and the publication boundary fence
+    against THIS execution (R10).
     """
+    stale = await _stale_claim_reason(session_factory, claimed)
+    if stale is not None:
+        requeue = await _requeue_expired_claim(session_factory, claimed)
+        logger.warning(
+            "Step %d claim stale before handler entry (%s, requeue=%s) — skipped unexecuted",
+            claimed.id,
+            stale,
+            requeue,
+        )
+        return
+
     me = asyncio.current_task()
+    lease_lost: list[str] = []
 
     async def _heartbeat() -> None:
         while True:
-            await asyncio.sleep(STEP_LEASE_RENEW_INTERVAL)
-            if not await renew_step_lease(session_factory, claimed):
-                logger.warning(
-                    "Step %d lease lost (owner=%s fence=%d) — aborting execution",
-                    claimed.id,
-                    claimed.owner,
-                    claimed.fence_token,
-                )
-                if me is not None:
-                    me.cancel()
-                return
+            await asyncio.sleep(heartbeat_interval)
+            alive: bool
+            failure: str | None
+            try:
+                alive = await renew_step_lease(session_factory, claimed)
+                failure = None if alive else "lease lost: renewal matched 0 rows"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # DB down mid-renewal: ownership can no longer be proven
+                alive = False
+                failure = f"lease lost: renewal failed: {exc}"
+            if alive:
+                continue
+            assert failure is not None
+            lease_lost.append(failure)
+            logger.warning(
+                "Step %d %s (owner=%s fence=%d) — aborting execution",
+                claimed.id,
+                failure,
+                claimed.owner,
+                claimed.fence_token,
+            )
+            if me is not None:
+                me.cancel()  # stop the handler's remaining effects at its next checkpoint
+            return
 
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         with bind_claim(execution_claim(claimed)):
             await execute_run_command(settings, forge_config, session_factory, claimed.payload)
+    except asyncio.CancelledError:
+        if lease_lost:
+            # Lease loss, not shutdown: fail the step (recoverable retry) and
+            # convert the self-inflicted cancellation into a typed failure —
+            # the queue loop must never mistake this for worker teardown.
+            if me is not None:
+                me.uncancel()
+            outcome = await fail_step(session_factory, claimed, lease_lost[0])
+            logger.warning(
+                "Step %d (%s) attempt %d/%d aborted — %s (%s)",
+                claimed.id,
+                claimed.step_name,
+                claimed.attempt + 1,
+                claimed.max_attempts,
+                lease_lost[0],
+                outcome,
+            )
+            raise LeaseLostError(lease_lost[0]) from None
+        raise
     except Exception as exc:
         outcome = await fail_step(session_factory, claimed, str(exc))
         logger.warning(
@@ -604,7 +829,11 @@ async def execute_claimed_step(
         )
         raise
     finally:
+        # Awaited teardown (A05): the heartbeat never dies unobserved — its
+        # outcome is either consumed above or cancelled deliberately here.
         heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
     # R10: a completion that lands after its run moved on carries superseded
     # evidence instead of a plain result — the run is never walked out of a
     # terminal state by a late callback.
@@ -624,6 +853,28 @@ async def execute_claimed_step(
         )
 
 
+async def _release_remaining(
+    session_factory: async_sessionmaker[AsyncSession],
+    unstarted: list[ClaimedStep],
+    why: str,
+) -> None:
+    """Best-effort handback of never-started claims (A05 shutdown/cancel).
+
+    Every failure here is survivable: the reaper recovers an abandoned lease
+    once this worker is gone, so a failed handback only costs one reap cycle.
+    """
+    for step in unstarted:
+        try:
+            await _release_unstarted_claim(session_factory, step)
+        except Exception:
+            logger.warning(
+                "Step %d handback failed (%s) — left to the reaper",
+                step.id,
+                why,
+                exc_info=True,
+            )
+
+
 async def run_due_steps(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Any,
@@ -631,16 +882,39 @@ async def run_due_steps(
     *,
     owner: str,
     limit: int = STEP_CLAIM_BATCH,
+    shutdown_event: asyncio.Event | None = None,
 ) -> int:
-    """One bounded pass: claim due steps and execute them (at-least-once)."""
+    """One bounded pass: claim due steps and execute them (at-least-once).
+
+    A05: the shipped worker executes sequentially, so it claims ONE step per
+    pass (``STEP_CLAIM_BATCH = 1``) — a lease is held only while it is
+    actually being executed, and no unstarted steps rot on expiring leases. A
+    larger *limit* is safe only with a bounded-parallel executor: every claim
+    is still re-validated immediately before its handler, and claims the pass
+    will not start (shutdown between steps, or a cancellation) are handed
+    back to the queue un-executed and un-failed. Returns the number of steps
+    claimed by this pass.
+    """
     claimed = await claim_due_steps(session_factory, owner, limit=limit)
-    for step in claimed:
+    for index, step in enumerate(claimed):
+        if shutdown_event is not None and shutdown_event.is_set():
+            # SIGTERM mid-pass: the remaining pre-claimed steps go back to
+            # the queue unstarted — never started, never failed.
+            await _release_remaining(session_factory, claimed[index:], "shutdown")
+            break
         try:
             await execute_claimed_step(session_factory, settings, forge_config, step)
+        except LeaseLostError as exc:
+            # fail_step already recorded the recoverable retry on the row.
+            logger.warning("Step %d aborted — %s", step.id, exc)
         except asyncio.CancelledError:
-            # The per-task heartbeat cancelled us: ownership moved on and the
-            # row belongs to the new claimant — nothing to record here.
-            logger.warning("Step %d aborted — lease lost to another owner", step.id)
+            # Worker teardown / process death, not a step failure: the
+            # in-flight step stays with the reaper (nothing recorded — the
+            # ADR-0017 §5 contract), the never-started claims are handed
+            # back, and the cancellation propagates so the queue loop stops
+            # instead of rolling into the next pre-claimed task.
+            await _release_remaining(session_factory, claimed[index + 1 :], "cancelled")
+            raise
         except Exception:
             # Retry/dead was already recorded on the step row by fail_step.
             logger.exception("Step %d execution failed", step.id)
@@ -707,7 +981,21 @@ async def run_step_worker(
             except asyncio.TimeoutError:
                 pass  # Interval elapsed — next tick.
         try:
-            await run_due_steps(session_factory, settings, forge_config, owner=worker_id)
+            # A05: the sequential default claims one step per pass — keep
+            # claiming back-to-back while the queue keeps yielding work, so a
+            # backlog does not drain at one step per poll interval. The pass
+            # itself re-checks the shutdown event between steps and hands
+            # never-started claims back.
+            while not shutdown_event.is_set():
+                processed = await run_due_steps(
+                    session_factory,
+                    settings,
+                    forge_config,
+                    owner=worker_id,
+                    shutdown_event=shutdown_event,
+                )
+                if not processed:
+                    break  # nothing due — wait for the next interval/wake
         except Exception:
             # A failed pass must never kill the step worker.
             logger.exception("Step worker pass failed")

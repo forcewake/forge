@@ -6,6 +6,7 @@ UPDATE claim is the portable ownership mechanism; SKIP LOCKED only decorates
 the candidate SELECT and is ignored by SQLite (single writer).
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from forge.models.base import Base
 from forge.runs import RunService
 from forge.worker.steps import (
     ClaimedStep,
+    LeaseLostError,
     claim_command_step,
     claim_due_steps,
     command_source_event_id,
@@ -452,6 +454,157 @@ class TestFencing:
         assert step.lease_owner is None
         assert step.due_at >= step.started_at, "retry delay is real (next_due_at)"
         assert await reschedule_expired_leases(db) == 0, "no lease to reap"
+
+
+class TestHeartbeatSupervision:
+    """A05: the heartbeat is a supervised task — a renewal that hits 0 rows
+    OR raises FAILS the handler (remaining effects stop at the next
+    checkpoint, the step stays recoverable), while a shutdown cancellation
+    records nothing at all."""
+
+    async def _claimed_step(self, db) -> ClaimedStep:
+        async with db() as session:
+            async with session.begin():
+                session.add(FlowRun(id=uuid4().hex, project_id=1, issue_iid=1))
+                await schedule_command_step(
+                    session, {"command": "noop", "n": 0}, source_event_id="e" * 64
+                )
+        claimed = await claim_due_steps(db, "worker-a")
+        assert len(claimed) == 1
+        return claimed[0]
+
+    async def test_renewal_exception_stops_effects_and_keeps_step_recoverable(
+        self, db, monkeypatch
+    ):
+        """Acceptance A05: a renewal exception excludes any subsequent write —
+        the handler is aborted at its next checkpoint — and the step is left
+        recoverable (scheduled again with the error recorded)."""
+        claimed = await self._claimed_step(db)
+
+        renewal_failed = asyncio.Event()
+
+        async def flaky_renew(session_factory, step, **kwargs):
+            renewal_failed.set()
+            raise RuntimeError("db down at renewal")
+
+        monkeypatch.setattr("forge.worker.steps.renew_step_lease", flaky_renew)
+
+        effects: list[str] = []
+
+        async def handler(settings, forge_config, session_factory, metadata):
+            effects.append("write-1")
+            await renewal_failed.wait()
+            await asyncio.sleep(0.05)  # cooperative checkpoint — the abort lands here
+            effects.append("write-2")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", handler)
+
+        with pytest.raises(LeaseLostError):
+            await execute_claimed_step(db, object(), object(), claimed, heartbeat_interval=0.01)
+
+        assert effects == ["write-1"], "no effect may follow the renewal failure"
+
+        async with db() as session:
+            step = await session.get(StepRun, claimed.id)
+        assert step is not None
+        assert step.status == "scheduled", "the lease-loss failure is a recoverable retry"
+        assert step.attempt == 1
+        assert step.lease_owner is None
+        assert "renewal failed" in (step.output or {}).get("error", "")
+
+        # Recoverable: due again now, a fresh claim runs the step to success.
+        async with db() as session:
+            async with session.begin():
+                await session.execute(
+                    update(StepRun)
+                    .where(StepRun.id == claimed.id)
+                    .values(due_at=datetime.now(timezone.utc))
+                )
+
+        async def good_handler(settings, forge_config, session_factory, metadata):
+            effects.append("write-3")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", good_handler)
+        fresh = await claim_due_steps(db, "worker-b")
+        assert [s.id for s in fresh] == [claimed.id]
+        await execute_claimed_step(db, object(), object(), fresh[0])
+
+        async with db() as session:
+            step = await session.get(StepRun, claimed.id)
+        assert step is not None
+        assert step.status == "succeeded"
+        assert effects == ["write-1", "write-3"]
+
+    async def test_renewal_matching_zero_rows_aborts_the_handler(self, db, monkeypatch):
+        """A renewal that matches 0 rows (the row was reaped while the handler
+        ran) cancels the handler before its next effect; the reaper already
+        owns the accounting, so no second attempt bump happens."""
+        claimed = await self._claimed_step(db)
+        started = asyncio.Event()
+        release = asyncio.Event()  # never set: the handler is aborted while parked
+
+        async def handler(settings, forge_config, session_factory, metadata):
+            started.set()
+            await release.wait()
+            raise AssertionError("handler must never resume after the lease was lost")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", handler)
+
+        task = asyncio.create_task(
+            execute_claimed_step(db, object(), object(), claimed, heartbeat_interval=0.01)
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        # The lease dies and the reaper reclaims the row for nobody.
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        async with db() as session:
+            async with session.begin():
+                await session.execute(
+                    update(StepRun).where(StepRun.id == claimed.id).values(lease_expires_at=past)
+                )
+        assert await reschedule_expired_leases(db) == 1
+
+        with pytest.raises(LeaseLostError):
+            await asyncio.wait_for(task, timeout=5)
+
+        async with db() as session:
+            step = await session.get(StepRun, claimed.id)
+        assert step is not None
+        assert step.status == "scheduled"
+        assert step.attempt == 1, "the reaper's bump — fail_step was fenced, no double count"
+        assert step.lease_owner is None
+        assert step.output is None
+
+    async def test_shutdown_cancellation_records_nothing(self, db, monkeypatch):
+        """A worker-teardown CancelledError is NOT a lease loss: the step row
+        stays running and leased with no attempt bump and no error — the
+        reaper owns the recovery (the ADR-0017 §5 process-death contract)."""
+        claimed = await self._claimed_step(db)
+        started = asyncio.Event()
+        blocked = asyncio.Event()  # never set: teardown lands while parked
+
+        async def handler(settings, forge_config, session_factory, metadata):
+            started.set()
+            await blocked.wait()
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", handler)
+
+        task = asyncio.create_task(
+            execute_claimed_step(db, object(), object(), claimed, heartbeat_interval=0.01)
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()  # worker teardown — the lease was NOT lost
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        async with db() as session:
+            step = await session.get(StepRun, claimed.id)
+        assert step is not None
+        assert step.status == "running"
+        assert step.attempt == 0, "shutdown never marks the step failed"
+        assert step.lease_owner == "worker-a"
+        assert step.lease_expires_at is not None
+        assert step.output is None
 
 
 class TestLateCompletionTerminalSet:

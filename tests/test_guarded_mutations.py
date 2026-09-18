@@ -39,7 +39,12 @@ from forge.models.base import Base
 from forge.runs.backends import HarnessOutcome
 from forge.runs.candidate import parse_unified_diff
 from forge.runs.publisher import PublishResult, publish_validated_candidate
-from forge.worker.steps import claim_due_steps, execution_claim, schedule_command_step
+from forge.worker.steps import (
+    claim_due_steps,
+    execution_claim,
+    reschedule_expired_leases,
+    schedule_command_step,
+)
 from tests.fixtures.candidate import create_diff
 
 BASE_SHA = "base-sha-1"
@@ -481,3 +486,102 @@ class TestLateCallbackAfterTerminal:
         assert len(azdo.calls_of("push_commits")) == pushes
         assert azdo.pull_requests == []
         assert run.evidence["superseded"]["reason"] == "run already blocked"
+
+
+# ----------------------------------------------------------------------
+# A05: claim freshness at handler ENTRY — the runtime-side sibling of the
+# publisher's reservation check. Queue ownership must imply effect ownership
+# at every effect, the first one included: a claim that died while queued
+# never reaches the handler, so no guarded mutation can even be attempted by
+# a stale owner.
+# ----------------------------------------------------------------------
+
+
+class TestClaimFreshAtHandlerEntry:
+    async def _bound_step(self, db) -> tuple[int, object]:
+        """A scheduled step bound to a fresh accepted run; returns (step_id, run_id)."""
+        run_id = await make_run(db)
+        async with db() as session, session.begin():
+            step = await schedule_command_step(
+                session,
+                {"command": "advance", "project_id": 1},
+                source_event_id=uuid4().hex,
+            )
+            step.flow_run_id = run_id
+            return step.id, run_id
+
+    async def test_expired_claim_never_reaches_a_guarded_mutation(self, db, monkeypatch):
+        """The lease died while the claim sat queued: the runtime skips the
+        handler and requeues the step — the guarded transition the handler
+        would have attempted is never even tried, and the run is untouched."""
+        from forge.worker.steps import execute_claimed_step
+
+        step_id, run_id = await self._bound_step(db)
+        claimed = (await claim_due_steps(db, "worker-a"))[0]
+        assert claimed.id == step_id
+
+        async with db() as session, session.begin():
+            await session.execute(
+                update(StepRun)
+                .where(StepRun.id == step_id)
+                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            )
+
+        attempted: list[str] = []
+
+        async def stale_handler(settings, forge_config, session_factory, metadata):
+            # The first thing this handler would do is a guarded lifecycle
+            # mutation — a stale owner must never get this far.
+            async with session_factory() as session:
+                await Controller(session).transition(run_id, FlowStatus.PREFLIGHT)
+            attempted.append("preflight")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", stale_handler)
+
+        await execute_claimed_step(db, object(), object(), claimed)
+
+        assert attempted == [], "a stale owner attempts no mutations"
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            step_row = await session.get(StepRun, step_id)
+        assert run is not None and run.status == FlowStatus.ACCEPTED.value
+        assert step_row is not None
+        assert step_row.status == "scheduled", "the stale claim is requeued for a fresh owner"
+        assert step_row.attempt == 1, "the expired-lease attempt is accounted like a reap"
+
+    async def test_reassigned_claim_leaves_the_new_owner_running(self, db, monkeypatch):
+        """The claim was reaped and another worker re-claimed it: the stale
+        claim skips without touching the row — the new owner's lease, fence
+        and attempt accounting are exactly as it left them."""
+        from forge.worker.steps import execute_claimed_step
+
+        step_id, _run_id = await self._bound_step(db)
+        stale = (await claim_due_steps(db, "worker-a"))[0]
+
+        async with db() as session, session.begin():
+            await session.execute(
+                update(StepRun)
+                .where(StepRun.id == step_id)
+                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            )
+        assert await reschedule_expired_leases(db) == 1
+        fresh = (await claim_due_steps(db, "worker-b"))[0]
+        assert fresh.fence_token == stale.fence_token + 1
+
+        attempted: list[str] = []
+
+        async def stale_handler(settings, forge_config, session_factory, metadata):
+            attempted.append("entered")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", stale_handler)
+
+        await execute_claimed_step(db, object(), object(), stale)
+
+        assert attempted == []
+        async with db() as session:
+            step_row = await session.get(StepRun, step_id)
+        assert step_row is not None
+        assert step_row.status == "running"
+        assert step_row.lease_owner == "worker-b"
+        assert step_row.fence_token == fresh.fence_token
+        assert step_row.attempt == 1

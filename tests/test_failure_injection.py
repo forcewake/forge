@@ -170,9 +170,11 @@ class WorkerProcess:
     """One simulated worker process: step loop + step reaper + run reconciler.
 
     The step loop is ``run_step_worker``'s loop with one deliberate difference:
-    ``run_due_steps`` swallows a per-step ``CancelledError`` (the heartbeat
-    lost-lease race) — a killed PROCESS must die mid-step with nothing
-    recorded, so this loop lets ``CancelledError`` propagate untouched.
+    a killed PROCESS must die mid-step with nothing recorded, so this loop
+    lets ``CancelledError`` propagate untouched (``run_due_steps`` hands the
+    never-started claims back and re-raises teardown cancellation; the
+    heartbeat's lost-lease cancellation is converted into a recorded failure
+    inside ``execute_claimed_step`` itself).
     """
 
     def __init__(

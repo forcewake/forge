@@ -536,6 +536,34 @@ class TestReaperParksDeadSteps:
 
 
 # ----------------------------------------------------------------------
+# 4b. A05 liveness: a stale claim never waits for the reaper
+# ----------------------------------------------------------------------
+
+
+class TestStaleClaimNeverRotates:
+    async def test_requeued_stale_claim_leaves_nothing_for_the_reaper(self, db, monkeypatch):
+        """A claim whose lease died while queued is requeued at handler-entry
+        time (A05 fresh-entry validation) — the reaper finds NOTHING to reap
+        and the step is immediately claimable by the next worker."""
+        from forge.worker.steps import execute_claimed_step
+
+        async def never(settings, forge_config, session_factory, metadata):
+            raise AssertionError("handler must not run on a stale claim")
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", never)
+
+        step_id, seid = await _scheduled_step(db)
+        claimed = await _claim_step(db, seid, "worker-a")
+        await _expire_lease(db, step_id)
+
+        await execute_claimed_step(db, object(), object(), claimed)
+
+        assert await reschedule_expired_leases(db) == 0, "nothing lingered for the reaper"
+        reclaimed = await claim_due_steps(db, "worker-b", source_event_id=seid)
+        assert [s.id for s in reclaimed] == [step_id]
+
+
+# ----------------------------------------------------------------------
 # 5. A terminal run is never revived by a late callback
 # ----------------------------------------------------------------------
 
