@@ -382,7 +382,8 @@ async def test_revival_pass_dispatches_a_due_run_on_the_same_branch(db, service,
     # The due stamp is consumed: a second pass cannot re-dispatch the run.
     assert "due_at" not in run.evidence["revival"]
     assert "dispatched_at" in run.evidence["revival"]
-    # Journaled as an auto_revive action (ADR-0005).
+    # Journaled as an auto_revive action (ADR-0005) — the durable attempt
+    # record (A11): window idempotency key, cause class, dispatch claimed.
     async with db() as session:
         actions = (
             (await session.execute(select(ActionLog).where(ActionLog.flow_run_id == run_id)))
@@ -391,6 +392,9 @@ async def test_revival_pass_dispatches_a_due_run_on_the_same_branch(db, service,
         )
     assert [action.action_kind for action in actions] == ["auto_revive"]
     assert actions[0].status == "succeeded"
+    assert actions[0].idempotency_key == f"revive:{run_id}:1"
+    assert actions[0].retryability == "transient_infrastructure"
+    assert actions[0].dispatch_state == "dispatched"
 
 
 async def test_revival_redispatch_follows_the_frozen_backend(db, service, monkeypatch):
@@ -537,6 +541,11 @@ async def test_retry_continues_the_same_branch_and_grants_one_cycle(
     assert "retry_requested" in {action.action_kind for action in actions}
     requested = next(a for a in actions if a.action_kind == "retry_requested")
     assert requested.status == "succeeded"
+    # A11: the attempt record — operator override class; no delivery id was
+    # passed in this direct call, so no idempotency key is pinned.
+    assert requested.retryability == "operator_override"
+    assert requested.idempotency_key is None
+    assert requested.dispatch_state == "dispatched"
 
 
 async def test_retry_of_a_harness_run_redispatches_the_lane(db, service, monkeypatch):

@@ -66,7 +66,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from html import unescape
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -164,19 +164,28 @@ from forge.runs.revival import (
     STATUS_RE,
     WHY_BLOCKED_RE,
     build_retry_context,
+    begin_revival_attempt,
+    claim_attempt_dispatch,
+    classify_retryability,
     collect_status_snapshot,
+    evaluate_attempt_recovery,
     evaluate_config_blocks,
     evaluate_revivals,
+    find_revival_attempt,
     format_reconcile_reply,
     format_status_reply,
     has_active_run,
     intents_for_run,
+    open_revival_attempt,
     resolve_retry_target,
     resolve_status_target,
+    retry_delivery_key,
+    retry_in_flight_rejection,
     retry_rejection,
     terminalize_failure,
     why_blocked_reply,
 )
+from forge.runs.revival import RevivalInFlight
 from forge.runs.spec import (
     EXECUTABLE_SPEC_SCHEMA_VERSION,
     ExecutableRunSpec,
@@ -1171,6 +1180,7 @@ class AzureRunService:
         issue_number: int,
         note_text: str,
         author_username: str,
+        delivery_id: str | None = None,
     ) -> None:
         """``/retry [run-id]``: operator revival of a dead run on the AzDO lane.
 
@@ -1179,6 +1189,10 @@ class AzureRunService:
         revival graph edge walks it to ``proposing``; one operator-granted
         commit cycle; the SAME branch re-dispatched with the terminal reason
         and the last verification evidence as the repair context.
+
+        A11: one durable, idempotent transition — the attempt record commits
+        with the CAS walk, keyed by the webhook delivery id (same id twice is
+        a no-op; a different id while an attempt is in flight is refused).
         """
         match = _RETRY_RE.search(note_text or "")
         if match is None:
@@ -1194,6 +1208,7 @@ class AzureRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        attempt_key = retry_delivery_key(delivery_id)
         run_id: str | None = None
         # A07: the dispatch legs below aim at the VERIFIED run's subject, read
         # back from the matched run — never the command context. The scoped
@@ -1202,6 +1217,10 @@ class AzureRunService:
         retry_project_id = 0
         retry_issue_number = 0
         rejection = ""
+        status = ""
+        status_reason = ""
+        cycle = 1
+        evidence: dict = {}
         async with self._session_factory() as session:
             run = await resolve_retry_target(
                 session,
@@ -1214,17 +1233,34 @@ class AzureRunService:
                 run_id = run.id
                 retry_project_id = int(run.project_id)
                 retry_issue_number = int(run.issue_iid or 0)
-                rejection = retry_rejection(
-                    run,
-                    other_active=await has_active_run(
-                        session,
-                        provider=run.provider,
-                        project_id=run.project_id,
-                        issue_iid=run.issue_iid,
-                        repo_full_name=run.github_repo_full_name,
-                        exclude_run_id=run.id,
-                    ),
-                )
+                # A11 delivery identity first: a redelivered /retry is a
+                # no-op; a different delivery while an attempt is in flight
+                # is refused before any status-based wording can mislead.
+                if attempt_key is not None:
+                    existing = await find_revival_attempt(
+                        session, run_id=run.id, kind="retry_requested", idempotency_key=attempt_key
+                    )
+                    if existing is not None:
+                        logger.info(
+                            "AzDO /retry delivery %s already delivered for run %s — no-op",
+                            delivery_id,
+                            run_id[:8],
+                        )
+                        return
+                    if await open_revival_attempt(session, run_id=run.id) is not None:
+                        rejection = retry_in_flight_rejection(run.id)
+                if not rejection:
+                    rejection = retry_rejection(
+                        run,
+                        other_active=await has_active_run(
+                            session,
+                            provider=run.provider,
+                            project_id=run.project_id,
+                            issue_iid=run.issue_iid,
+                            repo_full_name=run.github_repo_full_name,
+                            exclude_run_id=run.id,
+                        ),
+                    )
                 if not rejection:
                     status = run.status
                     status_reason = run.status_reason or ""
@@ -1243,20 +1279,42 @@ class AzureRunService:
             )
             return
 
-        # Intent-first journal (ADR-0005), then the durable walk.
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            action_id = await controller.record_action(
-                run_id, "retry_requested", correlation_id=f"issue-{issue_number}"
-            )
-            await controller.revive_transition(
+        # One durable, idempotent transition (A11): attempt + CAS walk commit
+        # atomically.
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                attempt = await begin_revival_attempt(
+                    session,
+                    run_id=run_id,
+                    kind="retry_requested",
+                    idempotency_key=attempt_key,
+                    retryability=classify_retryability("retry_requested"),
+                )
+                if not attempt.created:
+                    logger.info(
+                        "AzDO /retry delivery redelivered for run %s (index arbiter) — no-op",
+                        run_id[:8],
+                    )
+                    return
+                await controller.revive_transition(
+                    run_id,
+                    reason=f"retry requested by @{author_username}",
+                    authorized_by=f"operator:@{author_username}",
+                )
+                run = await self._get_run(session, run_id)
+                run.commit_cycle = cycle + 1
+                await session.commit()
+        except RevivalInFlight:
+            await self._post_journaled_comment(
+                project_id,
+                issue_number,
+                f"🔁 {retry_in_flight_rejection(run_id)}",
                 run_id,
-                reason=f"retry requested by @{author_username}",
-                authorized_by=f"operator:@{author_username}",
+                "retry_rejected_note",
             )
-            run = await self._get_run(session, run_id)
-            run.commit_cycle = cycle + 1
-            await session.commit()
+            return
+        action_id = attempt.action_id
 
         branch = azure_factory_branch(retry_issue_number, run_id)
         logger.info(
@@ -1275,6 +1333,16 @@ class AzureRunService:
             run_id,
             "retry_ack_note",
         )
+
+        # A11: claim the dispatch (pending → dispatched) before the leg runs.
+        async with self._session_factory() as session:
+            claimed = await claim_attempt_dispatch(session, action_id)
+            await session.commit()
+        if not claimed:
+            logger.warning(
+                "AzDO run %s revival dispatch already claimed — standing down", run_id[:8]
+            )
+            return
 
         repair_context = build_retry_context(self._settings, status_reason, evidence)
         repair_reason = f"retry by @{author_username}: {status_reason or status}"
@@ -1299,6 +1367,16 @@ class AzureRunService:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             raise
         await self._complete_action(action_id, "succeeded", {"backend": "ci_harness"})
+
+    async def evaluate_revival_recovery(self, now: datetime | None = None) -> int:
+        """One recovery pass over this lane's stranded revival attempts (A11)."""
+        return await evaluate_attempt_recovery(
+            self._session_factory,
+            provider="azure_devops",
+            redispatch=self._redispatch_revival,
+            now=now,
+            log=logger,
+        )
 
     # ------------------------------------------------------------------
     # R29 operator surface around dead/stuck runs
@@ -4439,6 +4517,9 @@ async def execute_azure_run_command(
                 issue_number=issue_number,
                 note_text=note_text,
                 author_username=author_username,
+                # A11: the delivery key is the delivery identity — the same
+                # redelivered webhook dedupes to a no-op at the attempt.
+                delivery_id=str(metadata.get("note_id") or "") or None,
             )
         elif command == "cancel":
             await service.handle_cancel(
@@ -4741,25 +4822,16 @@ class _RunStub:
     base_sha: str
 
 
-async def evaluate_azure_revival(
+def _azure_revival_redispatch(
     settings: Settings,
     forge_config: ForgeConfig,
     session_factory: async_sessionmaker[AsyncSession],
-    *,
-    stack_factory: Callable[[str, str], AzureAgents] | None = None,
-    now: datetime | None = None,
-) -> None:
-    """One Tier-1 auto-revive pass over every AzDO run whose backoff elapsed.
-
-    The twin of the GitLab reconciler's ``evaluate_revival`` leg: the same
-    classification, the same ``FORGE_RUN_AUTO_REVIVE_LIMIT`` budget, the same
-    journaled ``auto_revive`` walk — only the re-dispatch is the Pipelines
-    lane (or the builtin publish path for a repo-less lane-less project).
-    """
-    if stack_factory is None:
-        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
-            settings, session_factory, p, r
-        )
+    stack_factory: Callable[[str, str], AzureAgents],
+) -> Callable[[str], Awaitable[None]]:
+    """The Pipelines-lane re-dispatch leg shared by the Tier-1 revive pass
+    and the A11 recovery scan: rebuild the repo's service from the run's
+    durable subject and hand the run to
+    :meth:`AzureRunService._redispatch_revival`."""
 
     async def redispatch(run_id: str) -> None:
         async with session_factory() as session:
@@ -4790,11 +4862,66 @@ async def evaluate_azure_revival(
         )
         await service._redispatch_revival(run_id)
 
+    return redispatch
+
+
+async def evaluate_azure_revival(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """One Tier-1 auto-revive pass over every AzDO run whose backoff elapsed.
+
+    The twin of the GitLab reconciler's ``evaluate_revival`` leg: the same
+    classification, the same ``FORGE_RUN_AUTO_REVIVE_LIMIT`` budget, the same
+    journaled ``auto_revive`` walk — only the re-dispatch is the Pipelines
+    lane (or the builtin publish path for a repo-less lane-less project).
+    """
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+
     await evaluate_revivals(
         session_factory,
         settings,
         provider="azure_devops",
-        redispatch=redispatch,
+        redispatch=_azure_revival_redispatch(
+            settings, forge_config, session_factory, stack_factory
+        ),
+        now=now,
+        log=logger,
+    )
+
+
+async def evaluate_azure_revival_recovery(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+    now: datetime | None = None,
+) -> int:
+    """One A11 recovery pass over stranded AzDO revival attempts.
+
+    The twin of the GitLab reconciler's ``evaluate_revival_recovery`` slot:
+    a worker that died between the revive commit and the Pipelines dispatch
+    (or inside the dispatch leg, journal unfinished) has its dispatch
+    re-driven exactly once.
+    """
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+    return await evaluate_attempt_recovery(
+        session_factory,
+        provider="azure_devops",
+        redispatch=_azure_revival_redispatch(
+            settings, forge_config, session_factory, stack_factory
+        ),
         now=now,
         log=logger,
     )
@@ -4944,6 +5071,7 @@ __all__ = [
     "evaluate_azure_waiting_ci",
     "execute_azure_run_command",
     "evaluate_azure_revival",
+    "evaluate_azure_revival_recovery",
 ]
 
 
@@ -5008,6 +5136,14 @@ async def run_azure_harness_reconciler(
             )
         except Exception:
             logger.exception("Azure DevOps revival reconciler pass failed")
+        try:
+            # A11 revival-attempt recovery: re-drive the dispatch of revival
+            # attempts whose worker died before the backend call.
+            await evaluate_azure_revival_recovery(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("Azure DevOps revival-attempt recovery pass failed")
         try:
             # A13 config-gate recovery: retry the `.forge.yml` read of runs
             # parked blocked(config_…); re-enter planning on recovery.

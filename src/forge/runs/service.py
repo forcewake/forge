@@ -143,19 +143,28 @@ from forge.runs.revival import (
     STATUS_RE,
     WHY_BLOCKED_RE,
     build_retry_context,
+    begin_revival_attempt,
+    claim_attempt_dispatch,
+    classify_retryability,
     collect_status_snapshot,
+    evaluate_attempt_recovery,
     evaluate_config_blocks,
     evaluate_revivals,
+    find_revival_attempt,
     format_reconcile_reply,
     format_status_reply,
     has_active_run,
     intents_for_run,
+    open_revival_attempt,
     resolve_retry_target,
     resolve_status_target,
+    retry_delivery_key,
+    retry_in_flight_rejection,
     retry_rejection,
     terminalize_failure,
     why_blocked_reply,
 )
+from forge.runs.revival import RevivalInFlight
 from forge.runs.spec import (
     EXECUTABLE_SPEC_SCHEMA_VERSION,
     ExecutableRunSpec,
@@ -1058,6 +1067,8 @@ class RunService:
         note_text: str,
         author_username: str,
         issue_iid: int | None,
+        *,
+        delivery_id: str | None = None,
     ) -> None:
         """``@forge /retry [run-id]``: operator revival of a dead run (Tier 2).
 
@@ -1072,6 +1083,16 @@ class RunService:
         Cancelled runs, and runs that never committed a candidate, are
         rejected with an actionable note: there is no work to continue, so
         ``/implement`` is the honest path.
+
+        A11: the revival is ONE durable, idempotent transition. The attempt
+        record (the ``retry_requested`` action row) is written in the SAME
+        transaction as the CAS walk, keyed by the webhook DELIVERY id:
+        a redelivered ``/retry`` with the same delivery id is a no-op (no
+        second cycle bump, no second dispatch); a different delivery id
+        while an attempt is in flight is refused with the rejection-note
+        machinery; the persisted ``pending`` dispatch state lets the
+        recovery scan (:meth:`evaluate_revival_recovery`) re-drive a lost
+        dispatch exactly once.
         """
         match = _RETRY_RE.search(note_text or "")
         if match is None:
@@ -1084,6 +1105,7 @@ class RunService:
             return
 
         requested = (match.group(1) or "").lower()
+        attempt_key = retry_delivery_key(delivery_id)
         run_id: str | None = None
         # A07: the dispatch legs below aim at the VERIFIED run's subject, read
         # back from the matched run — never the command context. The scoped
@@ -1092,6 +1114,10 @@ class RunService:
         retry_project_id = 0
         retry_issue_iid: int | None = None
         rejection = ""
+        status = ""
+        status_reason = ""
+        cycle = 1
+        evidence: dict = {}
         async with self._session_factory() as session:
             run = await resolve_retry_target(
                 session,
@@ -1104,17 +1130,34 @@ class RunService:
                 run_id = run.id
                 retry_project_id = int(run.project_id)
                 retry_issue_iid = run.issue_iid
-                rejection = retry_rejection(
-                    run,
-                    other_active=await has_active_run(
-                        session,
-                        provider=run.provider,
-                        project_id=run.project_id,
-                        issue_iid=run.issue_iid,
-                        repo_full_name=run.github_repo_full_name,
-                        exclude_run_id=run.id,
-                    ),
-                )
+                # A11 delivery identity first: a redelivered /retry is a
+                # no-op; a different delivery while an attempt is in flight
+                # is refused before any status-based wording can mislead.
+                if attempt_key is not None:
+                    existing = await find_revival_attempt(
+                        session, run_id=run.id, kind="retry_requested", idempotency_key=attempt_key
+                    )
+                    if existing is not None:
+                        logger.info(
+                            "/retry delivery %s already delivered for run %s — no-op",
+                            delivery_id,
+                            run_id[:8],
+                        )
+                        return
+                    if await open_revival_attempt(session, run_id=run.id) is not None:
+                        rejection = retry_in_flight_rejection(run.id)
+                if not rejection:
+                    rejection = retry_rejection(
+                        run,
+                        other_active=await has_active_run(
+                            session,
+                            provider=run.provider,
+                            project_id=run.project_id,
+                            issue_iid=run.issue_iid,
+                            repo_full_name=run.github_repo_full_name,
+                            exclude_run_id=run.id,
+                        ),
+                    )
                 if not rejection:
                     status = run.status
                     status_reason = run.status_reason or ""
@@ -1129,22 +1172,46 @@ class RunService:
             )
             return
 
-        # Intent-first journal (ADR-0005), then the durable walk. The revived
-        # run re-enters ``proposing`` with one more cycle; the backend frozen
-        # in the evidence decides the advance leg (ADR-0015).
-        async with self._session_factory() as session:
-            controller = Controller(session)
-            action_id = await controller.record_action(
-                run_id, "retry_requested", correlation_id=f"issue-{issue_iid}"
-            )
-            await controller.revive_transition(
+        # One durable, idempotent transition (A11): the attempt record and
+        # the CAS revival walk commit atomically. The attempt carries the
+        # delivery id (webhook-redelivery idempotency) and the operator
+        # override retryability class.
+        try:
+            async with self._session_factory() as session:
+                controller = Controller(session)
+                attempt = await begin_revival_attempt(
+                    session,
+                    run_id=run_id,
+                    kind="retry_requested",
+                    idempotency_key=attempt_key,
+                    retryability=classify_retryability("retry_requested"),
+                )
+                if not attempt.created:
+                    logger.info(
+                        "/retry delivery redelivered for run %s (index arbiter) — no-op",
+                        run_id[:8],
+                    )
+                    return
+                await controller.revive_transition(
+                    run_id,
+                    reason=f"retry requested by @{author_username}",
+                    authorized_by=f"operator:@{author_username}",
+                )
+                run = await self._get_run(session, run_id)
+                run.commit_cycle = cycle + 1
+                await session.commit()
+        except RevivalInFlight:
+            # A concurrent driver opened an attempt between the check and the
+            # write — the index refused this one; carry the same rejection.
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                f"🔁 {retry_in_flight_rejection(run_id)}",
                 run_id,
-                reason=f"retry requested by @{author_username}",
-                authorized_by=f"operator:@{author_username}",
+                "retry_rejected_note",
             )
-            run = await self._get_run(session, run_id)
-            run.commit_cycle = cycle + 1
-            await session.commit()
+            return
+        action_id = attempt.action_id
 
         branch = factory_branch(retry_issue_iid, run_id)
         logger.info(
@@ -1163,6 +1230,19 @@ class RunService:
             run_id,
             "retry_ack_note",
         )
+
+        # A11: claim the dispatch (pending → dispatched) BEFORE any leg runs —
+        # the recovery scan never re-drives a claimed window, and a crash
+        # after this point resolves through the leg's own journaled action.
+        async with self._session_factory() as session:
+            claimed = await claim_attempt_dispatch(session, action_id)
+            await session.commit()
+        if not claimed:
+            logger.warning(
+                "Run %s revival dispatch already claimed by another driver — standing down",
+                run_id[:8],
+            )
+            return
 
         repair_context = build_retry_context(self._settings, status_reason, evidence)
         repair_reason = f"retry by @{author_username}: {status_reason or status}"
@@ -1186,6 +1266,22 @@ class RunService:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             raise
         await self._complete_action(action_id, "succeeded", {"backend": backend_name})
+
+    async def evaluate_revival_recovery(self, now: datetime | None = None) -> int:
+        """One recovery pass over stranded revival attempts (A11).
+
+        A worker that died between the revive commit and the dispatch (or
+        inside the dispatch leg, journal unfinished) leaves the persisted
+        attempt ``pending``/uncompleted — this pass re-drives each stranded
+        dispatch exactly once (:func:`forge.runs.revival.evaluate_attempt_recovery`).
+        """
+        return await evaluate_attempt_recovery(
+            self._session_factory,
+            provider="gitlab",
+            redispatch=self._redispatch_revival,
+            now=now,
+            log=logger,
+        )
 
     # ------------------------------------------------------------------
     # R29 operator surface around dead/stuck runs
@@ -1862,6 +1958,9 @@ class RunService:
                 metadata.get("note_text", ""),
                 metadata.get("author_username", ""),
                 metadata.get("issue_iid"),
+                # A11: the note id is the delivery identity — the same
+                # redelivered webhook dedupes to a no-op at the attempt.
+                delivery_id=str(metadata.get("note_id") or "") or None,
             )
         elif command == "status":
             await self.handle_status_note(

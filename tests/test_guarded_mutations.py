@@ -26,6 +26,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from forge.durable import (
+    ActionLog,
     Controller,
     ExecutionClaim,
     FlowRun,
@@ -39,6 +40,12 @@ from forge.models.base import Base
 from forge.runs.backends import HarnessOutcome
 from forge.runs.candidate import parse_unified_diff
 from forge.runs.publisher import PublishResult, publish_validated_candidate
+from forge.runs.revival import (
+    Retryability,
+    RevivalInFlight,
+    begin_revival_attempt,
+    claim_attempt_dispatch,
+)
 from forge.worker.steps import (
     claim_due_steps,
     execution_claim,
@@ -585,3 +592,83 @@ class TestClaimFreshAtHandlerEntry:
         assert step_row.lease_owner == "worker-b"
         assert step_row.fence_token == fresh.fence_token
         assert step_row.attempt == 1
+
+
+# ----------------------------------------------------------------------
+# A11: the revival attempt's dispatch claim is a CAS — one driver, one
+# dispatch; the in-flight index is the concurrent-begin arbiter
+# ----------------------------------------------------------------------
+
+
+class TestRevivalAttemptClaimCAS:
+    async def _open_attempt(self, db, run_id: str) -> int:
+        async with db() as session:
+            attempt = await begin_revival_attempt(
+                session,
+                run_id=run_id,
+                kind="retry_requested",
+                idempotency_key=f"delivery-{uuid4().hex[:8]}",
+                retryability=Retryability.OPERATOR_OVERRIDE,
+            )
+            await session.commit()
+            return attempt.action_id
+
+    async def test_two_drivers_claim_one_attempt_exactly_once(self, db):
+        run_id = await make_run(db)
+        action_id = await self._open_attempt(db, run_id)
+
+        # Two drivers race the claim: the first writer commits 'dispatched';
+        # the second's predicate (state still pending) matches 0 rows.
+        async with db() as first:
+            assert await claim_attempt_dispatch(first, action_id)
+            await first.commit()
+        async with db() as second:
+            assert not await claim_attempt_dispatch(second, action_id)
+            await second.commit()
+
+        async with db() as session:
+            row = await session.get(ActionLog, action_id)
+        assert row is not None
+        assert row.dispatch_state == "dispatched"
+        assert (row.correlation_id or "").startswith("claim:")
+
+    async def test_a_legacy_null_state_row_claims_once(self, db):
+        """Pre-017 stranded attempts (dispatch_state NULL) count as pending."""
+        run_id = await make_run(db)
+        async with db() as session:
+            row = ActionLog(flow_run_id=run_id, action_kind="auto_revive", status="requested")
+            session.add(row)
+            await session.commit()
+            action_id = row.id
+
+        async with db() as first:
+            assert await claim_attempt_dispatch(first, action_id)
+            await first.commit()
+        async with db() as second:
+            assert not await claim_attempt_dispatch(second, action_id)
+            await second.commit()
+
+    async def test_index_refuses_a_second_inflight_attempt(self, db):
+        """The partial unique index is the concurrent-begin arbiter: a second
+        open attempt for the SAME run (even of the other revival kind) is
+        refused with the typed RevivalInFlight — never a silent double."""
+        run_id = await make_run(db)
+        async with db() as session:
+            await begin_revival_attempt(
+                session,
+                run_id=run_id,
+                kind="auto_revive",
+                idempotency_key="revive:window:1",
+                retryability=Retryability.TRANSIENT_INFRASTRUCTURE,
+            )
+            await session.commit()
+
+        async with db() as session:
+            with pytest.raises(RevivalInFlight):
+                await begin_revival_attempt(
+                    session,
+                    run_id=run_id,
+                    kind="retry_requested",
+                    idempotency_key="delivery:other",
+                    retryability=Retryability.OPERATOR_OVERRIDE,
+                )

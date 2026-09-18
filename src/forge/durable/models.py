@@ -65,6 +65,29 @@ _STEP_STATUSES: tuple[str, ...] = (
     "cancelled",
 )
 _ACTION_STATUSES: tuple[str, ...] = ("requested", "succeeded", "failed", "unknown_outcome")
+#: A11: the retryability class of a revival attempt (why the run is retryable)
+#: — deliberately ORTHOGONAL to the A12 effect-certainty states above: a
+#: transient_infrastructure cause says nothing about whether a remote effect
+#: is unresolved, and an unknown publication blocks revival regardless.
+_REVIVAL_RETRYABILITY: tuple[str, ...] = (
+    "transient_infrastructure",
+    "operator_override",
+    "verification_timeout",
+)
+#: A11: the revival-attempt dispatch state. ``pending`` = the dispatch leg has
+#: not been claimed yet (a crash before the claim); ``dispatched`` = a driver
+#: claimed the dispatch (the recovery scan never re-drives a claimed attempt
+#: without first proving the leg never journaled its intent).
+_REVIVAL_DISPATCH_STATES: tuple[str, ...] = ("pending", "dispatched")
+#: A11: the in-flight arbiter for revival attempts — ONE open (``requested``)
+#: ``retry_requested``/``auto_revive`` row per run, enforced by the DB so two
+#: reconcilers (or a redelivered /retry racing a fresh one) collapse to one
+#: attempt at the index, not by hope.
+_REVIVAL_ATTEMPT_INFLIGHT = text(
+    "action_kind IN ('retry_requested', 'auto_revive') AND status = 'requested'"
+)
+_REVIVAL_RETRYABILITY_SQL = ", ".join(f"'{value}'" for value in _REVIVAL_RETRYABILITY)
+_REVIVAL_DISPATCH_SQL = ", ".join(f"'{value}'" for value in _REVIVAL_DISPATCH_STATES)
 _LLM_STATUSES: tuple[str, ...] = ("ok", "failed", "cancelled")
 #: ADR-0018 §5 (F22): closed set of run-budget lifecycle statuses. ``exhausted``
 #: budgets stop granting reservations; ``closed`` is terminal (run finished).
@@ -371,10 +394,44 @@ class ActionLog(Base):
     ``unknown_outcome``. Terminal statuses are final — the service layer
     (:meth:`forge.durable.controller.Controller.complete_action`) refuses any
     further change.
+
+    A11: the revival kinds (``retry_requested`` / ``auto_revive``) double as
+    the durable REVIVAL ATTEMPT record — the row written in the SAME
+    transaction as the CAS revival transition, carrying:
+
+    - ``idempotency_key`` — the delivery/event id of the triggering command
+      (``delivery:<note id>``) or the auto-revive window identity
+      (``revive:<run id>:<stamp count>``). A redelivered /retry with the SAME
+      key is a no-op (no second cycle bump, no second dispatch); a DIFFERENT
+      key is refused while an attempt is still open.
+    - ``retryability`` — the typed :data:`_REVIVAL_RETRYABILITY` class.
+    - ``dispatch_state`` — ``pending`` → ``dispatched``; the recovery scan
+      (``forge.runs.revival.evaluate_attempt_recovery``) re-drives pending
+      attempts whose dispatch never started, exactly once.
+
+    The partial unique index ``uq_revival_attempt_inflight`` makes "one
+    in-flight revival attempt per run" a DB invariant.
     """
 
     __tablename__ = "action_log"
-    __table_args__ = (_status_check("ck_action_log_status", _ACTION_STATUSES),)
+    __table_args__ = (
+        _status_check("ck_action_log_status", _ACTION_STATUSES),
+        CheckConstraint(
+            f"retryability IS NULL OR retryability IN ({_REVIVAL_RETRYABILITY_SQL})",
+            name="ck_action_log_retryability",
+        ),
+        CheckConstraint(
+            f"dispatch_state IS NULL OR dispatch_state IN ({_REVIVAL_DISPATCH_SQL})",
+            name="ck_action_log_dispatch_state",
+        ),
+        Index(
+            "uq_revival_attempt_inflight",
+            "flow_run_id",
+            unique=True,
+            postgresql_where=_REVIVAL_ATTEMPT_INFLIGHT,
+            sqlite_where=_REVIVAL_ATTEMPT_INFLIGHT,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     flow_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -383,6 +440,14 @@ class ActionLog(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="requested")
     remote_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: A11 revival-attempt identity: the triggering command's delivery id or
+    #: the auto-revive window key (NULL for every non-revival action).
+    idempotency_key: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)
+    #: A11: why the run is retryable (the retryability class, revival rows only).
+    retryability: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    #: A11: the revival dispatch state — pending until a driver claims the
+    #: dispatch leg (revival rows only).
+    dispatch_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

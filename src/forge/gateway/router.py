@@ -93,6 +93,9 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         "issue_iid": event.issue.iid if event.issue is not None else None,
         "author_username": event.user.username if event.user else "",
         "author_user_id": event.user.id if event.user else 0,
+        # A11: the note id is the /retry delivery identity — it keys the
+        # revival attempt's idempotency (a redelivered webhook is a no-op).
+        "note_id": event.object_attributes.id,
     }
     if slash_command == "/security":
         common["mr_iid"] = event.merge_request.iid if not on_issue and event.merge_request else None
