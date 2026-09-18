@@ -1359,7 +1359,17 @@ class TestVerificationGate:
         assert verification["status"] == "passed"
         assert verification["tested_oid"] == candidate_sha
         assert verification["producer"] == "azure-build"
-        assert verification["surface"] == [{"name": "CI", "result": "succeeded"}]
+        # A01: the surface carries the FULL check identity — name/result plus
+        # the native build id and the sourceVersion the provider verified —
+        # not just the display name.
+        assert verification["surface"] == [
+            {
+                "name": "CI",
+                "result": "succeeded",
+                "build_id": 301,
+                "source_version": candidate_sha,
+            }
+        ]
         # The run walked waiting_ci → evaluating_ci → reviewing → ready.
         assert (await outbox_targets(db, run_id))[-3:] == [
             FlowStatus.EVALUATING_CI.value,
@@ -1417,14 +1427,18 @@ class TestVerificationGate:
         assert verification["tested_oid"] == candidate_sha
         assert verification["producer"] == "azure-build"
 
-    @pytest.mark.parametrize("result", ["failed", "canceled", "partiallySucceeded"])
+    @pytest.mark.parametrize("result", ["failed", "partiallySucceeded"])
     async def test_red_build_results_enter_repair(self, db, fake, result):
-        """ADR-0008: not fully green blames the change — a bounded repair
-        cycle re-dispatches the lane with the failure as its context.
+        """ADR-0008: a result that blames the change drives a bounded repair
+        cycle that re-dispatches the lane with the failure as its context.
 
         A02: the lane pipeline id is FROZEN in the spec — the repair
         dispatches exactly that frozen contract (cycle 1's episode was the
-        lane dispatch; the red verification build enters cycle 2)."""
+        lane dispatch; the red verification build enters cycle 2).
+
+        A01: ``canceled``/``abandoned`` are NOT here — they are
+        infrastructure evidence and block instead of repairing (see
+        ``test_canceled_build_is_infrastructure_never_repair``)."""
         service = make_service(
             db, fake, settings=make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
         )
@@ -1564,6 +1578,138 @@ class TestVerificationGate:
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.CANCELLED.value  # superseded, never revived
+
+    # -- A01: the positive-proof contract on the Azure gate -------------------
+
+    @pytest.mark.parametrize("result", ["canceled", "abandoned"])
+    async def test_canceled_build_is_infrastructure_never_repair(self, db, fake, result):
+        """A01 AC3: a canceled/abandoned validation build is evidence the
+        EXECUTION died — the run parks as infrastructure and the repair
+        budget is never spent on it (no lane re-dispatch)."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, result=result)
+        reviewer = StubAzureReviewer()
+        service._stack = make_stack(fake, reviewer=reviewer)
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("verification_infrastructure")
+        assert "CI" in (run.status_reason or "")  # the offending build is named
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert fake.pipeline_calls == []  # no repair dispatch
+        assert reviewer.calls == []  # no review, no ready
+
+    async def test_required_build_absent_with_a_green_docs_pipeline_never_verifies(self, db, fake):
+        """A01 AC1 + A02: the required list comes from the FROZEN spec — a
+        green optional `docs` pipeline proves nothing while `tests` never
+        ran, even when live settings drift to empty after the freeze."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["verification"] == {"required_jobs": ["tests"]}
+        settings.FORGE_REQUIRED_JOBS = ""  # the post-gate drift A01 is immune to
+        fake.seed_build(source_version=candidate_sha, definition_name="docs", result="succeeded")
+        reviewer = StubAzureReviewer()
+        service._stack = make_stack(fake, reviewer=reviewer)
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # unknown — keep waiting
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["tested_oid"] == candidate_sha
+        assert "tests" in verification["summary"]
+        assert verification["surface"] == [
+            {
+                "name": "docs",
+                "result": "succeeded",
+                "build_id": verification["surface"][0]["build_id"],
+                "source_version": candidate_sha,
+            }
+        ]
+        # the A01 identity keys really ride the entry
+        assert set(verification["surface"][0]) == {
+            "name",
+            "result",
+            "build_id",
+            "source_version",
+        }
+        assert reviewer.calls == []  # the gate never let it reach review
+
+    async def test_unproven_required_still_blocks_on_the_verification_deadline(self, db, fake):
+        """Unknown is a WAITING verdict — the R17 deadline is the bound."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha, definition_name="docs", result="succeeded")
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            await session.commit()
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("verification_timeout")
+
+    async def test_human_push_during_review_supersedes_the_candidate(self, db, fake):
+        """A01 AC4: a push that lands while the LLM review is in flight
+        invalidates the candidate-specific result — superseded evidence,
+        never READY (the F19 parity of the GitLab leg)."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha)
+        branch = azure_factory_branch(WORK_ITEM, run_id)
+        moved_head = "9" * 40
+
+        class BranchMovingReviewer(StubAzureReviewer):
+            async def review(self, **kwargs):
+                # the human push lands while the review is in flight
+                fake.seed_commit(branch, moved_head, "human push during review")
+                return await super().review(**kwargs)
+
+        service._stack = make_stack(fake, reviewer=BranchMovingReviewer())
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("candidate_drift_after_review")
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["tested_oid"] == moved_head
+        assert "superseded" in verification["summary"]
+        assert len(service._stack.reviewer.calls) == 1  # the review DID run
+
+    async def test_verified_fragment_binds_the_provider_source_version(self, db, fake):
+        """A01: tested_oid is the sha the PROVIDER verified (the matched
+        build's sourceVersion), never a self-asserted candidate."""
+        service = make_service(db, fake)
+        run_id, candidate_sha = await drive_to_waiting_ci(service, fake)
+        fake.seed_build(source_version=candidate_sha)
+
+        await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "passed"
+        assert verification["tested_oid"] == candidate_sha
+        assert verification["surface"][0]["source_version"] == candidate_sha
 
 
 class TestWorkerVerificationPass:

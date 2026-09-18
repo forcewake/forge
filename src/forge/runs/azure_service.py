@@ -179,7 +179,15 @@ from forge.runs.spec import (
     SpecLegacy,
     load_verified_spec,
 )
-from forge.runs.verification import PRODUCER_AZURE_BUILD
+from forge.runs.verification import (
+    AZURE_CODE_FAILURE_RESULTS,
+    AZURE_INFRA_RESULTS,
+    AZURE_SUCCESS_RESULTS,
+    PRODUCER_AZURE_BUILD,
+    VERIFICATION_INFRA_REASON,
+    evaluate_positive_proof,
+    waived_conclusions_from_settings,
+)
 from forge.runs.service import (
     _CANCEL_RE,
     _DECISION_TTL_FALLBACK_SECONDS,
@@ -220,11 +228,11 @@ _ACTIVE_BUILD_STATUSES: frozenset[str] = frozenset(
     {"notStarted", "inProgress", "postponed", "cancelling"}
 )
 
-#: Build ``result`` values that blame the change (ADR-0008): not fully green
-#: is not green — ``partiallySucceeded`` fails branch-policy validation too.
-_RED_BUILD_RESULTS: frozenset[str] = frozenset(
-    {"failed", "canceled", "partiallySucceeded", "abandoned"}
-)
+#: A01: the build ``result`` classification lives in
+#: :mod:`forge.runs.verification` — ``AZURE_CODE_FAILURE_RESULTS``
+#: (``failed``/``partiallySucceeded``, the ONLY repair triggers) and
+#: ``AZURE_INFRA_RESULTS`` (``canceled``/``abandoned`` — the execution died,
+#: infrastructure, never a code repair).
 
 
 def azure_factory_branch(issue_number: int, run_id: str) -> str:
@@ -2728,6 +2736,39 @@ class AzureRunService:
             )
             return
 
+        # A01 (F19 parity with the GitLab leg): fresh-head + cancellation
+        # re-check BEFORE verified-ready. The LLM review takes time; a human
+        # push (or a cancel) that lands during it invalidates the
+        # candidate-specific result — the evidence becomes superseded and
+        # the run never reaches READY on a stale candidate.
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None or run.status != FlowStatus.REVIEWING.value:
+                return  # moved on/cancelled elsewhere — superseded, never revived
+            if run.cancel_requested:
+                logger.info("Run %s cancelled during review — the leg stands down", run_id[:8])
+                return
+        observed_head, enforceable = await self._observed_candidate_head(run_id, issue_number)
+        if enforceable and observed_head != candidate_sha:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        observed_head or "unknown",
+                        PRODUCER_AZURE_BUILD,
+                        summary="superseded: the branch head moved past the reviewed candidate",
+                        status="unknown",
+                    )
+                },
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                "candidate_drift_after_review: branch head moved past the reviewed candidate",
+            )
+            return
+
         # ADR-0027: one reason source and the iron finalization checks,
         # shared with the GitLab/GitHub legs (forge.runs.consistency).
         reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
@@ -2743,6 +2784,31 @@ class AzureRunService:
             await controller.transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
             await session.commit()
         logger.info("Azure DevOps run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
+
+    async def _observed_candidate_head(
+        self, run_id: str, issue_number: int
+    ) -> tuple[str | None, bool]:
+        """The candidate branch's ACTUAL head oid, re-read from the provider.
+
+        The Azure twin of the GitHub freshness read (A01): the reviewed
+        candidate must still BE the branch head the moment the run goes
+        ready. Returns ``(observed_oid, enforceable)`` — ``enforceable =
+        False`` means the provider could not answer (gone ref, transport
+        error) and the freshness check NEVER blocks on its own read
+        failures: the verification verdict above is already provider-proven
+        for the exact sha.
+        """
+        branch = azure_factory_branch(issue_number, run_id)
+        try:
+            head = await self._stack.client.get_branch_head(self._project, self._repo, branch)
+        except AzureDevOpsError as exc:
+            logger.warning(
+                "Run %s branch head read failed (%s) — freshness unconfirmable",
+                run_id[:8],
+                exc,
+            )
+            return None, False
+        return head, True
 
     # ------------------------------------------------------------------
     # Pipelines lane adoption (the AZ-3 reconciler's drive end)
@@ -3153,14 +3219,26 @@ class AzureRunService:
     # ------------------------------------------------------------------
 
     async def evaluate_waiting_ci_one(self, run_id: str, now: datetime | None = None) -> None:
-        """One verification pass over a waiting_ci run (R02).
+        """One verification pass over a waiting_ci run (R02, A01).
 
-        The candidate commit's builds are an independent gate: pending →
-        keep waiting (bounded); any red build → ADR-0008 repair-in-place
-        while commit cycles remain, else ``blocked(quality_contract)``; all
-        green → review; NO builds at all after the grace window → review as
+        The candidate commit's builds are an independent gate judged by the
+        POSITIVE-PROOF contract (:mod:`forge.runs.verification`, the GitHub
+        semantics mirrored): pending → keep waiting (bounded); a result that
+        blames the change → ADR-0008 repair-in-place while commit cycles
+        remain, else ``blocked(quality_contract)``; canceled/abandoned →
+        infrastructure (blocked, NEVER repaired); the required checks (the
+        FROZEN spec list) absent → an honest ``unknown`` verdict that keeps
+        waiting — a green optional pipeline never substitutes; every
+        required check proven succeeded for the exact sourceVersion →
+        review; NO builds at all after the grace window → review as
         honestly **unverified** (evidence records it; the ready reason says
         so — never presented as verified).
+
+        A01 identity rules: the lane pipeline is excluded by the id FROZEN
+        in the spec (never a name, never live settings); the verdict binds
+        to the sourceVersion the PROVIDER verified, and
+        ``_review_and_ready`` re-reads the actual branch head and the
+        cancellation grant before any READY.
 
         R17 (deadline-before-I/O): the verification budget and the cancel
         grant are evaluated LOCALLY before the provider is touched — a
@@ -3170,8 +3248,7 @@ class AzureRunService:
         R04/A02: the frozen executable spec is read digest-verified on every
         pass — it names the lane pipeline that is execution (excluded from
         the verification surface) and carries the required-checks contract
-        (the check-proof semantics are a later issue; the REQUIRED list is
-        frozen now). A missing/tampered spec blocks the run
+        this gate enforces. A missing/tampered spec blocks the run
         (``spec_invalid``); a legacy v2 spec parks
         ``spec_legacy: re-approval required``.
         """
@@ -3267,12 +3344,69 @@ class AzureRunService:
             # a Builds API that never answers cannot hold the run forever.
             return
 
-        red = [b for b in builds if str(b.get("result") or "") in _RED_BUILD_RESULTS]
-        if red:
-            # ADR-0008: an independent build failure blames the change —
-            # bounded repair while cycles remain, else an honest blocked
-            # state with the failing build names.
-            names = ", ".join(sorted({_build_name(b) for b in red}))
+        # A01 positive proof (the GitHub contract, mirrored): the newest
+        # build of each definition is the authoritative observation; the
+        # required list comes from the FROZEN spec (the lane contract's
+        # required check names, never live settings), and the tested oid is
+        # the sourceVersion the PROVIDER verified — not a self-asserted one.
+        ordered = sorted(builds, key=_build_order_key, reverse=True)
+        observations: dict[str, str | None] = {}
+        for build in ordered:
+            observations.setdefault(_build_name(build), str(build.get("result") or "") or None)
+        tested_oid = str(ordered[0].get("sourceVersion") or "") or candidate_sha
+        proof = evaluate_positive_proof(
+            spec.required_jobs,
+            observations,
+            success_conclusions=AZURE_SUCCESS_RESULTS,
+            code_failure_conclusions=AZURE_CODE_FAILURE_RESULTS,
+            infra_conclusions=AZURE_INFRA_RESULTS,
+            waived_conclusions=waived_conclusions_from_settings(self._settings),
+        )
+        surface = tuple(
+            {
+                "name": _build_name(build),
+                "result": str(build.get("result") or "") or None,
+                **({"build_id": int(build["id"])} if build.get("id") else {}),
+                **(
+                    {"source_version": str(build.get("sourceVersion") or "")}
+                    if build.get("sourceVersion")
+                    else {}
+                ),
+            }
+            for build in ordered
+        )
+
+        if proof.infra_failures:
+            # A canceled/abandoned build is evidence the EXECUTION died —
+            # infrastructure, never a code failure. The repair budget is for
+            # code failures only; the run blocks visibly instead.
+            names = ", ".join(proof.infra_failures)
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        tested_oid,
+                        PRODUCER_AZURE_BUILD,
+                        summary=f"builds canceled or abandoned: {names}",
+                        status="unknown",
+                        surface=surface,
+                    )
+                },
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"{VERIFICATION_INFRA_REASON}: builds {names} were canceled or abandoned "
+                "— infrastructure, not a code failure (no repair)",
+            )
+            return
+
+        if proof.code_failures:
+            # ADR-0008: only a result that blames the change drives the
+            # bounded repair loop (required checks prove, optional ones
+            # neither block nor substitute — A01).
+            names = ", ".join(proof.code_failures)
             await self._begin_repair(
                 run_id,
                 project_id=project_id,
@@ -3282,23 +3416,45 @@ class AzureRunService:
             )
             return
 
-        # ADR-0027: the unified R02 evidence shape via forge.runs.consistency.
+        if proof.unproven:
+            # Required checks absent (or waived-ineligible inconclusive): NO
+            # proof — a green optional pipeline never substitutes. The
+            # verdict is honestly unknown and the run keeps waiting; the
+            # R17 deadline is the bound.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        tested_oid,
+                        PRODUCER_AZURE_BUILD,
+                        summary=proof.summary(),
+                        status="unknown",
+                        surface=surface,
+                    )
+                },
+            )
+            logger.info(
+                "Run %s required checks unproven (%s) — keeping it waiting",
+                run_id[:8],
+                proof.summary(),
+            )
+            return
+
+        # ADR-0027: the unified R02 evidence shape via forge.runs.consistency,
+        # bound to the sourceVersion the provider verified.
         verification_fragment = ready_evidence(
             True,
-            candidate_sha,
+            tested_oid,
             PRODUCER_AZURE_BUILD,
-            summary="all candidate builds succeeded",
-            surface=(
-                {"name": _build_name(b), "result": str(b.get("result") or "")} for b in builds
-            ),
+            summary="required checks succeeded for the tested sha",
+            surface=surface,
         )
         await self._merge_run_evidence(
             run_id,
             {"verification": verification_fragment},
         )
-        await self._transition(
-            run_id, FlowStatus.EVALUATING_CI, reason="candidate builds succeeded"
-        )
+        await self._transition(run_id, FlowStatus.EVALUATING_CI, reason="required checks passed")
         await self._review_and_ready(
             run_id,
             project_id=project_id,
@@ -4312,6 +4468,15 @@ def _build_definition_id(build: dict) -> int | None:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _build_order_key(build: dict) -> int:
+    """Newest-build-first ordering key (the build id grows monotonically)."""
+    raw = build.get("id")
+    try:
+        return int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _build_name(build: dict) -> str:

@@ -1353,6 +1353,385 @@ class TestExecutableSpecA02:
         assert "re-approval required" in (run.status_reason or "")
 
 
+# ----------------------------------------------------------------------
+# A01: the positive-proof verification contract (GitHub gate)
+# ----------------------------------------------------------------------
+
+
+def workflow_run(
+    sha: str,
+    name: str,
+    conclusion: str | None,
+    *,
+    status: str = "completed",
+    path: str | None = None,
+    run_id: int | None = None,
+    attempt: int | None = None,
+) -> dict:
+    """One Actions workflow-run payload shaped like the runs-list answer."""
+    run: dict = {"head_sha": sha, "name": name, "status": status, "conclusion": conclusion}
+    if path is not None:
+        run["path"] = path
+    if run_id is not None:
+        run["id"] = run_id
+    if attempt is not None:
+        run["run_attempt"] = attempt
+    return run
+
+
+class PRHeadMover(StubPRReviewer):
+    """A reviewer during whose (in-flight) run a human push lands — the
+    PR's head sha moves past the reviewed candidate mid-review."""
+
+    def __init__(self, fake: FakeGitHub, new_head: str) -> None:
+        super().__init__()
+        self._fake = fake
+        self._new_head = new_head
+
+    async def review(self, **kwargs):
+        for pr in self._fake.pull_requests.get(REPO, []):
+            pr["head"]["sha"] = self._new_head
+        return await super().review(**kwargs)
+
+
+async def drive_to_waiting_ci(db, service: GitHubRunService, fake: FakeGitHub) -> tuple[str, str]:
+    """start_run → /go on the builtin lane → the run parked in waiting_ci.
+
+    Returns (run_id, candidate_sha)."""
+    run_id = await start(service)
+    clear_comments(fake)
+    await go(service, run_id)
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.WAITING_CI.value
+    return run_id, run.candidate_shas[-1]
+
+
+class TestPositiveVerification:
+    """A01: verified=True is POSITIVE PROOF — every REQUIRED check from the
+    FROZEN spec list must be present with an explicitly successful
+    conclusion for the exact candidate sha. Green optional checks never
+    substitute; skipped/neutral are unknown (the FORGE_VERIFICATION_WAIVE_
+    CONCLUSIONS policy waiver is the only bridge); cancelled/timed_out are
+    infrastructure and never repair; a human push during the LLM review
+    supersedes the candidate — never READY."""
+
+    async def test_required_absent_with_a_green_docs_workflow_never_verifies(self, db, fake):
+        """A01 AC1: the required `tests` check never ran; a green
+        `documentation` workflow proves nothing — the run keeps waiting
+        with an honest unknown verdict (it never verifies, never repairs,
+        never reviews)."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "documentation", "success")])
+        reviewer = StubPRReviewer()
+        service._stack = make_stack(fake, reviewer=reviewer)
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # unknown — keep waiting
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["tested_oid"] == candidate
+        assert "tests" in verification["summary"]
+        assert verification["surface"] == [{"name": "documentation", "conclusion": "success"}]
+        assert reviewer.calls == []  # the gate never let it reach review
+
+    async def test_unproven_required_still_blocks_on_the_verification_deadline(self, db, fake):
+        """Unknown is a WAITING verdict — the R17 deadline is the bound: a
+        required check that never registers parks verification_timeout."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id, _candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run("d" * 40, "documentation", "success")])
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            await session.commit()
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("verification_timeout")
+
+    async def test_skipped_required_check_is_unknown_without_a_waiver(self, db, fake):
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["surface"] == [{"name": "tests", "conclusion": "skipped"}]
+
+    async def test_neutral_required_check_is_unknown(self, db, fake):
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "neutral")])
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert (run.evidence or {})["verification"]["status"] == "unknown"
+
+    async def test_waiver_config_flips_a_skipped_required_to_verified(self, db, fake):
+        """FORGE_VERIFICATION_WAIVE_CONCLUSIONS is the explicit deployment
+        policy that lets a skipped required check count as satisfied."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests",
+            FORGE_VERIFICATION_WAIVE_CONCLUSIONS="skipped,neutral",
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "passed"
+        assert verification["tested_oid"] == candidate  # the provider-verified sha
+        assert run.status_reason == "checks passed; merge is a human decision"
+
+    @pytest.mark.parametrize("conclusion", ["cancelled", "timed_out"])
+    async def test_cancelled_or_timed_out_is_infrastructure_never_repair(
+        self, db, fake, conclusion
+    ):
+        """A01 AC3: a cancelled/timed_out workflow run is evidence the
+        EXECUTION died — the run parks as infrastructure and the repair
+        budget is never spent on it."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", conclusion)])
+        reviewer = StubPRReviewer()
+        service._stack = make_stack(fake, reviewer=reviewer)
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("verification_infrastructure")
+        assert "tests" in (run.status_reason or "")  # the offending check is named
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert reviewer.calls == []  # no review, no repair, no ready
+
+    async def test_human_push_during_review_supersedes_the_candidate(self, db, fake):
+        """A01 AC4: a push that lands while the LLM review is in flight
+        invalidates the candidate-specific result — superseded evidence,
+        never READY (the F19 parity of the GitLab leg)."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "success")])
+        moved_head = "9" * 40
+        service._stack = make_stack(fake, reviewer=PRHeadMover(fake, moved_head))
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("candidate_drift_after_review")
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["tested_oid"] == moved_head
+        assert "superseded" in verification["summary"]
+        assert len(service._stack.reviewer.calls) == 1  # the review DID run
+
+    async def test_cancel_during_review_stands_the_ready_down(self, db, fake):
+        """The cancellation generation is re-read with the fresh head: a
+        cancel that lands during the review revokes the READY."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "success")])
+
+        original_review = service._stack.reviewer.review
+
+        async def cancelling_review(**kwargs):
+            # the cancel lands while the review is in flight
+            async with db() as session:
+                run = await session.get(FlowRun, run_id)
+                run.cancel_requested = True
+                await session.commit()
+            return await original_review(**kwargs)
+
+        service._stack.reviewer.review = cancelling_review  # type: ignore[method-assign]
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.REVIEWING.value  # stood down — never READY
+
+    async def test_required_list_comes_from_the_frozen_spec_not_live_settings(self, db, fake):
+        """A02 integration: the proof set is the spec's frozen
+        `required_jobs` — mutating FORGE_REQUIRED_JOBS after the freeze
+        cannot weaken the gate."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["verification"] == {"required_jobs": ["tests"]}
+        # the post-gate settings drift that A01 must be immune to:
+        settings.FORGE_REQUIRED_JOBS = ""
+        fake.seed_workflow_runs([workflow_run(candidate, "documentation", "success")])
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # the FROZEN list enforced
+        assert (run.evidence or {})["verification"]["status"] == "unknown"
+
+    async def test_verified_surface_records_the_native_run_identity(self, db, fake):
+        """A01: the surface carries the FULL check identity — the native
+        run id and the attempt that produced the conclusion."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=777,
+                    attempt=2,
+                )
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["surface"] == [
+            {"name": "tests", "conclusion": "success", "run_id": 777, "attempt": 2}
+        ]
+
+    async def test_harness_lane_is_excluded_by_path_not_display_name(self, db, fake):
+        """A01 identity rule: the harness lane is excluded by the workflow
+        PATH encoding the spec-frozen FILENAME — a harness run whose
+        display NAME differs from the filename is still excluded, and its
+        green conclusion never substitutes for a required check."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests",
+            FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)  # the frozen lane dispatch → waiting_harness
+        branch = f"forge/{ISSUE}/{run_id[:8]}"
+        candidate = "a" * 40
+        fake.seed_commit(REPO, branch, candidate, "lane candidate")
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.WAITING_CI.value
+            run.candidate_shas = [candidate]
+            await session.commit()
+        # The harness ran for the candidate sha and "succeeded" — but it is
+        # EXECUTION, not verification. Its display name is NOT the filename.
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "Forge Harness",
+                    "success",
+                    path=f".github/workflows/{WORKFLOW}",
+                ),
+                workflow_run(candidate, "tests", "success", path=".github/workflows/tests.yml"),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "passed"
+        # Only the independent check is on the surface — the harness is gone.
+        assert verification["surface"] == [{"name": "tests", "conclusion": "success"}]
+
+    async def test_a_display_name_decoy_is_never_treated_as_the_harness(self, db, fake):
+        """The OLD name-based exclusion dropped any run whose display name
+        equaled the harness FILENAME — a decoy workflow named exactly that
+        masked the whole verification surface. Exclusion is by PATH: the
+        decoy is an (insufficient, optional) observation, so the missing
+        required check keeps the run waiting — never not_configured-ready."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests",
+            FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW,
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id = await start(service)
+        clear_comments(fake)
+        await go(service, run_id)
+        branch = f"forge/{ISSUE}/{run_id[:8]}"
+        candidate = "b" * 40
+        fake.seed_commit(REPO, branch, candidate, "lane candidate")
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.WAITING_CI.value
+            run.candidate_shas = [candidate]
+            await session.commit()
+        # A decoy whose DISPLAY NAME equals the frozen filename but whose
+        # path is an unrelated workflow, and it is green.
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    WORKFLOW,
+                    "success",
+                    path=".github/workflows/docs.yml",
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        # Old behavior: the decoy was excluded "as the harness" → empty
+        # surface → not_configured → READY. New behavior: the decoy is an
+        # observation; `tests` is unproven → waiting with unknown.
+        assert run.status == FlowStatus.WAITING_CI.value
+        verification = (run.evidence or {})["verification"]
+        assert verification["status"] == "unknown"
+        assert verification["surface"] == [{"name": WORKFLOW, "conclusion": "success"}]
+
+    async def test_code_failure_on_a_required_check_still_enters_repair(self, db, fake):
+        """The proof contract keeps ADR-0008: a conclusion that blames the
+        change on a required check is the ONLY repair trigger."""
+        service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(candidate, "tests", "failure"),
+                workflow_run(candidate, "documentation", "success"),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        # The frozen builtin lane has no repair dispatch — it blocks with
+        # the honest quality_contract reason naming the failed check.
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "quality_contract" in (run.status_reason or "")
+        assert "tests" in (run.status_reason or "")
+
+
 def test_gateway_commands_are_reachable_through_the_dispatch_guard():
     """Regression (LIVE-found): /retry was accepted by the gateway, routed
     below, and then silently dropped by the dispatch GUARD set that did not

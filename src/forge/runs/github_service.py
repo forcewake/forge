@@ -165,7 +165,15 @@ from forge.runs.spec import (
     SpecLegacy,
     load_verified_spec,
 )
-from forge.runs.verification import PRODUCER_GITHUB_CHECKS
+from forge.runs.verification import (
+    GITHUB_CODE_FAILURE_CONCLUSIONS,
+    GITHUB_INFRA_CONCLUSIONS,
+    GITHUB_SUCCESS_CONCLUSIONS,
+    PRODUCER_GITHUB_CHECKS,
+    VERIFICATION_INFRA_REASON,
+    evaluate_positive_proof,
+    waived_conclusions_from_settings,
+)
 from forge.runs.service import (
     _CANCEL_RE,
     _DECISION_TTL_FALLBACK_SECONDS,
@@ -188,6 +196,39 @@ _VERIFICATION_NOTE = (
 #: ready-reason prefix (forge.runs.consistency) — no CI checks exist on the
 #: repo (R02).
 UNVERIFIED_DETAIL = "no CI configured"
+
+
+def _harness_lane_run(run: Mapping[str, Any], harness_workflow: str) -> bool:
+    """Whether one workflow-run payload IS the harness lane (execution).
+
+    A01: the lane is matched by workflow IDENTITY — the run's ``path``,
+    which encodes the workflow FILENAME frozen in the spec
+    (``.github/workflows/<harness_workflow>``) — never by the mutable
+    display ``name``. The display name is only the legacy fallback for
+    payloads that carry no path (old GHES), so a decoy workflow merely
+    NAMED like the harness file can never mask the verification surface.
+    """
+    if not harness_workflow:
+        return False
+    path = str(run.get("path") or "").strip()
+    if path:
+        return path == f".github/workflows/{harness_workflow}"
+    return str(run.get("name") or "").strip() == harness_workflow
+
+
+def _run_int(run: Mapping[str, Any], key: str) -> int:
+    """An int field of a workflow-run payload, 0 when absent/unparseable."""
+    raw = run.get(key)
+    try:
+        return int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _run_order_key(run: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Newest-attempt-first ordering key (attempt, run number, run id)."""
+    return (_run_int(run, "run_attempt"), _run_int(run, "run_number"), _run_int(run, "id"))
+
 
 #: Backoff the publication-intent scanner applies to an open intent whose
 #: probe says "nothing landed, head intact" — the run's own publish leg owns
@@ -3230,13 +3271,25 @@ class GitHubRunService:
         # verified (or honestly unverified) run continues to review.
 
     async def evaluate_waiting_ci_one(self, run_id: str, now=None) -> None:
-        """One verification pass over a waiting_ci run (R02).
+        """One verification pass over a waiting_ci run (R02, A01).
 
-        The candidate's PR checks are an independent gate: pending → keep
-        waiting (bounded); any failure → ADR-0008 classification (repair if
-        budget remains, else blocked); all green → review; NO checks at all
-        → review as honestly **unverified** (evidence records it; the ready
-        reason says so — never presented as verified).
+        The candidate's PR checks are an independent gate judged by the
+        POSITIVE-PROOF contract (:mod:`forge.runs.verification`): pending →
+        keep waiting (bounded); a conclusion that blames the change →
+        ADR-0008 classification (repair if budget remains, else blocked);
+        cancelled/timed_out → infrastructure (blocked, NEVER repaired); the
+        required checks (the FROZEN spec list) absent/skipped/neutral → an
+        honest ``unknown`` verdict that keeps waiting — a green optional
+        workflow never substitutes; every required check proven successful
+        → review. NO checks at all → review as honestly **unverified**
+        (evidence records it; the ready reason says so — never presented as
+        verified).
+
+        A01 identity rules: the harness lane is excluded by workflow
+        PATH/IDENTITY (the spec-frozen FILENAME on the run's ``path``),
+        never by display name; the verdict binds to the head sha the
+        PROVIDER verified, and ``_review_and_ready`` re-reads the actual PR
+        head and the cancellation grant before any READY.
 
         R17 (deadline-before-I/O): the verification budget and the cancel
         grant are evaluated LOCALLY before the provider is touched — a
@@ -3246,8 +3299,7 @@ class GitHubRunService:
         R04/A02: the frozen executable spec is read digest-verified on every
         pass — it names the harness workflow that is execution (excluded
         from the verification surface) and carries the required-checks
-        contract (A01 consumes the proof semantics; the REQUIRED list is
-        frozen now). A missing/tampered spec blocks the run
+        contract this gate enforces. A missing/tampered spec blocks the run
         (``spec_invalid``); a legacy v2 spec parks
         ``spec_legacy: re-approval required``.
         """
@@ -3295,10 +3347,11 @@ class GitHubRunService:
         except Exception:
             logger.exception("Checks read failed for %s — keeping it waiting", run_id[:8])
             return
-        # The harness lane itself is execution, not verification — exclude
-        # it by the workflow name FROZEN in the spec, never live settings.
+        # A01: the harness lane itself is execution, not verification —
+        # excluded by workflow IDENTITY (the spec-frozen FILENAME matched on
+        # the run's `path`), never by the mutable display name.
         harness_workflow = spec.harness_workflow
-        checks = [r for r in runs if not (harness_workflow and r.get("name") == harness_workflow)]
+        checks = [r for r in runs if not _harness_lane_run(r, harness_workflow)]
 
         if not checks:
             # RACE GUARD: a just-opened PR's checks take a few seconds to
@@ -3349,22 +3402,79 @@ class GitHubRunService:
             return
 
         pending = [c for c in checks if (c.get("status") or "") != "completed"]
-        failed = [
-            c
-            for c in checks
-            if (c.get("conclusion") or "")
-            in ("failure", "timed_out", "action_required", "cancelled")
-        ]
         if pending:
             # Bounded (R17): the deadline itself is enforced pre-I/O above —
             # a checks API that never answers cannot hold the run forever.
             return
 
-        if failed:
-            # ADR-0008: an independent check failure blames the change —
-            # bounded repair while cycles remain, else an honest blocked
-            # state with the failing check names.
-            names = ", ".join(sorted({c.get("name") or "check" for c in failed}))
+        # A01 positive proof: the newest attempt of each check is the
+        # authoritative observation; the required list comes from the FROZEN
+        # spec (never live settings), and the tested oid is the head sha the
+        # PROVIDER verified (every listed run carries head_sha == candidate).
+        ordered = sorted(checks, key=_run_order_key, reverse=True)
+        observations: dict[str, str | None] = {}
+        for workflow_run in ordered:
+            observations.setdefault(
+                str(workflow_run.get("name") or "check"),
+                str(workflow_run.get("conclusion") or "") or None,
+            )
+        tested_oid = str(ordered[0].get("head_sha") or "") or candidate_sha
+        proof = evaluate_positive_proof(
+            spec.required_jobs,
+            observations,
+            success_conclusions=GITHUB_SUCCESS_CONCLUSIONS,
+            code_failure_conclusions=GITHUB_CODE_FAILURE_CONCLUSIONS,
+            infra_conclusions=GITHUB_INFRA_CONCLUSIONS,
+            waived_conclusions=waived_conclusions_from_settings(self._settings),
+        )
+        surface = tuple(
+            {
+                "name": str(workflow_run.get("name") or "check"),
+                "conclusion": str(workflow_run.get("conclusion") or "") or None,
+                # A01: the FULL check identity rides the surface — the native
+                # run id and the attempt that produced this conclusion (the
+                # verified sha itself is the fragment-level ``tested_oid``).
+                **({"run_id": _run_int(workflow_run, "id")} if workflow_run.get("id") else {}),
+                **(
+                    {"attempt": _run_int(workflow_run, "run_attempt")}
+                    if workflow_run.get("run_attempt")
+                    else {}
+                ),
+            }
+            for workflow_run in ordered
+        )
+
+        if proof.infra_failures:
+            # A cancelled/timed_out workflow run is evidence the EXECUTION
+            # died — infrastructure, never a code failure. The repair budget
+            # is for code failures only; the run blocks visibly instead.
+            names = ", ".join(proof.infra_failures)
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        tested_oid,
+                        PRODUCER_GITHUB_CHECKS,
+                        summary=f"checks cancelled or timed out: {names}",
+                        status="unknown",
+                        surface=surface,
+                    )
+                },
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"{VERIFICATION_INFRA_REASON}: checks {names} were cancelled or timed out "
+                "— infrastructure, not a code failure (no repair)",
+            )
+            return
+
+        if proof.code_failures:
+            # ADR-0008: only a conclusion that blames the change drives the
+            # bounded repair loop (required checks prove, optional ones
+            # neither block nor substitute — A01).
+            names = ", ".join(proof.code_failures)
             await self._begin_repair(
                 run_id,
                 project_id=run.project_id,
@@ -3374,15 +3484,39 @@ class GitHubRunService:
             )
             return
 
+        if proof.unproven:
+            # Required checks absent/skipped/neutral (unwaived): NO proof —
+            # a green optional workflow never substitutes. The verdict is
+            # honestly unknown and the run keeps waiting (a late check may
+            # still register); the R17 deadline is the bound.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        tested_oid,
+                        PRODUCER_GITHUB_CHECKS,
+                        summary=proof.summary(),
+                        status="unknown",
+                        surface=surface,
+                    )
+                },
+            )
+            logger.info(
+                "Run %s required checks unproven (%s) — keeping it waiting",
+                run_id[:8],
+                proof.summary(),
+            )
+            return
+
         # ADR-0027: the unified R02 evidence shape (one key set on every
-        # provider — ``tested_oid``/``surface`` via forge.runs.consistency;
-        # the hand-rolled ``candidate_sha``/``checks`` variant is gone).
+        # provider — ``tested_oid`` is the sha the provider verified).
         verification_fragment = ready_evidence(
             True,
-            candidate_sha,
+            tested_oid,
             PRODUCER_GITHUB_CHECKS,
-            summary="all PR checks succeeded",
-            surface=({"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks),
+            summary="required checks succeeded for the tested sha",
+            surface=surface,
         )
         await self._merge_run_evidence(
             run_id,
@@ -3393,7 +3527,7 @@ class GitHubRunService:
             await controller.transition(
                 run_id,
                 FlowStatus.EVALUATING_CI,
-                reason="PR checks passed",
+                reason="required checks passed",
             )
             await session.commit()
         await self._review_and_ready(
@@ -3564,6 +3698,39 @@ class GitHubRunService:
             )
             return
 
+        # A01 (F19 parity with the GitLab leg): fresh-head + cancellation
+        # re-check BEFORE verified-ready. The LLM review takes time; a human
+        # push (or a cancel) that lands during it invalidates the
+        # candidate-specific result — the evidence becomes superseded and
+        # the run never reaches READY on a stale candidate.
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, run_id)
+            if run is None or run.status != FlowStatus.REVIEWING.value:
+                return  # moved on/cancelled elsewhere — superseded, never revived
+            if run.cancel_requested:
+                logger.info("Run %s cancelled during review — the leg stands down", run_id[:8])
+                return
+        observed_head, enforceable = await self._observed_candidate_head(run_id, issue_number)
+        if enforceable and observed_head != candidate_sha:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "verification": ready_evidence(
+                        False,
+                        observed_head or "unknown",
+                        PRODUCER_GITHUB_CHECKS,
+                        summary="superseded: the PR head moved past the reviewed candidate",
+                        status="unknown",
+                    )
+                },
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                "candidate_drift_after_review: PR head moved past the reviewed candidate",
+            )
+            return
+
         verified = bool(verified)
         # ADR-0027: one reason source and the iron finalization checks,
         # shared with the GitLab/Azure legs (forge.runs.consistency).
@@ -3580,6 +3747,43 @@ class GitHubRunService:
             await controller.transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
             await session.commit()
         logger.info("GitHub run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
+
+    async def _observed_candidate_head(
+        self, run_id: str, issue_number: int
+    ) -> tuple[str | None, bool]:
+        """The candidate branch's ACTUAL head oid, re-read from the provider.
+
+        A01: the freshness check compares the REVIEWED candidate against the
+        PR head (the deliverable a human push moves); when no open PR
+        exists, the branch head is the fallback signal. Returns
+        ``(observed_oid, enforceable)`` — ``enforceable=False`` means the
+        provider could not answer (no PR, gone branch, transport error), and
+        the freshness check NEVER blocks on its own read failures: the
+        verification verdict above is already provider-proven for the exact
+        sha, and a transient read must not veto it (the divergence from the
+        GitLab leg's fail-closed read is deliberate — its branch always
+        exists; the GitHub deliverable can be legitimately absent).
+        """
+        branch = github_factory_branch(issue_number, run_id)
+        try:
+            pr = await self._stack.client.get_pr_by_head(self._owner, self._repo, branch)
+        except GitHubAPIError as exc:
+            logger.warning(
+                "Run %s PR head read failed (%s) — freshness unconfirmable", run_id[:8], exc
+            )
+            return None, False
+        if pr is not None:
+            return str((pr.get("head") or {}).get("sha") or ""), True
+        try:
+            head = await self._stack.client.get_branch_head(self._owner, self._repo, branch)
+        except GitHubAPIError as exc:
+            logger.warning(
+                "Run %s branch head read failed (%s) — freshness unconfirmable",
+                run_id[:8],
+                exc,
+            )
+            return None, False
+        return head, True
 
     # ------------------------------------------------------------------
     # Helpers

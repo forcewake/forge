@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     # grace elapses the verifier keeps waiting instead of concluding
     # "no CI configured" (live-found race on the dogfood cycle).
     FORGE_VERIFICATION_GRACE_SECONDS: int = 120
+    # A01 positive-proof policy waiver: comma-separated provider check
+    # conclusions/results a deployment explicitly ACCEPTS on a REQUIRED
+    # check (e.g. "skipped,neutral"). Default empty — a skipped/neutral/
+    # unknown conclusion on a required check never verifies the run. The
+    # waiver can never apply to failure-class or cancelled/timed_out
+    # conclusions (those blame the change or the infrastructure).
+    FORGE_VERIFICATION_WAIVE_CONCLUSIONS: str = ""
     # HMAC-SHA256 secret for X-Hub-Signature-256 validation. None/empty →
     # ingress disabled (503), matching the fail-closed MCP pattern above.
     FORGE_GITHUB_WEBHOOK_SECRET: SecretStr | None = None

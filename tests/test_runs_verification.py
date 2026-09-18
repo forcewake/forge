@@ -26,11 +26,21 @@ from forge.models.base import Base
 from forge.runs import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer, factory_branch
 from forge.runs.verification import (
+    AZURE_CODE_FAILURE_RESULTS,
+    AZURE_INFRA_RESULTS,
+    AZURE_SUCCESS_RESULTS,
     DEFAULT_FRESHNESS_WINDOW_SECONDS,
+    GITHUB_CODE_FAILURE_CONCLUSIONS,
+    GITHUB_INFRA_CONCLUSIONS,
+    GITHUB_SUCCESS_CONCLUSIONS,
     PRODUCER_GITLAB_PIPELINE,
+    VERIFICATION_INFRA_REASON,
+    PositiveProof,
     VerificationProfile,
     VerificationResult,
     evaluate,
+    evaluate_positive_proof,
+    waived_conclusions_from_settings,
 )
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
@@ -260,3 +270,147 @@ class TestPostReviewFreshness:
         await service.evaluate_waiting_ci()
 
         assert (await get_run(db, run_id)).status == FlowStatus.READY_FOR_HUMAN.value
+
+
+# ----------------------------------------------------------------------
+# A01: the positive-proof contract shared by the GitHub/Azure gates
+# ----------------------------------------------------------------------
+
+
+class TestPositiveProof:
+    """Verification is POSITIVE PROOF that the required checks RAN and
+    succeeded for the candidate commit — never "nothing failed" (A01).
+
+    The evaluator is provider-neutral: GitHub passes its conclusion
+    vocabulary, Azure its build results; the semantics are identical."""
+
+    def proof(
+        self,
+        required: tuple[str, ...],
+        observations: dict[str, str | None],
+        *,
+        waived: frozenset[str] = frozenset(),
+        azure: bool = False,
+    ) -> PositiveProof:
+        return evaluate_positive_proof(
+            required,
+            observations,
+            success_conclusions=AZURE_SUCCESS_RESULTS if azure else GITHUB_SUCCESS_CONCLUSIONS,
+            code_failure_conclusions=(
+                AZURE_CODE_FAILURE_RESULTS if azure else GITHUB_CODE_FAILURE_CONCLUSIONS
+            ),
+            infra_conclusions=AZURE_INFRA_RESULTS if azure else GITHUB_INFRA_CONCLUSIONS,
+            waived_conclusions=waived,
+        )
+
+    def test_required_absent_with_a_green_optional_is_never_verified(self):
+        """A01 AC1: the required `tests` check never ran — a green
+        `documentation` workflow proves nothing and never substitutes."""
+        proof = self.proof(("tests",), {"documentation": "success"})
+
+        assert proof.verified is False
+        assert proof.missing == ("tests",)
+        assert proof.unproven == ("tests",)
+        assert proof.code_failures == () and proof.infra_failures == ()
+        assert "tests" in proof.summary() and "not run" in proof.summary()
+
+    @pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
+    def test_inconclusive_required_conclusion_never_verifies(self, conclusion):
+        """A01 AC2: a skipped/neutral required check is not proof — the
+        verdict is unknown, not green."""
+        proof = self.proof(("tests",), {"tests": conclusion})
+
+        assert proof.verified is False
+        assert proof.inconclusive == ("tests",)
+
+    def test_missing_conclusion_is_inconclusive_not_missing(self):
+        """A check the provider observed but that concluded NOTHING carries
+        no proof either."""
+        proof = self.proof(("tests",), {"tests": None})
+
+        assert proof.verified is False
+        assert proof.inconclusive == ("tests",)
+        assert proof.missing == ()
+
+    def test_waiver_config_flips_an_inconclusive_required_to_verified(self):
+        """FORGE_VERIFICATION_WAIVE_CONCLUSIONS is the ONLY way a skipped/
+        neutral required check counts — an explicit deployment policy."""
+        proof = self.proof(
+            ("tests", "lint"),
+            {"tests": "skipped", "lint": "success"},
+            waived=frozenset({"skipped", "neutral"}),
+        )
+
+        assert proof.verified is True
+        assert proof.waived == ("tests",)
+        assert proof.succeeded == ("lint",)
+
+    @pytest.mark.parametrize("conclusion", ["failure", "cancelled", "timed_out"])
+    def test_the_waiver_can_never_flip_failure_or_infra_conclusions(self, conclusion):
+        """The waiver is for genuinely inconclusive conclusions only: a
+        failure-class or cancelled/timed_out conclusion never becomes proof."""
+        proof = self.proof(("tests",), {"tests": conclusion}, waived=frozenset({conclusion}))
+
+        assert proof.verified is False
+
+    def test_github_cancelled_and_timed_out_are_infrastructure(self):
+        """A01 AC3: cancel/timeout evidence blames the EXECUTION — the infra
+        class blocks, the code-repair budget is never spent on it."""
+        for conclusion, expected in (
+            ("cancelled", "infra_failure"),
+            ("timed_out", "infra_failure"),
+            ("failure", "code_failure"),
+            ("action_required", "code_failure"),
+            ("success", "succeeded"),
+        ):
+            proof = self.proof(("tests",), {"tests": conclusion})
+            state = (
+                "infra_failure"
+                if proof.infra_failures
+                else (
+                    "code_failure"
+                    if proof.code_failures
+                    else ("succeeded" if proof.verified else "inconclusive")
+                )
+            )
+            assert state == expected, conclusion
+
+    def test_azure_results_classify_the_same_way(self):
+        """Azure parity: succeeded proves; failed/partiallySucceeded blame
+        the change; canceled/abandoned are infrastructure. Matching is
+        case-insensitive (the Azure vocabulary is camelCase)."""
+        assert self.proof(("ci",), {"ci": "succeeded"}, azure=True).verified is True
+        assert self.proof(("ci",), {"ci": "SUCCEEDED"}, azure=True).verified is True
+        proof = self.proof(("ci",), {"ci": "partiallySucceeded"}, azure=True)
+        assert proof.code_failures == ("ci",) and proof.verified is False
+        for result in ("canceled", "abandoned"):
+            proof = self.proof(("ci",), {"ci": result}, azure=True)
+            assert proof.infra_failures == ("ci",) and proof.verified is False
+
+    def test_empty_required_contract_makes_every_observed_check_required(self):
+        """With NO frozen contract, every OBSERVED check is the proof set —
+        so a lone skipped workflow still never verifies without the waiver
+        (A01 AC2), while a green surface does."""
+        proof = self.proof((), {"ci": "skipped"})
+        assert proof.verified is False and proof.inconclusive == ("ci",)
+
+        proof = self.proof((), {"ci": "success", "docs": "success"})
+        assert proof.verified is True
+
+    def test_unobserved_names_only_count_when_required(self):
+        """Names nobody observed only matter when the contract REQUIRES
+        them — an empty required list never invents missing checks."""
+        proof = self.proof((), {})
+        assert proof.verified is True
+        proof = self.proof(("tests",), {})
+        assert proof.verified is False and proof.missing == ("tests",)
+
+    def test_waived_conclusions_parse_from_settings(self):
+        settings = make_settings(FORGE_VERIFICATION_WAIVE_CONCLUSIONS="Skipped, neutral ,")
+        assert waived_conclusions_from_settings(settings) == frozenset({"skipped", "neutral"})
+        assert waived_conclusions_from_settings(make_settings()) == frozenset()
+
+    def test_infra_reason_token_is_the_parked_vocabulary(self):
+        """The infra blocked reason is the verification_timeout-family token
+        both provider gates park runs with."""
+        assert VERIFICATION_INFRA_REASON == "verification_infrastructure"
