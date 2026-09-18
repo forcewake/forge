@@ -1019,6 +1019,9 @@ class GitHubRunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             run.cancel_requested = True
+            # R10: bump the fence so ExecutionClaims minted before this
+            # revoke are fenced out of publishing and guarded transitions.
+            run.cancellation_generation = (run.cancellation_generation or 0) + 1
             await session.execute(
                 update(StepRun)
                 .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
@@ -1200,6 +1203,12 @@ class GitHubRunService:
             return
 
         commit_oid = outcome.commit_oid or ""
+        if getattr(outcome, "superseded", False):
+            # The commit DID land, but a cancel won the publication race —
+            # the publisher stamped superseded evidence on the run. Walking
+            # toward ensuring_draft_mr/READY would resurrect a cancelled
+            # run (R10).
+            return
         async with self._session_factory() as session:
             controller = Controller(session)
             # Walk the intermediate states the publish leg covered in one

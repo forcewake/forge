@@ -913,6 +913,8 @@ class AzureRunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             run.cancel_requested = True
+            # R10: bump the fence so pre-revoke claims lose their grant.
+            run.cancellation_generation = (run.cancellation_generation or 0) + 1
             await session.execute(
                 update(StepRun)
                 .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
@@ -1324,6 +1326,8 @@ class AzureRunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             run.cancel_requested = True
+            # R10: bump the fence so pre-revoke claims lose their grant.
+            run.cancellation_generation = (run.cancellation_generation or 0) + 1
             await session.execute(
                 update(StepRun)
                 .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
