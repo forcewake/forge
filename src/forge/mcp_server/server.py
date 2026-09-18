@@ -176,7 +176,9 @@ def scoped_principals_from_settings(settings: Settings) -> dict[str, McpPrincipa
     audit label → repo globs) is merged onto the resolved principals.
     Tokens it does not mention stay unrestricted — existing configs keep
     working. Keys matching no scoped token are logged and ignored: the
-    FORGE_MCP_KEY master is unrestricted by design.
+    FORGE_MCP_KEY master is unrestricted by design. A06: the same merged
+    allowlist is what the durable run tools check each run's canonical
+    subject against, so this one config feeds both surfaces.
     """
     raw = settings.FORGE_MCP_SCOPED_TOKENS
     principals = parse_scoped_tokens(raw.get_secret_value() if raw is not None else None)

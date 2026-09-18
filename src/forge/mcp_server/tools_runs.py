@@ -6,29 +6,51 @@ factory and NEVER touch a provider token — killing the legacy
 platform-token passthrough for this surface (a token grants scopes over
 forge's state, not forge's GitLab/GitHub identity).
 
-Enforcement is per-call: each tool resolves the principal stashed by
-:class:`forge.mcp_server.auth.MCPAuthMiddleware` and requires its scope
-before any query runs. Denials return explicit ``FORBIDDEN`` text (the
-model-actionable error channel), not exceptions-with-traces.
+Enforcement is per-call and two-layered: each tool resolves the principal
+stashed by :class:`forge.mcp_server.auth.MCPAuthMiddleware`, requires its
+scope, AND — A06, closing the object-level gap the R19 guard left on this
+surface — checks the RUN's canonical subject against the principal's repo
+allowlist (:func:`forge.mcp_server.auth.repo_target_allowed`). A token
+allowlisted for repo A must not read (or even discover, via ``run_list``)
+runs, plans or evidence of repo B. The checked target is the run's OWN
+subject resolved from durable state, never a caller-supplied filter —
+``provider``/``status`` arguments narrow, never widen. Denials return the
+exact same NOT FOUND text a missing run produces (forbidden vs absent is
+indistinguishable from the caller's seat) and log a WARNING audit line;
+``run_list`` filters at the SQL level so its limit applies to the allowed
+set (a filtered page stays a valid page).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Context
+from sqlalchemy import ColumnElement
 
 from forge.mcp_server.auth import (
     McpAuthzError,
+    McpPrincipal,
     audit,
+    audit_denied,
+    repo_target_allowed,
     require_scope,
     session_factory_from_request,
 )
 
+if TYPE_CHECKING:
+    from forge.durable.models import FlowRun
+
 #: Session scope: RFC-2119 "defensively read-only" — these tools only SELECT.
 _MAX_LIST = 50
+
+#: The subject check rides ``forge:read`` — the audit label mirrors the
+#: repo-allowlist suffix :func:`forge.mcp_server.auth.guard_fn` uses, so
+#: operators grep one shape across surfaces.
+_SUBJECT_SCOPE = "forge:read (repo allowlist)"
 
 
 def _request(ctx: Context) -> Any:
@@ -48,6 +70,84 @@ def _session_factory(ctx: Context) -> Any:
 
 def _deny(exc: McpAuthzError) -> str:
     return f"FORBIDDEN: {exc}"
+
+
+def _run_not_found(run_id: str) -> str:
+    """The one not-found shape — shared by missing AND forbidden runs (A06)."""
+    return f"NOT FOUND: no run {run_id!r}"
+
+
+def _run_target_ref(run: FlowRun) -> str:
+    """The canonical repo/project ref a run's subject authorizes against (A06).
+
+    GitHub runs carry their subject path directly (``github_repo_full_name``),
+    so path globs like ``allowed/*`` match exactly as on the classic surface.
+    GitLab/AzDO rows keep only the provider's numeric subject id — matching
+    R19 semantics, a numeric ref passes only against an explicitly digit
+    pattern (``"42"``), never a path glob, so a restricted principal cannot
+    widen its allowlist through IDs. A github row with no resolvable full
+    name yields ``""`` — matched by no non-empty pattern, i.e. denied.
+    """
+    if run.provider == "github":
+        return str(run.github_repo_full_name or "")
+    return str(run.project_id)
+
+
+def _subject_allowed(principal: McpPrincipal, run: FlowRun, tool: str, run_id: str) -> bool:
+    """Object-level check: may *principal* read this run's subject? (A06)
+
+    A denied read is audited (WARNING, ``forge.mcp_server.audit``) and the
+    caller gets the same not-found text a missing run produces.
+    """
+    if repo_target_allowed(principal, _run_target_ref(run)):
+        return True
+    audit_denied(principal, tool, run_id, _SUBJECT_SCOPE)
+    return False
+
+
+def _allowed_subjects_clause(
+    principal: McpPrincipal,
+    subjects: Iterable[Any],
+) -> ColumnElement[bool]:
+    """SQL filter admitting only rows whose canonical subject is allowed (A06).
+
+    *subjects* are the DISTINCT (provider, project_id, github_repo_full_name)
+    tuples in the table; each is checked with the SAME
+    :func:`forge.mcp_server.auth.repo_target_allowed` the per-object path
+    uses, so the query-level and row-level decisions cannot drift. The
+    result is an exact disjunction over the allowed subjects — filtered in
+    SQL, so ``run_list``'s limit applies to the allowed set and a filtered
+    page remains a valid page. Restricted principals with zero allowed
+    subjects get a never-true clause (empty list, not an error).
+    """
+    from sqlalchemy import and_, false, or_
+
+    from forge.durable.models import FlowRun
+
+    github_refs: set[str] = set()
+    numeric_ids: set[int] = set()
+    for row in subjects:
+        if str(row.provider) == "github":
+            ref = str(row.github_repo_full_name or "")
+            if ref and repo_target_allowed(principal, ref):
+                github_refs.add(ref)
+        elif repo_target_allowed(principal, str(row.project_id)):
+            numeric_ids.add(int(row.project_id))
+    clauses: list[ColumnElement[bool]] = []
+    if github_refs:
+        clauses.append(
+            and_(
+                FlowRun.provider == "github",
+                FlowRun.github_repo_full_name.in_(sorted(github_refs)),
+            )
+        )
+    if numeric_ids:
+        clauses.append(
+            and_(FlowRun.provider != "github", FlowRun.project_id.in_(sorted(numeric_ids)))
+        )
+    if not clauses:
+        return false()
+    return or_(*clauses)
 
 
 def register_run_tools(mcp: FastMCP) -> None:
@@ -73,11 +173,27 @@ def register_run_tools(mcp: FastMCP) -> None:
 
         limit = max(1, min(int(limit), _MAX_LIST))
         async with _session_factory(ctx)() as session:
-            query = select(FlowRun).order_by(FlowRun.updated_at.desc()).limit(limit)
+            query = select(FlowRun).order_by(FlowRun.updated_at.desc())
             if status:
                 query = query.where(FlowRun.status == status)
             if provider:
                 query = query.where(FlowRun.provider == provider)
+            if principal.repo_patterns is not None:
+                # A06: object-level scope, applied BEFORE limit — the caller
+                # must not discover foreign subjects by listing. Subject
+                # resolution reads the table's distinct subjects; the
+                # provider/status arguments above only narrow further.
+                distinct_subjects = (
+                    await session.execute(
+                        select(
+                            FlowRun.provider,
+                            FlowRun.project_id,
+                            FlowRun.github_repo_full_name,
+                        ).distinct()
+                    )
+                ).all()
+                query = query.where(_allowed_subjects_clause(principal, distinct_subjects))
+            query = query.limit(limit)
             runs = (await session.execute(query)).scalars().all()
 
         payload = [
@@ -112,8 +228,10 @@ def register_run_tools(mcp: FastMCP) -> None:
 
         async with _session_factory(ctx)() as session:
             run = await session.get(FlowRun, run_id)
-        if run is None:
-            return f"NOT FOUND: no run {run_id!r}"
+        if run is None or not _subject_allowed(principal, run, "run_get", run_id):
+            # A06: forbidden reads share the missing-run shape — no
+            # existence oracle for subjects the principal cannot see.
+            return _run_not_found(run_id)
         payload = {
             "run_id": run.id,
             "provider": run.provider,
@@ -145,9 +263,14 @@ def register_run_tools(mcp: FastMCP) -> None:
             principal = require_scope(_request(ctx), "forge:read")
         except McpAuthzError as exc:
             return _deny(exc)
-        from forge.durable.models import RunSpec
+        from forge.durable.models import FlowRun, RunSpec
 
         async with _session_factory(ctx)() as session:
+            # A06: the owner subject is resolved and checked BEFORE the
+            # frozen document is read, let alone serialized.
+            run = await session.get(FlowRun, run_id)
+            if run is None or not _subject_allowed(principal, run, "plan_get", run_id):
+                return _run_not_found(run_id)
             spec = (
                 await session.execute(
                     RunSpec.__table__.select()
@@ -179,8 +302,9 @@ def register_run_tools(mcp: FastMCP) -> None:
 
         async with _session_factory(ctx)() as session:
             run = await session.get(FlowRun, run_id)
-            if run is None:
-                return f"NOT FOUND: no run {run_id!r}"
+            if run is None or not _subject_allowed(principal, run, "run_evidence_get", run_id):
+                # A06: missing and forbidden runs share one not-found shape.
+                return _run_not_found(run_id)
             steps = (
                 await session.execute(
                     StepRun.__table__.select()

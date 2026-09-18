@@ -34,6 +34,11 @@ SCOPED_JSON = json.dumps(
 
 REPOS_JSON = json.dumps({READONLY_TOKEN: ["allowed/*"]})
 
+# A06: the durable-surface allowlist — READONLY_TOKEN may see github
+# repos under allowed/* AND gitlab project 42 by its explicit numeric
+# subject id (R19 semantics: numerics never match path globs).
+RUN_REPOS_JSON = json.dumps({READONLY_TOKEN: ["allowed/*", "42"]})
+
 GL_BASE = "https://gitlab.test/api/v4"
 
 
@@ -41,12 +46,13 @@ def mcp_settings(
     tmp_path,
     scoped: str | None = SCOPED_JSON,
     repos: str | None = None,
+    db_name: str = "mcp-runs.db",
 ) -> Settings:
     return Settings(
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN=SecretStr("glpat-test"),
         GITLAB_WEBHOOK_SECRET=SecretStr("test-secret-token"),
-        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/mcp-runs.db",
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path}/{db_name}",
         LITELLM_URL="http://litellm:4000",
         REDIS_URL=None,
         FORGE_CAPTURE_DIR=None,
@@ -148,6 +154,87 @@ async def repos_app(tmp_path):
 @pytest.fixture()
 async def repos_client(repos_app) -> AsyncClient:
     transport = ASGITransport(app=repos_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+
+
+def subject_run(
+    run_id: str,
+    *,
+    provider: str = "gitlab",
+    project_id: int = 42,
+    issue: int = 7,
+    repo: str | None = None,
+    status: str = "ready_for_human",
+) -> FlowRun:
+    """A durable run with an explicit canonical subject (A06 test rig)."""
+    if provider == "github":
+        return FlowRun(
+            id=run_id,
+            provider="github",
+            project_id=project_id,
+            github_repo_full_name=repo,
+            github_issue_number=issue,
+            status=status,
+            evidence={"plan_summary": f"evidence {run_id}"},
+        )
+    return FlowRun(
+        id=run_id,
+        provider=provider,
+        project_id=project_id,
+        issue_iid=issue,
+        status=status,
+        evidence={"plan_summary": f"evidence {run_id}"},
+    )
+
+
+async def seed_subjects(application, runs: list[FlowRun], spec_for: str | None = None) -> None:
+    async with application.state.session_factory() as session:
+        async with session.begin():
+            for run in runs:
+                session.add(run)
+            if spec_for is not None:
+                session.add(
+                    RunSpec(run_id=spec_for, document={"steps": ["own plan"]}, digest="e" * 64)
+                )
+    return None
+
+
+@pytest.fixture()
+async def subject_app(tmp_path):
+    """App whose durable state spans four subjects across two providers.
+
+    READONLY_TOKEN is allowlisted for gitlab project 42 and github
+    allowed/* (RUN_REPOS_JSON) — the two ``run-own-*`` runs. The
+    ``run-other-*`` runs belong to subjects its allowlist never matches.
+    """
+    reset_engine()
+    application = create_app(
+        settings=mcp_settings(tmp_path, repos=RUN_REPOS_JSON, db_name="mcp-subject-runs.db")
+    )
+    async with application.router.lifespan_context(application):
+        application.state.task_queue = AsyncMock()
+        await seed_subjects(
+            application,
+            [
+                subject_run("run-own-gl"),
+                subject_run("run-other-gl", project_id=99, issue=8),
+                subject_run(
+                    "run-own-gh", provider="github", project_id=100, issue=3, repo="allowed/repo"
+                ),
+                subject_run(
+                    "run-other-gh", provider="github", project_id=101, issue=4, repo="secret/repo"
+                ),
+            ],
+            spec_for="run-own-gl",
+        )
+        yield application
+    reset_engine()
+
+
+@pytest.fixture()
+async def subject_client(subject_app) -> AsyncClient:
+    transport = ASGITransport(app=subject_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
 
@@ -425,6 +512,175 @@ class TestRepoTargetAuthz:
         )
         assert response.status_code == 200
         assert "No merge requests found." in result_text(response)
+
+
+class TestRunSubjectAuthz:
+    """A06: the durable run surface enforces repo_patterns at OBJECT level.
+
+    R19 taught the classic family to check the caller-supplied project;
+    the run tools read durable state directly, so the checked target is
+    each RUN's canonical subject (github repo full name / provider
+    project id) resolved from the database — never a caller-supplied
+    filter. Every test here drives the real streamable-HTTP mount with
+    registered tools and a live MCP request context.
+    """
+
+    async def test_run_list_scoped_to_allowed_subjects(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        text = result_text(await call_tool(subject_client, "run_list", {}, READONLY_TOKEN))
+        assert "run-own-gl" in text
+        assert "run-own-gh" in text
+        # Foreign subjects are not even discoverable by listing.
+        assert "run-other-gl" not in text
+        assert "run-other-gh" not in text
+        assert "secret/repo" not in text
+
+    async def test_run_list_master_key_sees_all_subjects(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        text = result_text(await call_tool(subject_client, "run_list", {}, MASTER_KEY))
+        assert "run-own-gl" in text
+        assert "run-other-gl" in text
+        assert "run-own-gh" in text
+        assert "run-other-gh" in text
+
+    async def test_run_list_provider_filter_cannot_widen(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        # The provider argument narrows the allowed set; it never re-admits
+        # a foreign subject (the subject clause is ANDed in SQL).
+        gh = result_text(
+            await call_tool(subject_client, "run_list", {"provider": "github"}, READONLY_TOKEN)
+        )
+        assert "run-own-gh" in gh
+        assert "run-other-gh" not in gh
+        gl = result_text(
+            await call_tool(subject_client, "run_list", {"provider": "gitlab"}, READONLY_TOKEN)
+        )
+        assert "run-own-gl" in gl
+        assert "run-other-gl" not in gl
+
+    async def test_run_list_status_filter_cannot_widen(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        # A foreign run is the ONLY planning run: the status filter must
+        # not surface it to a restricted principal.
+        await seed_subjects(
+            subject_app, [subject_run("run-plan-other", project_id=99, issue=9, status="planning")]
+        )
+        text = result_text(
+            await call_tool(subject_client, "run_list", {"status": "planning"}, READONLY_TOKEN)
+        )
+        assert "run-plan-other" not in text
+        master = result_text(
+            await call_tool(subject_client, "run_list", {"status": "planning"}, MASTER_KEY)
+        )
+        assert "run-plan-other" in master
+
+    async def test_run_get_denies_foreign_run_by_explicit_id(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        text = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": "run-other-gl"}, READONLY_TOKEN)
+        )
+        assert text == "NOT FOUND: no run 'run-other-gl'"
+
+    async def test_forbidden_run_is_indistinguishable_from_missing(
+        self,
+        subject_app,
+        subject_client: AsyncClient,
+        app,
+        client: AsyncClient,
+    ):
+        # No metadata leak: the SAME id read through a restricted principal
+        # (run exists, subject denied) and through an unrestricted deployment
+        # where the run does not exist answer with byte-identical text.
+        run_id = "run-other-gh"
+        forbidden = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": run_id}, READONLY_TOKEN)
+        )
+        missing = result_text(
+            await call_tool(client, "run_get", {"run_id": run_id}, READONLY_TOKEN)
+        )
+        assert forbidden == missing
+        assert "secret/repo" not in forbidden
+
+    async def test_plan_get_denies_foreign_run_before_serialization(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        text = result_text(
+            await call_tool(subject_client, "plan_get", {"run_id": "run-other-gl"}, READONLY_TOKEN)
+        )
+        assert text == "NOT FOUND: no run 'run-other-gl'"
+
+    async def test_run_evidence_get_denies_foreign_run(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        text = result_text(
+            await call_tool(
+                subject_client, "run_evidence_get", {"run_id": "run-other-gh"}, READONLY_TOKEN
+            )
+        )
+        assert text == "NOT FOUND: no run 'run-other-gh'"
+        assert "evidence run-other-gh" not in text
+
+    async def test_denied_reads_are_audited(self, subject_app, subject_client: AsyncClient, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="forge.mcp_server.audit"):
+            for tool in ("run_get", "plan_get", "run_evidence_get"):
+                await call_tool(subject_client, tool, {"run_id": "run-other-gl"}, READONLY_TOKEN)
+        denied = [r.message for r in caplog.records if "outcome=denied" in r.message]
+        assert len(denied) == 3
+        for tool in ("run_get", "plan_get", "run_evidence_get"):
+            assert any(
+                f"tool={tool}" in message
+                and "principal=tok-" in message
+                and "target=run-other-gl" in message
+                and "repo allowlist" in message
+                for message in denied
+            )
+
+    async def test_allowed_subjects_remain_readable(self, subject_app, subject_client: AsyncClient):
+        own_gl = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": "run-own-gl"}, READONLY_TOKEN)
+        )
+        assert "run-own-gl" in own_gl
+        own_gh = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": "run-own-gh"}, READONLY_TOKEN)
+        )
+        assert "allowed/repo#3" in own_gh
+        plan = result_text(
+            await call_tool(subject_client, "plan_get", {"run_id": "run-own-gl"}, READONLY_TOKEN)
+        )
+        assert "own plan" in plan
+        evidence = result_text(
+            await call_tool(
+                subject_client, "run_evidence_get", {"run_id": "run-own-gh"}, READONLY_TOKEN
+            )
+        )
+        assert "evidence run-own-gh" in evidence
+
+    async def test_unrestricted_token_behavior_unchanged(
+        self, subject_app, subject_client: AsyncClient
+    ):
+        # READ_TOKEN has no FORGE_MCP_TOKEN_REPOS entry: it stays
+        # unrestricted and still sees every subject.
+        text = result_text(await call_tool(subject_client, "run_list", {}, READ_TOKEN))
+        assert "run-other-gl" in text
+        assert "run-other-gh" in text
+        foreign = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": "run-other-gl"}, READ_TOKEN)
+        )
+        assert "run-other-gl" in foreign
+        assert "NOT FOUND" not in foreign
+
+    async def test_master_key_reads_foreign_subject(self, subject_app, subject_client: AsyncClient):
+        foreign = result_text(
+            await call_tool(subject_client, "run_get", {"run_id": "run-other-gh"}, MASTER_KEY)
+        )
+        assert "secret/repo#4" in foreign
 
 
 class TestDeliveryLadder:

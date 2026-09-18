@@ -29,6 +29,11 @@ per-call check, so a read-only principal could drive the shared GitLab
 token to write (comments, issue creation). Repository-target authorization
 rides the same guard: a principal may carry an explicit repo allowlist
 (``FORGE_MCP_TOKEN_REPOS``) checked against the caller-supplied project.
+A06 extends the same primitive to the durable run surface
+(:mod:`forge.mcp_server.tools_runs`), where the checked target is the
+RUN's canonical subject resolved from durable state — a scoped token
+allowlisted for repo A must not read (or discover via ``run_list``) the
+runs, plans or evidence of repo B.
 """
 
 from __future__ import annotations
