@@ -53,6 +53,9 @@ jobs:
 
       # Build once, push by digest. No mutable tag exists yet: nothing can
       # pull :vX or :latest until the canary below has passed on THIS digest.
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
