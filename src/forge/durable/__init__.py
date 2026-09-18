@@ -26,6 +26,11 @@ from forge.durable.budgets import (
     reconcile_harness_receipt,
     reserve,
 )
+from forge.durable.claims import (
+    ExecutionClaim,
+    bind_claim,
+    current_claim,
+)
 from forge.durable.controller import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
@@ -37,6 +42,7 @@ from forge.durable.controller import (
     InvalidActionTransition,
     InvalidTransition,
     RunNotFound,
+    StaleClaimError,
     StepRunNotFound,
     as_aware_utc,
 )
@@ -72,6 +78,7 @@ from forge.durable.models import (
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "BUDGET_EXHAUSTED",
+    "ExecutionClaim",
     "FLOW_STATUSES",
     "ActionLog",
     "ActionLogNotFound",
@@ -95,16 +102,19 @@ __all__ = [
     "RunBudget",
     "RunNotFound",
     "RunSpec",
+    "StaleClaimError",
     "TERMINAL_STATUSES",
     "TRANSITION_EVENT_TYPE",
     "StepRun",
     "StepRunNotFound",
     "as_aware_utc",
+    "bind_claim",
     "budget_for_run",
     "budget_limits_from_spec",
     "build_source_event_id",
     "close_budget",
     "consume_approval",
+    "current_claim",
     "factory_branch",
     "ingest_event",
     "is_valid",

@@ -295,6 +295,10 @@ class TestStepClaiming:
         claimed = await claim_command_step(db, "worker-a", seid)
         assert claimed is not None
         assert claimed.step_name == "cancel"
+        # Command steps bind their run at execution time — the claim carries
+        # no cancellation generation yet (R10), only the flag-level grant
+        # check fences them.
+        assert claimed.cancellation_generation is None
 
         # The other command's step is still scheduled for the generic loop.
         rest = await claim_due_steps(db, "worker-a")

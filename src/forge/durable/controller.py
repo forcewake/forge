@@ -21,14 +21,25 @@ Rules encoded here:
   exactly once (ADR-0005).
 - Worker leases are compared against their expiry (fencing): a different
   owner cannot renew or take a live lease (ADR-0005).
+- ``transition_guarded`` is the versioned form of ``transition`` (R10): the
+  whole move happens in ONE conditional ``UPDATE ... WHERE status =
+  :expected [AND cancellation_generation = :gen]`` whose rowcount is the
+  arbitration — two concurrent actors with the same expectation produce
+  exactly one applied transition and one typed :class:`StaleClaimError`.
+  ``request_cancel`` bumps the run's cancellation generation in one
+  statement with ``cancel_requested``, giving every guard a single value to
+  compare (queue ownership implies effect ownership).
 """
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal, cast
 
+from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.durable.models import ActionLog, FlowRun, Outbox, StepRun
@@ -144,6 +155,33 @@ class StepRunNotFound(ControllerError):
     """The referenced step run does not exist."""
 
 
+class StaleClaimError(ControllerError):
+    """A guarded mutation lost the arbitration (R10).
+
+    Raised by :meth:`Controller.transition_guarded` when the row no longer
+    matches the caller's expectation (status moved, or the cancellation
+    generation was bumped by a cancel): exactly one concurrent actor applies
+    its transition — this actor is the loser and must record superseded
+    evidence, never retry blindly. Carries the observed state for the
+    superseded-evidence record.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        expected_status: str | None = None,
+        observed_status: str | None = None,
+        expected_generation: int | None = None,
+        observed_generation: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.expected_status = expected_status
+        self.observed_status = observed_status
+        self.expected_generation = expected_generation
+        self.observed_generation = observed_generation
+
+
 def as_aware_utc(value: datetime) -> datetime:
     """Normalize *value* to timezone-aware UTC.
 
@@ -160,6 +198,25 @@ def _coerce_status(value: FlowStatus | str) -> FlowStatus:
         return FlowStatus(value)
     except ValueError:
         raise InvalidTransition(f"unknown flow status: {value!r}") from None
+
+
+def _coerce_expected(
+    expected: FlowStatus | str | Collection[FlowStatus | str] | None,
+) -> list[FlowStatus] | None:
+    """Normalize a guarded transition's expectation to a status list.
+
+    ``None`` means "derive from the stored row" (the WHERE still re-checks at
+    write time); a single status coerces to a one-element list; an empty
+    collection is a caller bug, not a match-nothing predicate.
+    """
+    if expected is None:
+        return None
+    if isinstance(expected, (FlowStatus, str)):
+        return [_coerce_status(expected)]
+    values = [_coerce_status(value) for value in expected]
+    if not values:
+        raise InvalidTransition("guarded transition expects at least one source status")
+    return values
 
 
 ActionOutcome = Literal["succeeded", "failed", "unknown_outcome"]
@@ -222,6 +279,155 @@ class Controller:
         )
         await self.session.flush()
         return run
+
+    async def transition_guarded(
+        self,
+        run_id: str,
+        to_status: FlowStatus | str,
+        *,
+        expected_status: FlowStatus | str | Collection[FlowStatus | str] | None = None,
+        expected_cancellation_generation: int | None = None,
+        reason: str | None = None,
+    ) -> FlowRun:
+        """Versioned conditional transition (R10): the CAS IS the state machine.
+
+        The move happens in ONE statement::
+
+            UPDATE flow_runs SET status = :to, ...
+            WHERE id = :run_id
+              AND status IN (:expected...)          -- the version predicate
+              [AND cancellation_generation = :gen]  -- the cancel fence
+
+        so two concurrent actors holding the same expectation arbitrate at the
+        row: exactly one UPDATE matches, the loser matches 0 rows. The outbox
+        row is written in the same transaction as the applied UPDATE — the
+        announcement can never exist without the state change, and a stale
+        actor writes no announcement at all.
+
+        *expected_status* is the caller's belief about the current status
+        (one status, or several for the enter-from-anywhere edges);
+        ``None`` derives it from a read — still safe, because the WHERE
+        re-checks at write time. *expected_cancellation_generation* pins the
+        publication-grant generation: if a cancel bumped it since the caller
+        minted its :class:`~forge.durable.claims.ExecutionClaim`, the UPDATE
+        matches 0 rows.
+
+        Returns the refreshed run. Raises :class:`RunNotFound` when the run
+        does not exist, :class:`InvalidTransition` when the expected→target
+        edge is not in ADR-0004's graph, and :class:`StaleClaimError` when
+        the predicate matched 0 rows — the loser's signal to record
+        superseded evidence, never to retry blindly. Call on a session with
+        no pending changes to the run row: the Core UPDATE bypasses the ORM
+        unit of work on purpose (the rowcount is the whole decision).
+        """
+        target = _coerce_status(to_status)
+        expected = _coerce_expected(expected_status)
+        if expected is None:
+            current = await self.session.get(FlowRun, run_id)
+            if current is None:
+                raise RunNotFound(f"flow run {run_id!r} not found")
+            await self.session.refresh(current)
+            expected = [FlowStatus(current.status)]
+        for source in expected:
+            allowed = ALLOWED_TRANSITIONS[source]
+            if target not in allowed:
+                raise InvalidTransition(
+                    f"transition {source.value!r} -> {target.value!r} is not allowed; "
+                    f"allowed targets: {sorted(s.value for s in allowed)}"
+                )
+
+        predicate = (
+            FlowRun.status == expected[0].value
+            if len(expected) == 1
+            else FlowRun.status.in_([s.value for s in expected])
+        )
+        stmt = update(FlowRun).where(FlowRun.id == run_id, predicate)
+        if expected_cancellation_generation is not None:
+            stmt = stmt.where(FlowRun.cancellation_generation == expected_cancellation_generation)
+        result = cast(
+            CursorResult[Any],
+            await self.session.execute(
+                stmt.values(
+                    status=target.value,
+                    status_reason=reason,
+                    updated_at=datetime.now(timezone.utc),
+                ).execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            run = await self.session.get(FlowRun, run_id)
+            if run is None:
+                raise RunNotFound(f"flow run {run_id!r} not found")
+            await self.session.refresh(run)
+            observed = FlowStatus(run.status)
+            raise StaleClaimError(
+                f"guarded transition {run_id[:8]} -> {target.value!r} lost the race: "
+                f"run is {observed.value!r} at cancellation generation "
+                f"{run.cancellation_generation}, expected "
+                f"{[s.value for s in expected]} at generation "
+                f"{expected_cancellation_generation}",
+                expected_status="/".join(sorted(s.value for s in expected)),
+                observed_status=observed.value,
+                expected_generation=expected_cancellation_generation,
+                observed_generation=int(run.cancellation_generation),
+            )
+
+        run = await self.session.get(FlowRun, run_id)
+        if run is None:  # pragma: no cover — the UPDATE just matched this row
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        await self.session.refresh(run)
+        from_label = (
+            expected[0].value if len(expected) == 1 else "/".join(sorted(s.value for s in expected))
+        )
+        self.session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type=TRANSITION_EVENT_TYPE,
+                payload={
+                    "flow_run_id": run_id,
+                    "from": from_label,
+                    "to": target.value,
+                    "reason": reason,
+                    "guarded": True,
+                },
+            )
+        )
+        await self.session.flush()
+        return run
+
+    async def request_cancel(self, run_id: str) -> int:
+        """Revoke the publication grant and bump the cancel generation (R10).
+
+        ONE statement sets ``cancel_requested`` and increments
+        ``cancellation_generation`` — the flag and the fence value can never
+        disagree, and every :class:`~forge.durable.claims.ExecutionClaim`
+        minted before this call is fenced out of publishing and guarded
+        transitions the moment it lands. Returns the NEW generation.
+        Raises :class:`RunNotFound` when the run does not exist. The terminal
+        ``cancelled`` transition stays the caller's; so does step
+        withdrawal (the service's cancel machinery owns both today).
+        """
+        result = cast(
+            CursorResult[Any],
+            await self.session.execute(
+                update(FlowRun)
+                .where(FlowRun.id == run_id)
+                .values(
+                    cancel_requested=True,
+                    cancellation_generation=FlowRun.cancellation_generation + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        if result.rowcount != 1:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        run = await self.session.get(FlowRun, run_id)
+        if run is None:  # pragma: no cover — the UPDATE just matched this row
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        await self.session.refresh(run)
+        await self.session.flush()
+        return int(run.cancellation_generation)
 
     async def revive_transition(
         self,

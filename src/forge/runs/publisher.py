@@ -8,9 +8,11 @@ sequence (validate → fence → native adapter); the pure policy half is
 
 1. checks the candidate's diff base against the run's frozen attempt base
    (cycle 1 → approved source base; repair → last verified candidate);
-2. checks the publication grant (run not cancelled), the RunSpec digest
-   (the spec frozen at plan acceptance is the one being executed) and a
-   caller-supplied Stage-B-style fence callable;
+2. checks the publication grant (:func:`publication_grant_valid` — run not
+   cancelled AND, when the executing :class:`~forge.durable.claims.ExecutionClaim`
+   pinned one, the run's cancellation generation unchanged), the RunSpec
+   digest (the spec frozen at plan acceptance is the one being executed) and
+   a caller-supplied Stage-B-style fence callable;
 3. materializes the bundle against AUTHORITATIVE full base contents
    (no truncation; strict hunk application with no fuzz) — the R08/R09
    ``base_blob_digest``/``intended_digest`` verification runs here;
@@ -22,6 +24,14 @@ sequence (validate → fence → native adapter); the pure policy half is
    boundary can issue — to the native adapter for the journaled,
    reconcilable write (GitLab: :class:`ChangesetWriter` with
    ``start_ref = expected_head = attempt base``).
+
+The grant is re-checked at the RESERVATION POINT — after the long
+base-content reads, immediately before the adapter (R10): a cancel during
+the reads forbids a NEW publication reservation. A cancel that lands during
+the already-started remote commit is NOT rolled back (best-effort), but its
+completion records superseded evidence on the run and
+``PublishResult.superseded`` is set instead of letting the caller walk a
+cancelled run toward ``ready_for_human``.
 
 The publisher never executes candidate content and never trusts the
 harness's claims; a rejected candidate is reported, not repaired. The
@@ -42,6 +52,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable import FlowRun, FlowStatus, RunSpec, factory_branch, short_run_id
+from forge.durable.claims import ExecutionClaim, current_claim
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.repository import (
@@ -180,12 +191,39 @@ def validate_candidate_bundle(
 class PublishResult:
     """The publisher's verdict. ``ok=False`` carries a machine-readable
     ``reason`` for the run's blocking evidence; ``unknown_outcome=True``
-    means the commit MAY exist — the caller must fail, never retry."""
+    means the commit MAY exist — the caller must fail, never retry.
+    ``superseded=True`` (with ``ok=True``) means the commit DID land but the
+    publication grant was revoked meanwhile — the run's completion records
+    superseded evidence and must never walk toward ``ready_for_human``
+    (R10)."""
 
     ok: bool
     reason: str = ""
     commit_sha: str | None = None
     unknown_outcome: bool = False
+    superseded: bool = False
+
+
+def publication_grant_valid(run: FlowRun, generation: int | None) -> bool:
+    """Whether *run* still grants a publication to the *generation* holder.
+
+    The one grant predicate, consulted at the entry check and again at the
+    reservation point (R10):
+
+    - a run with ``cancel_requested`` set or already ``cancelled`` has NO
+      grant (F13/ADR-0018 §4);
+    - a *generation* that no longer equals the run's
+      ``cancellation_generation`` has NO grant — the claim was minted before
+      a cancel bumped the run (:meth:`forge.durable.controller.Controller.request_cancel`),
+      so queue ownership no longer implies effect ownership;
+    - ``generation=None`` (no claim binding — legacy/transport callers) only
+      applies the flag-level checks above.
+    """
+    if bool(run.cancel_requested) or run.status == FlowStatus.CANCELLED.value:
+        return False
+    if generation is not None and int(run.cancellation_generation) != generation:
+        return False
+    return True
 
 
 async def _spec_digest_matches(session: AsyncSession, run: FlowRun) -> bool:
@@ -272,6 +310,48 @@ async def _fetch_base_contents(
     return contents
 
 
+async def _reload_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: str,
+) -> FlowRun | None:
+    """The run row as it is NOW, in a fresh session (R10 reservation checks)."""
+    async with session_factory() as session:
+        return await session.get(FlowRun, run_id)
+
+
+async def _record_superseded_publication(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: str,
+    *,
+    commit_sha: str | None,
+    attempt_base: str,
+) -> None:
+    """Record on the run that a commit landed AFTER its grant was revoked.
+
+    R10 best-effort completion: an already-started remote commit is not
+    rolled back, but the run's evidence names it as superseded so no reader
+    mistakes it for the published candidate, and the run is never walked
+    toward ``ready_for_human`` on its back.
+    """
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            return
+        evidence = dict(run.evidence or {})
+        evidence["superseded"] = {
+            "reason": "cancelled_during_publication",
+            "commit_sha": commit_sha,
+            "attempt_base": attempt_base,
+        }
+        run.evidence = evidence
+        await session.commit()
+    logger.warning(
+        "Run %s publication grant revoked mid-commit — commit %s recorded as superseded",
+        run_id[:8],
+        (commit_sha or "?")[:8],
+    )
+
+
 async def publish_validated_candidate(
     run: FlowRun,
     candidate: CandidateBundle,
@@ -295,11 +375,22 @@ async def publish_validated_candidate(
 
     *session_factory* enables the fresh-run leg (run existence, RunSpec
     digest, frozen ``allowed_paths`` from the spec when *allowed_paths* is
-    None); transport callers without a session run the checks they own
-    service-side. Never raises for candidate content — rejections are
-    returned as a failed :class:`PublishResult` with a machine-readable
-    reason; the caller decides what that means for the run.
+    None) and the R10 reservation guard: the publication grant is re-read
+    AFTER the base-content reads and immediately before the adapter, so a
+    cancel during the long reads forbids a NEW reservation. Transport
+    callers without a session run the checks they own service-side. Never
+    raises for candidate content — rejections are returned as a failed
+    :class:`PublishResult` with a machine-readable reason; the caller
+    decides what that means for the run.
+
+    The executing step's :class:`~forge.durable.claims.ExecutionClaim` (if
+    bound) pins the publication-grant generation it was minted under: a
+    cancel that bumped the run's generation after the claim fences the
+    reservation out even before the flag flips (R10).
     """
+    claim: ExecutionClaim | None = current_claim()
+    claim_generation = claim.cancellation_generation if claim is not None else None
+
     if session_factory is not None:
         # Fresh trusted state: the run row as it is NOW, not as the caller
         # saw it.
@@ -325,8 +416,8 @@ async def publish_validated_candidate(
     if candidate.is_empty:
         return PublishResult(False, "empty_candidate")
 
-    # Publication grant (F13/ADR-0018 §4): a cancelled run has none.
-    if bool(fresh.cancel_requested) or fresh.status == FlowStatus.CANCELLED.value:
+    # Publication grant (F13/ADR-0018 §4, generation-fenced per R10).
+    if not publication_grant_valid(fresh, claim_generation):
         return PublishResult(False, "publication_revoked")
     # F14: the spec frozen at plan acceptance is the one being executed.
     if not spec_ok:
@@ -352,6 +443,14 @@ async def publish_validated_candidate(
     except PolicyViolation as exc:
         return PublishResult(False, "changeset_invalid: " + "; ".join(exc.violations))
 
+    # R10 RESERVATION POINT: the reads above can take arbitrarily long —
+    # re-read the grant immediately before handing the candidate to the
+    # adapter. A cancel during the reads forbids this NEW reservation.
+    if session_factory is not None:
+        recent = await _reload_run(session_factory, fresh.id)
+        if recent is None or not publication_grant_valid(recent, claim_generation):
+            return PublishResult(False, "publication_revoked: grant revoked during reservation")
+
     result = await native_publish(validated)
     if result.ok:
         logger.info(
@@ -361,6 +460,23 @@ async def publish_validated_candidate(
             attempt_base[:8],
             len(validated.changeset.changes),
         )
+        # R10 best-effort completion: the remote commit already started (or
+        # landed) — never rolled back, but a grant revoked DURING the commit
+        # turns the completion into superseded evidence.
+        if session_factory is not None:
+            recent = await _reload_run(session_factory, fresh.id)
+            if recent is None or not publication_grant_valid(recent, claim_generation):
+                await _record_superseded_publication(
+                    session_factory,
+                    fresh.id,
+                    commit_sha=result.commit_sha,
+                    attempt_base=attempt_base,
+                )
+                return PublishResult(
+                    True,
+                    commit_sha=result.commit_sha,
+                    superseded=True,
+                )
     return result
 
 

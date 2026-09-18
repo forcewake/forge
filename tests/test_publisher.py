@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 import pytest
 
-from forge.durable import ActionLog, FlowRun, RunSpec
+from forge.durable import ActionLog, Controller, FlowRun, RunSpec
 from forge.durable.identity import factory_branch
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
@@ -488,3 +488,50 @@ class TestBoundaryEntry:
         (seen_run_id, seen_bundle) = calls[0]
         assert seen_run_id == run.id
         assert seen_bundle.attempt_base_oid == BASE_SHA
+
+
+class TestGrantGeneration:
+    """R10: the publication grant is generation-fenced and re-checked at the
+    reservation point — and a commit that already landed when the grant dies
+    comes back ``superseded``, never as a fresh publish."""
+
+    async def test_commit_landing_during_cancel_comes_back_superseded(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        writer = ChangesetWriter(fake_gitlab, db, PROJECT_ID)
+        real_apply = writer.apply
+
+        async def cancelling_apply(run_id, changeset, **kwargs):
+            # The cancel lands WHILE the remote commit is in flight.
+            async with db() as session:
+                await Controller(session).request_cancel(run_id)
+                await session.commit()
+            return await real_apply(run_id, changeset, **kwargs)
+
+        writer.apply = cancelling_apply  # type: ignore[method-assign]
+
+        result = await publish_candidate(
+            gitlab=fake_gitlab,
+            session_factory=db,
+            writer=writer,
+            run=run,
+            bundle=bundle_for(_create_diff("forge-demo/x.md", "hello\n")),
+        )
+
+        # Best-effort: the commit is NOT rolled back …
+        assert result.ok
+        assert len(fake_gitlab.calls_of("create_commit")) == 1
+        # … but its completion is superseded evidence, never a fresh publish.
+        assert result.superseded is True
+        async with db() as session:
+            final = await session.get(FlowRun, run.id)
+        assert final is not None
+        assert (final.evidence or {})["superseded"]["reason"] == "cancelled_during_publication"
+        assert final.status != "ready_for_human"
+
+    async def test_uncancelled_commit_is_a_plain_publish(self, db, fake_gitlab):
+        run = await persisted(db, make_run())
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_create_diff("forge-demo/x.md", "hello\n"))
+        )
+        assert result.ok
+        assert result.superseded is False

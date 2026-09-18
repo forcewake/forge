@@ -10,13 +10,21 @@ that commit:
   additionally carries ``FOR UPDATE SKIP LOCKED`` so concurrent Postgres
   workers do not fight over the same rows (SQLite ignores FOR UPDATE —
   single writer). The claim grants a lease (owner + expiry) and bumps the
-  per-row monotonic ``fence_token``.
+  per-row monotonic ``fence_token``, and snapshots the bound run's
+  cancellation generation (R10) when the step already has one.
 - **Execute** (§8): external calls happen OUTSIDE any DB transaction; a
   per-task heartbeat renews the lease; a renewal hitting 0 rows means
-  ownership was lost and aborts the in-flight step immediately.
+  ownership was lost and aborts the in-flight step immediately. The
+  :class:`~forge.durable.claims.ExecutionClaim` minted from the claim is
+  bound as the task's ambient context for the whole dispatch, so the write
+  boundaries (publisher grant, guarded transitions) can pin the fence —
+  queue ownership implies effect ownership (R10).
 - **Commit/abort** (§3): completion and failure are fenced CASes
   (``WHERE fence_token = <claimed> AND status='running'``) — a stale owner's
-  write hits 0 rows and is abandoned silently.
+  write hits 0 rows and is abandoned silently. A handler that finishes after
+  its run went terminal still commits its step, but the completion records
+  superseded evidence instead of a plain result — the run is never walked
+  out of a terminal state by a late callback (R17 pattern, mirrored here).
 - **Recovery**: a reaper reschedules steps whose lease expired (fence stays —
   the zombie's old token can no longer commit); failures reschedule with
   exponential backoff + full jitter and park as ``dead`` after
@@ -41,7 +49,9 @@ from sqlalchemy import case, select, type_coerce, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from forge.durable.models import StepRun
+from forge.durable.claims import ExecutionClaim, bind_claim
+from forge.durable.controller import TERMINAL_STATUSES
+from forge.durable.models import FlowRun, StepRun
 from forge.runs import execute_run_command
 
 logger = logging.getLogger(__name__)
@@ -88,6 +98,21 @@ class ClaimedStep:
     payload: dict[str, Any]
     owner: str
     source_event_id: str | None
+    #: R10: the bound run's cancellation generation as of the claim (``None``
+    #: when the step was not bound to a run yet — command steps bind at
+    #: execution time, and only the flag-level grant check applies then).
+    cancellation_generation: int | None = None
+
+
+def execution_claim(claimed: ClaimedStep) -> ExecutionClaim:
+    """Mint the effect-side :class:`ExecutionClaim` from a queue claim (R10)."""
+    return ExecutionClaim(
+        step_id=claimed.id,
+        attempt=claimed.attempt,
+        owner=claimed.owner,
+        fence_token=claimed.fence_token,
+        cancellation_generation=claimed.cancellation_generation,
+    )
 
 
 def command_source_event_id(command: str, project_id: int, note_id: int | str) -> str:
@@ -182,20 +207,34 @@ async def claim_due_steps(
             ids = (await session.execute(candidate)).scalars().all()
             for step_id in ids:
                 # CAS: fence bumps here, on the lease-granting write only.
-                result = await session.execute(
-                    update(StepRun)
-                    .where(StepRun.id == step_id, StepRun.status == STEP_SCHEDULED)
-                    .values(
-                        status=STEP_RUNNING,
-                        lease_owner=owner,
-                        lease_expires_at=now + timedelta(seconds=lease_seconds),
-                        fence_token=StepRun.fence_token + 1,
-                        started_at=now,
-                    )
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        update(StepRun)
+                        .where(StepRun.id == step_id, StepRun.status == STEP_SCHEDULED)
+                        .values(
+                            status=STEP_RUNNING,
+                            lease_owner=owner,
+                            lease_expires_at=now + timedelta(seconds=lease_seconds),
+                            fence_token=StepRun.fence_token + 1,
+                            started_at=now,
+                        )
+                    ),
                 )
                 if result.rowcount != 1:
                     continue  # another owner's CAS won this row
                 row = await session.get(StepRun, step_id)
+                if row is None:  # pragma: no cover — the CAS just matched it
+                    continue
+                # R10: snapshot the bound run's publication-grant generation at
+                # claim time. Command steps bind at execution time (NULL here) —
+                # their claim carries no generation and only the flag-level
+                # grant check fences them.
+                generation = (
+                    await session.execute(
+                        select(FlowRun.cancellation_generation).where(FlowRun.id == row.flow_run_id)
+                    )
+                ).scalar_one_or_none()
                 claimed.append(
                     ClaimedStep(
                         id=row.id,
@@ -207,6 +246,7 @@ async def claim_due_steps(
                         payload=dict(row.payload or {}),
                         owner=owner,
                         source_event_id=row.source_event_id,
+                        cancellation_generation=generation,
                     )
                 )
     return claimed
@@ -465,6 +505,56 @@ async def reap_deadline_exceeded(
 # ----------------------------------------------------------------------
 
 
+def _bound_run_id(claimed: ClaimedStep) -> str | None:
+    """The run this step's result belongs to, if it is known to the claim.
+
+    Prefer the persisted ``flow_run_id`` binding; command steps that carry an
+    explicit ``run_id`` payload key (the step-runtime convention for steps
+    bound at execution time) resolve through it.
+    """
+    if claimed.flow_run_id is not None:
+        return claimed.flow_run_id
+    raw = claimed.payload.get("run_id")
+    return str(raw) if raw else None
+
+
+async def _superseded_evidence(
+    session_factory: async_sessionmaker[AsyncSession],
+    claimed: ClaimedStep,
+) -> dict[str, Any] | None:
+    """Evidence that this execution finished AFTER its run moved on (R10/R17).
+
+    A fenced handler completing late — its run already terminal, or its
+    publication grant cancelled away (generation bumped) — records WHY its
+    result is superseded instead of presenting a plain success. Returns
+    ``None`` while the claim is still fresh.
+    """
+    run_id = _bound_run_id(claimed)
+    if run_id is None:
+        return None
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+    if run is None:
+        return None
+    terminal = run.status in {status.value for status in TERMINAL_STATUSES}
+    revoked = (
+        claimed.cancellation_generation is not None
+        and int(run.cancellation_generation) != claimed.cancellation_generation
+    )
+    if not terminal and not revoked:
+        return None
+    reason = "run_terminal" if terminal else "publication_grant_cancelled"
+    return {
+        "superseded": {
+            "reason": reason,
+            "run_status": run.status,
+            "fence_token": claimed.fence_token,
+            "claimed_generation": claimed.cancellation_generation,
+            "run_generation": int(run.cancellation_generation),
+        }
+    }
+
+
 async def execute_claimed_step(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Any,
@@ -476,7 +566,10 @@ async def execute_claimed_step(
     The external call runs outside any DB transaction. The per-task
     heartbeat renews the lease and cancels this execution the moment a
     renewal hits 0 rows (ownership lost). Completion/failure are fenced —
-    a fenced owner abandons silently.
+    a fenced owner abandons silently. The claim is bound as the task's
+    ambient :class:`~forge.durable.claims.ExecutionClaim` for the dispatch,
+    so effectful handlers and the publication boundary fence against THIS
+    execution (R10).
     """
     me = asyncio.current_task()
 
@@ -496,7 +589,8 @@ async def execute_claimed_step(
 
     heartbeat = asyncio.create_task(_heartbeat())
     try:
-        await execute_run_command(settings, forge_config, session_factory, claimed.payload)
+        with bind_claim(execution_claim(claimed)):
+            await execute_run_command(settings, forge_config, session_factory, claimed.payload)
     except Exception as exc:
         outcome = await fail_step(session_factory, claimed, str(exc))
         logger.warning(
@@ -511,7 +605,17 @@ async def execute_claimed_step(
         raise
     finally:
         heartbeat.cancel()
-    if not await complete_step(session_factory, claimed):
+    # R10: a completion that lands after its run moved on carries superseded
+    # evidence instead of a plain result — the run is never walked out of a
+    # terminal state by a late callback.
+    output = await _superseded_evidence(session_factory, claimed)
+    if output is not None:
+        logger.info(
+            "Step %d completed late — result superseded (%s)",
+            claimed.id,
+            output["superseded"]["reason"],
+        )
+    if not await complete_step(session_factory, claimed, output=output):
         logger.warning(
             "Step %d completion fenced (owner=%s fence=%d) — abandoned",
             claimed.id,

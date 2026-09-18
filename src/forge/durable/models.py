@@ -172,6 +172,16 @@ class FlowRun(Base):
     #: cancelled transition; in-flight publication legs re-read it and stand
     #: down, and a verified candidate for a cancelled run stays superseded.
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: R10 publication-grant generation: bumped atomically WITH
+    #: ``cancel_requested`` by :meth:`Controller.request_cancel` (one UPDATE).
+    #: An execution claim pins the generation it was minted under; the
+    #: publisher only grants a NEW reservation while the run's generation
+    #: still equals the pinned one — so a cancel that lands between the
+    #: claim and the publication instantly fences every claim minted before
+    #: it (queue ownership implies effect ownership, R10).
+    cancellation_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     #: Incremental ADR-0008 evidence: plan digest/summary, review verdict+sha,
     #: pipeline id/url/status — written as the run accumulates proof.
     evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)

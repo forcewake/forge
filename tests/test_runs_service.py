@@ -1,5 +1,6 @@
 """Tests for RunService: gate handling, stub propose→validate→commit→MR flow."""
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -8,11 +9,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
-from forge.durable import FlowRun, FlowStatus, GateApproval, Outbox
+from forge.durable import FlowRun, FlowStatus, GateApproval, Outbox, RunSpec
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import WriteOutcome, WriteResult
 from forge.runs import RunService
+from forge.runs.service import task_digest_of
 from forge.runs.stubs import (
     StubImplementer,
     StubPlanner,
@@ -455,3 +457,347 @@ async def test_head_checks_use_branch_endpoint_not_commit_history(service, fake_
     assert base == "base-sha-1"
     assert fake_gitlab.calls_of("list_commits") == []
     assert fake_gitlab.calls_of("get_branch_head")
+
+
+# ----------------------------------------------------------------------
+# #29 lifecycle commands on the GitLab surface: issue-edit replan +
+# trigger-label-off cancel — the mirror of the GitHub handlers
+# ----------------------------------------------------------------------
+
+
+async def go(service: RunService, run_id: str) -> None:
+    """Approve at the gate; the builtin lane lands the run in waiting_ci."""
+    await service.handle_command_note(
+        PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+    )
+
+
+def note_bodies(fake_gitlab: FakeGitLab) -> list[str]:
+    return [note["body"] for note in fake_gitlab.notes]
+
+
+class TestIssueEdited:
+    async def test_edit_while_waiting_approval_replans(self, service, fake_gitlab, db):
+        stale_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+        new_body = "Users cannot reset their password. The reset mail bounces with SMTP 550."
+
+        new_id = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body=new_body,
+            author_username="alice",
+        )
+
+        assert new_id is not None and new_id != stale_id
+        stale = await get_run(db, stale_id)
+        fresh = await get_run(db, new_id)
+        # The stale run is cancelled DURABLY: grant revoked, not just parked.
+        assert stale.status == FlowStatus.CANCELLED.value
+        assert stale.cancel_requested is True
+        assert fresh.status == FlowStatus.WAITING_APPROVAL.value
+
+        # The fresh run's frozen snapshot IS the new text.
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == new_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["task_digest"] == task_digest_of(ISSUE_TITLE, new_body)
+
+        # The plan comment went out again, plus the regeneration note.
+        bodies = note_bodies(fake_gitlab)
+        assert len([b for b in bodies if "Forge plan" in b]) == 1
+        (note,) = [b for b in bodies if "stale" in b]
+        assert stale_id[:8] in note and new_id[:8] in note
+
+        # The stale run's gate was never consumed by the replan.
+        async with db() as session:
+            gates = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == stale_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert gates and all(gate.consumed_at is None for gate in gates)
+
+    async def test_redelivered_edit_is_a_no_op(self, service, fake_gitlab, db):
+        """A redelivered edit (fresh run's snapshot already IS that text)
+        must not spawn a third run or re-post anything."""
+        await start_issue_run(service)
+        new_body = "The issue body, edited once."
+        first = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body=new_body,
+            author_username="alice",
+        )
+        notes_after_first = len(fake_gitlab.notes)
+
+        second = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body=new_body,
+            author_username="alice",
+        )
+
+        assert second == first
+        assert len(fake_gitlab.notes) == notes_after_first
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2  # the stale run + the replan, nothing more
+
+    async def test_gate_consumed_but_still_waiting_posts_note_only(self, service, fake_gitlab, db):
+        """The "gate already consumed" guard: between consume_approval and
+        the PROPOSING commit the run still reads waiting_approval — an edit
+        in exactly that window must never cancel an approved run."""
+        run_id = await start_issue_run(service)
+        async with db() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval).where(GateApproval.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            gate.consumed_at = datetime.now(timezone.utc)
+            await session.commit()
+        fake_gitlab.notes = []
+
+        result = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body="an edited body",
+            author_username="alice",
+        )
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert run.cancel_requested is False
+        (note,) = note_bodies(fake_gitlab)
+        assert "not** in the approved plan" in note
+
+    async def test_mid_flight_edit_notes_once_and_does_not_yank(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        await go(service, run_id)  # approved → published → waiting_ci
+        fake_gitlab.notes = []
+
+        result = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body="edited while the run executes",
+            author_username="alice",
+        )
+
+        run = await get_run(db, run_id)
+        assert result == run_id
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert run.cancel_requested is False
+        (note,) = note_bodies(fake_gitlab)
+        assert "in flight" in note
+
+    async def test_non_admitted_edit_is_ignored(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+
+        result = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            issue_title=ISSUE_TITLE,
+            issue_body="vandalism",
+            author_username="mallory",
+        )
+
+        assert result is None
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert fake_gitlab.notes == []
+
+    async def test_edit_without_an_issue_is_ignored(self, service, fake_gitlab, db):
+        result = await service.handle_issue_edited(
+            project_id=PROJECT_ID,
+            issue_iid=None,
+            issue_title=ISSUE_TITLE,
+            issue_body="anything",
+            author_username="alice",
+        )
+        assert result is None
+
+    async def test_edited_command_dispatch_replans(self, service, fake_gitlab, db):
+        """The gateway-normalized command drives the service end to end."""
+        stale_id = await start_issue_run(service)
+        metadata = {
+            "command": "issue_edited",
+            "provider": "gitlab",
+            "project_id": PROJECT_ID,
+            "issue_iid": ISSUE_IID,
+            "issue_title": ISSUE_TITLE,
+            "issue_body": "dispatched edit body",
+            "author_username": "alice",
+            "note_text": "",
+            "note_id": "edit:12:abc:2026-03-22T09:15:00Z",
+        }
+
+        await service.run_command(metadata)
+
+        stale = await get_run(db, stale_id)
+        assert stale.status == FlowStatus.CANCELLED.value
+        async with db() as session:
+            runs = (await session.execute(select(FlowRun))).scalars().all()
+        assert len(runs) == 2
+        assert any(run.status == FlowStatus.WAITING_APPROVAL.value for run in runs)
+
+
+class TestLabelOff:
+    async def test_label_removal_cancels_the_gate_waiting_run(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_iid=ISSUE_IID, author_username="alice"
+        )
+
+        assert cancelled == 1
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert run.cancel_requested is True
+        (note,) = note_bodies(fake_gitlab)
+        assert "cancelled" in note and "label" in note
+
+    async def test_label_removal_leaves_a_past_gate_run_alone(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        await go(service, run_id)  # the approval consumed the plan
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_iid=ISSUE_IID, author_username="alice"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+
+    async def test_non_approver_label_removal_is_ignored(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+
+        cancelled = await service.handle_label_removed(
+            project_id=PROJECT_ID, issue_iid=ISSUE_IID, author_username="mallory"
+        )
+
+        assert cancelled == 0
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert fake_gitlab.notes == []
+
+    async def test_unlabeled_command_dispatch_cancels(self, service, fake_gitlab, db):
+        """The gateway-normalized command drives the service end to end."""
+        run_id = await start_issue_run(service)
+        metadata = {
+            "command": "unlabeled",
+            "provider": "gitlab",
+            "project_id": PROJECT_ID,
+            "issue_iid": ISSUE_IID,
+            "author_username": "alice",
+            "note_text": "",
+            "note_id": "unlabel:12:2026-03-22T10:00:00Z",
+        }
+
+        await service.run_command(metadata)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert run.cancel_requested is True
+
+
+class TestCiDeadlineBeforeIO:
+    """R17 (deadline-before-I/O) on the GitLab verification pass: the durable
+    ci_timeout and the cancel grant are LOCAL checks — a run past its budget
+    parks blocked without a single GitLab read, so a permanently erroring API
+    can never hold a run past FORGE_CI_WAIT_SECONDS."""
+
+    async def _waiting_ci_run(self, service, db) -> str:
+        run_id = await start_issue_run(service)
+        await go(service, run_id)
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        return run_id
+
+    async def _age_deadline(self, db, run_id: str, *, seconds: int) -> None:
+        """Rewind the WAITING_CI outbox timestamp — the durable timer."""
+        async with db() as session:
+            rows = (
+                (await session.execute(select(Outbox).where(Outbox.flow_run_id == run_id)))
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                if (row.payload or {}).get("to") == FlowStatus.WAITING_CI.value:
+                    row.created_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+            await session.commit()
+
+    async def test_expired_deadline_blocks_without_any_provider_call(
+        self, service, fake_gitlab, db
+    ):
+        run_id = await self._waiting_ci_run(service, db)
+        # Age past the EFFECTIVE budget (the environment may override the
+        # config default) — provably behind, whatever the deployment sets.
+        await self._age_deadline(db, run_id, seconds=make_settings().FORGE_CI_WAIT_SECONDS + 100)
+        provider_calls = len(fake_gitlab.calls_of("get_branch_head")) + len(
+            fake_gitlab.calls_of("list_pipelines")
+        )
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason == "ci_timeout"
+        # The provider was NEVER called: no drift read, no pipeline listing.
+        assert (
+            len(fake_gitlab.calls_of("get_branch_head"))
+            + len(fake_gitlab.calls_of("list_pipelines"))
+            == provider_calls
+        )
+
+    async def test_cancel_requested_ignores_the_late_pass(self, service, fake_gitlab, db):
+        run_id = await self._waiting_ci_run(service, db)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancel_requested = True
+            await session.commit()
+        provider_calls = len(fake_gitlab.calls_of("get_branch_head")) + len(
+            fake_gitlab.calls_of("list_pipelines")
+        )
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # terminal stays /cancel's
+        assert (
+            len(fake_gitlab.calls_of("get_branch_head"))
+            + len(fake_gitlab.calls_of("list_pipelines"))
+            == provider_calls
+        )
+
+    async def test_inside_the_deadline_the_provider_is_still_polled(self, service, fake_gitlab, db):
+        """Control: within the budget the reconciler reads the provider (and
+        a missing pipeline keeps the run waiting, not blocked)."""
+        run_id = await self._waiting_ci_run(service, db)
+        provider_calls = len(fake_gitlab.calls_of("get_branch_head"))
+
+        await service.evaluate_waiting_ci()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        assert len(fake_gitlab.calls_of("get_branch_head")) > provider_calls
