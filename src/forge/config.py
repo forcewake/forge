@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     # is the first line of defence) and the model passed to the harness job
     # as FORGE_HARNESS_MODEL.
     FORGE_HARNESS_TIMEOUT_SECONDS: int = 1800
+    # R17 liveness: bounded discovery for a dispatch whose response was lost
+    # (legacy empty-202). After this many discovery ticks that never found
+    # the Actions run, the run parks blocked ("dispatch never observed")
+    # instead of retrying until the harness timeout on a stalled API.
+    FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS: int = 20
     FORGE_HARNESS_MODEL: str = "glm-5.3-flash[1m]"
 
     # ADR-0023 §1: comma-separated harness driver ids — the env form of the

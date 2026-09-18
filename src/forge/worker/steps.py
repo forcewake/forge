@@ -35,9 +35,10 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, type_coerce, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.models import StepRun
@@ -301,9 +302,11 @@ async def fail_step(
 ) -> str:
     """Fenced failure: reschedule with jittered backoff, or park as dead.
 
-    Returns ``"retry"``, ``"dead"`` or ``"fenced"``. Dead rows keep the last
-    error in ``output`` — the poison pill is an incident record, never
-    deleted (ADR-0017 §4).
+    Returns ``"retry"``, ``"dead"`` or ``"fenced"``. Rows keep the last error
+    in ``output`` on BOTH outcomes — the poison pill is an incident record,
+    never deleted (ADR-0017 §4), and a row that dies later to the reaper
+    (exhausted lease retries, passed deadline) carries its worker's error
+    with it instead of a bare reap note.
     """
     now = _utcnow()
     ownership = (
@@ -347,6 +350,7 @@ async def fail_step(
                     due_at=now + timedelta(seconds=_backoff_delay(new_attempt)),
                     lease_owner=None,
                     lease_expires_at=None,
+                    output={"error": error[:2000]},
                 )
             )
             return "retry"
@@ -359,20 +363,99 @@ async def reschedule_expired_leases(
 
     The fence token stays: the zombie's completion carries the old token and
     is rejected by the fenced CAS (0 rows) — it cannot commit effects.
+
+    Liveness bound: a reaped attempt that exhausts the poison-pill budget
+    parks the step ``dead`` instead of rescheduling — the reaper bumps the
+    attempt counter too, so without this a step crashing before its heartbeat
+    would loop claim → crash → reap forever and never reach ``fail_step``'s
+    dead parking. The last error (if a worker recorded one) is preserved in
+    ``output``; otherwise the reap reason is written there.
     """
     now = _utcnow()
+    reap_error = {"error": "lease_expired: attempts exhausted by the reaper"}
     async with session_factory() as session:
         async with session.begin():
-            result = await session.execute(
-                update(StepRun)
-                .where(StepRun.status == STEP_RUNNING, StepRun.lease_expires_at < now)
-                .values(
-                    status=STEP_SCHEDULED,
-                    due_at=now,
-                    attempt=StepRun.attempt + 1,
-                    lease_owner=None,
-                    lease_expires_at=None,
-                )
+            dead = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(
+                        StepRun.status == STEP_RUNNING,
+                        StepRun.lease_expires_at < now,
+                        StepRun.attempt + 1 >= StepRun.max_attempts,
+                    )
+                    .values(
+                        status=STEP_DEAD,
+                        attempt=StepRun.attempt + 1,
+                        finished_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        output=case(
+                            (
+                                StepRun.output.is_(None),
+                                type_coerce(reap_error, StepRun.output.type),
+                            ),
+                            else_=StepRun.output,
+                        ),
+                    )
+                ),
+            )
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(StepRun.status == STEP_RUNNING, StepRun.lease_expires_at < now)
+                    .values(
+                        status=STEP_SCHEDULED,
+                        due_at=now,
+                        attempt=StepRun.attempt + 1,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                ),
+            )
+            return dead.rowcount + result.rowcount
+
+
+async def reap_deadline_exceeded(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Reaper: steps whose ``deadline_at`` passed park as ``dead``.
+
+    ``deadline_at`` is the step's schedule-to-close budget, recorded at
+    ingress (ADR-0017): once it has passed, no retry of this step can finish
+    in time — a retry that cannot fit the deadline is a new problem, not a
+    retry. The step dies with the reason preserved (a worker's last error
+    stays in ``output``); the fenced completion of an in-flight owner hits 0
+    rows and is abandoned silently.
+    """
+    now = _utcnow()
+    deadline_error = {"error": "deadline_exceeded: step budget spent before completion"}
+    async with session_factory() as session:
+        async with session.begin():
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(StepRun)
+                    .where(
+                        StepRun.status.in_([STEP_SCHEDULED, STEP_RUNNING]),
+                        StepRun.deadline_at.is_not(None),
+                        StepRun.deadline_at < now,
+                    )
+                    .values(
+                        status=STEP_DEAD,
+                        finished_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        output=case(
+                            (
+                                StepRun.output.is_(None),
+                                type_coerce(deadline_error, StepRun.output.type),
+                            ),
+                            else_=StepRun.output,
+                        ),
+                    )
+                ),
             )
             return result.rowcount
 
@@ -545,5 +628,8 @@ async def run_step_reaper(
             count = await reschedule_expired_leases(session_factory)
             if count:
                 logger.warning("Step reaper rescheduled %d step(s) with expired leases", count)
+            deadline_count = await reap_deadline_exceeded(session_factory)
+            if deadline_count:
+                logger.warning("Step reaper parked %d step(s) past their deadline", deadline_count)
         except Exception:
             logger.error("Step reaper error", exc_info=True)

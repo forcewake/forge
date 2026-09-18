@@ -1553,7 +1553,16 @@ class GitHubRunService:
                 logger.exception("Actions harness reconcile failed for run %s", run_id[:8])
 
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
-        """Poll one waiting_harness run through its journaled Actions handle."""
+        """Poll one waiting_harness run through its journaled Actions handle.
+
+        R17 (deadline-before-I/O): the FIRST operation of every evaluation is
+        a local deadline/cancel check over the journaled handle — no provider
+        call is made once the harness budget is spent, so a permanently
+        erroring (or silently stalled) Actions API can never hold a run past
+        its ``harness_timeout``. A poll failure therefore cannot extend the
+        deadline either: the deadline derives only from the journaled
+        ``started_at``, never from poll outcomes.
+        """
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             if run is None:
@@ -1561,6 +1570,7 @@ class GitHubRunService:
             evidence = dict(run.evidence or {})
             project_id = run.project_id
             issue_number = run.issue_iid or 0
+            cancel_requested = bool(run.cancel_requested)
 
         if evidence.get("backend") and not is_harness_backend(str(evidence["backend"])):
             await self._to_terminal(
@@ -1574,6 +1584,32 @@ class GitHubRunService:
             )
             return
         handle = ActionsHandle.from_json(raw_handle)
+
+        # --- R17: local deadline / grant check BEFORE any provider I/O ----
+        if cancel_requested:
+            # F13: the publication grant is revoked — stand down without
+            # touching the provider. The terminal transition stays /cancel's
+            # (handle_cancel also stops the Actions run); the late candidate
+            # is recorded as superseded either way.
+            await self._merge_run_evidence(
+                run_id,
+                {"superseded": {"reason": "cancelled", "attempt_base": handle.attempt_base}},
+            )
+            logger.info("Run %s cancelled — harness evaluation stood down pre-poll", run_id[:8])
+            return
+        timeout = int(getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800)
+        started = _parse_journaled_time(handle.started_at)
+        if started is not None and as_aware_utc(now) > as_aware_utc(started) + timedelta(
+            seconds=timeout
+        ):
+            await self._handle_harness_failure(
+                run_id,
+                project_id,
+                issue_number,
+                HarnessOutcome.failed("infrastructure", "harness_timeout"),
+            )
+            return
+
         executor = GitHubActionsExecutor(self._stack.client, self._settings)
 
         try:
@@ -1589,6 +1625,7 @@ class GitHubRunService:
                                 **(evidence.get("harness") or {}),
                                 "handle": handle.to_json(),
                                 "run_id": handle.run_id,
+                                "discovery_attempts": 0,
                             }
                         },
                     )
@@ -1628,7 +1665,28 @@ class GitHubRunService:
                                 exc_info=True,
                             )
                 else:
-                    return  # discovery retries next tick; the deadline decides
+                    # R17 (bounded discovery): a dispatch that never surfaces
+                    # must not retry forever — after the configured number of
+                    # fruitless discovery ticks the run parks blocked with the
+                    # precise reason instead of polling until heat death.
+                    attempts = (
+                        int((evidence.get("harness") or {}).get("discovery_attempts") or 0) + 1
+                    )
+                    cap = int(
+                        getattr(self._settings, "FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS", 20) or 20
+                    )
+                    if attempts >= cap:
+                        await self._to_terminal(
+                            run_id,
+                            FlowStatus.BLOCKED,
+                            "harness_infrastructure: dispatch never observed — "
+                            f"discovery found no workflow_dispatch run after {attempts} attempts",
+                        )
+                        return
+                    harness_fragment = dict(evidence.get("harness") or {})
+                    harness_fragment["discovery_attempts"] = attempts
+                    await self._merge_run_evidence(run_id, {"harness": harness_fragment})
+                    return  # remaining discovery attempts retry next tick
             outcome = await executor.poll(handle, now=now)
         except Exception:
             logger.exception(
@@ -1640,23 +1698,39 @@ class GitHubRunService:
             return  # keep waiting — the durable deadline decides the rest
 
         if outcome.status == "failed":
-            kind = outcome.failure_kind or "code"
-            # ADR-0023 §6: an opt-in, journaled advance down the frozen
-            # chain — only infrastructure, only pre-candidate, OFF by
-            # default. Everything else keeps the ADR-0015 semantics:
-            # harness failures never enter the LLM repair loop.
-            if await self._advance_harness_fallback(
-                run_id,
-                project_id=project_id,
-                issue_number=issue_number,
-                failure_kind=kind,
-                failure_reason=outcome.reason,
-            ):
-                return
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            await self._handle_harness_failure(run_id, project_id, issue_number, outcome)
             return
 
         await self._publish_harness_candidate(run_id, project_id, issue_number, outcome, handle)
+
+    async def _handle_harness_failure(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        outcome: HarnessOutcome,
+    ) -> None:
+        """One terminal harness failure → optional fallback advance, else blocked.
+
+        Shared by the poll outcome and the R17 local deadline path (which
+        feeds a synthetic ``harness_timeout`` outcome without any provider
+        call). With FORGE_HARNESS_FALLBACK off — the default — this is a
+        straight local transition to ``blocked``.
+        """
+        kind = outcome.failure_kind or "code"
+        # ADR-0023 §6: an opt-in, journaled advance down the frozen
+        # chain — only infrastructure, only pre-candidate, OFF by
+        # default. Everything else keeps the ADR-0015 semantics:
+        # harness failures never enter the LLM repair loop.
+        if await self._advance_harness_fallback(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            failure_kind=kind,
+            failure_reason=outcome.reason,
+        ):
+            return
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
 
     async def _current_harness_selection(self, run_id: str) -> tuple[HarnessSelection | None, bool]:
         """The run's current position in the frozen chain (ADR-0023 §6).
@@ -1785,26 +1859,38 @@ class GitHubRunService:
                 run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
             )
             return
-        # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
-        # recorded as evidence only; the publication grant is gone. The run
-        # stays cancelled even if the harness could not be stopped.
+        # F13 (ADR-0018 §4) + R17 liveness: a late candidate for a run that
+        # already reached ANY terminal state (cancelled, failed, blocked,
+        # ready) is superseded — recorded as evidence only, never published,
+        # and a terminal run is never revived by the callback. The
+        # publication grant is gone the moment the run left the active set.
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
+            if run is None:
+                logger.info("Run %s vanished — late harness candidate dropped", run_id[:8])
+                return
+            status = run.status
+            revoked = bool(run.cancel_requested or status in {s.value for s in TERMINAL_STATUSES})
             plan_digest = run.plan_digest or ""
         if revoked:
+            reason = (
+                "cancelled"
+                if run.cancel_requested or status == FlowStatus.CANCELLED.value
+                else f"run already {status}"
+            )
             await self._merge_run_evidence(
                 run_id,
                 {
                     "superseded": {
-                        "reason": "cancelled",
+                        "reason": reason,
                         "attempt_base": bundle.attempt_base_oid,
                     }
                 },
             )
             logger.info(
-                "Run %s cancelled — Actions candidate on %s recorded as superseded",
+                "Run %s is %s — Actions candidate on %s recorded as superseded",
                 run_id[:8],
+                reason,
                 bundle.attempt_base_oid[:8],
             )
             return
@@ -1977,6 +2063,11 @@ class GitHubRunService:
         budget remains, else blocked); all green → review; NO checks at all
         → review as honestly **unverified** (evidence records it; the ready
         reason says so — never presented as verified).
+
+        R17 (deadline-before-I/O): the verification budget and the cancel
+        grant are evaluated LOCALLY before the provider is touched — a
+        permanently erroring checks API can keep the run waiting only up to
+        ``FORGE_VERIFICATION_TIMEOUT_SECONDS``, never past it.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -1988,10 +2079,27 @@ class GitHubRunService:
             candidate_shas = list(run.candidate_shas or [])
             candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
             issue_number = run.issue_iid or 0
+            updated_at = run.updated_at  # the WAITING_CI transition moment
+            cancel_requested = bool(run.cancel_requested)
 
         if not candidate_sha:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
+            )
+            return
+
+        # F13: the grant was revoked mid-wait — no provider call, no publish.
+        if cancel_requested:
+            logger.info("Run %s cancelled — late verification pass ignored", run_id[:8])
+            return
+
+        # R17: the local deadline fires even when the checks API keeps
+        # erroring (the stalled-provider stall this bound exists for).
+        deadline = int(getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800)
+        started = as_aware_utc(updated_at) if updated_at is not None else None
+        if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "verification_timeout: checks did not conclude"
             )
             return
 
@@ -2020,9 +2128,6 @@ class GitHubRunService:
 
             started = as_aware_utc(started) if started is not None else None
             now = as_aware_utc(now)
-            print(
-                f"DEBUG grace: elapsed={(now - started).total_seconds() if started else None} grace={grace}"
-            )
             if started is not None and (now - started).total_seconds() < grace:
                 return  # keep waiting — checks may still register
             # No independent CI configured on this repo — proceed to review
@@ -2059,15 +2164,8 @@ class GitHubRunService:
             in ("failure", "timed_out", "action_required", "cancelled")
         ]
         if pending:
-            # Deadline: verification must converge (R17 — bounded waiting).
-            deadline = int(
-                getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800
-            )
-            started = run.updated_at  # the WAITING_CI transition moment
-            if started is not None and (now - started).total_seconds() > deadline:
-                await self._to_terminal(
-                    run_id, FlowStatus.BLOCKED, "verification_timeout: checks did not conclude"
-                )
+            # Bounded (R17): the deadline itself is enforced pre-I/O above —
+            # a checks API that never answers cannot hold the run forever.
             return
 
         if failed:
@@ -2728,6 +2826,14 @@ def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
     merged = dict(evidence or {})
     merged.update(patch)
     return merged
+
+
+def _parse_journaled_time(raw: str) -> datetime | None:
+    """Parse a journaled ISO timestamp (handle ``started_at``); None if broken."""
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
