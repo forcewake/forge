@@ -13,11 +13,17 @@ empty-202 fallback.
 from __future__ import annotations
 
 import base64
+import httpx
 import io
 import json
 import zipfile
 from datetime import datetime, timedelta, timezone
 
+from forge.gitlab.blob_reads import (
+    BlobReadResult,
+    blob_result_for_http_status,
+    decode_blob_content,
+)
 from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
 from forge.integrations.github import GitHubAPIError, GitHubStaleBranchError
 
@@ -34,6 +40,13 @@ class FakeGitHub:
         self.commits: dict[str, dict[str, list[dict]]] = {}
         # full_name -> path -> text content (single snapshot, like FakeGitLab)
         self.files: dict[str, dict[str, str]] = {}
+        # full_name -> path -> [(commit_sha, content | None, existed_before)]
+        # — the per-commit file history recorded by create_commit_on_branch.
+        # Reads at a frozen base ref resolve existence THROUGH this history
+        # (R14): a file a branch commit CREATED does not exist at the base
+        # the branch was cut from, so a re-driven candidate is validated
+        # against honest base evidence, not the mutable snapshot.
+        self.file_history: dict[str, dict[str, list[tuple[str, str | None, bool]]]] = {}
         # full_name -> issue number -> issue dict
         self.issues: dict[str, dict[int, dict]] = {}
         # full_name -> list of PR dicts
@@ -175,11 +188,20 @@ class FakeGitHub:
                 expected_head_oid,
                 f'Expected branch to point to "{expected_head_oid}" but it did not.',
             )
-        for path, content in additions or []:
-            self.files.setdefault(full, {})[path] = content
-        for path in deletions or []:
-            self.files.setdefault(full, {}).pop(path, None)
         new_oid = self._oid()
+        for path, content in additions or []:
+            existed_before = path in self.files.setdefault(full, {})
+            self.files.setdefault(full, {})[path] = content
+            self.file_history.setdefault(full, {}).setdefault(path, []).append(
+                (new_oid, content, existed_before)
+            )
+        for path in deletions or []:
+            existed_before = path in self.files.get(full, {})
+            self.files.setdefault(full, {}).pop(path, None)
+            if existed_before:
+                self.file_history.setdefault(full, {}).setdefault(path, []).append(
+                    (new_oid, None, True)
+                )
         self.heads.setdefault(full, {})[branch] = new_oid
         self.commits.setdefault(full, {}).setdefault(branch, []).insert(
             0, {"sha": new_oid, "message": headline, "parent_ids": [expected_head_oid]}
@@ -384,6 +406,35 @@ class FakeGitHub:
 
     # -- reader surface (contents API semantics) --------------------------------------------
 
+    def _path_exists_at(self, full_name: str, path: str, ref: str) -> bool:
+        """Whether *path* existed at commit *ref* (ref-faithful reads, R14).
+
+        Resolved through the recorded per-commit history: walk the parent
+        chain from *ref*; the first reachable history entry decides. No
+        reachable entry means the path's state at *ref* is its state before
+        the first recorded change — a created file did NOT exist there, a
+        modified/deleted one did. Unrecorded (seeded) paths always exist.
+        """
+        history = self.file_history.get(full_name, {}).get(path) or []
+        if not history:
+            return True
+        introduced = {sha for sha, _, _ in history}
+        index: dict[str, dict] = {}
+        for branch_commits in self.commits.get(full_name, {}).values():
+            for commit in branch_commits:
+                index.setdefault(commit["sha"], commit)
+        sha: str | None = ref
+        seen: set[str] = set()
+        while sha and sha in index and sha not in seen:
+            seen.add(sha)
+            if sha in introduced:
+                return True
+            parents = index[sha].get("parent_ids") or []
+            sha = parents[0] if parents else None
+        # ref never reached a recorded change: its state predates history —
+        # the oldest entry's existed_before IS the state at ref.
+        return history[-1][2]
+
     async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
         """Duck-typed :class:`GitHubRepositoryReader` shape for direct use."""
         self.calls.append(("get_file", (project_id, file_path, ref)))
@@ -392,6 +443,10 @@ class FakeGitHub:
         files = next(iter(self.files.values()), {})
         if file_path not in files:
             raise GitHubAPIError(404, f"file {file_path!r} not found")
+        if ref != "HEAD" and not self._path_exists_at(
+            next(iter(self.files.keys()), ""), file_path, ref
+        ):
+            raise GitHubAPIError(404, f"file {file_path!r} not found at {ref[:8]}")
         content = files[file_path]
         return RepositoryFile.model_validate(
             {
@@ -408,6 +463,23 @@ class FakeGitHub:
         """Duck-typed :meth:`GitHubRepositoryReader.read_text`."""
         repo_file = await self.get_file(0, file_path, ref)
         return base64.b64decode(repo_file.content).decode("utf-8")
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> "BlobReadResult":
+        """Typed authoritative read (R14) — mirrors the real adapter.
+
+        Routes through :meth:`get_file` so ref-faithful absence (404) and
+        injected failures flow through the same classification GitHub's
+        adapter applies.
+        """
+        try:
+            repo_file = await self.get_file(project_id, file_path, ref)
+        except GitHubAPIError as exc:
+            return blob_result_for_http_status(exc.status_code, f"github api error {exc.status_code}: {exc.message}")
+        except httpx.HTTPError as exc:
+            return BlobReadResult.unavailable(f"github transport error: {exc}")
+        return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)
 
     async def get_tree(
         self,

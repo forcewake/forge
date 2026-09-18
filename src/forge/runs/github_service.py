@@ -1601,10 +1601,18 @@ class GitHubRunService:
                 )
                 return
             if verdict is ProbeVerdict.DUPLICATED:
-                # Someone else owns the ref now — the drift contract applies.
+                # Someone else owns the ref now — the drift contract applies:
+                # the intent resolves duplicated and the run stops here, the
+                # same outcome a CAS refusal would produce (minus the POST).
                 await self._complete_intent(
                     intent.id, "duplicated", remote_result={"branch": branch}
                 )
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {branch} moved away from the publication intent",
+                )
+                return
             elif verdict is ProbeVerdict.UNKNOWN:
                 await self._complete_intent(
                     intent.id, "unknown", remote_result={"matches": hits}
@@ -2556,6 +2564,12 @@ class GitHubRunService:
                 await self._complete_intent(
                     intent.id, "duplicated", remote_result={"branch": branch}
                 )
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {branch} moved away from the publication intent",
+                )
+                return
             elif verdict is ProbeVerdict.UNKNOWN:
                 await self._complete_intent(
                     intent.id, "unknown", remote_result={"matches": hits}

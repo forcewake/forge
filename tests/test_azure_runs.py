@@ -106,6 +106,8 @@ class FakeAzureDevOps:
     def __init__(self) -> None:
         # branch name -> head sha
         self.heads: dict[str, str] = {"main": BASE_HEAD}
+        # branch name -> [commit dicts newest-first] — the R11 probe surface
+        self.commits: dict[str, list[dict]] = {}
         # sha -> path -> text content (snapshots created by pushes/seeds)
         self.snapshots: dict[str, dict[str, str]] = {BASE_HEAD: dict(self._seed_files)}
         self.work_items: dict[int, dict] = {}
@@ -144,6 +146,15 @@ class FakeAzureDevOps:
 
     def seed_snapshot(self, sha: str, files: dict[str, str]) -> None:
         self.snapshots[sha] = dict(files)
+
+    def seed_commit(
+        self, branch: str, sha: str, comment: str, parents: list[str] | None = None
+    ) -> None:
+        """Record a commit on *branch* and move its head there (probe tests)."""
+        self.commits.setdefault(branch, []).insert(
+            0, {"commit_id": sha, "comment": comment, "parents": list(parents or [])}
+        )
+        self.heads[branch] = sha
 
     def seed_build(
         self,
@@ -234,6 +245,12 @@ class FakeAzureDevOps:
             raise AzureDevOpsNotFoundError(404, f"branch head not found for {branch!r}")
         return head
 
+    async def list_commits(
+        self, project: str, repo: str, branch: str, top: int = 30
+    ) -> list[dict]:
+        self.calls.append(("list_commits", (project, repo, branch, top)))
+        return [dict(commit) for commit in self.commits.get(branch, [])[:top]]
+
     async def create_branch_from(self, project: str, repo: str, branch: str, base_sha: str) -> dict:
         self.calls.append(("create_branch_from", (project, repo, branch, base_sha)))
         if branch in self.heads:
@@ -279,6 +296,15 @@ class FakeAzureDevOps:
         new_sha = self._oid()
         self.heads[branch] = new_sha
         self.snapshots[new_sha] = files
+        for commit in commits:
+            self.commits.setdefault(branch, []).insert(
+                0,
+                {
+                    "commit_id": new_sha,
+                    "comment": commit.comment,
+                    "parents": [expected_old_sha],
+                },
+            )
         return {
             "value": [
                 {

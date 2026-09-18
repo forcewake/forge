@@ -77,17 +77,30 @@ from forge.durable import (
     FlowStatus,
     GateAlreadyConsumed,
     GateApproval,
+    OPEN_STATES,
+    PublicationIntent,
     RunNotFound,
     RunSpec,
     StepRun,
     as_aware_utc,
     build_source_event_id,
+    classify_probe,
+    commit_matches,
+    complete_intent,
     consume_approval,
+    due_intents,
+    find_open_intent,
     is_valid,
+    mark_dispatched,
+    message_with_marker,
+    mint_operation_key,
+    ProbeObservation,
+    ProbeVerdict,
     record_approval,
+    record_intent,
     short_run_id,
 )
-from forge.durable.controller import TERMINAL_STATUSES
+from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError, truncate_chars
 from forge.factory.planner import LLMPlanner, PLAN_SUMMARY_CHARS
 from forge.factory.reviewer import (
@@ -158,6 +171,11 @@ _VERIFICATION_NOTE = (
     "Branch-policy Build validation on the PR is the verification surface — "
     "the run waits for the candidate commit's builds before review."
 )
+
+#: Backoff the publication-intent scanner applies to an open intent whose
+#: probe says "nothing landed, head intact" — the run's own publish leg owns
+#: the re-push; the scanner just stops polling the provider hot.
+_INTENT_PROBE_BACKOFF_SECONDS = 60
 
 #: Build ``status`` values that mean the build has not concluded yet
 #: (research §6.2: ``state``/``result`` in the Runs API, ``status``/
@@ -256,6 +274,10 @@ class AzurePublishOutcome:
     #: A CAS rejection (``staleObjectId`` et al.): reported, never retried
     #: silently (ADR-0024 §4).
     drift: bool = False
+    #: R11: True when ``commit_oid`` is a PREVIOUS attempt's landed push
+    #: found by the identity probe (exact operation marker + expected
+    #: parent) after a lost response or stale CAS — adopted, never re-posted.
+    adopted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1389,6 +1411,318 @@ class AzureRunService:
     # Publish leg: gate → lane dispatch OR builtin CAS publish
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Publication intents (R11): identity before the HTTP effect
+    # ------------------------------------------------------------------
+
+    #: Run statuses where a publish leg is still in progress — the only
+    #: states the recovery scanner may act on the run from.
+    _PUBLISHING_STATUSES = frozenset(
+        {
+            FlowStatus.PROPOSING.value,
+            FlowStatus.VALIDATING.value,
+            FlowStatus.COMMITTING.value,
+            FlowStatus.ENSURING_DRAFT_MR.value,
+        }
+    )
+
+    def _intent_scope(self, run: FlowRun) -> str:
+        """The logical retry scope of the run's current publication attempt."""
+        return f"cycle-{run.commit_cycle or 1}"
+
+    def _intent_repo(self) -> str:
+        """The provider-scoped subject the intents are keyed on."""
+        return f"{self._project}/{self._repo}"
+
+    async def _load_run(self, run_id: str) -> FlowRun:
+        """The run row in a fresh session (intent-identity reads)."""
+        async with self._session_factory() as session:
+            return await self._get_run(session, run_id)
+
+    async def _publication_intent(
+        self, run: FlowRun, *, branch: str, expected_head: str | None
+    ) -> PublicationIntent | None:
+        """The run's OPEN publication intent for this branch, if any.
+
+        An open intent means a previous attempt's outcome was never durably
+        recorded — the caller must PROBE before any new push (never a blind
+        replay as reconciliation).
+        """
+        async with self._session_factory() as session:
+            return await find_open_intent(
+                session,
+                run_id=run.id,
+                provider="azure_devops",
+                repo=self._intent_repo(),
+                target_ref=branch,
+                operation="commit",
+                idempotency_scope=self._intent_scope(run),
+            )
+
+    async def _record_publication_intent(
+        self,
+        run: FlowRun,
+        *,
+        branch: str,
+        expected_head: str | None,
+    ) -> PublicationIntent:
+        """Create the ``requested`` intent — BEFORE any push-API call.
+
+        The row is committed in its own transaction; its ``operation_key``
+        is minted here exactly once and reused by every retry of this
+        attempt.
+        """
+        async with self._session_factory() as session:
+            intent = await record_intent(
+                session,
+                run_id=run.id,
+                provider="azure_devops",
+                repo=self._intent_repo(),
+                target_ref=branch,
+                idempotency_scope=self._intent_scope(run),
+                operation_key=mint_operation_key(),
+                commit_cycle=run.commit_cycle or 1,
+                expected_parent_oid=expected_head,
+                expected_head=expected_head,
+            )
+            await session.commit()
+            return intent
+
+    async def _probe_intent(self, intent: PublicationIntent) -> tuple[ProbeVerdict, list[str]]:
+        """Classify one intent's outcome against the live remote (read-only).
+
+        The identity tuple: exactly one commit carrying this intent's
+        ``(forge-op:<key>)`` marker whose parent equals the intent-time
+        expected parent proves the push landed.
+        """
+        try:
+            head = await self._stack.client.get_branch_head(
+                self._project, self._repo, intent.target_ref
+            )
+            commits = await self._stack.client.list_commits(
+                self._project, self._repo, intent.target_ref
+            )
+        except Exception:
+            # A failed probe read is inconclusive, not negative — no push
+            # may be derived from it.
+            logger.exception(
+                "Publication-intent probe read failed for %s@%s",
+                intent.target_ref,
+                self._intent_repo(),
+            )
+            return ProbeVerdict.UNKNOWN, []
+        hits = commit_matches(
+            commits,
+            operation_key=intent.operation_key,
+            expected_parent_oid=intent.expected_parent_oid,
+        )
+        verdict = classify_probe(
+            ProbeObservation(
+                marker_hits=tuple(hits),
+                head_oid=head,
+                expected_parent_oid=intent.expected_parent_oid,
+            )
+        )
+        return verdict, hits
+
+    async def _complete_intent(
+        self,
+        intent_id: str,
+        status: str,
+        *,
+        provider_object_id: str | None = None,
+        remote_result: dict | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            await complete_intent(
+                session,
+                intent_id,
+                status,
+                provider_object_id=provider_object_id,
+                remote_result=remote_result,
+            )
+            await session.commit()
+
+    async def _mark_intent_dispatched(self, intent: PublicationIntent) -> None:
+        async with self._session_factory() as session:
+            await mark_dispatched(session, intent.id)
+            await session.commit()
+
+    async def _complete_intent_from_outcome(
+        self, intent_id: str, outcome: AzurePublishOutcome
+    ) -> None:
+        """Map a push outcome onto the intent's terminal state.
+
+        ``ok`` + ``adopted`` → ``adopted`` (a probe found the effect);
+        ``ok`` → ``committed``; ``drift`` → ``duplicated``; any other
+        failure → ``failed``.
+        """
+        if outcome.ok:
+            await self._complete_intent(
+                intent_id,
+                "adopted" if outcome.adopted else "committed",
+                provider_object_id=outcome.commit_oid,
+                remote_result={
+                    "commit_id": outcome.commit_oid,
+                    "pr_id": outcome.pr_id,
+                    "expected_head": outcome.expected_head_oid,
+                },
+            )
+        elif outcome.drift:
+            await self._complete_intent(
+                intent_id, "duplicated", remote_result={"reason": outcome.reason}
+            )
+        else:
+            await self._complete_intent(
+                intent_id, "failed", remote_result={"reason": outcome.reason}
+            )
+
+    async def resolve_publication_intents(self, *, now: datetime | None = None) -> int:
+        """One recovery pass over this repo's due publication intents (R11).
+
+        Twin of
+        :meth:`forge.runs.github_service.GitHubRunService.resolve_publication_intents`:
+        probe by identity, adopt (and advance the run) / duplicated /
+        unknown; REDISPATCH stays with the run's own publish leg — the
+        scanner never pushes.
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            intents = await due_intents(
+                session, provider="azure_devops", repo=self._intent_repo(), now=now
+            )
+        resolved = 0
+        for intent in intents:
+            try:
+                if await self._resolve_one_publication_intent(intent, now=now):
+                    resolved += 1
+            except Exception:
+                # One broken intent must not stall the recovery pass.
+                logger.exception("Publication-intent resolution failed for %s", intent.id[:8])
+        return resolved
+
+    async def _resolve_one_publication_intent(
+        self, intent: PublicationIntent, *, now: datetime
+    ) -> bool:
+        run = await self._load_run(intent.run_id)
+        if run is None:
+            await self._complete_intent(
+                intent.id, "duplicated", remote_result={"reason": "run_vanished"}
+            )
+            return True
+        if run.cancel_requested or run.status in {s.value for s in TERMINAL_STATUSES}:
+            # R10 superseded interplay: the publication grant is gone — a
+            # landed push is superseded evidence, never adopted-into-READY.
+            await self._complete_intent(
+                intent.id,
+                "duplicated",
+                remote_result={"reason": "run_superseded", "run_status": run.status},
+            )
+            await self._merge_run_evidence(
+                intent.run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled_during_publication"
+                        if run.cancel_requested
+                        else f"run already {run.status}",
+                        "attempt_base": intent.expected_parent_oid,
+                    }
+                },
+            )
+            return True
+        if intent.status == "requested":
+            return False  # never dispatched — the run's own probe-first leg owns it
+
+        verdict, hits = await self._probe_intent(intent)
+        if verdict is ProbeVerdict.ADOPT:
+            await self._complete_intent(
+                intent.id,
+                "adopted",
+                provider_object_id=hits[0],
+                remote_result={"commit_id": hits[0], "reconciled": True},
+            )
+            await self._adopt_committed_candidate(run, intent, commit_oid=hits[0])
+            logger.warning(
+                "Recovered publication intent %s for run %s — adopted commit %s",
+                intent.id[:8],
+                intent.run_id[:8],
+                hits[0][:8],
+            )
+            return True
+        if verdict is ProbeVerdict.DUPLICATED:
+            await self._complete_intent(
+                intent.id, "duplicated", remote_result={"branch": intent.target_ref}
+            )
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(
+                    intent.run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {intent.target_ref} moved away from the intent "
+                    "(reconciled by the publication-intent scanner)",
+                )
+            return True
+        if verdict is ProbeVerdict.UNKNOWN:
+            await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+            return True
+
+        # REDISPATCH: nothing landed, head intact — back the probe off.
+        async with self._session_factory() as session:
+            row = await session.get(PublicationIntent, intent.id)
+            if row is not None:
+                row.next_probe_at = now + timedelta(seconds=_INTENT_PROBE_BACKOFF_SECONDS)
+                await session.commit()
+        return False
+
+    async def _adopt_committed_candidate(
+        self,
+        run: FlowRun,
+        intent: PublicationIntent,
+        *,
+        commit_oid: str,
+    ) -> None:
+        """Advance a mid-publication run onto a probe-adopted commit (R11)."""
+        if run.status not in self._PUBLISHING_STATUSES:
+            return
+        pr = await self._ensure_draft_pr(
+            intent.target_ref, self._target_branch(), run.issue_iid or 0, run.id
+        )
+        pr_id = int(pr.get("pullRequestId") or 0) if pr else None
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            for status in (
+                FlowStatus.VALIDATING,
+                FlowStatus.COMMITTING,
+                FlowStatus.ENSURING_DRAFT_MR,
+                FlowStatus.WAITING_CI,
+            ):
+                try:
+                    await controller.transition(
+                        intent.run_id,
+                        status,
+                        reason=f"publication intent: adopted commit {commit_oid[:8]}",
+                    )
+                except InvalidTransition:
+                    pass  # already past this stage — resume the walk
+            run_row = await self._get_run(session, intent.run_id)
+            run_row.mr_iid = pr_id
+            if commit_oid not in list(run_row.candidate_shas or []):
+                run_row.candidate_shas = list(run_row.candidate_shas or []) + [commit_oid]
+            run_row.evidence = _merge_evidence(
+                run_row.evidence,
+                {
+                    "published_candidate": {
+                        "sha": commit_oid,
+                        "base": intent.expected_parent_oid,
+                        "branch": intent.target_ref,
+                        "pr_id": pr_id,
+                        "reconciled": True,
+                    }
+                },
+            )
+            await session.commit()
+
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
         """One gate-approved publish cycle.
 
@@ -1436,13 +1770,82 @@ class AzureRunService:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
             return
 
+        # R11: resolve the publication intent BEFORE any push-API call — an
+        # open intent from a crashed attempt is probed and ADOPTED, never
+        # duplicated; a fresh attempt persists the intent first and reuses
+        # its stable operation key.
+        branch = azure_factory_branch(issue_number, run_id)
+        expected_head = base_sha or None
+        intent = await self._publication_intent(
+            await self._load_run(run_id),
+            branch=branch,
+            expected_head=expected_head,
+        )
+        if intent is None:
+            intent = await self._record_publication_intent(
+                await self._load_run(run_id),
+                branch=branch,
+                expected_head=expected_head,
+            )
+        else:
+            verdict, hits = await self._probe_intent(intent)
+            if verdict is ProbeVerdict.ADOPT:
+                await self._complete_intent(
+                    intent.id,
+                    "adopted",
+                    provider_object_id=hits[0],
+                    remote_result={"commit_id": hits[0], "reconciled": True},
+                )
+                pr = await self._ensure_draft_pr(
+                    branch, self._target_branch(), issue_number, run_id
+                )
+                outcome = AzurePublishOutcome(
+                    ok=True,
+                    commit_oid=hits[0],
+                    expected_head_oid=expected_head,
+                    branch=branch,
+                    pr_id=int(pr.get("pullRequestId") or 0) if pr else None,
+                    pr_url=_pr_web_url(pr),
+                    adopted=True,
+                )
+                await self._finish_publish_leg(
+                    run_id, project_id, issue_number, outcome, plan_digest
+                )
+                return
+            if verdict is ProbeVerdict.DUPLICATED:
+                await self._complete_intent(
+                    intent.id, "duplicated", remote_result={"branch": branch}
+                )
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {branch} moved away from the publication intent",
+                )
+                return
+            elif verdict is ProbeVerdict.UNKNOWN:
+                await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+                await self._post_journaled_comment(
+                    project_id,
+                    issue_number,
+                    f"Run `{run_id[:8]}` publication outcome is **unresolved** — an operator "
+                    f"must inspect branch `{branch}` and reconcile manually.\n\n"
+                    "*This is an automated message.*",
+                    run_id,
+                    "publish_unknown_outcome",
+                )
+                return
+
+        await self._mark_intent_dispatched(intent)
         outcome = await self._publish_changeset(
             run_id,
             issue_number=issue_number,
             changeset=changeset,
             base_branch=self._target_branch(),
             expected_head=base_sha or None,
+            operation_key=intent.operation_key,
         )
+        await self._complete_intent_from_outcome(intent.id, outcome)
 
         if not outcome.ok:
             reason = outcome.reason or "publish_failed"
@@ -1458,7 +1861,21 @@ class AzureRunService:
                 "publish_failed",
             )
             return
+        await self._finish_publish_leg(run_id, project_id, issue_number, outcome, plan_digest)
 
+    async def _finish_publish_leg(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        outcome: AzurePublishOutcome,
+        plan_digest: str,
+    ) -> None:
+        """The shared publish-leg tail: candidate evidence → Draft PR → waiting_ci.
+
+        Runs identically for a fresh push and an ADOPTED previous attempt's
+        commit (R11) — the run advances to ``waiting_ci`` on the found sha.
+        """
         commit_oid = outcome.commit_oid or ""
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -1706,6 +2123,7 @@ class AzureRunService:
         changeset: ChangeSet,
         base_branch: str,
         expected_head: str | None,
+        operation_key: str | None = None,
     ) -> AzurePublishOutcome:
         """Ensure the factory branch, CAS-push the changeset, open the Draft PR.
 
@@ -1723,6 +2141,8 @@ class AzureRunService:
             expected_head = await self._stack.client.get_branch_head(
                 self._project, self._repo, base_branch
             )
+        key = operation_key or uuid4().hex[:12]
+        commits = _changeset_to_commits(changeset, operation_key=key)
 
         try:
             await self._ensure_factory_branch(branch, expected_head)
@@ -1731,9 +2151,34 @@ class AzureRunService:
                 self._repo,
                 branch,
                 expected_old_sha=expected_head,
-                commits=_changeset_to_commits(changeset),
+                commits=commits,
             )
         except AzureDevOpsDriftError as exc:
+            # staleObjectId proves only that the ref moved — NOT that nothing
+            # landed (research §5): a previous attempt's push may have gone
+            # through with its response lost. Probe for THIS intent's marker
+            # + expected parent before declaring drift; adopt one match.
+            adopted_oid = await self._probe_for_intent(
+                branch, operation_key=key, expected_head=expected_head
+            )
+            if adopted_oid is not None:
+                logger.warning(
+                    "Azure DevOps push on %s stale but previous attempt's commit %s found "
+                    "by marker (forge-op:%s) — adopting",
+                    branch,
+                    adopted_oid[:8],
+                    key,
+                )
+                pr = await self._ensure_draft_pr(branch, base_branch, issue_number, run_id)
+                return AzurePublishOutcome(
+                    ok=True,
+                    commit_oid=adopted_oid,
+                    expected_head_oid=expected_head,
+                    branch=branch,
+                    pr_id=int(pr.get("pullRequestId") or 0) if pr else None,
+                    pr_url=_pr_web_url(pr),
+                    adopted=True,
+                )
             logger.warning(
                 "Azure DevOps publish on %s drifted (%s) — reporting, not retrying",
                 branch,
@@ -1773,6 +2218,26 @@ class AzureRunService:
             pr_url=_pr_web_url(pr),
             work_item_linked=work_item_linked,
         )
+
+    async def _probe_for_intent(
+        self, branch: str, *, operation_key: str, expected_head: str
+    ) -> str | None:
+        """The branch commit carrying THIS intent's marker + parent, or None.
+
+        Exactly one commit whose comment contains ``(forge-op:<key>)`` AND
+        whose parent is *expected_head* proves a previous attempt of this
+        intent landed — its id is adopted. Zero or several matches return
+        None (drift / inconclusive).
+        """
+        try:
+            commits = await self._stack.client.list_commits(self._project, self._repo, branch)
+        except AzureDevOpsError:
+            logger.exception("Intent probe read failed for %s@%s", branch, self._repo)
+            return None
+        hits = commit_matches(
+            commits, operation_key=operation_key, expected_parent_oid=expected_head
+        )
+        return hits[0] if len(hits) == 1 else None
 
     async def _ensure_factory_branch(self, branch: str, sha: str) -> None:
         """Create the factory branch at *sha*; tolerate pre-existence.
@@ -2157,13 +2622,78 @@ class AzureRunService:
             )
             return
 
+        # R11: resolve the publication intent BEFORE the push-API call — an
+        # open intent from a crashed attempt is probed and ADOPTED, never
+        # duplicated; a fresh attempt persists the intent first and reuses
+        # its stable operation key.
+        branch = azure_factory_branch(issue_number, run_id)
+        intent = await self._publication_intent(
+            await self._load_run(run_id),
+            branch=branch,
+            expected_head=bundle.attempt_base_oid,
+        )
+        if intent is None:
+            intent = await self._record_publication_intent(
+                await self._load_run(run_id),
+                branch=branch,
+                expected_head=bundle.attempt_base_oid,
+            )
+        else:
+            verdict, hits = await self._probe_intent(intent)
+            if verdict is ProbeVerdict.ADOPT:
+                await self._complete_intent(
+                    intent.id,
+                    "adopted",
+                    provider_object_id=hits[0],
+                    remote_result={"commit_id": hits[0], "reconciled": True},
+                )
+                pr = await self._ensure_draft_pr(
+                    branch, self._target_branch(), issue_number, run_id
+                )
+                publish_outcome = AzurePublishOutcome(
+                    ok=True,
+                    commit_oid=hits[0],
+                    expected_head_oid=bundle.attempt_base_oid,
+                    branch=branch,
+                    pr_id=int(pr.get("pullRequestId") or 0) if pr else None,
+                    pr_url=_pr_web_url(pr),
+                    adopted=True,
+                )
+                logger.warning(
+                    "Run %s adopting previous attempt's commit %s (intent %s)",
+                    run_id[:8],
+                    hits[0][:8],
+                    intent.id[:8],
+                )
+                await self._finish_harness_publish_leg(
+                    run_id, project_id, issue_number, publish_outcome, handle
+                )
+                return
+            if verdict is ProbeVerdict.DUPLICATED:
+                await self._complete_intent(
+                    intent.id, "duplicated", remote_result={"branch": branch}
+                )
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {branch} moved away from the publication intent",
+                )
+                return
+            elif verdict is ProbeVerdict.UNKNOWN:
+                await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+                return
+
+        await self._mark_intent_dispatched(intent)
         publish_outcome = await self._publish_changeset(
             run_id,
             issue_number=issue_number,
             changeset=changeset,
             base_branch=self._target_branch(),
             expected_head=bundle.attempt_base_oid,
+            operation_key=intent.operation_key,
         )
+        await self._complete_intent_from_outcome(intent.id, publish_outcome)
         if not publish_outcome.ok:
             await self._to_terminal(
                 run_id,
@@ -2171,6 +2701,23 @@ class AzureRunService:
                 f"harness_publish_failed: {publish_outcome.reason or 'unknown'}",
             )
             return
+        await self._finish_harness_publish_leg(
+            run_id, project_id, issue_number, publish_outcome, handle
+        )
+
+    async def _finish_harness_publish_leg(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        publish_outcome: AzurePublishOutcome,
+        handle: AzurePipelinesHandle,
+    ) -> None:
+        """The shared Pipelines-candidate tail: evidence → Draft PR → waiting_ci.
+
+        Runs identically for a fresh push and an ADOPTED previous attempt's
+        commit (R11).
+        """
 
         # The publication tail — the SAME walk the builtin leg runs after
         # _publish_changeset: state walk, candidate evidence, the work-item
@@ -3073,11 +3620,15 @@ def _strip_html(html: str) -> str:
     return " ".join(unescape(text).split())
 
 
-def _changeset_to_commits(changeset: ChangeSet) -> list[CommitPayload]:
+def _changeset_to_commits(
+    changeset: ChangeSet, *, operation_key: str | None = None
+) -> list[CommitPayload]:
     """Map a ChangeSet onto the push-API commit shape (research §3.1).
 
     Azure paths are repository-absolute (``/src/app.py``); operations map
-    create→add, update→edit, delete→delete.
+    create→add, update→edit, delete→delete. ``operation_key`` (R11) stamps
+    the frozen ``(forge-op:<key>)`` marker into the commit comment so the
+    identity probe can attribute a found commit to its intent.
     """
     file_changes: list[FileChange] = []
     for change in changeset.changes:
@@ -3092,7 +3643,12 @@ def _changeset_to_commits(changeset: ChangeSet) -> list[CommitPayload]:
             file_changes.append(
                 FileChange(path=path, change_type="edit", content=change.content or "")
             )
-    return [CommitPayload(comment=changeset.commit_message, changes=file_changes)]
+    comment = (
+        message_with_marker(changeset.commit_message, operation_key)
+        if operation_key
+        else changeset.commit_message
+    )
+    return [CommitPayload(comment=comment, changes=file_changes)]
 
 
 def _push_new_object_id(payload: dict) -> str:
@@ -3278,6 +3834,70 @@ async def evaluate_azure_revival(
     )
 
 
+async def _repos_with_due_publication_intents(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct AzDO ``project/repo`` subjects holding open intents (R11)."""
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PublicationIntent.repo)
+                    .where(
+                        PublicationIntent.provider == "azure_devops",
+                        PublicationIntent.status.in_(OPEN_STATES),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [row for row in rows if row]
+
+
+async def evaluate_azure_publication_intents(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """One recovery pass over every AzDO repo with open publication intents.
+
+    The post-restart half of the R11 fix on the AzDO lane: a worker that
+    died between the push and the journal completion leaves the intent
+    ``dispatched`` — this pass probes by identity (marker + expected
+    parent) and resolves it: the run ADVANCES on the landed push instead of
+    blocking on a stale-CAS re-publish.
+    """
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+    for repo_full_name in await _repos_with_due_publication_intents(session_factory):
+        if "/" not in repo_full_name:
+            logger.warning(
+                "Publication intent with malformed repo %r — skipping", repo_full_name
+            )
+            continue
+        project, repo_name = repo_full_name.split("/", 1)
+        stack = stack_factory(project, repo_name)
+        try:
+            service = AzureRunService(
+                session_factory,
+                settings,
+                forge_config,
+                stack=stack,
+                repo_full_name=repo_full_name,
+            )
+            await service.resolve_publication_intents(now=now)
+        except Exception:
+            # One broken repo must not stall the recovery pass.
+            logger.exception("Publication-intent recovery failed for %s", repo_full_name)
+
+
 __all__ = [
     "AzureAgents",
     "AzurePRReviewer",
@@ -3286,6 +3906,7 @@ __all__ = [
     "AzureRunService",
     "azure_factory_branch",
     "build_azure_agents",
+    "evaluate_azure_publication_intents",
     "evaluate_azure_waiting_ci",
     "execute_azure_run_command",
     "evaluate_azure_revival",
@@ -3353,6 +3974,13 @@ async def run_azure_harness_reconciler(
             )
         except Exception:
             logger.exception("Azure DevOps revival reconciler pass failed")
+        try:
+            # R11 recovery: probe-and-resolve stranded publication intents.
+            await evaluate_azure_publication_intents(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("Azure publication-intent reconciler pass failed")
 
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)

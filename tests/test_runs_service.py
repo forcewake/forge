@@ -67,6 +67,13 @@ class FakeWriter:
         cs,
         start_ref: str = "main",
         expected_head: str | None = None,
+        operation_key: str | None = None,
+        *,
+        provider: str = "gitlab",
+        repo: str = "",
+        idempotency_scope: str | None = None,
+        commit_cycle: int = 1,
+        content_digest: str | None = None,
     ) -> WriteResult:
         self.calls.append(
             {
@@ -76,6 +83,10 @@ class FakeWriter:
                 "changes": cs.changes,
                 "start_ref": start_ref,
                 "expected_head": expected_head,
+                "operation_key": operation_key,
+                "provider": provider,
+                "repo": repo,
+                "commit_cycle": commit_cycle,
             }
         )
         if self.outcome is WriteOutcome.UNKNOWN:
@@ -356,9 +367,9 @@ class TestAdvanceFailures:
 
         class UnknownWriter(FakeWriter):
             async def apply(
-                self, flow_run_id, cs, start_ref="main", expected_head=None
+                self, flow_run_id, cs, start_ref="main", expected_head=None, **kwargs
             ) -> WriteResult:
-                await super().apply(flow_run_id, cs, start_ref, expected_head)
+                await super().apply(flow_run_id, cs, start_ref, expected_head, **kwargs)
                 return WriteResult(WriteOutcome.UNKNOWN, None)
 
         service._writer_class = UnknownWriter

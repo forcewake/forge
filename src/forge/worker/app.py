@@ -19,7 +19,10 @@ from forge.mcp_client.registry import MCPRegistry
 from forge.orchestrator.orchestrator import Orchestrator
 from forge.runs import RunService, execute_run_command, run_reconciler
 from forge.runs.azure_service import run_azure_harness_reconciler
-from forge.runs.github_service import run_github_harness_reconciler
+from forge.runs.github_service import (
+    run_github_harness_reconciler,
+    run_github_publication_intents_reconciler,
+)
 from forge.runs.service import forge_token
 from forge.utils.logging import setup_logging
 from forge.utils.redis_client import RedisManager
@@ -313,6 +316,16 @@ async def main() -> None:
                 shutdown_event=shutdown_event,
             ),
             run_github_harness_reconciler(
+                settings,
+                forge_config,
+                session_factory,
+                interval_seconds=15,
+                shutdown_event=shutdown_event,
+            ),
+            # R11: probe-and-resolve stranded publication intents — runs for
+            # every GitHub deployment (builtin lane included, unlike the
+            # harness reconciler which gates on the workflow setting).
+            run_github_publication_intents_reconciler(
                 settings,
                 forge_config,
                 session_factory,

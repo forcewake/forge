@@ -35,6 +35,10 @@ async def run_reconciler(
             # ADR-0017 §5: re-post the evidence note for runs that reached
             # ready_for_human before their worker died mid-announcement.
             service.evaluate_ready_evidence,
+            # R11: probe-and-resolve publication intents whose effect may
+            # have landed while the worker was stalled (adopt / duplicate /
+            # unknown — never a blind re-publish).
+            service.evaluate_publication_intents,
         ):
             try:
                 await evaluate()

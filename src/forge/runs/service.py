@@ -58,13 +58,20 @@ from forge.durable import (
     GateAlreadyConsumed,
     LLMCall,
     Outbox,
+    PublicationIntent,
     RunNotFound,
     RunSpec,
     StepRun,
     as_aware_utc,
     build_source_event_id,
+    classify_probe,
+    commit_matches,
+    complete_intent,
     consume_approval,
+    due_intents,
     is_valid,
+    ProbeObservation,
+    ProbeVerdict,
     record_approval,
 )
 from forge.durable.budgets import (
@@ -76,7 +83,7 @@ from forge.durable.budgets import (
     reconcile_harness_receipt,
     resolve_budget_limits,
 )
-from forge.durable.controller import TERMINAL_STATUSES
+from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
@@ -2532,6 +2539,218 @@ class RunService:
             await self._advance_harness(project_id, run_id)
         else:
             await self._advance_proposal(project_id, run_id)
+
+    # ------------------------------------------------------------------
+    # Publication-intent recovery scanner (R11)
+    # ------------------------------------------------------------------
+
+    #: Run statuses where a publish leg is still in progress — the only
+    #: states the recovery scanner may act on the run from.
+    _PUBLISHING_STATUSES = frozenset(
+        {
+            FlowStatus.PROPOSING.value,
+            FlowStatus.VALIDATING.value,
+            FlowStatus.COMMITTING.value,
+            FlowStatus.ENSURING_DRAFT_MR.value,
+        }
+    )
+
+    #: Backoff for an intent the probe says is safe to re-dispatch — the
+    #: run's own leg owns the re-dispatch (it holds the candidate); this
+    #: scanner only resolves outcomes and stops the polling loop.
+    _INTENT_PROBE_BACKOFF_SECONDS = 60
+
+    async def evaluate_publication_intents(self, now: datetime | None = None) -> None:
+        """One recovery pass over every GitLab publication intent (R11).
+
+        The post-restart half of the R11 fix on the GitLab lane: a worker
+        that died between the remote commit and the journal completion
+        leaves the intent open — this pass probes by identity (the
+        ``(forge-op:<key>)`` marker + the intent-time expected parent) and:
+
+        - ADOPT: the found commit is journaled as the run's committed
+          candidate (a succeeded ``commit`` action) so the crashed leg's
+          re-drive adopts it via ``_committed_candidate`` — never a second
+          commit; when the Draft MR is already journaled the run also walks
+          on to ``waiting_ci`` right here;
+        - DUPLICATED / UNKNOWN: the intent resolves and a mid-publication
+          run parks ``blocked`` (branch_drift / unknown_outcome contract);
+        - REDISPATCH (nothing landed, head intact): left to the run's own
+          publish leg, which re-dispatches with the SAME key — this pass
+          never POSTs (it holds no candidate content).
+
+        Superseded runs (R10: cancelled / terminal) resolve ``duplicated``
+        — never adopted into a READY state.
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            intents = await due_intents(session, provider="gitlab", now=now)
+        for intent in intents:
+            try:
+                await self._resolve_one_publication_intent(intent, now=now)
+            except Exception:
+                # One broken intent must not stall the recovery pass.
+                logger.exception("Publication-intent resolution failed for %s", intent.id[:8])
+
+    async def _resolve_one_publication_intent(
+        self, intent: PublicationIntent, *, now: datetime
+    ) -> None:
+        async with self._session_factory() as session:
+            run = await session.get(FlowRun, intent.run_id)
+            if run is None:
+                await complete_intent(
+                    session, intent.id, "duplicated", remote_result={"reason": "run_vanished"}
+                )
+                await session.commit()
+                return
+            run_status = run.status
+            cancel_requested = bool(run.cancel_requested)
+            project_id = int(run.project_id)
+        if cancel_requested or run_status in {s.value for s in TERMINAL_STATUSES}:
+            async with self._session_factory() as session:
+                await complete_intent(
+                    session,
+                    intent.id,
+                    "duplicated",
+                    remote_result={"reason": "run_superseded", "run_status": run_status},
+                )
+                await session.commit()
+            await self._merge_run_evidence(
+                intent.run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled_during_publication"
+                        if cancel_requested
+                        else f"run already {run_status}",
+                        "attempt_base": intent.expected_parent_oid,
+                    }
+                },
+            )
+            return
+        if intent.status == "requested":
+            return  # never dispatched — the run's own probe-first leg owns it
+
+        # Probe by identity: marker + expected parent over the branch commits.
+        try:
+            head = await self._gitlab.get_branch_head(project_id, intent.target_ref)
+            commits = await self._gitlab.list_commits(project_id, intent.target_ref)
+        except GitLabAPIError:
+            logger.exception(
+                "Publication-intent probe read failed for branch %r — leaving open",
+                intent.target_ref,
+            )
+            return
+        hits = commit_matches(
+            commits,
+            operation_key=intent.operation_key,
+            expected_parent_oid=intent.expected_parent_oid,
+        )
+        verdict = classify_probe(
+            ProbeObservation(
+                marker_hits=tuple(hits),
+                head_oid=head,
+                expected_parent_oid=intent.expected_parent_oid,
+            )
+        )
+        if verdict is ProbeVerdict.ADOPT:
+            sha = hits[0]
+            async with self._session_factory() as session:
+                # Journal the found commit as THIS run's succeeded commit —
+                # the durable record the resumed leg's ``_committed_candidate``
+                # adoption reads (sha must still be the live branch head).
+                controller = Controller(session)
+                action_id = await controller.record_action(
+                    intent.run_id, "commit", correlation_id=intent.target_ref
+                )
+                await controller.complete_action(
+                    action_id,
+                    "succeeded",
+                    {"sha": sha, "reconciled": True, "adopted": True},
+                )
+                await complete_intent(
+                    session,
+                    intent.id,
+                    "adopted",
+                    provider_object_id=sha,
+                    remote_result={"sha": sha, "reconciled": True},
+                )
+                await session.commit()
+            logger.warning(
+                "Recovered publication intent %s for run %s — adopted commit %s",
+                intent.id[:8],
+                intent.run_id[:8],
+                sha[:8],
+            )
+            mr_iid = await self._journaled_draft_mr(intent.run_id, project_id, intent.target_ref)
+            if mr_iid is not None:
+                # The crashed leg already opened the Draft MR — finish the
+                # walk to waiting_ci on the adopted sha right here.
+                async with self._session_factory() as session:
+                    controller = Controller(session)
+                    for status in (
+                        FlowStatus.VALIDATING,
+                        FlowStatus.COMMITTING,
+                        FlowStatus.ENSURING_DRAFT_MR,
+                        FlowStatus.WAITING_CI,
+                    ):
+                        try:
+                            await controller.transition(
+                                intent.run_id,
+                                status,
+                                reason=f"publication intent: adopted commit {sha[:8]}",
+                            )
+                        except InvalidTransition:
+                            pass  # already past this stage — resume the walk
+                    run = await self._get_run(session, intent.run_id)
+                    run.mr_iid = mr_iid
+                    if sha not in list(run.candidate_shas or []):
+                        run.candidate_shas = list(run.candidate_shas or []) + [sha]
+                    run.evidence = _merge_evidence(
+                        run.evidence,
+                        {
+                            "published_candidate": {
+                                "sha": sha,
+                                "base": intent.expected_parent_oid,
+                                "branch": intent.target_ref,
+                                "mr_iid": mr_iid,
+                                "reconciled": True,
+                            }
+                        },
+                    )
+                    await session.commit()
+            return
+        if verdict is ProbeVerdict.DUPLICATED:
+            async with self._session_factory() as session:
+                await complete_intent(
+                    session,
+                    intent.id,
+                    "duplicated",
+                    remote_result={"branch": intent.target_ref},
+                )
+                await session.commit()
+            if run_status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(
+                    intent.run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {intent.target_ref} moved away from the intent "
+                    "(reconciled by the publication-intent scanner)",
+                )
+            return
+        if verdict is ProbeVerdict.UNKNOWN:
+            async with self._session_factory() as session:
+                await complete_intent(
+                    session, intent.id, "unknown", remote_result={"matches": hits}
+                )
+                await session.commit()
+            if run_status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(intent.run_id, FlowStatus.FAILED, "commit_unknown_outcome")
+            return
+        # REDISPATCH: nothing landed, head intact — back the probe off.
+        async with self._session_factory() as session:
+            row = await session.get(PublicationIntent, intent.id)
+            if row is not None:
+                row.next_probe_at = now + timedelta(seconds=self._INTENT_PROBE_BACKOFF_SECONDS)
+                await session.commit()
 
     # ------------------------------------------------------------------
     # Reconciler tick: waiting_harness → … (ADR-0015)

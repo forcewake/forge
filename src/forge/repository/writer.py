@@ -264,6 +264,11 @@ class ChangesetWriter:
             raise
 
         sha = commit.get("id")
+        if not isinstance(sha, str) or not sha:
+            # A committed response without a usable sha cannot be correlated
+            # with later CI evidence — resolve through the probe instead of
+            # propagating a None into the candidate history.
+            return await self._resolve_unknown(action_id, intent_id, commit_intent)
         meta = self._meta({"sha": sha}, commit_intent.expected_head)
         # Exact-SHA correlation: this is the sha all later CI evidence must match.
         await self._succeed(action_id, intent_id, sha, meta, adopted=False)

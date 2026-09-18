@@ -15,7 +15,12 @@ sequence (validate → fence → native adapter); the pure policy half is
    a caller-supplied Stage-B-style fence callable;
 3. materializes the bundle against AUTHORITATIVE full base contents
    (no truncation; strict hunk application with no fuzz) — the R08/R09
-   ``base_blob_digest``/``intended_digest`` verification runs here;
+   ``base_blob_digest``/``intended_digest`` verification runs here; the
+   base reads are TYPED (R14): only a provider-confirmed ``not_found``
+   may make a path absent, so a create is only publishable against
+   confirmed absence, and a ``forbidden``/``unavailable``/``incomplete``
+   read fails validation (``authoritative_read_failed``) BEFORE any
+   remote effect;
 4. validates the resulting ChangeSet against the write policy
    (:func:`validate_changeset` — denied paths, lockfiles, size caps,
    existence rules) and the RunSpec's frozen ``allowed_paths`` scope
@@ -42,7 +47,6 @@ with zero commit-API calls.
 
 from __future__ import annotations
 
-import base64
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -54,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.durable import FlowRun, FlowStatus, RunSpec, factory_branch, short_run_id
 from forge.durable.claims import ExecutionClaim, current_claim
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
+from forge.gitlab.blob_reads import AUTHORITATIVE_READ_FAILED, BlobReadResult
 from forge.gitlab.client import GitLabAPIError, GitLabClient
 from forge.repository import (
     Change,
@@ -84,9 +89,11 @@ _OPERATION_MAP: dict[str, Operation] = {
 }
 
 #: Fetches the AUTHORITATIVE full content of *paths* at *base_ref* (the
-#: provider-side half of materialization). Missing paths are absent from the
-#: result; a base file over the materialization cap raises
-#: :class:`CandidateError` (``file_too_large``).
+#: provider-side half of materialization). Under the R14 policy a path is
+#: absent from the result ONLY on a provider-confirmed ``not_found`` — a
+#: fetcher that drops paths on ANY failure forges existence facts; a base
+#: file over the materialization cap raises :class:`CandidateError`
+#: (``file_too_large``).
 BaseContentFetcher = Callable[[str, list[str]], Awaitable[dict[str, str]]]
 
 
@@ -160,7 +167,11 @@ def validate_candidate_bundle(
        verified BEFORE anything is applied, ``intended_digest`` AFTER — the
        R08/R09 guarantees run on every path, builtin included;
     2. :func:`validate_changeset` — denied paths/prefixes/lockfiles, change
-       count and size caps, existence rules, and the *allowed_paths* globs.
+       count and size caps, existence rules, and the *allowed_paths* globs;
+    3. the R14 create rule: a create publishes only against a CONFIRMED
+       absence. Callers feed *base_contents* from the strict typed reads,
+       so presence in the mapping means the provider said the file exists —
+       a create over it is a violation, not a silent overwrite.
 
     Raises :class:`CandidateError` (materialization/digest failures) or
     :class:`PolicyViolation` (write-policy violations). Returns the
@@ -177,6 +188,11 @@ def validate_candidate_bundle(
         attempt_base_oid=bundle.attempt_base_oid,
     )
     violations = validate_changeset(changeset, base_contents, allowed_paths=list(allowed_paths))
+    violations.extend(
+        f"change {entry.path!r} (create): file already exists in the base snapshot"
+        for entry in entries
+        if entry.operation == "create" and entry.path in base_contents
+    )
     if violations:
         raise PolicyViolation(violations)
     return ValidatedCandidate(
@@ -280,26 +296,28 @@ async def _fetch_base_contents(
 ) -> dict[str, str]:
     """Fetch COMPLETE content of *paths* at the attempt base snapshot.
 
-    Authoritative full-content reads (no truncation, ever); a file over the
-    :data:`FORGE_MATERIALIZE_MAX_FILE_CHARS` cap raises
-    :class:`CandidateError` instead. Paths missing from the snapshot are
-    absent from the result — validation reports create/update/delete
-    existence against it.
+    Authoritative full-content reads (no truncation, ever). R14 strict
+    semantics: a path is absent from the result ONLY on a provider-confirmed
+    ``not_found`` — create is then provably safe, and update/delete
+    existence is honestly reported by validation. ``forbidden``,
+    ``unavailable`` and ``incomplete`` raise :class:`CandidateError`
+    (``authoritative_read_failed``) so publication fails BEFORE any remote
+    effect instead of letting an unreadable base forge existence facts. A
+    file over the :data:`FORGE_MATERIALIZE_MAX_FILE_CHARS` cap still
+    raises ``file_too_large``.
     """
     contents: dict[str, str] = {}
     for path in dict.fromkeys(paths):
-        try:
-            repo_file = await gitlab.get_file(project_id, path, ref=base_ref)
-        except GitLabAPIError:
-            continue  # not in the snapshot — validate_changeset reports it
-        raw = repo_file.content
-        if (repo_file.encoding or "") == "base64":
-            text = base64.b64decode(raw).decode("utf-8", errors="replace")
-        else:
-            try:
-                text = base64.b64decode(raw, validate=True).decode("utf-8", errors="replace")
-            except Exception:
-                text = raw
+        result: BlobReadResult = await gitlab.read_blob(project_id, path, ref=base_ref)
+        if result.confirmed_absent:
+            continue  # provider-confirmed absence — the only honest "missing"
+        if not result.usable:
+            raise CandidateError(
+                AUTHORITATIVE_READ_FAILED,
+                f"{path}: base read at {base_ref[:8]} returned {result.status}: "
+                f"{result.detail or 'no detail'}",
+            )
+        text = result.text()
         if len(text) > FORGE_MATERIALIZE_MAX_FILE_CHARS:
             raise CandidateError(
                 "file_too_large",
@@ -512,6 +530,13 @@ async def publish_candidate(
                 validated.changeset,
                 start_ref=attempt_base,
                 expected_head=attempt_base,
+                # R11 intent identity: the writer journals the durable
+                # publication intent (stable operation key + expected
+                # parent) BEFORE the HTTP effect, and an open intent from a
+                # crashed attempt is probed-and-adopted, never duplicated.
+                provider="gitlab",
+                repo=str(run.project_id),
+                commit_cycle=run.commit_cycle or 1,
             )
         except BranchDriftError as exc:
             return PublishResult(False, f"branch_drift: {exc}")

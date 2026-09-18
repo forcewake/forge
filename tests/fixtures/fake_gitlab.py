@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import base64
 
+import httpx
+
+from forge.gitlab.blob_reads import (
+    BlobReadResult,
+    blob_result_for_http_status,
+    decode_blob_content,
+)
 from forge.gitlab.client import CommitOutcomeUnknown, GitLabAPIError
 from forge.gitlab.schemas import Issue, Job, MergeRequest, Note, Pipeline, RepositoryFile, TreeEntry
 
@@ -149,6 +156,10 @@ class FakeGitLab:
         """Seed a file in the (ref-independent) repository snapshot."""
         self.files[path] = content
 
+    def seed_bytes_file(self, path: str, content: bytes) -> None:
+        """Seed a raw-bytes file (e.g. invalid UTF-8) for strict-decode tests."""
+        self.files[path] = content.decode("utf-8", errors="surrogateescape")
+
     async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
         self.calls.append(("get_file", (project_id, file_path, ref)))
         if file_path not in self.files:
@@ -158,12 +169,33 @@ class FakeGitLab:
             {
                 "file_name": file_path.rsplit("/", 1)[-1],
                 "file_path": file_path,
-                "size": len(content.encode("utf-8")),
+                "size": len(content.encode("utf-8", errors="surrogateescape")),
                 "encoding": "base64",
-                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "content": base64.b64encode(
+                    content.encode("utf-8", errors="surrogateescape")
+                ).decode("ascii"),
                 "ref": ref,
             }
         )
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> BlobReadResult:
+        """Typed authoritative read (R14) — mirrors ``GitLabClient.read_blob``.
+
+        Routes through :meth:`get_file` so subclass/monkeypatched read
+        failures (403, timeouts, …) flow through the same classification
+        the real adapter applies.
+        """
+        try:
+            repo_file = await self.get_file(project_id, file_path, ref)
+        except GitLabAPIError as exc:
+            return blob_result_for_http_status(
+                exc.status_code, f"gitlab api error {exc.status_code}: {exc.message}"
+            )
+        except httpx.HTTPError as exc:
+            return BlobReadResult.unavailable(f"gitlab transport error: {exc}")
+        return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)
 
     async def get_tree(
         self,
