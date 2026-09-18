@@ -423,9 +423,7 @@ class TestGitHubReadBlob:
 
 
 def _az_item_url(path: str, **params: str) -> str:
-    return (
-        f"{AZ_ITEMS}?{urlencode({'api-version': '7.1', 'path': path, 'includeContent': 'true', **params})}"
-    )
+    return f"{AZ_ITEMS}?{urlencode({'api-version': '7.1', 'path': path, 'includeContent': 'true', **params})}"
 
 
 class TestAzureReadBlob:
@@ -468,9 +466,7 @@ class TestAzureReadBlob:
 
         assert result.confirmed_absent
 
-    async def test_401_is_forbidden(
-        self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader
-    ):
+    async def test_401_is_forbidden(self, httpx_mock: HTTPXMock, az_reader: AzureRepositoryReader):
         httpx_mock.add_response(
             url=_az_item_url(
                 "/src/app.py",

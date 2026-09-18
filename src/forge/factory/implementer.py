@@ -272,8 +272,7 @@ class LLMImplementer:
                 continue
             if not result.usable:
                 raise AuthoritativeReadError(
-                    f"{path} at {base_sha[:8]} read {result.status}: "
-                    f"{result.detail or 'no detail'}"
+                    f"{path} at {base_sha[:8]} read {result.status}: {result.detail or 'no detail'}"
                 )
             text = result.text()
             if len(text) > FORGE_MATERIALIZE_MAX_FILE_CHARS:

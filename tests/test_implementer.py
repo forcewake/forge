@@ -91,9 +91,7 @@ def implementer_factory():
 class TestForbiddenNeverProvesAbsence:
     """The R14 headline: a 403 on an EXISTING file must not flip UPDATE→CREATE."""
 
-    async def test_403_on_existing_file_raises_instead_of_creating(
-        self, implementer_factory
-    ):
+    async def test_403_on_existing_file_raises_instead_of_creating(self, implementer_factory):
         repo = _ForbiddenReader()
         repo.seed_commit("main", BASE_SHA, "initial")
         repo.seed_file("src/app.py", "x = 1\n")
@@ -111,9 +109,7 @@ class TestForbiddenNeverProvesAbsence:
         # The model was asked exactly once; no proposal survived the failure.
         assert len(llm.calls_for("implementer")) == 1
 
-    async def test_timeout_on_existing_file_raises_instead_of_creating(
-        self, implementer_factory
-    ):
+    async def test_timeout_on_existing_file_raises_instead_of_creating(self, implementer_factory):
         repo = _TimeoutReader()
         repo.seed_commit("main", BASE_SHA, "initial")
         repo.seed_file("src/app.py", "x = 1\n")
@@ -142,9 +138,7 @@ class TestForbiddenNeverProvesAbsence:
 
 
 class TestStrictDecodeAtAuthority:
-    async def test_invalid_utf8_base_is_explicitly_rejected(
-        self, fake_gitlab, implementer_factory
-    ):
+    async def test_invalid_utf8_base_is_explicitly_rejected(self, fake_gitlab, implementer_factory):
         fake_gitlab.seed_bytes_file("assets/logo.bin", b"\xff\xfe\x00\x80 binary")
         _, implementer = implementer_factory(
             fake_gitlab, [update_draft("assets/logo.bin", "x", "y")]

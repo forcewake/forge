@@ -556,16 +556,12 @@ class TestAuthoritativeBaseReads:
 
         monkeypatch.setattr(fake_gitlab, "read_blob", _read)
 
-    async def test_forbidden_base_read_rejects_without_commit(
-        self, db, fake_gitlab, monkeypatch
-    ):
+    async def test_forbidden_base_read_rejects_without_commit(self, db, fake_gitlab, monkeypatch):
         fake_gitlab.seed_file("src/mod.py", "keep\nold\ntail\n")
         self.stub_read_blob(
             fake_gitlab,
             monkeypatch,
-            lambda path: BlobReadResult.forbidden(
-                f"gitlab api error 403: forbidden for {path!r}"
-            ),
+            lambda path: BlobReadResult.forbidden(f"gitlab api error 403: forbidden for {path!r}"),
         )
         run = await persisted(db, make_run())
         diff = _modify_diff("src/mod.py", "old", "new")
@@ -577,9 +573,7 @@ class TestAuthoritativeBaseReads:
         assert "forbidden" in result.reason
         assert fake_gitlab.calls_of("create_commit") == []
 
-    async def test_unavailable_base_read_rejects_without_commit(
-        self, db, fake_gitlab, monkeypatch
-    ):
+    async def test_unavailable_base_read_rejects_without_commit(self, db, fake_gitlab, monkeypatch):
         fake_gitlab.seed_file("src/mod.py", "keep\nold\ntail\n")
         self.stub_read_blob(
             fake_gitlab,
@@ -588,16 +582,16 @@ class TestAuthoritativeBaseReads:
         )
         run = await persisted(db, make_run())
 
-        result = await publish(db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new")))
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new"))
+        )
 
         assert not result.ok
         assert "authoritative_read_failed" in result.reason
         assert "unavailable" in result.reason
         assert fake_gitlab.calls_of("create_commit") == []
 
-    async def test_incomplete_base_read_rejects_without_commit(
-        self, db, fake_gitlab, monkeypatch
-    ):
+    async def test_incomplete_base_read_rejects_without_commit(self, db, fake_gitlab, monkeypatch):
         self.stub_read_blob(
             fake_gitlab,
             monkeypatch,
@@ -605,7 +599,9 @@ class TestAuthoritativeBaseReads:
         )
         run = await persisted(db, make_run())
 
-        result = await publish(db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new")))
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new"))
+        )
 
         assert not result.ok
         assert "authoritative_read_failed" in result.reason
@@ -684,9 +680,7 @@ class TestAuthoritativeBaseReads:
         assert "stale_base" in result.reason
         assert fake_gitlab.calls_of("create_commit") == []
 
-    async def test_intended_digest_verifies_the_materialized_result(
-        self, db, fake_gitlab
-    ):
+    async def test_intended_digest_verifies_the_materialized_result(self, db, fake_gitlab):
         # R09 intact end-to-end: the diff's own new blob OID must equal the
         # materialized result — a wrong claim is an internal error, never a
         # publish; the correct claim publishes exactly the expected text.

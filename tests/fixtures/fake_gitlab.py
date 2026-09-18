@@ -178,9 +178,7 @@ class FakeGitLab:
             }
         )
 
-    async def read_blob(
-        self, project_id: int, file_path: str, ref: str = "HEAD"
-    ) -> BlobReadResult:
+    async def read_blob(self, project_id: int, file_path: str, ref: str = "HEAD") -> BlobReadResult:
         """Typed authoritative read (R14) — mirrors ``GitLabClient.read_blob``.
 
         Routes through :meth:`get_file` so subclass/monkeypatched read

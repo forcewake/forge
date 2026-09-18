@@ -1250,9 +1250,7 @@ class GitHubRepositoryReader:
         except (binascii.Error, ValueError) as exc:
             raise GitHubAPIError(200, f"{file_path!r}: undecodable base64 content") from exc
 
-    async def read_blob(
-        self, project_id: int, file_path: str, ref: str = "HEAD"
-    ) -> BlobReadResult:
+    async def read_blob(self, project_id: int, file_path: str, ref: str = "HEAD") -> BlobReadResult:
         """One AUTHORITATIVE blob read as a typed result (R14).
 
         Provider-verified outcome for the create-vs-update existence

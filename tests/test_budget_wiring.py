@@ -196,9 +196,7 @@ async def get_spec_document(db, run_id: str) -> dict:
 
     async with db() as session:
         row = (
-            (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
-            .scalars()
-            .one()
+            (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id))).scalars().one()
         )
         return dict(row.document)
 
@@ -325,9 +323,7 @@ class TestProfileFreezeChain:
         per command) — the propose + review legs must still reserve, and the
         budget shows their actuals."""
         settings = make_settings(FORGE_BUDGET_PROFILES=PROFILE_JSON)
-        llm = BudgetAwareFakeLLM(
-            session_factory=db, script=["{}", CREATE_DRAFT, REVIEW_OK_JSON]
-        )
+        llm = BudgetAwareFakeLLM(session_factory=db, script=["{}", CREATE_DRAFT, REVIEW_OK_JSON])
         service = real_agent_service(db, fake_gitlab, llm, settings)
         run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
 
@@ -352,9 +348,7 @@ class TestBuiltinExhaustion:
         """max_calls=1: the planner spends the budget, /go's proposer is
         refused BEFORE any dispatch and the run classifies as blocked
         (budget_exhausted) — not a proposal failure."""
-        settings = make_settings(
-            FORGE_BUDGET_PROFILES=json.dumps({"standard": {"max_calls": 1}})
-        )
+        settings = make_settings(FORGE_BUDGET_PROFILES=json.dumps({"standard": {"max_calls": 1}}))
         llm = BudgetAwareFakeLLM(session_factory=db, script=["{}"])
         service = real_agent_service(db, fake_gitlab, llm, settings)
         run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
@@ -526,18 +520,20 @@ class TestProfileConfig:
         assert parse_budget_profiles(None) == {}
 
     def test_parse_budget_profiles_fails_closed_on_garbage(self):
-        for raw in ("not json", "[1, 2]", '{"heavy": {"max_calls": "lots"}}',
-                    '{"heavy": {"max_calls": -1}}', '{"": {}}'):
+        for raw in (
+            "not json",
+            "[1, 2]",
+            '{"heavy": {"max_calls": "lots"}}',
+            '{"heavy": {"max_calls": -1}}',
+            '{"": {}}',
+        ):
             with pytest.raises(ValueError):
                 parse_budget_profiles(raw)
 
     def test_forge_config_yaml_profiles_win_over_env(self, tmp_path):
         config_file = tmp_path / "forge.yml"
         config_file.write_text(
-            "forge:\n"
-            "  budget_profiles:\n"
-            "    heavy:\n"
-            "      max_calls: 7\n",
+            "forge:\n  budget_profiles:\n    heavy:\n      max_calls: 7\n",
             encoding="utf-8",
         )
         config = ForgeConfig(config_file)

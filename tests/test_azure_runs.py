@@ -245,9 +245,7 @@ class FakeAzureDevOps:
             raise AzureDevOpsNotFoundError(404, f"branch head not found for {branch!r}")
         return head
 
-    async def list_commits(
-        self, project: str, repo: str, branch: str, top: int = 30
-    ) -> list[dict]:
+    async def list_commits(self, project: str, repo: str, branch: str, top: int = 30) -> list[dict]:
         self.calls.append(("list_commits", (project, repo, branch, top)))
         return [dict(commit) for commit in self.commits.get(branch, [])[:top]]
 

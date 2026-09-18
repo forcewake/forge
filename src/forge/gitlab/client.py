@@ -311,9 +311,7 @@ class GitLabClient:
         )
         return RepositoryFile.model_validate(resp.json())
 
-    async def read_blob(
-        self, project_id: int, file_path: str, ref: str = "HEAD"
-    ) -> BlobReadResult:
+    async def read_blob(self, project_id: int, file_path: str, ref: str = "HEAD") -> BlobReadResult:
         """One AUTHORITATIVE blob read as a typed result (R14).
 
         Unlike :meth:`get_file` — which raises and leaves every caller to

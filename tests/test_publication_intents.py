@@ -179,9 +179,7 @@ class TestProbeDecisionTable:
     ]
 
     def test_exactly_one_marker_and_parent_match_adopts(self):
-        hits = commit_matches(
-            self.COMMITS, operation_key="ka12bug45678", expected_parent_oid="p"
-        )
+        hits = commit_matches(self.COMMITS, operation_key="ka12bug45678", expected_parent_oid="p")
         assert hits == ["a" * 40]
         verdict = classify_probe(
             ProbeObservation(marker_hits=tuple(hits), head_oid="x", expected_parent_oid="p")
@@ -190,9 +188,7 @@ class TestProbeDecisionTable:
 
     def test_previous_repair_key_is_never_mistaken_for_this_intent(self):
         """A different intent's key (same repeating human message) matches nothing."""
-        hits = commit_matches(
-            self.COMMITS, operation_key="currentkey01", expected_parent_oid="p"
-        )
+        hits = commit_matches(self.COMMITS, operation_key="currentkey01", expected_parent_oid="p")
         assert hits == []
 
     def test_right_marker_wrong_parent_is_not_a_match(self):
@@ -271,9 +267,7 @@ class TestGitLabWriterIntents:
                 intent = (
                     (
                         await session.execute(
-                            select(PublicationIntent).where(
-                                PublicationIntent.run_id == RUN_ID
-                            )
+                            select(PublicationIntent).where(PublicationIntent.run_id == RUN_ID)
                         )
                     )
                     .scalars()
@@ -403,9 +397,7 @@ class TestGitLabWriterIntents:
         resolved = await intent_of(session_factory, intent.id)
         assert resolved.status == "unknown"
 
-    async def test_previous_repair_commit_not_mistaken_for_new_attempt(
-        self, session_factory
-    ):
+    async def test_previous_repair_commit_not_mistaken_for_new_attempt(self, session_factory):
         """A previous cycle's commit (different operation key) is never
         adopted by this intent: nothing landed FOR THIS KEY and the head is
         intact at the new attempt base → safe same-key re-dispatch."""
@@ -459,9 +451,7 @@ class TestGitLabWriterIntents:
         assert resolved.status == "unknown"
         assert resolved.remote_result["matches"] == ["sha-twin-1", "sha-twin-2"]
 
-    async def test_head_moved_by_human_resolves_duplicated_and_drifts(
-        self, session_factory
-    ):
+    async def test_head_moved_by_human_resolves_duplicated_and_drifts(self, session_factory):
         """Zero marker matches + a moved head: someone else owns the ref —
         the intent resolves duplicated and the writer raises BranchDriftError
         (never force, never adopt)."""
@@ -505,8 +495,7 @@ def _create_diff(path: str, content: str) -> str:
         "index 0000000..1111111\n"
         "--- /dev/null\n"
         f"+++ b/{path}\n"
-        f"@@ -0,0 +1,{len(lines)} @@\n"
-        + body
+        f"@@ -0,0 +1,{len(lines)} @@\n" + body
     )
 
 
@@ -718,9 +707,7 @@ class TestGitHubIntentScanner:
         fake = FakeGitHub()
         fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
         fake.heads[REPO]["main"] = BASE_HEAD
-        fake.seed_commit(
-            REPO, GBRANCH, "f" * 40, gh_marker_message(key), parents=[BASE_HEAD]
-        )
+        fake.seed_commit(REPO, GBRANCH, "f" * 40, gh_marker_message(key), parents=[BASE_HEAD])
         for i in range(twins):
             fake.seed_commit(
                 REPO,
@@ -769,9 +756,7 @@ class TestGitHubIntentScanner:
         assert run.status == FlowStatus.WAITING_CI.value  # advanced, not blocked
         assert "f" * 40 in list(run.candidate_shas or [])
 
-    async def test_scanner_resolves_superseded_run_as_duplicated(
-        self, gh_session_factory
-    ):
+    async def test_scanner_resolves_superseded_run_as_duplicated(self, gh_session_factory):
         """R10 interplay: a cancelled run's landed commit is superseded
         evidence — the intent resolves duplicated, the run is NEVER revived."""
         key = "supersedk1234"
@@ -810,9 +795,7 @@ class TestGitHubIntentScanner:
             run = await session.get(FlowRun, RUN_ID)
         assert run.status == FlowStatus.BLOCKED.value
 
-    async def test_scanner_redispatch_backs_off_without_posting(
-        self, gh_session_factory
-    ):
+    async def test_scanner_redispatch_backs_off_without_posting(self, gh_session_factory):
         """Nothing landed and the head intact: the scanner does NOT dispatch
         (it holds no candidate) — it backs the next probe off and leaves the
         re-dispatch to the run's own probe-first publish leg."""

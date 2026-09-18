@@ -1360,9 +1360,7 @@ class AzureRepositoryReader:
         except (ValueError, UnicodeDecodeError) as exc:
             raise AzureDevOpsError(200, f"{file_path!r}: undecodable content") from exc
 
-    async def read_blob(
-        self, project_id: int, file_path: str, ref: str = "HEAD"
-    ) -> BlobReadResult:
+    async def read_blob(self, project_id: int, file_path: str, ref: str = "HEAD") -> BlobReadResult:
         """One AUTHORITATIVE blob read as a typed result (R14).
 
         Provider-verified outcome for the create-vs-update existence
@@ -1388,22 +1386,14 @@ class AzureRepositoryReader:
         except AzureDevOpsError as exc:
             status = exc.status_code
             if status == 404:
-                return BlobReadResult.not_found(
-                    f"azure devops 404: {exc.message[:200]}"
-                )
+                return BlobReadResult.not_found(f"azure devops 404: {exc.message[:200]}")
             if status in (200, 422):
                 # The reader's own honesty refusals (no inline content,
                 # symlink) — the path exists but delivered nothing usable.
-                return BlobReadResult.incomplete(
-                    f"{file_path!r} at {ref!r}: {exc.message[:200]}"
-                )
+                return BlobReadResult.incomplete(f"{file_path!r} at {ref!r}: {exc.message[:200]}")
             if status in (401, 403):
-                return BlobReadResult.forbidden(
-                    f"azure devops error {status}: {exc.message[:200]}"
-                )
-            return BlobReadResult.unavailable(
-                f"azure devops error {status}: {exc.message[:200]}"
-            )
+                return BlobReadResult.forbidden(f"azure devops error {status}: {exc.message[:200]}")
+            return BlobReadResult.unavailable(f"azure devops error {status}: {exc.message[:200]}")
         except httpx.HTTPError as exc:
             return BlobReadResult.unavailable(f"azure devops transport error: {exc}")
         return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)

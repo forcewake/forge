@@ -476,7 +476,9 @@ class FakeGitHub:
         try:
             repo_file = await self.get_file(project_id, file_path, ref)
         except GitHubAPIError as exc:
-            return blob_result_for_http_status(exc.status_code, f"github api error {exc.status_code}: {exc.message}")
+            return blob_result_for_http_status(
+                exc.status_code, f"github api error {exc.status_code}: {exc.message}"
+            )
         except httpx.HTTPError as exc:
             return BlobReadResult.unavailable(f"github transport error: {exc}")
         return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)

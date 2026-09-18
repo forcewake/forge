@@ -759,14 +759,10 @@ class TestReceiptDedupe:
         await openb(db, max_calls=5)
         usage = SimpleUsage(input_tokens=21, output_tokens=7, completeness="aggregate")
         async with db() as session:
-            first = await reconcile_harness_receipt(
-                session, RUN_ID, usage, dedupe_key="episode-1"
-            )
+            first = await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="episode-1")
             assert first is not None
             assert first.consumed_calls == 1
-            again = await reconcile_harness_receipt(
-                session, RUN_ID, usage, dedupe_key="episode-1"
-            )
+            again = await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="episode-1")
             await session.commit()
         assert again is not None
         assert again.consumed_calls == 1  # the repeat was a no-op

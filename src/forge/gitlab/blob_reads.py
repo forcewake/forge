@@ -188,7 +188,5 @@ def decode_blob_content(
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        return BlobReadResult.incomplete(
-            f"{path!r} at {ref!r}: content is not valid UTF-8 ({exc})"
-        )
+        return BlobReadResult.incomplete(f"{path!r} at {ref!r}: content is not valid UTF-8 ({exc})")
     return BlobReadResult.found(text)

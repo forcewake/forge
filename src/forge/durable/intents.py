@@ -201,11 +201,7 @@ async def find_open_intent(
     )
     if idempotency_scope is not None:
         query = query.where(PublicationIntent.idempotency_scope == idempotency_scope)
-    return (
-        (await session.execute(query.limit(1)))
-        .scalars()
-        .first()
-    )
+    return (await session.execute(query.limit(1))).scalars().first()
 
 
 async def record_intent(
@@ -273,9 +269,7 @@ async def mark_dispatched(
         )
     if expected_parent_oid is not None or expected_head is not None:
         intent.expected_parent_oid = (
-            expected_parent_oid
-            if expected_parent_oid is not None
-            else intent.expected_parent_oid
+            expected_parent_oid if expected_parent_oid is not None else intent.expected_parent_oid
         )
         intent.expected_head = expected_head if expected_head is not None else intent.expected_head
     intent.status = "dispatched"
@@ -344,8 +338,10 @@ async def due_intents(
     )
     if repo is not None:
         query = query.where(PublicationIntent.repo == repo)
-    rows = ((await session.execute(query)).scalars().all())
+    rows = (await session.execute(query)).scalars().all()
     if now is None:
         return list(rows)
     now = as_aware_utc(now)
-    return [row for row in rows if row.next_probe_at is None or as_aware_utc(row.next_probe_at) <= now]
+    return [
+        row for row in rows if row.next_probe_at is None or as_aware_utc(row.next_probe_at) <= now
+    ]
