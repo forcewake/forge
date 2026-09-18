@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
+    DEFAULT_SETTLE_WINDOW_SECONDS,
     TRANSITION_EVENT_TYPE,
     ActionLog,
     Controller,
@@ -63,6 +64,7 @@ from forge.durable import (
     PublicationIntent,
     RunNotFound,
     RunSpec,
+    SettleDecision,
     StepRun,
     as_aware_utc,
     build_source_event_id,
@@ -76,6 +78,8 @@ from forge.durable import (
     ProbeObservation,
     ProbeVerdict,
     record_approval,
+    settle_negative_probe,
+    settle_state_record,
 )
 from forge.durable.budgets import (
     BUDGET_EXHAUSTED,
@@ -2074,7 +2078,12 @@ class RunService:
         # branch is cut from the FROZEN attempt base (review F03) — never
         # from the live target branch — and the expected head is checked
         # before the commit (BranchDriftError on drift).
-        writer = self._writer_class(self._gitlab, self._session_factory, project_id)
+        writer = self._writer_class(
+            self._gitlab,
+            self._session_factory,
+            project_id,
+            settle_seconds=self._publish_settle_seconds(),
+        )
         # F13 (ADR-0018 §4): re-read the publication grant right before
         # applying — a cancel that landed while this proposal was in flight
         # revokes it, so this leg stands down instead of racing the cancel.
@@ -2120,6 +2129,19 @@ class RunService:
                 # publisher and the GitHub/Azure lanes, and the branch keeps
                 # the human's commit.
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, f"branch_drift: {exc}")
+                return
+            if result.outcome is WriteOutcome.SETTLING:
+                # A12: the recovery probe was negative — the intent parked in
+                # the effect-certainty window. NOT a terminal outcome: the
+                # run stays in ``committing`` so the window-end re-probe
+                # (evaluate_publication_intents) can adopt a late-landing
+                # commit or resolve the honest unknown. The step's lease
+                # expiry re-drives the leg, which adopts via the journal.
+                logger.info(
+                    "Run %s publication negative-probed — settling in the A12 "
+                    "certainty window (no re-dispatch)",
+                    run_id[:8],
+                )
                 return
             if result.outcome is WriteOutcome.UNKNOWN:
                 # Unknown outcome: block the run, never blind-retry (ADR-0005).
@@ -2369,7 +2391,12 @@ class RunService:
 
         *driver* (ADR-0023) pins the leg to the RunSpec's frozen selection.
         """
-        writer = self._writer_class(self._gitlab, self._session_factory, project_id)
+        writer = self._writer_class(
+            self._gitlab,
+            self._session_factory,
+            project_id,
+            settle_seconds=self._publish_settle_seconds(),
+        )
         return build_backend(
             self._settings,
             gitlab=self._gitlab,
@@ -3274,6 +3301,21 @@ class RunService:
     #: scanner only resolves outcomes and stops the polling loop.
     _INTENT_PROBE_BACKOFF_SECONDS = 60
 
+    def _publish_settle_seconds(self) -> int:
+        """The A12 effect-certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``).
+
+        How long a negative probe parks an intent in ``probing`` before its
+        window-end re-probe; a broken/absent setting degrades to the
+        intents-module default, never to zero (a zero window would make one
+        negative read decisive again).
+        """
+        raw = getattr(self._settings, "FORGE_PUBLISH_SETTLE_SECONDS", DEFAULT_SETTLE_WINDOW_SECONDS)
+        try:
+            seconds = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return DEFAULT_SETTLE_WINDOW_SECONDS
+        return seconds if seconds > 0 else DEFAULT_SETTLE_WINDOW_SECONDS
+
     async def evaluate_publication_intents(self, now: datetime | None = None) -> None:
         """One recovery pass over every GitLab publication intent (R11).
 
@@ -3289,9 +3331,13 @@ class RunService:
           on to ``waiting_ci`` right here;
         - DUPLICATED / UNKNOWN: the intent resolves and a mid-publication
           run parks ``blocked`` (branch_drift / unknown_outcome contract);
-        - REDISPATCH (nothing landed, head intact): left to the run's own
-          publish leg, which re-dispatches with the SAME key — this pass
-          never POSTs (it holds no candidate content).
+        - REDISPATCH (nothing landed, head intact): A12 — a negative probe
+          is not proof of absence, so the intent parks in the effect-
+          certainty window (``probing``); a window-end re-probe that is
+          STILL negative parks ``blocked(unknown_outcome)`` with operator
+          instructions (GitLab has no branch-wide CAS that could refuse a
+          duplicate), while a late-landing commit is adopted by the ADOPT
+          branch above. This pass never POSTs.
 
         Superseded runs (R10: cancelled / terminal) resolve ``duplicated``
         — never adopted into a READY state.
@@ -3320,6 +3366,7 @@ class RunService:
             run_status = run.status
             cancel_requested = bool(run.cancel_requested)
             project_id = int(run.project_id)
+            issue_iid = int(run.issue_iid or 0)
         if cancel_requested or run_status in {s.value for s in TERMINAL_STATUSES}:
             async with self._session_factory() as session:
                 await complete_intent(
@@ -3396,6 +3443,23 @@ class RunService:
                 sha[:8],
             )
             mr_iid = await self._journaled_draft_mr(intent.run_id, project_id, intent.target_ref)
+            if mr_iid is None:
+                # A12 convergence: the publish leg may have stood down inside
+                # the effect-certainty window (its step completed, the run
+                # stayed mid-publish) — this scanner finishes the walk itself:
+                # open the Draft MR on the adopted sha, then advance the run.
+                try:
+                    mr_iid = await self._create_draft_mr(
+                        project_id, intent.run_id, intent.target_ref, sha
+                    )
+                except (GitLabAPIError, httpx.HTTPError):
+                    logger.warning(
+                        "Adopted commit %s for run %s but the Draft MR could not be "
+                        "created — leaving the run mid-publish for a re-drive",
+                        sha[:8],
+                        intent.run_id[:8],
+                        exc_info=True,
+                    )
             if mr_iid is not None:
                 # The crashed leg already opened the Draft MR — finish the
                 # walk to waiting_ci on the adopted sha right here.
@@ -3459,12 +3523,55 @@ class RunService:
             if run_status in self._PUBLISHING_STATUSES:
                 await self._to_terminal(intent.run_id, FlowStatus.FAILED, "commit_unknown_outcome")
             return
-        # REDISPATCH: nothing landed, head intact — back the probe off.
+        # REDISPATCH — A12: a negative probe proves nothing landed YET; it
+        # cannot prove that no first effect is in flight, and GitLab's
+        # Commits API has no branch-wide CAS that could refuse a duplicate.
+        # The intent parks in the effect-certainty window (``probing``) and
+        # only a window-end re-probe that is STILL negative parks the honest
+        # unknown — this pass never derives a dispatch from one read.
         async with self._session_factory() as session:
-            row = await session.get(PublicationIntent, intent.id)
-            if row is not None:
-                row.next_probe_at = now + timedelta(seconds=self._INTENT_PROBE_BACKOFF_SECONDS)
-                await session.commit()
+            decision = await settle_negative_probe(
+                session,
+                intent,
+                now=now,
+                window_seconds=self._publish_settle_seconds(),
+            )
+            exhausted = decision is SettleDecision.PARK_UNKNOWN
+            if exhausted:
+                await complete_intent(
+                    session,
+                    intent.id,
+                    "unknown",
+                    remote_result={
+                        "reason": "settle_window_exhausted",
+                        "operator_instruction": (
+                            "Publication outcome unresolved after the effect-certainty "
+                            "window: an operator must inspect branch "
+                            f"`{intent.target_ref}` and reconcile manually — forge will "
+                            "not re-publish over an unknown outcome."
+                        ),
+                        "settle": settle_state_record(intent),
+                    },
+                )
+            await session.commit()
+        if exhausted:
+            if run_status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+                await self._post_journaled_note(
+                    project_id,
+                    issue_iid,
+                    f"Run `{intent.run_id[:8]}` publication outcome is **unresolved** — the "
+                    "certainty window expired with consistently-negative probes and GitLab "
+                    "offers no write precondition that could prove no effect is in flight. "
+                    f"An operator must inspect branch `{intent.target_ref}` and reconcile "
+                    "manually; forge will not re-publish over an unknown outcome.\n\n"
+                    "*This is an automated message.*",
+                    intent.run_id,
+                    "publish_unknown_outcome",
+                )
+            return
+        # WAIT: the certainty window was (re)opened — the re-probe happens at
+        # its end, never hot, and nothing is dispatched from a read alone.
 
     # ------------------------------------------------------------------
     # Reconciler tick: waiting_harness → … (ADR-0015)
@@ -3788,7 +3895,12 @@ class RunService:
                     return False
                 return run.status == FlowStatus.COMMITTING.value
 
-        writer = self._writer_class(self._gitlab, self._session_factory, project_id)
+        writer = self._writer_class(
+            self._gitlab,
+            self._session_factory,
+            project_id,
+            settle_seconds=self._publish_settle_seconds(),
+        )
         result = await publish_candidate(
             gitlab=self._gitlab,
             session_factory=self._session_factory,
@@ -3809,6 +3921,17 @@ class RunService:
                     "Run %s harness publish stood down — execution claim stale (%s)",
                     run_id[:8],
                     result.reason,
+                )
+                return
+            if result.settling:
+                # A12: the recovery probe was negative — the intent parked in
+                # the effect-certainty window. Leave the run in its
+                # non-terminal publishing state; the window-end re-probe by
+                # evaluate_publication_intents resolves it (adopt or park).
+                logger.info(
+                    "Run %s harness publish negative-probed — settling in the A12 "
+                    "certainty window (no re-dispatch)",
+                    run_id[:8],
                 )
                 return
             if result.unknown_outcome:

@@ -43,6 +43,24 @@ that lands during the already-started remote commit is NOT rolled back
 ``PublishResult.superseded`` is set instead of letting the caller walk a
 cancelled run toward ``ready_for_human``.
 
+The recovery half is the A12 effect-certainty contract: a NEGATIVE
+publication-intent probe (zero ``(forge-op:<key>)`` marker hits, head still
+at the expected parent) is NOT proof that no remote effect is pending — the
+provider may have accepted the first request and be applying it slowly. The
+GitLab transport therefore never re-dispatches off one read: a negative
+probe returns ``WriteOutcome.SETTLING`` (``PublishResult.settling``), the
+intent parks in the bounded ``probing`` certainty window
+(``FORGE_PUBLISH_SETTLE_SECONDS``, 30s default, ×2 backoff), and only the
+window-end re-probe decides — a late-landing commit is ADOPTED, and an
+exhausted window on GitLab (no branch-wide CAS) parks
+``blocked(unknown_outcome)`` with operator instructions. GitHub and Azure
+DevOps carry a per-adapter guarantee (see
+:mod:`forge.durable.intents`): their writes are branch-wide CAS
+(``expectedHeadOid`` / ``oldObjectId``), so a redispatch whose
+``expected_parent`` is the unchanged head is INHERENTLY duplicate-safe — a
+slow first write would move the head and the CAS would refuse the
+duplicate.
+
 The publisher never executes candidate content and never trusts the
 harness's claims; a rejected candidate is reported, not repaired. The
 negative conformance suite (``tests/test_publication_boundary.py``) is the
@@ -247,16 +265,21 @@ class PublishResult:
     """The publisher's verdict. ``ok=False`` carries a machine-readable
     ``reason`` for the run's blocking evidence; ``unknown_outcome=True``
     means the commit MAY exist — the caller must fail, never retry.
-    ``superseded=True`` (with ``ok=True``) means the commit DID land but the
-    publication grant was revoked meanwhile — the run's completion records
-    superseded evidence and must never walk toward ``ready_for_human``
-    (R10)."""
+    ``settling=True`` (with ``ok=False``, A12) means the recovery probe was
+    negative and the intent parked in the effect-certainty window — NOT
+    final: the caller must NOT park the run terminal, the window-end
+    re-probe (the lane's recovery scanner) adopts a late-landing commit or
+    resolves the honest unknown. ``superseded=True`` (with ``ok=True``)
+    means the commit DID land but the publication grant was revoked
+    meanwhile — the run's completion records superseded evidence and must
+    never walk toward ``ready_for_human`` (R10)."""
 
     ok: bool
     reason: str = ""
     commit_sha: str | None = None
     unknown_outcome: bool = False
     superseded: bool = False
+    settling: bool = False
 
 
 def publication_grant_valid(run: FlowRun, generation: int | None) -> bool:
@@ -739,6 +762,13 @@ async def publish_candidate(
             return PublishResult(False, f"branch_drift: {exc}")
         except GitLabAPIError as exc:
             return PublishResult(False, f"commit_failed: {exc}")
+        if result.outcome is WriteOutcome.SETTLING:
+            # A12: the recovery probe was negative — the intent parked in the
+            # effect-certainty window. NOT a final outcome: the caller must
+            # leave the run in its (non-terminal) publishing state so the
+            # window-end re-probe can adopt a late-landing commit or resolve
+            # the honest unknown.
+            return PublishResult(False, "commit_settling_probe_pending", settling=True)
         if result.outcome is WriteOutcome.UNKNOWN or not result.commit_sha:
             return PublishResult(False, "commit_unknown_outcome", unknown_outcome=True)
         return PublishResult(True, commit_sha=result.commit_sha)

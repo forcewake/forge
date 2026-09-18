@@ -38,6 +38,7 @@ Checkpoint matrix (coroutine suite ⇄ this suite):
 - (c) gate consumed, proposal not yet persisted     — S2c ⇄ TestCheckpointC
 - (d) commit applied, response lost, intent open    — S3  ⇄ TestCheckpointD
 - (R11) ambiguous publication: adopt, never re-POST — new ⇄ TestAmbiguousCommit
+- (A12) DELAYED apply: negative probe ≠ absence     — new ⇄ TestDelayedApplyCommit
 - review leg crash (REVIEWING resume)               — S4f ⇄ TestCheckpointReview
 - crash while waiting_ci: adopt the full publication— S3/S4 aftermath ⇄
                                                       TestCheckpointWaitingCI
@@ -724,6 +725,103 @@ class TestCheckpointD:
 async def _intent_status(lab: OSLab, run_id: str) -> str | None:
     intents = await intents_of(lab, run_id)
     return intents[0].status if intents else None
+
+
+# ----------------------------------------------------------------------
+# A12 — DELAYED apply: accepted, applied after the negative probe
+# ----------------------------------------------------------------------
+
+
+class TestDelayedApplyCommit:
+    async def test_delayed_apply_negative_probe_settles_then_adopts_never_duplicates(
+        self, lab: OSLab
+    ):
+        """The A12 hole: the stub ACCEPTS the publication POST but DELAYS the
+        commit's application past the recovery's negative probe. A recovery
+        that treated ``zero marker hits + unchanged head`` as safe-to-
+        redispatch would POST a duplicate and BOTH would land. Instead the
+        negative probe parks the intent in the effect-certainty window
+        (``probing``), the late-landing commit is ADOPTED by the window-end
+        re-probe, and the run converges on exactly one candidate."""
+        victim = lab.spawn("worker-1")
+        run_id = await start_run_leg(lab, note_id=650)
+        await wait_status(lab, run_id, WAITING_APPROVAL)
+
+        lab.gitlab.arm_commit_delay(45.0)
+        lab.gitlab.arm_commit_effect("hold")
+        await ingress(lab, go_command(run_id), note_id=651)
+        await eventually(
+            lambda: lab.gitlab.commit_holds == 1,
+            description="the commit POST to be accepted (application delayed) and hold",
+            timeout=WAIT_WORKER,
+            lab=lab,
+        )
+        sigkill(victim)
+
+        branch = factory_branch(ISSUE_IID, run_id)
+        counts = lab.gitlab.snapshot_counts()
+        assert counts["commit_posts"] == 1, "exactly one write was accepted"
+        assert counts["commits_applied"] == 0, "the accepted effect is NOT applied yet"
+        assert lab.gitlab.delayed_apply_pending == 1
+        assert lab.gitlab.forge_commits_on(branch) == [], (
+            "every branch read still shows the old head — the negative-probe view"
+        )
+        intents = await intents_of(lab, run_id)
+        assert len(intents) == 1 and intents[0].status == "dispatched"
+        run = await get_run(lab, run_id)
+        assert run.status == COMMITTING
+        assert list(run.candidate_shas or []) == []
+
+        # Recovery: a fresh worker probes the STALE head. The negative read
+        # must park the intent in the certainty window — never re-POST.
+        await expire_running_leases(lab)
+        lab.spawn("worker-2")
+
+        async def intent_settling() -> bool:
+            return await _intent_status(lab, run_id) == "probing"
+
+        await eventually(
+            intent_settling,
+            description="the negative probe to park the intent in the A12 certainty window",
+            timeout=WAIT_CONVERGE,
+            lab=lab,
+        )
+        assert lab.gitlab.snapshot_counts()["commit_posts"] == 1, (
+            "the certainty window forbids a re-dispatch off one negative read"
+        )
+
+        # The provider's slow application completes AFTER the negative probe.
+        await eventually(
+            lambda: lab.gitlab.delayed_apply_pending == 0,
+            description="the delayed commit application to complete",
+            timeout=WAIT_CONVERGE,
+            lab=lab,
+        )
+        forge_commits = lab.gitlab.forge_commits_on(branch)
+        assert len(forge_commits) == 1, "exactly ONE logical candidate exists"
+        sha = forge_commits[0]["id"]
+
+        # The window-end re-probe ADOPTS the late-landing commit: the run
+        # advances with no second write and a consistent history.
+        await eventually(
+            lambda: _intent_status(lab, run_id) == "adopted",
+            description="the certainty-window re-probe to adopt the late-landing commit",
+            timeout=WAIT_CONVERGE,
+            lab=lab,
+        )
+        adopted = (await intents_of(lab, run_id))[0]
+        assert adopted.provider_object_id == sha, "the adopted commit is THE landed one"
+        assert lab.gitlab.snapshot_counts()["commit_posts"] == 1, (
+            "recovery adopted — never a second POST"
+        )
+        assert lab.gitlab.mrs_created == 1
+        run = await get_run(lab, run_id)
+        assert list(run.candidate_shas or []) == [sha]
+
+        await drive_to_ready(lab, run_id, sha)
+        await wait_steps_settled(lab)
+        assert_single_publication(lab)
+        assert await run_status(lab, run_id) == READY
 
 
 # ----------------------------------------------------------------------

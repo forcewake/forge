@@ -13,8 +13,13 @@ codes, including the semantics recovery depends on:
 - ``POST .../repository/commits`` can be armed to APPLY the commit and then
   ``hold`` the response forever (the caller is SIGKILLed waiting) or ``drop``
   the connection before responding — the ambiguous remote effect R11's
-  identity probe exists for. Applied effects stay in the stub's state, so
-  the probe can find exactly one ``(forge-op:<key>)`` commit afterwards.
+  identity probe exists for. It can also be armed (``arm_commit_delay``) to
+  ACCEPT the request but DELAY the application itself: the commit lands only
+  after the arming window elapses, so a recovery probe racing the delay sees
+  the OLD head — the A12 delayed-apply window in which a negative probe
+  proves nothing about an in-flight effect. Applied effects stay in the
+  stub's state, so the probe can find exactly one ``(forge-op:<key>)``
+  commit afterwards.
 
 State lives in the test process; the suite drives the "external world" (CI
 pipelines) by mutating it directly, exactly like the coroutine suite drives
@@ -81,12 +86,15 @@ class GitLabStub:
         self.commit_responses_served = 0
         self.commit_holds = 0
         self.commit_drops = 0
+        self.delayed_apply_pending = 0  # accepted, application still delayed
+        self.delayed_applies = 0  # delayed applications completed
         self.mr_posts = 0
         self.mrs_created = 0
         self.note_posts = 0
         self.notes_created = 0
         self.request_log: list[str] = []
         self._commit_effect: str | None = None  # None | "hold" | "drop" (one-shot)
+        self._commit_delay_seconds: float | None = None  # one-shot
         self._note_hold_fragment: str | None = None  # one-shot
         self._ids = 100
 
@@ -115,6 +123,43 @@ class GitLabStub:
         assert effect in ("hold", "drop"), effect
         with self._lock:
             self._commit_effect = effect
+
+    def arm_commit_delay(self, seconds: float) -> None:
+        """The NEXT create_commit is ACCEPTED but APPLIED only after *seconds*.
+
+        The A12 delayed-apply window: the request's effect is in flight
+        while every branch read still shows the old head, so a recovery
+        probe racing the delay is NEGATIVE without proving absence. Combine
+        with ``arm_commit_effect("hold")`` so the poster never sees an
+        outcome (the ambiguous shape recovery exists for).
+        """
+        with self._lock:
+            self._commit_delay_seconds = float(seconds)
+
+    # -- effect execution (stub-owned: the delayed timer runs on the stub) ----
+
+    def _apply_commit(
+        self, branch: str, sha: str, message: str, head: str, actions: list[dict]
+    ) -> None:
+        """Execute the accepted write: file actions + the branch move."""
+        with self._lock:
+            for action in actions:
+                path = str(action.get("file_path") or "")
+                if action.get("action") == "delete":
+                    self.files.pop(path, None)
+                elif path:
+                    self.files[path] = str(action.get("content") or "")
+            self.branches[branch].insert(0, _commit(sha, message, [head]))
+            self.commits_applied += 1
+
+    def _apply_delayed_commit(
+        self, branch: str, sha: str, message: str, head: str, actions: list[dict]
+    ) -> None:
+        """The delayed half of an accepted A12 write: apply it now."""
+        self._apply_commit(branch, sha, message, head, actions)
+        with self._lock:
+            self.delayed_apply_pending -= 1
+            self.delayed_applies += 1
 
     def arm_note_hold(self, fragment: str) -> None:
         """The NEXT issue note whose body contains *fragment* is held."""
@@ -158,6 +203,8 @@ class GitLabStub:
                 "commit_posts": self.commit_posts,
                 "commits_applied": self.commits_applied,
                 "commit_responses_served": self.commit_responses_served,
+                "delayed_apply_pending": self.delayed_apply_pending,
+                "delayed_applies": self.delayed_applies,
                 "mr_posts": self.mr_posts,
                 "mrs_created": self.mrs_created,
                 "note_posts": self.note_posts,
@@ -387,6 +434,9 @@ class GitLabStub:
                 The commit is applied FIRST (the ambiguous-effect contract:
                 the provider may have executed it even though no response
                 arrived), then the armed effect holds or drops the response.
+                With a delay armed (A12) the commit is ACCEPTED but its
+                application is scheduled for later — branch reads keep
+                showing the old head until the delay elapses.
                 """
                 branch = str(body.get("branch") or "")
                 message = str(body.get("commit_message") or "")
@@ -399,16 +449,29 @@ class GitLabStub:
                     sha = hashlib.sha1(
                         f"{branch}:{message}:{stub.commit_posts}".encode()
                     ).hexdigest()
-                    for action in body.get("actions") or []:
-                        path = str(action.get("file_path") or "")
-                        if action.get("action") == "delete":
-                            stub.files.pop(path, None)
-                        elif path:
-                            stub.files[path] = str(action.get("content") or "")
-                    stub.branches[branch].insert(0, _commit(sha, message, [head]))
-                    stub.commits_applied += 1
+                    actions = [
+                        action
+                        for action in (body.get("actions") or [])
+                        if str(action.get("file_path") or "")
+                    ]
+                    delay = stub._commit_delay_seconds
+                    stub._commit_delay_seconds = None  # one-shot
                     effect = stub._commit_effect
                     stub._commit_effect = None  # one-shot
+                    if delay is not None:
+                        # Accepted-but-not-applied: the parent is pinned by
+                        # the head at accept time (exactly what the intent's
+                        # expected parent recorded).
+                        stub.delayed_apply_pending += 1
+                        timer = threading.Timer(
+                            delay,
+                            stub._apply_delayed_commit,
+                            args=(branch, sha, message, head, actions),
+                        )
+                        timer.daemon = True
+                        timer.start()
+                    else:
+                        stub._apply_commit(branch, sha, message, head, actions)
                     if effect == "hold":
                         stub.commit_holds += 1
                     elif effect == "drop":

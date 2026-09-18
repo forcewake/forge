@@ -1,5 +1,5 @@
-"""Publication-intent tests (R11): durable intent BEFORE the remote effect,
-adoption of a lost outcome by identity — never a blind replay.
+"""Publication-intent tests (R11 + A12): durable intent BEFORE the remote
+effect, adoption of a lost outcome by identity — never a blind replay.
 
 The review acceptance, per provider:
 
@@ -14,6 +14,13 @@ The review acceptance, per provider:
 4. the intent row is durably written BEFORE the HTTP call (order asserted
    through the journal at dispatch time).
 
+A12 adds the effect-certainty contract: a NEGATIVE probe (zero marker hits,
+head intact) is not proof that no remote effect is pending — the provider
+may have accepted the first request and be applying it slowly. On GitLab
+(no branch-wide CAS) the intent settles in the bounded ``probing`` window
+and an exhausted window parks a visible unknown; on GitHub/Azure the CAS
+makes the released redispatch inherently duplicate-safe.
+
 Also covered: the pure probe decision table
 (:func:`forge.durable.intents.classify_probe`), the R10 superseded
 interplay (a cancelled/terminal run's intent resolves ``duplicated``, never
@@ -23,6 +30,7 @@ Azure stale-CAS adoption.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -33,17 +41,23 @@ from sqlalchemy.pool import StaticPool
 
 from forge.durable import (
     ActionLog,
+    DEFAULT_SETTLE_WINDOW_SECONDS,
     FlowRun,
     FlowStatus,
     PublicationIntent,
     ProbeObservation,
     ProbeVerdict,
+    RedispatchGuarantee,
+    SettleDecision,
     classify_probe,
     commit_matches,
     mark_dispatched,
     message_with_marker,
     op_marker,
     record_intent,
+    redispatch_guarantee,
+    settle_negative_probe,
+    settle_state,
 )
 from forge.integrations.github_flow import GitHubPublishFlow, github_factory_branch
 from forge.models.base import Base
@@ -162,6 +176,55 @@ async def intent_of(session_factory, intent_id: str) -> PublicationIntent:
         return await session.get(PublicationIntent, intent_id)
 
 
+async def expire_settle_window(session_factory, intent_id: str) -> None:
+    """Force the A12 certainty window open-ended (the wall clock stood in for)."""
+    async with session_factory() as session:
+        row = await session.get(PublicationIntent, intent_id)
+        assert row is not None
+        row.next_probe_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+
+
+async def _apply_after_expired_window(writer, session_factory, intent_id: str) -> WriteResult:
+    """Expire the certainty window, then re-enter the writer's recovery probe."""
+    await expire_settle_window(session_factory, intent_id)
+    return await writer.apply(RUN_ID, gitlab_changeset(), start_ref="main")
+
+
+class DelayedApplyGitLab(FakeGitLab):
+    """A12 accept-then-delay-apply fake: the provider ACCEPTED the write but
+    its application is still in flight — every branch read shows the OLD
+    head until :meth:`complete_delayed_apply` runs (the review's acceptance
+    shape: accept, delay the application past the negative probe, complete
+    after the redispatch attempt would have happened)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending: dict | None = None
+
+    def accept_delayed_commit(
+        self, branch: str, sha: str, message: str, parents: list[str]
+    ) -> None:
+        """Seed the accepted-but-unapplied effect (the lost-response shape)."""
+        self.pending = {
+            "branch": branch,
+            "record": {
+                "sha": sha,
+                "short_id": sha[:8],
+                "message": message,
+                "parent_ids": list(parents),
+            },
+        }
+
+    def complete_delayed_apply(self) -> str:
+        """The provider's slow application lands — the commit appears."""
+        assert self.pending is not None, "no delayed apply is in flight"
+        pending = self.pending
+        self.pending = None
+        self.branches.setdefault(pending["branch"], []).insert(0, dict(pending["record"]))
+        return str(pending["record"]["sha"])
+
+
 # ---------------------------------------------------------------------------
 # The pure probe decision table
 # ---------------------------------------------------------------------------
@@ -235,6 +298,125 @@ class TestProbeDecisionTable:
             message_with_marker("forge: implement 7", "abcd1234efgh")
             == "forge: implement 7 (forge-op:abcd1234efgh)"
         )
+
+
+class TestRedispatchGuaranteeTable:
+    """A12 per-adapter guarantees (research doc §summary matrix)."""
+
+    def test_github_and_azure_are_cas_protected(self):
+        assert (
+            redispatch_guarantee("github") is RedispatchGuarantee.CAS_PROTECTED
+        )  # createCommitOnBranch expectedHeadOid — a branch-wide CAS
+        assert (
+            redispatch_guarantee("azure_devops") is RedispatchGuarantee.CAS_PROTECTED
+        )  # pushes oldObjectId → staleOldObjectId — a branch-wide CAS
+
+    def test_gitlab_has_no_cas(self):
+        assert redispatch_guarantee("gitlab") is RedispatchGuarantee.UNPROTECTED
+
+    def test_default_settle_window_is_bounded(self):
+        assert DEFAULT_SETTLE_WINDOW_SECONDS == 30
+
+
+class TestA12SettleMachine:
+    """The effect-certainty machine over a seeded open intent."""
+
+    async def _seed(self, session_factory, *, provider: str, status: str) -> PublicationIntent:
+        async with session_factory() as session:
+            intent = await record_intent(
+                session,
+                run_id=RUN_ID,
+                provider=provider,
+                repo=str(PROJECT_ID),
+                target_ref=BRANCH,
+                idempotency_scope="cycle-1",
+                operation_key="settlek12345",
+                expected_parent_oid=None,
+                expected_head=None,
+            )
+            if status == "dispatched":
+                await mark_dispatched(session, intent.id)
+            await session.commit()
+            return intent
+
+    async def test_first_negative_probe_opens_the_window(self, session_factory):
+        intent = await self._seed(session_factory, provider="gitlab", status="dispatched")
+        async with session_factory() as session:
+            decision = await settle_negative_probe(
+                session, intent, now=datetime.now(timezone.utc), window_seconds=30
+            )
+            await session.commit()
+        assert decision is SettleDecision.WAIT
+        settled = await intent_of(session_factory, intent.id)
+        assert settled.status == "probing"
+        assert settled.next_probe_at is not None
+        state = settle_state(settled)
+        assert state.rounds == 0 and state.window_seconds == 30
+        assert state.reprobe_at is not None
+
+    async def test_open_window_waits_without_touching_the_row(self, session_factory):
+        intent = await self._seed(session_factory, provider="gitlab", status="dispatched")
+        async with session_factory() as session:
+            await settle_negative_probe(session, intent, window_seconds=30)
+            await session.commit()
+        settled = await intent_of(session_factory, intent.id)
+        before = (settled.status, settled.next_probe_at, settle_state(settled).rounds)
+        async with session_factory() as session:
+            decision = await settle_negative_probe(session, settled, window_seconds=30)
+            await session.commit()
+        assert decision is SettleDecision.WAIT  # window still open — no hot re-probe
+        after = await intent_of(session_factory, intent.id)
+        assert (after.status, after.next_probe_at, settle_state(after).rounds) == before
+
+    async def test_gitlab_window_exhaustion_parks_unknown(self, session_factory):
+        intent = await self._seed(session_factory, provider="gitlab", status="dispatched")
+        decisions: list[SettleDecision] = []
+        for round_index in range(4):
+            await expire_settle_window(session_factory, intent.id)
+            current = await intent_of(session_factory, intent.id)
+            async with session_factory() as session:
+                decisions.append(
+                    await settle_negative_probe(
+                        session, current, now=datetime.now(timezone.utc), window_seconds=30
+                    )
+                )
+                await session.commit()
+        assert decisions == [
+            SettleDecision.WAIT,
+            SettleDecision.WAIT,
+            SettleDecision.WAIT,
+            SettleDecision.PARK_UNKNOWN,
+        ]
+        exhausted = await intent_of(session_factory, intent.id)
+        assert exhausted.status == "probing"  # the PARK write stays with the caller
+        assert settle_state(exhausted).rounds == 2  # 3 windows total: 30s, 60s, 120s
+
+    async def test_cas_provider_window_release_returns_to_dispatched(self, session_factory):
+        """On a CAS-protected adapter the exhausted window RELEASES the same-key
+        redispatch (``probing → dispatched``): the branch-wide CAS itself
+        refuses any duplicate, so the release is inherently safe."""
+        intent = await self._seed(session_factory, provider="github", status="dispatched")
+        attempts_before = intent.attempt_count
+        async with session_factory() as session:
+            first = await settle_negative_probe(session, intent, window_seconds=30)
+            await session.commit()
+        assert first is SettleDecision.WAIT
+        await expire_settle_window(session_factory, intent.id)
+        for _ in range(2):  # rounds 1 and 2 extend the window
+            current = await intent_of(session_factory, intent.id)
+            async with session_factory() as session:
+                extended = await settle_negative_probe(session, current, window_seconds=30)
+                await session.commit()
+            assert extended is SettleDecision.WAIT
+            await expire_settle_window(session_factory, intent.id)
+        released = await intent_of(session_factory, intent.id)
+        async with session_factory() as session:
+            decision = await settle_negative_probe(session, released, window_seconds=30)
+            await session.commit()
+        assert decision is SettleDecision.REDISPATCH
+        final = await intent_of(session_factory, intent.id)
+        assert final.status == "dispatched"  # released to the CAS-protected leg
+        assert int(final.attempt_count) == attempts_before + 1
 
 
 # ---------------------------------------------------------------------------
@@ -381,26 +563,51 @@ class TestGitLabWriterIntents:
         assert action.remote_result["adopted"] is True
         assert action.remote_result["sha"] == "sha-landed"
 
-    async def test_response_lost_and_nothing_landed_stays_unknown(self, session_factory):
-        """Lost response, nothing landed, head intact: conservative unknown —
-        the run blocks, the intent records unknown (never a blind retry)."""
+    async def test_response_lost_and_nothing_landed_settles_then_parks_unknown(
+        self, session_factory
+    ):
+        """Lost response, nothing landed, head intact (A12): the FIRST
+        negative probe must NOT re-dispatch and must not call the outcome
+        unknown either — the intent settles in the certainty window; only
+        the window's exhaustion with consistently-negative probes parks the
+        conservative unknown (the run blocks, never a blind retry)."""
         fake = FakeGitLab()
-        fake.create_commit_timeout_drops = True  # POST lost, no effect
         intent = await open_or_create_intent(
             session_factory, status="dispatched", key="droppedkk123", expected_parent=None
         )
 
         writer = ChangesetWriter(fake, session_factory, project_id=PROJECT_ID)
-        result = await writer.apply(RUN_ID, gitlab_changeset(), start_ref="main")
+        first = await writer.apply(RUN_ID, gitlab_changeset(), start_ref="main")
 
-        assert result == WriteResult(WriteOutcome.UNKNOWN, None)
+        assert first == WriteResult(WriteOutcome.SETTLING, None)
+        assert fake.calls_of("create_commit") == []  # zero new writes — no duplicate
+        settled = await intent_of(session_factory, intent.id)
+        assert settled.status == "probing"
+        assert settled.next_probe_at is not None  # the window-end re-probe
+
+        # Windows expire with the probe still negative (nothing ever lands):
+        # the ladder extends twice, then parks the honest unknown.
+        second = await _apply_after_expired_window(writer, session_factory, intent.id)
+        assert second == WriteResult(WriteOutcome.SETTLING, None)
+        third = await _apply_after_expired_window(writer, session_factory, intent.id)
+        assert third == WriteResult(WriteOutcome.SETTLING, None)
+        fourth = await _apply_after_expired_window(writer, session_factory, intent.id)
+        assert fourth == WriteResult(WriteOutcome.UNKNOWN, None)
+        assert fake.calls_of("create_commit") == []  # never re-dispatched
+
         resolved = await intent_of(session_factory, intent.id)
         assert resolved.status == "unknown"
+        assert resolved.remote_result["reason"] == "settle_window_exhausted"
+        assert "operator" in resolved.remote_result["operator_instruction"]
+        assert settle_state(resolved).rounds == 2  # three certainty windows served
 
     async def test_previous_repair_commit_not_mistaken_for_new_attempt(self, session_factory):
         """A previous cycle's commit (different operation key) is never
         adopted by this intent: nothing landed FOR THIS KEY and the head is
-        intact at the new attempt base → safe same-key re-dispatch."""
+        intact at the new attempt base — but A12 forbids deriving a dispatch
+        from that one read, so the intent settles first and (nothing ever
+        landing) parks the honest unknown. The old cycle's commit is never
+        adopted and never re-written."""
         fake = FakeGitLab()
         fake.branches[BRANCH] = []  # branch pre-exists at the new base
         fake.seed_commit(BRANCH, "sha-newbase", "previous cycle's candidate (forge-op:oldcycle1)")
@@ -412,22 +619,33 @@ class TestGitLabWriterIntents:
         )
 
         writer = ChangesetWriter(fake, session_factory, project_id=PROJECT_ID)
-        result = await writer.apply(
+        first = await writer.apply(
             RUN_ID,
             gitlab_changeset(),
             start_ref="sha-newbase",
             expected_head="sha-newbase",
         )
 
-        # The old commit was NOT adopted; a fresh commit went out with THIS
-        # intent's key, on top of the previous cycle's work.
-        assert result.outcome is WriteOutcome.COMMITTED
-        assert result.commit_sha != "sha-newbase"
-        (call,) = fake.calls_of("create_commit")
-        assert "(forge-op:oldcycle1)" not in call[1][3]
-        assert "(forge-op:newcyclek123)" in call[1][3]
+        # The old commit was NOT adopted; nothing was dispatched either —
+        # the negative probe opened the certainty window.
+        assert first == WriteResult(WriteOutcome.SETTLING, None)
+        assert fake.calls_of("create_commit") == []
+        settled = await intent_of(session_factory, intent.id)
+        assert settled.status == "probing"
+
+        second = await _apply_after_expired_window(writer, session_factory, intent.id)
+        third = await _apply_after_expired_window(writer, session_factory, intent.id)
+        fourth = await _apply_after_expired_window(writer, session_factory, intent.id)
+        assert (second, third, fourth) == (
+            WriteResult(WriteOutcome.SETTLING, None),
+            WriteResult(WriteOutcome.SETTLING, None),
+            WriteResult(WriteOutcome.UNKNOWN, None),
+        )
         resolved = await intent_of(session_factory, intent.id)
-        assert resolved.status == "committed"
+        assert resolved.status == "unknown"
+        # The branch still holds ONLY the previous cycle's work — no duplicate
+        # was ever dispatched and the old commit was never mis-adopted.
+        assert [c["sha"] for c in fake.branches[BRANCH]] == ["sha-newbase"]
 
     async def test_unresolvable_two_matches_block_unknown(self, session_factory):
         """≥2 marker+parent matches is a double write — inconclusive: the
@@ -473,6 +691,64 @@ class TestGitLabWriterIntents:
         resolved = await intent_of(session_factory, intent.id)
         assert resolved.status == "duplicated"
         assert fake.calls_of("create_commit") == []
+
+
+# ---------------------------------------------------------------------------
+# A12: delayed apply on GitLab — a negative probe never duplicates
+# ---------------------------------------------------------------------------
+
+
+class TestA12DelayedApplyGitLab:
+    async def test_negative_probe_never_redispatches_and_late_commit_is_adopted(
+        self, session_factory
+    ):
+        """THE A12 acceptance: the provider ACCEPTED the first request and is
+        applying it SLOWLY. The recovery's negative probe must not redispatch
+        — the intent settles in the certainty window, and the window-end
+        re-probe adopts the late-landing commit. One write, one logical
+        candidate, a consistent history."""
+        fake = DelayedApplyGitLab()
+        key = "slowapplyk12"
+        intent = await open_or_create_intent(
+            session_factory, status="dispatched", key=key, expected_parent=None
+        )
+        # The provider accepted A; its application is still in flight — the
+        # branch reads show only the old (empty) head.
+        fake.accept_delayed_commit(
+            BRANCH,
+            "sha-inflight",
+            f"forge: implement 7 (run {RUN_ID[:8]}) {op_marker(key)}",
+            parents=[],
+        )
+
+        writer = ChangesetWriter(fake, session_factory, project_id=PROJECT_ID)
+        result = await writer.apply(RUN_ID, gitlab_changeset(), start_ref="main")
+
+        assert result == WriteResult(WriteOutcome.SETTLING, None)
+        assert fake.calls_of("create_commit") == [], "no duplicate dispatched off one read"
+        assert fake.branches.get(BRANCH, []) == [], "the probe saw the old head"
+        settled = await intent_of(session_factory, intent.id)
+        assert settled.status == "probing"
+        assert settled.next_probe_at is not None
+
+        # The provider's slow application completes AFTER the negative probe
+        # (and after the point where the old code would have redispatched).
+        sha = fake.complete_delayed_apply()
+        assert [c["sha"] for c in fake.branches[BRANCH]] == [sha]
+        assert op_marker(key) in fake.branches[BRANCH][0]["message"]
+
+        # Window-end re-probe: the settled intent is due again — the recovery
+        # adopts the late-landing commit (same key, parent intact), it never
+        # dispatches a second candidate.
+        writer2 = ChangesetWriter(fake, session_factory, project_id=PROJECT_ID)
+        result2 = await _apply_after_expired_window(writer2, session_factory, intent.id)
+
+        assert result2 == WriteResult(WriteOutcome.COMMITTED, sha)
+        assert fake.calls_of("create_commit") == []  # zero writes across the whole recovery
+        resolved = await intent_of(session_factory, intent.id)
+        assert resolved.status == "adopted"
+        assert resolved.provider_object_id == sha
+        assert [c["sha"] for c in fake.branches[BRANCH]] == [sha], "one candidate, no duplicate"
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +946,106 @@ class TestGitHubFlowAdoption:
 
 
 # ---------------------------------------------------------------------------
+# A12: delayed apply on GitHub/Azure CAS — the branch-wide CAS refuses the
+# duplicate, so a redispatch off a negative probe is inherently safe
+# ---------------------------------------------------------------------------
+
+
+class TestA12DelayedApplyGitHubCAS:
+    def _fake(self) -> FakeGitHub:
+        github = FakeGitHub()
+        github.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+        github.heads[REPO]["main"] = BASE_HEAD
+        return github
+
+    async def test_slow_first_write_cannot_double_the_redispatch(self):
+        """The first write is ACCEPTED but its application is delayed; the
+        re-drive's negative probe sees the unchanged head and redispatches.
+        The CAS makes both landing impossible: whichever write applies
+        against a moved head is refused — exactly one effect survives."""
+        fake = self._fake()
+        fake.delayed_apply = True  # A is accepted, application in flight
+        flow = GitHubPublishFlow(fake, base_branch="main")
+        key = "casslowk1234"
+
+        first = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
+            issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/feature.py"),
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert first.ok is True
+        assert fake.heads[REPO][GBRANCH] == BASE_HEAD, "accepted, not yet applied"
+        assert len(fake.pending_delayed_commits[GBRANCH]) == 1
+
+        # The negative probe would see exactly this old head. The redispatch
+        # is applied immediately (the CAS evaluates against the same head).
+        fake.delayed_apply = False
+        second = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
+            issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/other.py"),  # new path: validation passes
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert second.ok is True
+        assert fake.heads[REPO][GBRANCH] == second.commit_oid
+
+        # The slow first write's application finally races in — its CAS
+        # (expected BASE_HEAD, actual = the re-drive's commit) REFUSES it.
+        fake.flush_delayed_apply(GBRANCH)
+        assert fake.delayed_refused == 1
+        assert len(fake.commits[REPO][GBRANCH]) == 1, "single effect — no duplicate"
+        assert fake.heads[REPO][GBRANCH] == second.commit_oid
+
+    async def test_late_landing_first_write_is_adopted_not_duplicated(self):
+        """The delayed application completes BEFORE the redispatch: the
+        re-drive's CAS is refused (the head moved), the stale-CAS probe finds
+        THIS intent's marker + parent and ADOPTS the late-landing commit —
+        one effect, no duplicate."""
+        fake = self._fake()
+        fake.delayed_apply = True
+        flow = GitHubPublishFlow(fake, base_branch="main")
+        key = "caslatek1234"
+
+        first = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
+            issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/feature.py"),
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert first.ok is True
+        fake.flush_delayed_apply(GBRANCH)  # the slow application lands
+        landed = fake.heads[REPO][GBRANCH]
+        assert landed != BASE_HEAD
+        assert op_marker(key) in fake.commits[REPO][GBRANCH][0]["message"]
+
+        fake.delayed_apply = False
+        second = await flow.publish_changeset(
+            OWNER,
+            REPO_NAME,
+            issue_number=GITHUB_ISSUE,
+            run_id=RUN_ID,
+            changeset=gh_changeset("src/other.py"),
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+
+        assert second.ok is True
+        assert second.adopted is True
+        assert second.commit_oid == landed  # the previous attempt's commit
+        assert len(fake.commits[REPO][GBRANCH]) == 1  # one commit, no duplicate
+
+
+# ---------------------------------------------------------------------------
 # GitHub service: the recovery scanner
 # ---------------------------------------------------------------------------
 
@@ -795,10 +1171,13 @@ class TestGitHubIntentScanner:
             run = await session.get(FlowRun, RUN_ID)
         assert run.status == FlowStatus.BLOCKED.value
 
-    async def test_scanner_redispatch_backs_off_without_posting(self, gh_session_factory):
-        """Nothing landed and the head intact: the scanner does NOT dispatch
-        (it holds no candidate) — it backs the next probe off and leaves the
-        re-dispatch to the run's own probe-first publish leg."""
+    async def test_scanner_negative_probe_opens_certainty_window_without_posting(
+        self, gh_session_factory
+    ):
+        """Nothing landed and the head intact (A12): the scanner does NOT
+        dispatch (it holds no candidate) and does NOT call the outcome
+        resolved — the negative probe parks the intent in the effect-
+        certainty window for the window-end re-probe."""
         key = "scanredisk123"
         fake = FakeGitHub()
         fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
@@ -810,8 +1189,38 @@ class TestGitHubIntentScanner:
 
         assert resolved == 0  # not resolved — intentionally left open
         row = await intent_of(gh_session_factory, intent.id)
-        assert row.status == "dispatched"  # still open, same key for the leg
-        assert row.next_probe_at is not None
+        assert row.status == "probing"  # the A12 certainty window
+        assert row.next_probe_at is not None  # the window-end re-probe
+        assert fake.calls_of("create_commit_on_branch") == []
+
+    async def test_scanner_exhausted_window_releases_cas_protected_redispatch(
+        self, gh_session_factory
+    ):
+        """Window expired still-negative on GitHub: the release returns the
+        intent to ``dispatched`` for the run's probe-first leg — the
+        branch-wide CAS of createCommitOnBranch refuses any duplicate, so
+        the redispatch is inherently safe. The scanner still never POSTs."""
+        key = "scanrelek123"
+        fake = FakeGitHub()
+        fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+        fake.heads[REPO][GBRANCH] = BASE_HEAD
+        intent = await self._seed_dispatched_intent(gh_session_factory, key=key)
+        service = self._service(gh_session_factory, fake)
+
+        first = await service.resolve_publication_intents()
+        assert first == 0
+        await expire_settle_window(gh_session_factory, intent.id)
+        for _ in range(2):  # rounds 1 and 2 extend the certainty window
+            again = await service.resolve_publication_intents()
+            assert again == 0
+            await expire_settle_window(gh_session_factory, intent.id)
+
+        resolved = await service.resolve_publication_intents()
+
+        assert resolved == 0  # released, not resolved
+        row = await intent_of(gh_session_factory, intent.id)
+        assert row.status == "dispatched"  # the release: probing → dispatched
+        assert row.next_probe_at is not None  # the scanner's probe backoff
         assert fake.calls_of("create_commit_on_branch") == []
 
 
@@ -870,3 +1279,100 @@ class TestAzureAdoption:
         # attempt's). No duplicate push survived.
         assert len(fake.calls_of("push_commits")) == 1
         assert len(fake.commits[GBRANCH]) == 1
+
+
+class TestA12DelayedApplyAzureCAS:
+    def _service(self, session_factory, fake) -> AzureRunService:
+        return AzureRunService(
+            session_factory,
+            SimpleNamespace(),
+            None,
+            stack=SimpleNamespace(client=fake),
+            repo_full_name="proj/repo",
+        )
+
+    async def test_slow_first_push_cannot_double_the_redispatch(self, session_factory):
+        """The first push is ACCEPTED but its application is delayed; the
+        re-drive's negative probe sees the unchanged head and redispatches.
+        The pushes API's branch-wide CAS (``oldObjectId``) makes both landing
+        impossible — exactly one effect survives."""
+        from tests.test_azure_runs import FakeAzureDevOps
+
+        fake = FakeAzureDevOps()
+        key = "azslowpk1234"
+        service = self._service(session_factory, fake)
+
+        fake.delayed_apply = True  # A accepted, application in flight
+        first = await service._publish_changeset(
+            RUN_ID,
+            issue_number=GITHUB_ISSUE,
+            changeset=gh_changeset("src/feature.py"),
+            base_branch="main",
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert first.ok is True
+        assert fake.heads[GBRANCH] == BASE_HEAD, "accepted, not yet applied"
+        assert len(fake.pending_pushes) == 1
+
+        # The negative probe would see exactly this old head. The redispatch
+        # is applied immediately (the CAS evaluates against the same head).
+        fake.delayed_apply = False
+        second = await service._publish_changeset(
+            RUN_ID,
+            issue_number=GITHUB_ISSUE,
+            changeset=gh_changeset("src/other.py"),
+            base_branch="main",
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert second.ok is True
+        assert fake.heads[GBRANCH] == second.commit_oid
+
+        # The slow first push's application finally races in — its CAS
+        # (expected BASE_HEAD, actual = the re-drive's commit) REFUSES it.
+        fake.flush_delayed_pushes()
+        assert fake.delayed_refused == 1
+        assert len(fake.commits[GBRANCH]) == 1, "single effect — no duplicate"
+        assert fake.heads[GBRANCH] == second.commit_oid
+
+    async def test_late_landing_first_push_is_adopted_not_duplicated(self, session_factory):
+        """The delayed application completes BEFORE the redispatch: the
+        re-drive's CAS is refused (``staleObjectId`` — the head moved), the
+        probe finds THIS intent's marker + parent and ADOPTS the
+        late-landing push — one effect, no duplicate."""
+        from tests.test_azure_runs import FakeAzureDevOps
+
+        fake = FakeAzureDevOps()
+        key = "azlatepk1234"
+        service = self._service(session_factory, fake)
+
+        fake.delayed_apply = True
+        first = await service._publish_changeset(
+            RUN_ID,
+            issue_number=GITHUB_ISSUE,
+            changeset=gh_changeset("src/feature.py"),
+            base_branch="main",
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+        assert first.ok is True
+        fake.flush_delayed_pushes()  # the slow application lands
+        landed = fake.heads[GBRANCH]
+        assert landed != BASE_HEAD
+        assert op_marker(key) in fake.commits[GBRANCH][0]["comment"]
+
+        fake.delayed_apply = False
+        second = await service._publish_changeset(
+            RUN_ID,
+            issue_number=GITHUB_ISSUE,
+            changeset=gh_changeset("src/other.py"),
+            base_branch="main",
+            expected_head=BASE_HEAD,
+            operation_key=key,
+        )
+
+        assert second.ok is True
+        assert second.adopted is True
+        assert second.commit_oid == landed  # the previous attempt's push
+        assert len(fake.commits[GBRANCH]) == 1  # one push, no duplicate

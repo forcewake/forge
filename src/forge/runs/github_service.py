@@ -65,6 +65,7 @@ from forge.durable import (
     ActionLog,
     BudgetLimits,
     Controller,
+    DEFAULT_SETTLE_WINDOW_SECONDS,
     FlowRun,
     FlowStatus,
     GateAlreadyConsumed,
@@ -73,6 +74,7 @@ from forge.durable import (
     PublicationIntent,
     RunNotFound,
     RunSpec,
+    SettleDecision,
     StepRun,
     as_aware_utc,
     budget_block_reason,
@@ -95,6 +97,7 @@ from forge.durable import (
     record_approval,
     record_intent,
     resolve_budget_limits,
+    settle_negative_probe,
     short_run_id,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
@@ -275,6 +278,41 @@ class GitHubRunService:
     @property
     def _repo(self) -> str:
         return self._repo_full_name.split("/", 1)[1]
+
+    def _publish_settle_seconds(self) -> int:
+        """The A12 effect-certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``).
+
+        How long a negative probe parks an intent in ``probing`` before its
+        window-end re-probe; a broken/absent setting degrades to the
+        intents-module default, never to zero (a zero window would make one
+        negative read decisive again).
+        """
+        raw = getattr(self._settings, "FORGE_PUBLISH_SETTLE_SECONDS", DEFAULT_SETTLE_WINDOW_SECONDS)
+        try:
+            seconds = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return DEFAULT_SETTLE_WINDOW_SECONDS
+        return seconds if seconds > 0 else DEFAULT_SETTLE_WINDOW_SECONDS
+
+    async def _settle_negative_probe(
+        self, intent: PublicationIntent, *, now: datetime | None = None
+    ) -> SettleDecision:
+        """The A12 certainty machine for a negative probe (own transaction).
+
+        WAIT opens/extends the ``probing`` window; REDISPATCH releases a
+        CAS-protected window (``probing → dispatched``) so the branch-wide
+        CAS of ``createCommitOnBranch`` — not a read — refuses any
+        duplicate. PARK_UNKNOWN is unreachable on this adapter.
+        """
+        async with self._session_factory() as session:
+            decision = await settle_negative_probe(
+                session,
+                intent,
+                now=now,
+                window_seconds=self._publish_settle_seconds(),
+            )
+            await session.commit()
+        return decision
 
     # ------------------------------------------------------------------
     # Commands (dispatched from execute_github_run_command)
@@ -1347,10 +1385,13 @@ class GitHubRunService:
         parked ``blocked`` (branch_drift contract, never force);
         ``unknown`` (≥2 matches): run parked ``blocked(unknown_outcome)``
         with an operator instruction — never guessed;
-        ``redispatch`` (nothing landed, head intact): left to the run's own
-        publish leg, which re-dispatches with the SAME key — the scanner
-        never POSTs (it holds no candidate content), it only backs the next
-        probe off.
+        ``redispatch`` (nothing landed, head intact): A12 — the intent
+        first settles in the effect-certainty window (a negative probe is
+        not proof of absence); once the window expires still-negative the
+        CAS-protected same-key redispatch is released to the run's own
+        probe-first publish leg — the branch-wide CAS refuses any duplicate.
+        The scanner never POSTs (it holds no candidate content), it only
+        backs the next probe off.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -1452,9 +1493,22 @@ class GitHubRunService:
                 )
             return True
 
-        # REDISPATCH: nothing landed, head intact — the run's publish leg
-        # re-dispatches with the same key; back the probe off so the scanner
-        # does not poll the provider hot while the leg is between retries.
+        # REDISPATCH — A12: a negative probe proves nothing landed YET, not
+        # that no first effect is in flight. Route through the effect-
+        # certainty settle machine: WAIT parks/extends the ``probing``
+        # window; an exhausted window on this CAS-protected adapter RELEASES
+        # the same-key dispatch (``probing → dispatched``) — the branch-wide
+        # CAS refuses a duplicate, so the release is inherently safe. The
+        # run's own probe-first publish leg owns the POST; this scanner
+        # never dispatches, it only backs the next probe off.
+        decision = await self._settle_negative_probe(intent, now=now)
+        if decision is SettleDecision.PARK_UNKNOWN:
+            # Defensive: unreachable on a CAS-protected adapter — resolve as
+            # the honest unknown rather than ever dispatching off reads.
+            await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+            return False
         async with self._session_factory() as session:
             row = await session.get(PublicationIntent, intent.id)
             if row is not None:
@@ -2207,7 +2261,12 @@ class GitHubRunService:
                 )
                 return
             # REDISPATCH (nothing landed, head intact) falls through to the
-            # dispatch below, reusing the intent's stable operation key.
+            # dispatch below, reusing the intent's stable operation key. A12:
+            # no certainty-window wait is required on this leg — the write
+            # below is a branch-wide CAS (``expectedHeadOid``), so a redispatch
+            # carrying the unchanged head is INHERENTLY duplicate-safe (a slow
+            # first write would move the head and the CAS would refuse the
+            # duplicate). The CAS, not a read, is the exactly-once guard here.
 
         await self._mark_intent_dispatched(intent)
         # R04: no live issue re-read — the implementer executes the FROZEN
@@ -3347,6 +3406,9 @@ class GitHubRunService:
                     "publish_unknown_outcome",
                 )
                 return
+            # REDISPATCH falls through to the CAS dispatch below (A12: the
+            # branch-wide CAS makes the same-key redispatch inherently
+            # duplicate-safe on this leg — no certainty-window wait needed).
 
         await self._mark_intent_dispatched(intent)
         # R23: the receipt records the LANE's spend, not the publish's

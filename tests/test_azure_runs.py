@@ -132,6 +132,14 @@ class FakeAzureDevOps:
         self._next_oid = 1
         self._next_pr = 500
         self._next_build = 300
+        # A12 delayed-apply mode: accepted pushes are NOT applied until
+        # flush_delayed_pushes() — the provider window in which a probe
+        # still sees the old head. The flush applies each pending push's
+        # branch-wide CAS: a moved head refuses it (counted in
+        # delayed_refused).
+        self.delayed_apply: bool = False
+        self.delayed_refused = 0
+        self.pending_pushes: list[dict] = []
 
     # -- seeding --------------------------------------------------------------
 
@@ -282,12 +290,40 @@ class FakeAzureDevOps:
     ) -> dict:
         self.calls.append(("push_commits", (project, repo, branch, expected_old_sha, len(commits))))
         head = self.heads.get(branch)
+        if self.delayed_apply:
+            # A12: ACCEPT the push, apply it later — no CAS evaluation yet,
+            # the branch keeps its old head (the negative-probe view).
+            self.pending_pushes.append(
+                {
+                    "branch": branch,
+                    "expected_old_sha": expected_old_sha,
+                    "commits": list(commits),
+                }
+            )
+            return {
+                "value": [
+                    {
+                        "name": f"refs/heads/{branch}",
+                        "oldObjectId": expected_old_sha,
+                        "newObjectId": self._oid(),
+                        "updateStatus": "succeeded",
+                        "success": True,
+                    }
+                ]
+            }
         if head != expected_old_sha:
             raise AzureDevOpsDriftError(
                 f"refs/heads/{branch}",
                 "staleObjectId",
                 "the old object id does not match the current tip",
             )
+        return self._apply_push(branch, expected_old_sha=expected_old_sha, commits=commits)
+
+    def _apply_push(
+        self, branch: str, *, expected_old_sha: str, commits: list[CommitPayload]
+    ) -> dict:
+        """Execute one accepted push: snapshot + head move + commit records."""
+        head = self.heads.get(branch)
         files = dict(self.snapshots.get(head, {}))
         for commit in commits:
             for change in commit.changes:
@@ -319,6 +355,26 @@ class FakeAzureDevOps:
                 }
             ]
         }
+
+    def flush_delayed_pushes(self) -> None:
+        """Apply the A12 accepted-but-delayed pushes, in order.
+
+        Each push's branch-wide CAS is evaluated NOW: a push whose
+        ``expected_old_sha`` no longer matches the current head is REFUSED
+        and dropped (``delayed_refused``) — exactly how the real CAS makes a
+        slow first push unable to double an applied duplicate.
+        """
+        for pending in self.pending_pushes:
+            head = self.heads.get(pending["branch"])
+            if head != pending["expected_old_sha"]:
+                self.delayed_refused += 1
+                continue
+            self._apply_push(
+                pending["branch"],
+                expected_old_sha=pending["expected_old_sha"],
+                commits=list(pending["commits"]),
+            )
+        self.pending_pushes = []
 
     # -- pull requests ---------------------------------------------------------
 

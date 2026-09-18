@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     # its reconciler re-dispatch.
     FORGE_RUN_REVIVE_BACKOFF_SECONDS: int = 60
 
+    # A12 effect-certainty window: how long a NEGATIVE publication-intent
+    # recovery probe parks the intent in `probing` before its re-probe. A
+    # provider may have accepted the first request and be applying it slowly,
+    # so one negative read never justifies a re-dispatch. The window backs
+    # off (×2) per still-negative round (bounded by the intents module's
+    # MAX_SETTLE_ROUNDS); on CAS-less GitLab an exhausted window parks
+    # unknown_outcome for an operator instead of ever re-dispatching, while
+    # on GitHub/Azure the branch-wide CAS makes the released redispatch
+    # inherently duplicate-safe.
+    FORGE_PUBLISH_SETTLE_SECONDS: int = 30
+
     # ADR-0015 pluggable implementer backend: "builtin" (LLM -> ChangeSet ->
     # Commits API) or "ci_harness" (optionally "ci_harness:claude-code") —
     # a coding harness executing as a job in the target project's CI.

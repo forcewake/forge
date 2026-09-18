@@ -13,8 +13,13 @@ Re-entry (the R11 recovery): when a previous attempt's intent is still open
 (``requested``/``dispatched``/``probing`` — the process died around the
 effect), ``apply`` PROBES the remote by identity BEFORE any new dispatch:
 exactly one marker+parent match adopts the landed commit (no duplicate);
-zero matches with the head intact re-dispatches with the SAME key; zero
-matches with a moved head raises :class:`BranchDriftError` (intent
+zero matches with the head intact does NOT immediately re-dispatch (A12) —
+the intent parks in the ``probing`` certainty window for a bounded settle
+period (``FORGE_PUBLISH_SETTLE_SECONDS``, 30s default, backed off) and only
+a re-probe at the window end may decide: still negative on this CAS-less
+lane means ``unknown_outcome`` with operator instructions (absence of an
+in-flight GitLab effect is unprovable), a late-landing commit is ADOPTED.
+Zero matches with a moved head raises :class:`BranchDriftError` (intent
 ``duplicated``); an inconclusive probe stays unknown. A fresh per-call key
 would make the landed commit unfindable — that was the bug.
 """
@@ -30,8 +35,10 @@ from typing import Any
 
 from forge.durable import Controller
 from forge.durable.intents import (
+    DEFAULT_SETTLE_WINDOW_SECONDS,
     ProbeObservation,
     ProbeVerdict,
+    SettleDecision,
     classify_probe,
     commit_matches,
     complete_intent,
@@ -41,6 +48,8 @@ from forge.durable.intents import (
     mint_operation_key,
     op_marker,
     record_intent,
+    settle_negative_probe,
+    settle_state_record,
 )
 from forge.durable.models import PublicationIntent
 from forge.gitlab.client import CommitOutcomeUnknown, GitLabAPIError, GitLabClient
@@ -61,6 +70,11 @@ _PROBE_RETRY_SECONDS = 30
 class WriteOutcome(StrEnum):
     COMMITTED = "committed"
     UNKNOWN = "unknown_outcome"
+    #: A12: the recovery probe was negative and the intent parked in the
+    #: certainty window — NOT final. The caller must not park the run
+    #: terminal: the settle re-probe (the lane's recovery scanner) adopts a
+    #: late-landing commit or resolves the honest unknown at the window end.
+    SETTLING = "settling"
 
 
 @dataclass(frozen=True)
@@ -125,10 +139,16 @@ class ChangesetWriter:
         gitlab: GitLabClient,
         session_factory: Any,
         project_id: int,
+        *,
+        settle_seconds: int | None = None,
     ) -> None:
         self._gitlab = gitlab
         self._session_factory = session_factory
         self._project_id = project_id
+        #: A12 certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``): how long
+        #: a negative recovery probe parks the intent before its re-probe.
+        #: ``None`` = the intents-module default.
+        self._settle_seconds = settle_seconds
         #: Operation key stamped into the commit message of the current (or
         #: last) apply() call: the open intent's key on recovery re-entry,
         #: the fresh intent's key otherwise. Injectable for tests.
@@ -287,9 +307,11 @@ class ChangesetWriter:
         The decision table (docs/research/remote-effect-reconciliation.md):
         exactly one marker+parent match ⇒ ADOPT (this process re-enters on
         the landed commit, zero new writes); zero matches + head intact ⇒
-        safe re-dispatch WITH THE SAME KEY; zero matches + head moved ⇒
-        ``duplicated`` (drift — never force); ≥2 matches or a failed probe
-        read ⇒ conservative unknown. Never a blind POST as reconciliation.
+        the A12 certainty window (``probing``), and only a re-probe at the
+        window end — still negative on this CAS-less lane — parks
+        ``unknown``; zero matches + head moved ⇒ ``duplicated`` (drift —
+        never force); ≥2 matches or a failed probe read ⇒ conservative
+        unknown. Never a blind POST as reconciliation.
         """
         self.operation_key = intent.operation_key
         try:
@@ -366,8 +388,74 @@ class ChangesetWriter:
                 branch_head or "",
             )
 
-        # REDISPATCH: nothing landed and the head still equals the intent's
-        # expected parent — the same key goes out again, bounded.
+        # A12 REDISPATCH: a negative probe proves nothing landed YET — it can
+        # never prove that no first effect is in flight. Route through the
+        # effect-certainty settle machine instead of re-dispatching on one
+        # read: the intent parks ``probing`` for a bounded window and the
+        # re-probe at the window end decides (late landing ⇒ adopt; still
+        # negative on this CAS-less lane ⇒ honest unknown).
+        decision = await self._settle(intent)
+        if decision is SettleDecision.WAIT:
+            logger.warning(
+                "Negative probe for intent %s (marker %s), head intact — entering the "
+                "effect-certainty window (probing); no re-dispatch until the re-probe",
+                intent.id[:8],
+                intent.operation_key,
+            )
+            action_id = await self._journal_action(flow_run_id, cs.branch)
+            await self._complete(
+                action_id,
+                "unknown_outcome",
+                self._meta(
+                    {
+                        "probe": "negative",
+                        "settle": "pending",
+                        "settle_state": settle_state_record(intent),
+                    },
+                    expected_head,
+                ),
+            )
+            return WriteResult(WriteOutcome.SETTLING, None)
+
+        if decision is SettleDecision.PARK_UNKNOWN:
+            # The certainty window expired with consistently-negative probes
+            # on a provider with NO branch-wide CAS (GitLab): absence of an
+            # in-flight effect is unprovable — park blocked(unknown_outcome)
+            # with operator instructions. Never a re-dispatch off reads.
+            logger.warning(
+                "Certainty window exhausted for intent %s (marker %s) with negative probes "
+                "on a CAS-less provider — parking unknown_outcome for an operator",
+                intent.id[:8],
+                intent.operation_key,
+            )
+            instruction = (
+                "Publication outcome unresolved after the effect-certainty window: the remote "
+                "probe never found this attempt's commit, but GitLab offers no write "
+                "precondition that could prove none is in flight. An operator must inspect "
+                f"branch `{intent.target_ref}` and reconcile manually — forge will not "
+                "re-publish over an unknown outcome."
+            )
+            remote_result = {
+                "reason": "settle_window_exhausted",
+                "operator_instruction": instruction,
+                "settle": settle_state_record(intent),
+            }
+            action_id = await self._journal_action(flow_run_id, cs.branch)
+            await self._complete(
+                action_id, "unknown_outcome", self._meta(remote_result, expected_head)
+            )
+            async with self._session_factory() as session:
+                await complete_intent(session, intent.id, "unknown", remote_result=remote_result)
+                await session.commit()
+            return WriteResult(WriteOutcome.UNKNOWN, None)
+
+        # SettleDecision.REDISPATCH — reachable ONLY for CAS-protected
+        # adapters (github/azure_devops): the certainty window expired
+        # still-negative and the release (``probing → dispatched``) already
+        # happened inside the settle machine. On this GitLab transport the
+        # guarantee table never says redispatch (no branch-wide CAS — the
+        # exhausted window parks unknown above). The bounded same-key
+        # re-dispatch below is the shared, attempt-capped shape.
         if expected_head is not None and intent.expected_parent_oid != expected_head:
             raise BranchDriftError(intent.target_ref, expected_head, branch_head or "")
         if int(intent.attempt_count) >= int(intent.max_attempts):
@@ -400,8 +488,8 @@ class ChangesetWriter:
             expected_head=expected_head,
         )
         logger.warning(
-            "No effect found for intent %s (marker %s) and head intact — "
-            "re-dispatching with the SAME key (attempt %d)",
+            "Certainty window expired negative for intent %s (marker %s) on a "
+            "CAS-protected adapter — re-dispatching with the SAME key (attempt %d)",
             intent.id[:8],
             intent.operation_key,
             int(intent.attempt_count),
@@ -409,6 +497,22 @@ class ChangesetWriter:
         return await self._dispatch(
             flow_run_id, action_id, intent.id, commit_intent, cs, commit_message
         )
+
+    async def _settle(self, intent: PublicationIntent) -> SettleDecision:
+        """Run the A12 effect-certainty machine for a negative probe.
+
+        Own transaction: the enter/extend path persists the ``probing`` park
+        (status + window end + settle bookkeeping); the release path writes
+        ``probing → dispatched`` for a CAS-protected adapter.
+        """
+        async with self._session_factory() as session:
+            decision = await settle_negative_probe(
+                session,
+                intent,
+                window_seconds=self._settle_seconds or DEFAULT_SETTLE_WINDOW_SECONDS,
+            )
+            await session.commit()
+        return decision
 
     async def _open_intent(
         self,

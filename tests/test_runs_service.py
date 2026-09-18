@@ -52,7 +52,9 @@ class FakeWriter:
     outcome: WriteOutcome = WriteOutcome.COMMITTED
     raise_error: Exception | None = None
 
-    def __init__(self, gitlab, session_factory, project_id: int) -> None:
+    def __init__(
+        self, gitlab, session_factory, project_id: int, *, settle_seconds: int | None = None
+    ) -> None:
         self.project_id = project_id
         self.calls: list[dict] = []
         FakeWriter.instances.append(self)

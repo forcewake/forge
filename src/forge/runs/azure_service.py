@@ -77,6 +77,7 @@ from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     BudgetLimits,
     Controller,
+    DEFAULT_SETTLE_WINDOW_SECONDS,
     FlowRun,
     FlowStatus,
     GateAlreadyConsumed,
@@ -85,6 +86,7 @@ from forge.durable import (
     PublicationIntent,
     RunNotFound,
     RunSpec,
+    SettleDecision,
     StepRun,
     as_aware_utc,
     budget_block_reason,
@@ -107,6 +109,7 @@ from forge.durable import (
     ProbeVerdict,
     record_approval,
     record_intent,
+    settle_negative_probe,
     short_run_id,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
@@ -562,6 +565,41 @@ class AzureRunService:
     @property
     def _repo(self) -> str:
         return self._repo_full_name.partition("/")[2]
+
+    def _publish_settle_seconds(self) -> int:
+        """The A12 effect-certainty window (``FORGE_PUBLISH_SETTLE_SECONDS``).
+
+        How long a negative probe parks an intent in ``probing`` before its
+        window-end re-probe; a broken/absent setting degrades to the
+        intents-module default, never to zero (a zero window would make one
+        negative read decisive again).
+        """
+        raw = getattr(self._settings, "FORGE_PUBLISH_SETTLE_SECONDS", DEFAULT_SETTLE_WINDOW_SECONDS)
+        try:
+            seconds = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return DEFAULT_SETTLE_WINDOW_SECONDS
+        return seconds if seconds > 0 else DEFAULT_SETTLE_WINDOW_SECONDS
+
+    async def _settle_negative_probe(
+        self, intent: PublicationIntent, *, now: datetime | None = None
+    ) -> SettleDecision:
+        """The A12 certainty machine for a negative probe (own transaction).
+
+        WAIT opens/extends the ``probing`` window; REDISPATCH releases a
+        CAS-protected window (``probing → dispatched``) so the branch-wide
+        CAS of the pushes API (``oldObjectId``) — not a read — refuses any
+        duplicate. PARK_UNKNOWN is unreachable on this adapter.
+        """
+        async with self._session_factory() as session:
+            decision = await settle_negative_probe(
+                session,
+                intent,
+                now=now,
+                window_seconds=self._publish_settle_seconds(),
+            )
+            await session.commit()
+        return decision
 
     # ------------------------------------------------------------------
     # Commands (dispatched from execute_azure_run_command)
@@ -2119,7 +2157,23 @@ class AzureRunService:
                 await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
             return True
 
-        # REDISPATCH: nothing landed, head intact — back the probe off.
+        # REDISPATCH — A12: a negative probe proves nothing landed YET, not
+        # that no first effect is in flight. Route through the effect-
+        # certainty settle machine: WAIT parks/extends the ``probing``
+        # window; an exhausted window on this CAS-protected adapter RELEASES
+        # the same-key dispatch (``probing → dispatched``) — the pushes API's
+        # ``oldObjectId`` CAS refuses a duplicate, so the release is
+        # inherently safe. The run's own probe-first publish leg owns the
+        # POST; this scanner never dispatches, it only backs the next probe
+        # off.
+        decision = await self._settle_negative_probe(intent, now=now)
+        if decision is SettleDecision.PARK_UNKNOWN:
+            # Defensive: unreachable on a CAS-protected adapter — resolve as
+            # the honest unknown rather than ever dispatching off reads.
+            await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+            return False
         async with self._session_factory() as session:
             row = await session.get(PublicationIntent, intent.id)
             if row is not None:
@@ -2300,6 +2354,9 @@ class AzureRunService:
                     "publish_unknown_outcome",
                 )
                 return
+            # REDISPATCH falls through to the CAS push below (A12: the pushes
+            # API's branch-wide CAS makes the same-key redispatch inherently
+            # duplicate-safe on this leg — no certainty-window wait needed).
 
         await self._mark_intent_dispatched(intent)
         outcome = await self._publish_changeset(
@@ -3280,6 +3337,9 @@ class AzureRunService:
                 await self._complete_intent(intent.id, "unknown", remote_result={"matches": hits})
                 await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
                 return
+            # REDISPATCH falls through to the CAS push below (A12: the pushes
+            # API's branch-wide CAS makes the same-key redispatch inherently
+            # duplicate-safe on this leg — no certainty-window wait needed).
 
         await self._mark_intent_dispatched(intent)
         publish_outcome = await self._publish_changeset(

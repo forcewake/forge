@@ -87,6 +87,14 @@ class FakeGitHub:
         self.dependabot_alerts: dict[str, list[dict]] = {}
         self.code_scanning_disabled: bool = False
         self.secret_scanning_disabled: bool = False
+        # A12 delayed-apply mode: accepted writes are NOT applied until
+        # flush_delayed_apply() — the provider window in which a probe still
+        # sees the old head (the first write is in flight). The flush applies
+        # each pending write's branch-wide CAS: a head that moved since the
+        # write was accepted refuses it (the refused duplicate is counted).
+        self.delayed_apply: bool = False
+        self.delayed_refused = 0
+        self.pending_delayed_commits: dict[str, list[dict]] = {}  # branch -> writes
         self.calls: list[tuple[str, tuple]] = []
         self._next_number = 100
         self._next_oid = 1
@@ -181,6 +189,24 @@ class FakeGitHub:
             )
         )
         full = f"{owner}/{repo}"
+        if self.delayed_apply:
+            # A12: ACCEPT the write, apply it later — no CAS check yet, the
+            # branch keeps its old head (the negative-probe view).
+            self.pending_delayed_commits.setdefault(branch, []).append(
+                {
+                    "full": full,
+                    "headline": headline,
+                    "additions": list(additions or []),
+                    "deletions": list(deletions or []),
+                    "expected_head_oid": expected_head_oid,
+                }
+            )
+            new_oid = self._oid()
+            return {
+                "oid": new_oid,
+                "url": f"https://github.test/{full}/commit/{new_oid}",
+                "client_mutation_id": client_mutation_id,
+            }
         head = self.heads.get(full, {}).get(branch)
         if head != expected_head_oid:
             raise GitHubStaleBranchError(
@@ -189,13 +215,40 @@ class FakeGitHub:
                 f'Expected branch to point to "{expected_head_oid}" but it did not.',
             )
         new_oid = self._oid()
-        for path, content in additions or []:
+        self._apply_commit_write(
+            full,
+            branch,
+            new_oid=new_oid,
+            headline=headline,
+            additions=additions or [],
+            deletions=deletions or [],
+            expected_head_oid=expected_head_oid,
+        )
+        return {
+            "oid": new_oid,
+            "url": f"https://github.test/{full}/commit/{new_oid}",
+            "client_mutation_id": client_mutation_id,
+        }
+
+    def _apply_commit_write(
+        self,
+        full: str,
+        branch: str,
+        *,
+        new_oid: str,
+        headline: str,
+        additions: list[tuple[str, str]],
+        deletions: list[str],
+        expected_head_oid: str,
+    ) -> None:
+        """Execute one accepted write: file history + branch move + commit."""
+        for path, content in additions:
             existed_before = path in self.files.setdefault(full, {})
             self.files.setdefault(full, {})[path] = content
             self.file_history.setdefault(full, {}).setdefault(path, []).append(
                 (new_oid, content, existed_before)
             )
-        for path in deletions or []:
+        for path in deletions:
             existed_before = path in self.files.get(full, {})
             self.files.setdefault(full, {}).pop(path, None)
             if existed_before:
@@ -206,11 +259,31 @@ class FakeGitHub:
         self.commits.setdefault(full, {}).setdefault(branch, []).insert(
             0, {"sha": new_oid, "message": headline, "parent_ids": [expected_head_oid]}
         )
-        return {
-            "oid": new_oid,
-            "url": f"https://github.test/{full}/commit/{new_oid}",
-            "client_mutation_id": client_mutation_id,
-        }
+
+    def flush_delayed_apply(self, branch: str) -> None:
+        """Apply the A12 accepted-but-delayed writes on *branch*, in order.
+
+        Each write's branch-wide CAS is evaluated NOW: a write whose
+        ``expected_head_oid`` no longer matches the current head is REFUSED
+        and dropped (counted in ``delayed_refused``) — exactly how the real
+        CAS makes a slow first write unable to double an applied duplicate.
+        """
+        for pending in self.pending_delayed_commits.pop(branch, []):
+            full = str(pending["full"])
+            head = self.heads.get(full, {}).get(branch)
+            if head != pending["expected_head_oid"]:
+                self.delayed_refused += 1
+                continue
+            new_oid = self._oid()
+            self._apply_commit_write(
+                full,
+                branch,
+                new_oid=new_oid,
+                headline=pending["headline"],
+                additions=list(pending["additions"]),
+                deletions=list(pending["deletions"]),
+                expected_head_oid=pending["expected_head_oid"],
+            )
 
     async def list_commits(
         self, owner: str, repo: str, branch: str, per_page: int = 30
