@@ -2978,9 +2978,7 @@ class GitHubRunService:
             candidate_sha,
             PRODUCER_GITHUB_CHECKS,
             summary="all PR checks succeeded",
-            surface=(
-                {"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks
-            ),
+            surface=({"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks),
         )
         await self._merge_run_evidence(
             run_id,

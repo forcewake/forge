@@ -75,9 +75,7 @@ class TestReadyEvidence:
         assert "summary" not in fragment  # empty summary is omitted, as always
 
     def test_not_configured_override_stays_honest(self):
-        fragment = ready_evidence(
-            False, CANDIDATE, "github-checks", status="not_configured"
-        )
+        fragment = ready_evidence(False, CANDIDATE, "github-checks", status="not_configured")
         assert fragment["status"] == "not_configured"
 
     def test_contradictions_raise(self):
@@ -108,8 +106,12 @@ class TestReadyReason:
             (True, "ok", "", "checks passed; merge is a human decision"),
             (True, "ok", "ignored when verified", "checks passed; merge is a human decision"),
             (True, "concerns", "", "review raised concerns — merge is a human decision"),
-            (False, "ok", "no CI configured", "unverified — no CI configured · "
-             "merge is a human decision"),
+            (
+                False,
+                "ok",
+                "no CI configured",
+                "unverified — no CI configured · merge is a human decision",
+            ),
             (
                 False,
                 "concerns",
@@ -344,9 +346,7 @@ async def _finalize_gitlab(db, verified: bool) -> str:
         evidence={"verification": fragment},  # the gate already recorded its verdict
     )
     fake.seed_commit(factory_branch(ISSUE_IID, run_id), CANDIDATE, "candidate")
-    service = make_gitlab_service(
-        db, fake, settings=gitlab_settings(), reviewer=StubReviewer()
-    )
+    service = make_gitlab_service(db, fake, settings=gitlab_settings(), reviewer=StubReviewer())
     await service._review_and_ready(
         run_id,
         project_id=GITLAB_PROJECT,
@@ -354,7 +354,9 @@ async def _finalize_gitlab(db, verified: bool) -> str:
         mr_iid=None,
         candidate_sha=CANDIDATE,
         base_sha="1" * 40,
-        pipeline=SimpleNamespace(id=9, status="success", web_url="https://gitlab.test/-/pipelines/9"),
+        pipeline=SimpleNamespace(
+            id=9, status="success", web_url="https://gitlab.test/-/pipelines/9"
+        ),
         plan_digest="a" * 64,
         verified=verified,
         verification_evidence=fragment,
@@ -410,9 +412,7 @@ async def _finalize_azure(db, verified: bool) -> str:
 
     project_id = azure_project_key(AZURE_PROJECT_GUID)
     fake = FakeAzureDevOps()
-    fake.seed_work_item(
-        AZURE_WORK_ITEM, "Ship the flux capacitor", "<p>Users cannot reset.</p>"
-    )
+    fake.seed_work_item(AZURE_WORK_ITEM, "Ship the flux capacitor", "<p>Users cannot reset.</p>")
     fragment = ready_evidence(verified, CANDIDATE, "azure-build")
     run_id = await _add_run(
         db,
@@ -422,9 +422,7 @@ async def _finalize_azure(db, verified: bool) -> str:
         evidence={"verification": fragment},  # the gate already recorded its verdict
         mr_iid=501,
     )
-    service = make_azure_service(
-        db, fake, settings=azure_settings(), stack=make_azure_stack(fake)
-    )
+    service = make_azure_service(db, fake, settings=azure_settings(), stack=make_azure_stack(fake))
     await service._review_and_ready(
         run_id,
         project_id=project_id,
@@ -500,8 +498,12 @@ class TestGateEvidenceUnification:
         fake.seed_issue(GITHUB_REPO, GITHUB_ISSUE, "Add password reset", "Users cannot reset.")
         fake.seed_workflow_runs(
             [
-                {"head_sha": CANDIDATE, "name": "ci", "status": "completed",
-                 "conclusion": "success"},
+                {
+                    "head_sha": CANDIDATE,
+                    "name": "ci",
+                    "status": "completed",
+                    "conclusion": "success",
+                },
             ]
         )
         run_id = await _add_run(

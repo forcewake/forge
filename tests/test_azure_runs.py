@@ -1139,7 +1139,9 @@ class TestVerificationGate:
 
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
-        assert run.status_reason == "merge is a human decision"  # no unverified label
+        # ADR-0027: the ONE shared verified ready tail — identical to the
+        # GitLab lane's, no unverified label.
+        assert run.status_reason == "checks passed; merge is a human decision"
         verification = (run.evidence or {})["verification"]
         # The unified R02 evidence shape (the same keys on every provider).
         assert set(verification) >= {"status", "tested_oid", "observed_at", "producer"}
