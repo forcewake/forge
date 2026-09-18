@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase B/C/D complete (external review e8bf381: every finding closed)
+
+- **R04** ExecutableRunSpec v3: the gate approves bytes that execute — task/plan/model/
+  policy/budgets frozen content-addressed, digest-verified on every read.
+- **R07** bounded steps with replay: every non-deterministic step checkpoints; a crash
+  never re-calls the model or re-derives published work.
+- **R10** ExecutionClaim + guarded transitions + publication grants (cancel fences claims).
+- **R11** PublicationIntent persisted before HTTP on all three providers; probe-first
+  reconciliation adopts lost pushes (the live branch_drift case now adopts).
+- **R13** numeric budget profiles enforced on the standard path (planning reserves).
+- **R14** BlobReadResult: only a confirmed 404 proves absence.
+- **R24** honest delivery metrics (accepted/rejected/rework, time decomposition).
+- **R29** operator commands: /status, /why-blocked, /reconcile (all providers).
+- **R31** capability-aware harness selection (manifest + policy-bound planner proposal +
+  numeric budget binding).
+
 ### Added — Phase-A correctness alignment (external review e8bf381: all Phase-A P1s closed)
 
 - **R01 — one publication boundary (ADR-0026)**: `publish_validated_candidate`
