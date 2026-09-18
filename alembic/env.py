@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 # Import all models so metadata is populated
 import forge.durable.models  # noqa: F401  (registers the durable tables in metadata)
+import forge.findings.models  # noqa: F401  (registers the findings tables in metadata)
 from forge.models import Base  # noqa: F401
 
 target_metadata = Base.metadata

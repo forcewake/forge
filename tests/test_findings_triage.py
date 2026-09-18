@@ -18,9 +18,10 @@ from forge.config import Settings
 from forge.database import reset_engine
 from forge.durable import StepRun
 from forge.findings.ingest import NormalizedFinding, upsert_findings
-from forge.findings.models import SecurityFinding
+from forge.findings.models import SecurityFinding, SecurityFindingAction
 from forge.findings.triage import (
     TRIAGE_BATCH,
+    confirm_finding_verdict,
     execute_security_command,
     format_triage_comment,
 )
@@ -149,7 +150,9 @@ class TestSecurityCommandGitLab:
     def fake_gitlab(self):
         return FakeGitLab()  # no pipelines — the refresh leg skips silently
 
-    async def test_triage_comment_grouped_by_severity_with_writeback(self, db_factory, fake_gitlab):
+    async def test_triage_comment_grouped_by_severity_with_suggestions(
+        self, db_factory, fake_gitlab
+    ):
         fps = await seed_findings(db_factory)
 
         async def runner(rows):
@@ -182,6 +185,8 @@ class TestSecurityCommandGitLab:
         assert outcome["considered"] == 4
         assert outcome["triaged"] == 2
         assert outcome["false_positives"] == 2
+        assert outcome["suggested"] == 4
+        assert outcome["confirmed"] == 0  # default: no auto-accept
         assert outcome["comment_posted"] is True
         notes = fake_gitlab.notes
         assert len(notes) == 1
@@ -192,15 +197,63 @@ class TestSecurityCommandGitLab:
             assert fingerprint[:12] in body
         assert "rotate the credential" in body
         assert "test value, not a real credential" in body
-        # Write-back: confirmed → triaged, false positives → false_positive.
+        # R25: the verdict is a SUGGESTION — the authoritative status stays
+        # open until an authorized actor (or the auto-accept opt-in) confirms.
+        assert "Suggested: confirmed" in body and "Suggested: false positive" in body
         async with db_factory() as session:
             rows = {
                 row.fingerprint: row
                 for row in (await session.execute(select(SecurityFinding))).scalars().all()
             }
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        assert all(row.status == "open" for row in rows.values())
+        assert rows[fps["high"]].suggested_verdict == "false_positive"
+        assert rows[fps["high"]].triage_note == "test value, not a real credential"
+        assert rows[fps["critical"]].suggested_verdict == "triaged"
+        assert rows[fps["critical"]].suggested_by == "ai:security-triage"
+        assert rows[fps["critical"]].version == 1  # suggestion bumps the CAS version
+        # The governance journal recorded every suggestion.
+        assert {action.action for action in actions} == {"suggest_verdict"}
+        assert all(action.outcome == "applied" for action in actions)
+
+    async def test_auto_accept_opt_in_moves_authoritative_status(self, db_factory, fake_gitlab):
+        """FORGE_SECURITY_AUTO_ACCEPT (default OFF) lets the pass confirm."""
+        fps = await seed_findings(db_factory)
+
+        async def runner(rows):
+            return SecurityTriageResult(
+                summary="s",
+                risk_level="high",
+                findings=[
+                    verdict(fps["critical"]),
+                    verdict(fps["high"], false_positive=True),
+                ],
+            )
+
+        outcome = await execute_security_command(
+            _settings(FORGE_SECURITY_AUTO_ACCEPT=True),
+            None,
+            db_factory,
+            {"command": "security_triage", "project_id": PROJECT_ID, "issue_iid": ISSUE_IID},
+            gitlab=fake_gitlab,
+            triage_runner=runner,
+        )
+        assert outcome["confirmed"] == 2
+        async with db_factory() as session:
+            rows = {
+                row.fingerprint: row
+                for row in (await session.execute(select(SecurityFinding))).scalars().all()
+            }
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
         assert rows[fps["critical"]].status == "triaged"
         assert rows[fps["high"]].status == "false_positive"
-        assert rows[fps["high"]].triage_note == "test value, not a real credential"
+        # Both legs journaled: the suggestion AND the machine confirmation.
+        by_action = {action.action for action in actions}
+        assert by_action == {"suggest_verdict", "confirm_verdict"}
+        confirm = next(a for a in actions if a.action == "confirm_verdict")
+        assert confirm.actor == "auto_accept"
+        rows_by_id = {row.id: row for row in rows.values()}
+        assert confirm.after_status == rows_by_id[confirm.finding_id].status
 
     async def test_pipeline_artifacts_are_ingested_before_triage(self, db_factory, fake_gitlab):
         from tests.test_findings import seed_sast_pipeline
@@ -348,10 +401,23 @@ class TestSecurityCommandGitHub:
 
         async with db_factory() as session:
             row = (await session.execute(select(SecurityFinding))).scalar_one()
-        assert row.status == "triaged"
+        # R25: the suggestion is recorded; the status stays open.
+        assert row.suggested_verdict == "triaged"
+        assert row.status == "open"
         assert row.provider == "github"
+        assert row.connection_id == "github:o/r"  # metadata fallback scope key
 
-    async def test_remote_dismiss_is_opt_in_with_exact_enums(self, db_factory):
+    async def test_suggestion_and_remote_dismiss_are_separate_privileges(self, db_factory):
+        """R25: suggestion != status != remote dismissal.
+
+        - default settings: the AI verdict lands as a suggestion only — no
+          remote call, no authoritative write;
+        - grant + auto-accept: the confirmed false positives may be
+          dismissed remotely, each with an intent journal row written
+          before the provider call;
+        - grant WITHOUT confirmation: still no remote dismissal — a model
+          suggestion alone can never close a remote alert.
+        """
         fake = FakeGitHub()
         fake.seed_issue("o/r", 7, "Security review")
         fake.code_scanning_alerts["o/r"] = [code_alert(11)]
@@ -380,28 +446,47 @@ class TestSecurityCommandGitHub:
             "author_username": "alice",
         }
 
-        # Default: verdict recorded locally, provider alert untouched.
-        first_store = await new_db_factory()
-        await execute_security_command(
+        # Default: verdict recorded as a suggestion, provider untouched.
+        suggestion_store = await new_db_factory()
+        outcome = await execute_security_command(
             _settings(),
             None,
-            first_store,
+            suggestion_store,
             dict(metadata),
             github_client=fake,
             triage_runner=runner,
         )
         assert not fake.calls_of("dismiss_code_scanning_alert")
         assert not fake.calls_of("resolve_secret_scanning_alert")
-        async with first_store() as session:
+        assert outcome["confirmed"] == 0 and outcome["remote_dismissed"] == 0
+        async with suggestion_store() as session:
             statuses = {
-                row.fingerprint: row.status
+                row.fingerprint: (row.status, row.suggested_verdict)
                 for row in (await session.execute(select(SecurityFinding))).scalars().all()
             }
-        assert statuses == {"11": "false_positive", "21": "false_positive"}
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        assert statuses == {"11": ("open", "false_positive"), "21": ("open", "false_positive")}
+        assert {a.action for a in actions} == {"suggest_verdict"}
 
-        # Opt-in (fresh store: the first pass already wrote verdicts back):
-        # the research §4.2 enums, justification as the audit comment.
-        settings = _settings(FORGE_SECURITY_REMOTE_DISMISS=True)
+        # Grant WITHOUT a confirmation: the suggestions exist but no
+        # authoritative status — the remote alerts stay untouched.
+        grant_store = await new_db_factory()
+        outcome = await execute_security_command(
+            _settings(FORGE_SECURITY_REMOTE_DISMISS=True),
+            None,
+            grant_store,
+            dict(metadata),
+            github_client=fake,
+            triage_runner=runner,
+        )
+        assert outcome["confirmed"] == 0
+        assert outcome["remote_dismissed"] == 0
+        assert not fake.calls_of("dismiss_code_scanning_alert")
+
+        # Grant + auto-accept (fresh store): the suggestions are confirmed,
+        # and ONLY THEN the research §4.2 enum-dismissals run, journal
+        # intent-first, flipping the mirror to `dismissed`.
+        settings = _settings(FORGE_SECURITY_REMOTE_DISMISS=True, FORGE_SECURITY_AUTO_ACCEPT=True)
         outcome = await execute_security_command(
             settings,
             None,
@@ -410,6 +495,7 @@ class TestSecurityCommandGitHub:
             github_client=fake,
             triage_runner=runner,
         )
+        assert outcome["confirmed"] == 2
         assert outcome["remote_dismissed"] == 2
         code_patch = fake.calls_of("dismiss_code_scanning_alert")[0][1]
         assert code_patch[2] == 11
@@ -418,7 +504,55 @@ class TestSecurityCommandGitHub:
         secret_patch = fake.calls_of("resolve_secret_scanning_alert")[0][1]
         assert secret_patch[2] == 21
         assert secret_patch[3] == "false_positive"  # UNDERSCORE enum (secret scanning)
-        assert statuses == {"11": "false_positive", "21": "false_positive"}
+
+    async def test_remote_dismiss_journals_intent_before_the_call(self, db_factory):
+        """The privileged action leaves an audit trail: intent → outcome."""
+        fake = FakeGitHub()
+        fake.seed_issue("o/r", 7, "Security review")
+        fake.code_scanning_alerts["o/r"] = [code_alert(11)]
+        settings = _settings(FORGE_SECURITY_REMOTE_DISMISS=True, FORGE_SECURITY_AUTO_ACCEPT=True)
+
+        async def runner(rows):
+            return SecurityTriageResult(
+                summary="s",
+                findings=[verdict(rows[0].fingerprint, false_positive=True)],
+            )
+
+        await execute_security_command(
+            settings,
+            None,
+            db_factory,
+            {
+                "command": "security_triage",
+                "provider": "github",
+                "repo_full_name": "o/r",
+                "project_id": 70010,
+                "issue_number": 7,
+                "author_username": "alice",
+            },
+            github_client=fake,
+            triage_runner=runner,
+        )
+        async with db_factory() as session:
+            actions = (
+                (
+                    await session.execute(
+                        select(SecurityFindingAction).order_by(SecurityFindingAction.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            row = (await session.execute(select(SecurityFinding))).scalar_one()
+        dismissals = [a for a in actions if a.action == "remote_dismiss"]
+        assert [a.outcome for a in dismissals] == ["requested", "succeeded"]
+        assert dismissals[0].payload["alert"] == "11"
+        assert dismissals[0].before_status == "false_positive"
+        assert dismissals[1].after_status == "dismissed"
+        assert dismissals[0].justification == "test value, not a real credential"
+        assert row.status == "dismissed"  # the mirror follows the remote state
+        suggestions = [a for a in actions if a.action == "suggest_verdict"]
+        assert len(suggestions) == 1
 
     async def test_dependabot_false_positive_maps_to_inaccurate(self, db_factory):
         fake = FakeGitHub()
@@ -439,7 +573,7 @@ class TestSecurityCommandGitHub:
                 },
             }
         ]
-        settings = _settings(FORGE_SECURITY_REMOTE_DISMISS=True)
+        settings = _settings(FORGE_SECURITY_REMOTE_DISMISS=True, FORGE_SECURITY_AUTO_ACCEPT=True)
 
         async def runner(rows):
             return SecurityTriageResult(
@@ -465,6 +599,236 @@ class TestSecurityCommandGitHub:
         assert outcome["remote_dismissed"] == 1
         patch = fake.calls_of("dismiss_dependabot_alert")[0][1]
         assert patch[3] == "inaccurate"  # no "false positive" in the dependabot enum
+
+
+# ----------------------------------------------------------------------
+# Optimistic binding (R25): the LLM call never overwrites a manual change
+# ----------------------------------------------------------------------
+
+
+class TestOptimisticBinding:
+    @pytest.fixture()
+    def fake_gitlab(self):
+        return FakeGitLab()  # no pipelines — the refresh leg skips silently
+
+    async def test_manual_change_during_llm_call_is_not_overwritten(self, db_factory, fake_gitlab):
+        """A status change racing the model call wins; the stale verdict skips."""
+        fps = await seed_findings(db_factory)
+        victim = fps["critical"]
+
+        async def runner(rows):
+            # Simulate a human flipping the status WHILE the LLM call is in
+            # flight: an authoritative change that bumps the version the
+            # triage pass pinned at snapshot time.
+            async with db_factory() as session:
+                async with session.begin():
+                    row = (
+                        await session.execute(
+                            select(SecurityFinding).where(SecurityFinding.fingerprint == victim)
+                        )
+                    ).scalar_one()
+                    row.status = "fixed"
+                    row.version += 1
+            return SecurityTriageResult(
+                summary="s",
+                risk_level="high",
+                findings=[verdict(row.fingerprint) for row in rows],
+            )
+
+        outcome = await execute_security_command(
+            _settings(),
+            None,
+            db_factory,
+            {"command": "security_triage", "project_id": PROJECT_ID, "issue_iid": ISSUE_IID},
+            gitlab=fake_gitlab,
+            triage_runner=runner,
+        )
+        assert outcome["superseded"] == 1
+        assert outcome["suggested"] == 3
+        async with db_factory() as session:
+            rows = {
+                row.fingerprint: row
+                for row in (await session.execute(select(SecurityFinding))).scalars().all()
+            }
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        # The manual decision stands untouched — no suggestion landed on it.
+        assert rows[victim].status == "fixed"
+        assert rows[victim].suggested_verdict is None
+        assert rows[victim].version == 1  # only the manual bump (seed = 0)
+        skipped = [a for a in actions if a.outcome == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0].finding_id == rows[victim].id
+        assert skipped[0].payload["reason"] == "version_changed_since_snapshot"
+        # The other three findings still got their suggestions.
+        assert rows[fps["high"]].suggested_verdict == "triaged"
+
+    async def test_out_of_batch_verdict_is_never_applied(self, db_factory, fake_gitlab):
+        """Verdicts for suppressed / hallucinated fingerprints do nothing."""
+        await seed_findings(db_factory)
+        # A suppressed row that is NOT part of the open batch, plus a
+        # fingerprint the model simply hallucinated.
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [
+                        NormalizedFinding(
+                            source="gitlab_sast",
+                            fingerprint="9" * 64,
+                            severity="high",
+                            title="Suppressed earlier",
+                        )
+                    ],
+                    provider="gitlab",
+                    scope=str(PROJECT_ID),
+                )
+                suppressed = (
+                    await session.execute(
+                        select(SecurityFinding).where(SecurityFinding.fingerprint == "9" * 64)
+                    )
+                ).scalar_one()
+                suppressed.status = "false_positive"
+                suppressed.version += 1
+        suppressed_version = suppressed.version
+
+        async def runner(rows):
+            assert len(rows) == 4  # the suppressed row is not in the batch
+            return SecurityTriageResult(
+                summary="s",
+                risk_level="high",
+                findings=[verdict(row.fingerprint) for row in rows]
+                + [
+                    verdict("9" * 64, false_positive=False),  # suppressed row
+                    verdict("deadbeef" * 8),  # hallucinated
+                ],
+            )
+
+        outcome = await execute_security_command(
+            _settings(FORGE_SECURITY_AUTO_ACCEPT=True),
+            None,
+            db_factory,
+            {"command": "security_triage", "project_id": PROJECT_ID, "issue_iid": ISSUE_IID},
+            gitlab=fake_gitlab,
+            triage_runner=runner,
+        )
+        assert outcome["out_of_batch"] == 2
+        assert outcome["suggested"] == 4
+        async with db_factory() as session:
+            row = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.fingerprint == "9" * 64)
+                )
+            ).scalar_one()
+        # The out-of-batch row kept its authoritative suppression, version
+        # untouched — the model cannot reach rows outside the pinned batch.
+        assert row.status == "false_positive"
+        assert row.suggested_verdict is None
+        assert row.version == suppressed_version
+
+
+# ----------------------------------------------------------------------
+# Authorized confirmation (R25): the human gate on suggestions
+# ----------------------------------------------------------------------
+
+
+class TestConfirmFindingVerdict:
+    @pytest.fixture()
+    def fake_gitlab(self):
+        return FakeGitLab()
+
+    async def seed_one(self, db_factory) -> str:
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [
+                        NormalizedFinding(
+                            source="gitlab_sast",
+                            fingerprint="c" * 64,
+                            severity="critical",
+                            title="Hardcoded secret",
+                        )
+                    ],
+                    provider="gitlab",
+                    scope=str(PROJECT_ID),
+                )
+                row = (
+                    await session.execute(
+                        select(SecurityFinding).where(SecurityFinding.fingerprint == "c" * 64)
+                    )
+                ).scalar_one()
+                row.suggested_verdict = "false_positive"
+                row.suggested_by = "ai:security-triage"
+                row.triage_note = "test value, not a real credential"
+                row.version += 1
+                return row.id
+
+    async def test_unauthorized_actor_is_refused(self, db_factory):
+        finding_id = await self.seed_one(db_factory)
+        with pytest.raises(PermissionError):
+            await confirm_finding_verdict(
+                db_factory,
+                finding_id,
+                "mallory",
+                triagers="alice",
+            )
+        with pytest.raises(PermissionError):
+            await confirm_finding_verdict(
+                db_factory,
+                finding_id,
+                "alice",
+                triagers="",  # empty allowlist: nobody may confirm
+            )
+        async with db_factory() as session:
+            row = (await session.execute(select(SecurityFinding))).scalar_one()
+        assert row.status == "open"  # nothing moved
+
+    async def test_confirm_promotes_suggestion_to_status(self, db_factory):
+        finding_id = await self.seed_one(db_factory)
+        result = await confirm_finding_verdict(
+            db_factory,
+            finding_id,
+            "alice",
+            justification="checked with the team",
+            triagers="alice, bob",
+        )
+        assert result["status"] == "false_positive"
+        async with db_factory() as session:
+            row = (await session.execute(select(SecurityFinding))).scalar_one()
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        assert row.version == 2
+        assert len(actions) == 1
+        assert actions[0].action == "confirm_verdict"
+        assert actions[0].actor == "alice"
+        assert actions[0].justification == "checked with the team"
+        assert actions[0].after_status == "false_positive"
+
+    async def test_reject_clears_suggestion_and_journals(self, db_factory):
+        finding_id = await self.seed_one(db_factory)
+        result = await confirm_finding_verdict(
+            db_factory,
+            finding_id,
+            "bob",
+            accept=False,
+            triagers="bob",
+        )
+        assert result["status"] == "open"
+        assert result["suggested_verdict"] is None
+        async with db_factory() as session:
+            row = (await session.execute(select(SecurityFinding))).scalar_one()
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        assert row.suggested_verdict is None and row.suggested_by is None
+        assert row.version == 2
+        assert [a.action for a in actions] == ["reject_verdict"]
+
+    async def test_confirm_requires_a_suggestion(self, db_factory):
+        finding_id = await self.seed_one(db_factory)
+        async with db_factory() as session:
+            async with session.begin():
+                row = (await session.execute(select(SecurityFinding))).scalar_one()
+                row.suggested_verdict = None
+        with pytest.raises(RuntimeError, match="no suggested verdict"):
+            await confirm_finding_verdict(db_factory, finding_id, "alice", triagers="alice")
 
 
 # ----------------------------------------------------------------------
@@ -501,7 +865,8 @@ class TestFormatTriageComment:
             "42",
         )
         assert "no verdict, stays open" in body
-        assert "Confirmed" in body
+        assert "Suggested: confirmed" in body  # R25: suggestions, not writes
+        assert "awaiting confirmation" in body
         assert "High" in body and "Critical" in body
 
     def test_agent_max_findings_setting_raises_the_prompt_cap(self):

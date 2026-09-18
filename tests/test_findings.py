@@ -2,11 +2,14 @@
 
 Ground truth: docs/research/ci-security-surface.md §3 (report schema,
 alert field sets, tier matrix) and §4.1 (forge-computed GitLab
-fingerprints; absence from one scan is never a fix).
+fingerprints; absence from one scan is never a fix). R25/R26 coverage:
+the DB-native concurrent upsert, scan-completeness records, the
+connection-scoped dedupe key and the reappearance rule live here.
 """
 
+import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -20,7 +23,14 @@ from forge.findings.ingest import (
     ingest_github_alerts,
     upsert_findings,
 )
-from forge.findings.models import SecurityFinding, normalize_severity
+from forge.findings.models import (
+    SCAN_RETENTION_DAYS,
+    ScanExecution,
+    SecurityFinding,
+    SecurityFindingAction,
+    normalize_severity,
+)
+from forge.findings.triage import open_findings_for_scope
 from forge.models.base import Base
 from tests.fixtures.fake_github import FakeGitHub
 from tests.fixtures.fake_gitlab import FakeGitLab
@@ -296,8 +306,9 @@ class TestUpsert:
         assert row.line == 2  # observability refreshed
 
     async def test_same_fingerprint_different_source_coexists(self, db_factory):
-        # The dedupe key is (source, scope, fingerprint): an identical
-        # identity under gitlab_secret never collides with gitlab_sast.
+        # The dedupe key is (connection, source, scope, fingerprint): an
+        # identical identity under gitlab_secret never collides with
+        # gitlab_sast.
         async with db_factory() as session:
             async with session.begin():
                 await upsert_findings(
@@ -311,6 +322,391 @@ class TestUpsert:
                 )
         rows = await self._rows(db_factory)
         assert {row.source for row in rows} == {"gitlab_sast", "gitlab_secret"}
+
+    async def test_last_seen_is_monotonic_under_a_late_older_scan(self, db_factory):
+        """An out-of-order (older) scan never rolls last_seen backwards."""
+        now = datetime.now(timezone.utc)
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [finding("7" * 64)],
+                    provider="gitlab",
+                    scope="42",
+                    seen_at=now,
+                )
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [finding("7" * 64)],
+                    provider="gitlab",
+                    scope="42",
+                    seen_at=now - timedelta(hours=1),  # reordered/late delivery
+                )
+        row = (await self._rows(db_factory))[0]
+        assert row.last_seen == now.replace(tzinfo=None)
+
+
+# ----------------------------------------------------------------------
+# R26: the dedupe is DB-native — concurrent ingests collapse to one row
+# ----------------------------------------------------------------------
+
+
+class TestConcurrentUpsert:
+    async def test_two_concurrent_ingests_of_one_finding_create_one_row(self, tmp_path):
+        """Two simultaneous ingest passes hit the unique index, not a race.
+
+        The upsert is a single INSERT … ON CONFLICT DO UPDATE against the
+        unique (connection, source, scope, fingerprint) index, so both
+        passes converge on ONE row — no SELECT+INSERT race, no IntegrityError
+        leak, and exactly one created row overall.
+        """
+        database = f"sqlite+aiosqlite:///{tmp_path}/findings.db"
+        engines = [create_async_engine(database) for _ in range(2)]
+        try:
+            for engine in engines:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+            factories = [async_sessionmaker(engine, expire_on_commit=False) for engine in engines]
+
+            fake = FakeGitLab()
+            seed_sast_pipeline(fake, pipeline_id=990, job_id=991)
+            # Two concurrent full ingestion passes over the SAME pipeline.
+            results = await asyncio.gather(
+                ingest_gitlab_pipeline(fake, factories[0], 42, 990),
+                ingest_gitlab_pipeline(fake, factories[1], 42, 990),
+            )
+            assert all(result.errors == [] for result in results)
+        finally:
+            for engine in engines:
+                await engine.dispose()
+
+        store = async_sessionmaker(create_async_engine(database), expire_on_commit=False)
+        try:
+            async with store() as session:
+                rows = (await session.execute(select(SecurityFinding))).scalars().all()
+            assert len(rows) == 2  # the two distinct pipeline findings — deduped
+            assert len({row.fingerprint for row in rows}) == 2
+            assert (
+                sum(result.created for result in results)
+                + sum(result.updated for result in results)
+                == 4
+            )  # every pass accounted for both findings exactly once
+        finally:
+            await store.kw["bind"].dispose()  # type: ignore[attr-defined]
+
+    async def test_parallel_upsert_sessions_stay_unique(self, db_factory):
+        """Direct upsert races through separate sessions also converge."""
+        await asyncio.gather(
+            *(self._one_ingest(db_factory, seen_at=datetime.now(timezone.utc)) for _ in range(2))
+        )
+        async with db_factory() as session:
+            rows = (await session.execute(select(SecurityFinding))).scalars().all()
+        assert len(rows) == 1
+
+    async def _one_ingest(self, db_factory, *, seen_at: datetime) -> None:
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [finding("8" * 64, title="Raced finding")],
+                    provider="gitlab",
+                    scope="42",
+                    seen_at=seen_at,
+                )
+
+
+# ----------------------------------------------------------------------
+# R26: ScanExecution — a partial scan never looks clean
+# ----------------------------------------------------------------------
+
+
+class TestScanExecution:
+    async def _scans(self, db_factory) -> list[ScanExecution]:
+        async with db_factory() as session:
+            return (
+                (await session.execute(select(ScanExecution).order_by(ScanExecution.source)))
+                .scalars()
+                .all()
+            )
+
+    async def test_clean_report_records_complete_scan(self, db_factory):
+        fake = FakeGitLab()
+        seed_sast_pipeline(fake, pipeline_id=710, job_id=711)
+        result = await ingest_gitlab_pipeline(fake, db_factory, 42, 710)
+        assert result.scan_complete is True
+        scans = await self._scans(db_factory)
+        assert len(scans) == 1
+        assert scans[0].source == "gitlab_sast"
+        assert scans[0].completeness == "complete"
+        assert scans[0].external_id == "710"
+        assert scans[0].parsed == 2
+        assert scans[0].created == 2
+        # Retention: scan records are observability metadata with a purge date.
+        assert scans[0].retention_until is not None
+        delta = scans[0].retention_until.replace(tzinfo=None) - (
+            scans[0].observed_at.replace(tzinfo=None)
+        )
+        assert delta == timedelta(days=SCAN_RETENTION_DAYS)
+
+    async def test_expired_artifact_marks_scan_incomplete(self, db_factory):
+        fake = FakeGitLab()
+        seed_sast_pipeline(fake, pipeline_id=720, job_id=721)
+        del fake.job_artifacts[721]["gl-sast-report.json"]  # artifact expired (404)
+        result = await ingest_gitlab_pipeline(fake, db_factory, 42, 720)
+        assert result.created == 0
+        assert result.scan_complete is False
+        scans = await self._scans(db_factory)
+        assert len(scans) == 1
+        assert scans[0].completeness == "incomplete"
+        assert "404" in scans[0].errors[0]
+
+    async def test_pipeline_without_report_jobs_is_incomplete(self, db_factory):
+        fake = FakeGitLab()
+        fake.pipelines.append({"id": 730, "ref": "main", "status": "success", "sha": "d" * 40})
+        fake.set_pipeline_jobs(
+            730, [{"id": 731, "name": "build", "stage": "build", "status": "success"}]
+        )
+        result = await ingest_gitlab_pipeline(fake, db_factory, 42, 730)
+        assert result.created == 0
+        assert result.scan_complete is False  # no evidence — never looks clean
+        scans = await self._scans(db_factory)
+        assert len(scans) == 1
+        assert scans[0].completeness == "incomplete"
+        assert "no security report jobs" in scans[0].errors[0]
+
+    async def test_github_403_surface_records_incomplete_scan(self, db_factory):
+        fake = FakeGitHub()
+        fake.code_scanning_disabled = True
+        fake.dependabot_alerts["o/r"] = [dependabot_alert(31)]
+        result = await ingest_github_alerts(fake, db_factory, "o", "r")
+        assert result.created == 1
+        assert result.scan_complete is False  # dependabot ingested, scan still partial
+        scans = {(scan.source, scan.completeness) for scan in await self._scans(db_factory)}
+        assert ("github_code_scanning", "incomplete") in scans
+        assert ("github_dependabot", "complete") in scans
+
+    async def test_partial_gitlab_scan_marks_only_the_failed_source(self, db_factory):
+        fake = FakeGitLab()
+        seed_sast_pipeline(fake, pipeline_id=740, job_id=741)
+        del fake.job_artifacts[741]["gl-sast-report.json"]
+        fake.set_pipeline_jobs(
+            740,
+            [
+                {"id": 741, "name": "sast", "stage": "test", "status": "success"},
+                {"id": 742, "name": "secret_detection", "stage": "test", "status": "success"},
+            ],
+        )
+        fake.seed_job_artifact(
+            742,
+            "gl-secret-detection-report.json",
+            json.dumps(sast_report(VULNS[:1])),
+        )
+        result = await ingest_gitlab_pipeline(fake, db_factory, 42, 740)
+        assert result.created == 1  # the secret surface still ingested
+        assert result.scan_complete is False
+        scans = {(scan.source, scan.completeness) for scan in await self._scans(db_factory)}
+        assert scans == {
+            ("gitlab_sast", "incomplete"),
+            ("gitlab_secret", "complete"),
+        }
+
+
+# ----------------------------------------------------------------------
+# R26: the connection leads the dedupe key — same project id, no mixing
+# ----------------------------------------------------------------------
+
+
+class TestCrossConnectionIsolation:
+    async def test_same_scope_two_connections_stay_separate(self, db_factory):
+        for connection_id in ("conn-a", "conn-b"):
+            async with db_factory() as session:
+                async with session.begin():
+                    await upsert_findings(
+                        session,
+                        [finding("5" * 64, title=f"from {connection_id}")],
+                        provider="gitlab",
+                        scope="42",
+                        connection_id=connection_id,
+                    )
+        rows = await self._all(db_factory)
+        assert len(rows) == 2  # one row per connection, never merged
+        assert {row.connection_id for row in rows} == {"conn-a", "conn-b"}
+
+    async def test_default_connection_rows_are_distinct_from_named_ones(self, db_factory):
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [finding("6" * 64)],
+                    provider="gitlab",
+                    scope="42",  # connection_id defaults to ""
+                )
+        async with db_factory() as session:
+            async with session.begin():
+                await upsert_findings(
+                    session,
+                    [finding("6" * 64, title="other connection")],
+                    provider="gitlab",
+                    scope="42",
+                    connection_id="gitlab:other.example.com",
+                )
+        assert len(await self._all(db_factory)) == 2
+
+    async def test_triage_queries_are_connection_scoped(self, db_factory):
+        """A triage pass on connection A never sees or touches B's rows."""
+        for connection_id, status in (("conn-a", "open"), ("conn-b", "open")):
+            async with db_factory() as session:
+                async with session.begin():
+                    await upsert_findings(
+                        session,
+                        [finding("4" * 64, title=f"on {connection_id}")],
+                        provider="gitlab",
+                        scope="42",
+                        connection_id=connection_id,
+                    )
+        batch = await open_findings_for_scope(db_factory, "42", connection_id="conn-a")
+        assert [row.connection_id for row in batch] == ["conn-a"]
+        # Conn-B's identical finding stays untouched by A's verdict writes.
+        from forge.agents.models import SecurityFindingResult, SecurityTriageResult
+        from forge.findings.triage import apply_triage_verdicts, observe_batch
+
+        observed = observe_batch(batch)
+        result = SecurityTriageResult(
+            summary="s",
+            findings=[
+                SecurityFindingResult(
+                    id="4" * 64,
+                    severity="high",
+                    category="testing",
+                    description="d",
+                    remediation="fix",
+                    is_false_positive=True,
+                    justification="not real",
+                )
+            ],
+        )
+        applied = await apply_triage_verdicts(
+            db_factory,
+            "42",
+            result,
+            connection_id="conn-a",
+            observed=observed,
+            auto_accept=True,
+        )
+        assert applied.applied == ["4" * 64]
+        rows = await self._all(db_factory)
+        by_connection = {row.connection_id: row for row in rows}
+        assert by_connection["conn-a"].status == "false_positive"
+        assert by_connection["conn-b"].status == "open"  # isolated
+
+    async def _all(self, db_factory) -> list[SecurityFinding]:
+        async with db_factory() as session:
+            return (await session.execute(select(SecurityFinding))).scalars().all()
+
+
+# ----------------------------------------------------------------------
+# R25 §4: a reappearing finding gets a fresh assessment, never the old
+# suppression silently restored
+# ----------------------------------------------------------------------
+
+
+class TestReappearance:
+    async def test_suppressed_finding_reappearing_after_absence_is_reopened(self, db_factory):
+        fake = FakeGitLab()
+        seed_sast_pipeline(fake, pipeline_id=800, job_id=801)  # both vulns
+        await ingest_gitlab_pipeline(fake, db_factory, 42, 800)
+
+        # Triage suppresses "Weak hash".
+        async with db_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(SecurityFinding).where(SecurityFinding.title == "Weak hash")
+                    )
+                ).scalar_one()
+                row.status = "false_positive"
+                row.suggested_verdict = "false_positive"
+                row.triage_note = "stale suppression"
+                row.version += 1
+
+        # Next scan: the finding is ABSENT (branch-scoped scan / fix).
+        absent = [v for v in VULNS if v["name"] == "Hardcoded secret"]
+        seed_sast_pipeline(fake, pipeline_id=802, job_id=803, report=sast_report(absent))
+        await ingest_gitlab_pipeline(fake, db_factory, 42, 802)
+        async with db_factory() as session:
+            row = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.title == "Weak hash")
+                )
+            ).scalar_one()
+            assert row.status == "false_positive"  # absence alone never reopens
+            assert row.absent_in_last_scan is True
+
+        # It REAPPEARS (reintroduced code): the old suppression must not
+        # silently hold — a fresh evidence assessment starts.
+        seed_sast_pipeline(fake, pipeline_id=804, job_id=805)  # both vulns again
+        await ingest_gitlab_pipeline(fake, db_factory, 42, 804)
+        async with db_factory() as session:
+            row = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.title == "Weak hash")
+                )
+            ).scalar_one()
+            actions = (
+                (
+                    await session.execute(
+                        select(SecurityFindingAction).order_by(SecurityFindingAction.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert row.status == "open"  # reopened for assessment
+        assert row.suggested_verdict is None  # stale suggestion cleared
+        assert row.absent_in_last_scan is False
+        reopens = [a for a in actions if a.action == "reopen"]
+        assert len(reopens) == 1
+        assert reopens[0].before_status == "false_positive"
+        assert reopens[0].after_status == "open"
+        assert reopens[0].actor == "ingest:reappearance"
+        # The continuously-present finding was never touched.
+        async with db_factory() as session:
+            other = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.title == "Hardcoded secret")
+                )
+            ).scalar_one()
+        assert other.status == "open" and other.version == 0
+
+    async def test_suppressed_finding_present_in_every_scan_stays_suppressed(self, db_factory):
+        """Continuous presence does NOT reopen — only true reappearance does."""
+        fake = FakeGitLab()
+        seed_sast_pipeline(fake, pipeline_id=810, job_id=811)
+        await ingest_gitlab_pipeline(fake, db_factory, 42, 810)
+        async with db_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(SecurityFinding).where(SecurityFinding.title == "Weak hash")
+                    )
+                ).scalar_one()
+                row.status = "false_positive"
+                row.version += 1
+
+        seed_sast_pipeline(fake, pipeline_id=812, job_id=813)
+        await ingest_gitlab_pipeline(fake, db_factory, 42, 812)
+        async with db_factory() as session:
+            row = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.title == "Weak hash")
+                )
+            ).scalar_one()
+            actions = (await session.execute(select(SecurityFindingAction))).scalars().all()
+        assert row.status == "false_positive"  # suppression stands
+        assert row.absent_in_last_scan is False
+        assert [a.action for a in actions if a.action == "reopen"] == []
 
 
 # ----------------------------------------------------------------------
@@ -623,6 +1019,71 @@ class TestMigration010:
                 assert "security_findings" in inspect(conn).get_table_names()
                 module.downgrade()
                 assert "security_findings" not in inspect(conn).get_table_names()
+        engine.dispose()
+
+
+# ----------------------------------------------------------------------
+# Migration 016 (R25/R26) — columns, connection-led key, new tables
+# ----------------------------------------------------------------------
+
+
+class TestMigration016:
+    def _run(self, conn, filename: str, direction: str):
+        import importlib.util
+        from pathlib import Path
+
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            spec = importlib.util.spec_from_file_location(
+                filename,
+                Path(__file__).resolve().parent.parent / "alembic" / "versions" / filename,
+            )
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            getattr(module, direction)()
+
+    def test_upgrade_adds_governance_columns_and_tables(self):
+        from sqlalchemy import create_engine, inspect
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.connect() as conn:
+            # The findings table starts at its 010 shape.
+            self._run(conn, "010_security_findings.py", "upgrade")
+            self._run(conn, "016_findings_triage_governance.py", "upgrade")
+
+            inspector = inspect(conn)
+            columns = {column["name"] for column in inspector.get_columns("security_findings")}
+            index_names = {index["name"] for index in inspector.get_indexes("security_findings")}
+            tables = inspector.get_table_names()
+        assert {"suggested_verdict", "suggested_at", "suggested_by", "version"} <= columns
+        assert {"connection_id", "absent_in_last_scan"} <= columns
+        # The dedupe key is connection-led now (R26).
+        assert "uq_finding_per_source_scope_fingerprint" not in index_names
+        assert "uq_finding_per_connection_source_scope_fingerprint" in index_names
+        assert "security_scan_executions" in tables
+        assert "security_finding_actions" in tables
+        engine.dispose()
+
+    def test_upgrade_downgrade_round_trip(self):
+        from sqlalchemy import create_engine, inspect
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.connect() as conn:
+            self._run(conn, "010_security_findings.py", "upgrade")
+            self._run(conn, "016_findings_triage_governance.py", "upgrade")
+            assert "security_finding_actions" in inspect(conn).get_table_names()
+            self._run(conn, "016_findings_triage_governance.py", "downgrade")
+            inspector = inspect(conn)
+            assert "security_finding_actions" not in inspector.get_table_names()
+            assert "security_scan_executions" not in inspector.get_table_names()
+            index_names = {index["name"] for index in inspector.get_indexes("security_findings")}
+            assert "uq_finding_per_source_scope_fingerprint" in index_names
+            columns = {column["name"] for column in inspector.get_columns("security_findings")}
+            assert "suggested_verdict" not in columns and "connection_id" not in columns
         engine.dispose()
 
 

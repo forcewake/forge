@@ -7,20 +7,36 @@ the worker claims it and :func:`execute_security_command` runs the leg:
 1. **Refresh** (best effort): latest successful GitLab pipeline artifacts
    and/or the GitHub alert surfaces are re-ingested, so triage reasons
    over current data. Ingest errors (403 on a repo without Code Security,
-   missing artifacts, …) degrade to notes — never fail the command.
-2. **Pull**: open findings for the scope from ``security_findings``,
-   severity-sorted, capped at :data:`TRIAGE_BATCH` (50) per call.
+   missing artifacts, …) degrade to notes — never fail the command; the
+   pass's :class:`~forge.findings.models.ScanExecution` rows record the
+   scan's completeness (R26).
+2. **Pull + pin**: open findings for the (connection, scope) from
+   ``security_findings``, severity-sorted, capped at :data:`TRIAGE_BATCH`
+   (50) per call. Each row's ``version`` is captured NOW — this is the
+   optimistic-binding snapshot (R25).
 3. **Triage**: the existing ``security-triage`` agent classifies each
    finding. The agent contract (:class:`~forge.agents.models.
    SecurityTriageResult`) keys findings by ``id`` — forge feeds it the
    stable **fingerprint** as the id so verdicts join back to rows.
-4. **Write back**: ``is_false_positive`` → ``status='false_positive'``,
-   confirmed → ``status='triaged'``, with the justification as
-   ``triage_note``. Optionally (``FORGE_SECURITY_REMOTE_DISMISS``) the
-   false positives are also dismissed on GitHub with the research §4.2
-   enum quirks and the justification as the audit-trail comment.
-5. **Post** the triage comment: grouped by severity, every finding with
-   its fingerprint and suggested action.
+4. **Write back SUGGESTIONS**: the AI verdict is recorded on
+   ``suggested_verdict``/``suggested_at``/``suggested_by`` — the
+   authoritative ``status`` is NOT moved by the model (R25). Each
+   suggestion applies as a compare-and-set on the pinned version, so a
+   manual status change during the LLM call is never overwritten (the
+   stale batch misses and journals a skip). Only when the operator has
+   explicitly opted in via ``FORGE_SECURITY_AUTO_ACCEPT`` (default OFF)
+   does the same pass promote accepted suggestions into ``status``. The
+   privileged actor path is :func:`confirm_finding_verdict` (gated by
+   ``FORGE_SECURITY_TRIAGERS``). Every applied/skipped change journals a
+   :class:`~forge.findings.models.SecurityFindingAction` row.
+5. **Remote dismissal** (``FORGE_SECURITY_REMOTE_DISMISS``, GitHub only):
+   a separate privileged action — only findings whose AUTHORITATIVE
+   status is already ``false_positive`` (confirmed, never a bare
+   suggestion) are dismissed remotely, each with an intent journal row
+   written strictly BEFORE the provider call (research §4.2 enum quirks,
+   justification as the audit-trail comment).
+6. **Post** the triage comment: grouped by severity, every finding with
+   its fingerprint and the SUGGESTED action.
 
 No admission gate (unlike /implement): triage is a read + one bounded
 model call + comments, mirroring the legacy reactive ``/security``.
@@ -30,9 +46,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, cast
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.agents.models import SecurityFindingResult, SecurityTriageResult
@@ -44,7 +61,11 @@ from forge.context.security_report import (
     SecurityReport,
 )
 from forge.findings.ingest import ingest_github_alerts, ingest_gitlab_pipeline
-from forge.findings.models import SecurityFinding, normalize_severity
+from forge.findings.models import (
+    SecurityFinding,
+    SecurityFindingAction,
+    normalize_severity,
+)
 from forge.gitlab.schemas import Pipeline
 
 logger = logging.getLogger(__name__)
@@ -55,8 +76,47 @@ TRIAGE_BATCH = 50
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
+#: The actor recorded on AI suggestions.
+AI_TRIAGE_ACTOR = "ai:security-triage"
+
 #: TriageRunner: findings rows → the agent's structured verdict.
 TriageRunner = Callable[[list[SecurityFinding]], Awaitable[SecurityTriageResult]]
+
+#: The optimistic-binding snapshot (R25): fingerprint → (row id, version)
+#: read at triage start; verdicts apply as compare-and-set on the version.
+Observation = dict[str, tuple[str, int]]
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def authorized_triagers(triagers_config: str) -> frozenset[str]:
+    """The comma-separated triager allowlist (``FORGE_SECURITY_TRIAGERS``).
+
+    Empty — NOBODY may confirm or reject a suggestion: the default is that
+    only an explicit human grant governs authoritative status changes.
+    """
+    return frozenset({name.strip() for name in (triagers_config or "").split(",") if name.strip()})
+
+
+def resolve_connection_id(metadata: dict[str, Any], provider: str, scope: str) -> str:
+    """The findings-scope connection for a triage pass.
+
+    The GitHub ingress always supplies ``connection_id``
+    (``github:{installation}:{repo}``); the fallback derives from the repo
+    full name — the SAME derivation :func:`forge.findings.ingest.
+    ingest_github_alerts` uses when called without an explicit connection,
+    so the refresh leg and the triage queries always agree on the scope
+    key. GitLab is a single-connection deployment today ("" = default
+    connection).
+    """
+    explicit = str(metadata.get("connection_id") or "")
+    if explicit:
+        return explicit
+    if provider == "github":
+        return f"github:{scope}"
+    return ""
 
 
 @dataclass
@@ -65,8 +125,14 @@ class TriageOutcome:
 
     scope: str = ""
     considered: int = 0
+    #: Suggestions by kind (the AI's proposal, not authoritative writes).
     triaged: int = 0
     false_positives: int = 0
+    #: R25 governance counters.
+    suggested: int = 0
+    confirmed: int = 0
+    superseded: int = 0
+    out_of_batch: int = 0
     refresh_created: int = 0
     refresh_errors: list[str] = field(default_factory=list)
     comment_posted: bool = False
@@ -78,11 +144,25 @@ class TriageOutcome:
             "considered": self.considered,
             "triaged": self.triaged,
             "false_positives": self.false_positives,
+            "suggested": self.suggested,
+            "confirmed": self.confirmed,
+            "superseded": self.superseded,
+            "out_of_batch": self.out_of_batch,
             "refresh_created": self.refresh_created,
             "refresh_errors": self.refresh_errors,
             "comment_posted": self.comment_posted,
             "remote_dismissed": self.remote_dismissed,
         }
+
+
+@dataclass
+class AppliedVerdicts:
+    """The result of a verdict write-back pass (R25 counters)."""
+
+    applied: list[str] = field(default_factory=list)
+    superseded: list[str] = field(default_factory=list)
+    out_of_batch: list[str] = field(default_factory=list)
+    confirmed: int = 0
 
 
 # ----------------------------------------------------------------------
@@ -94,15 +174,20 @@ async def open_findings_for_scope(
     session_factory: async_sessionmaker[AsyncSession],
     scope: str,
     *,
+    connection_id: str = "",
     limit: int = TRIAGE_BATCH,
 ) -> list[SecurityFinding]:
-    """Open findings for *scope*, severity-sorted, batch-capped."""
+    """Open findings for (connection, scope), severity-sorted, batch-capped."""
     async with session_factory() as session:
         rows = (
             (
                 await session.execute(
                     select(SecurityFinding)
-                    .where(SecurityFinding.scope == scope, SecurityFinding.status == "open")
+                    .where(
+                        SecurityFinding.connection_id == connection_id,
+                        SecurityFinding.scope == scope,
+                        SecurityFinding.status == "open",
+                    )
                     .order_by(SecurityFinding.first_seen, SecurityFinding.id)
                 )
             )
@@ -116,39 +201,246 @@ async def open_findings_for_scope(
     return ordered[:limit]
 
 
+def observe_batch(rows: list[SecurityFinding]) -> Observation:
+    """Pin (row id, version) per fingerprint — the triage-start snapshot.
+
+    Compare-and-set target for :func:`apply_triage_verdicts`: any
+    authoritative change between this snapshot and the write-back bumps
+    ``version`` and makes the stale verdict miss instead of overwrite.
+    Fingerprints are stable within (connection, scope, source); a
+    duplicate fingerprint in one batch keeps its FIRST occurrence.
+    """
+    observed: Observation = {}
+    for row in rows:
+        observed.setdefault(row.fingerprint, (row.id, row.version))
+    return observed
+
+
+def _journal(
+    session: AsyncSession,
+    *,
+    finding_id: str,
+    action: str,
+    actor: str,
+    justification: str = "",
+    before_status: str | None = None,
+    after_status: str | None = None,
+    payload: dict[str, Any] | None = None,
+    outcome: str = "applied",
+) -> SecurityFindingAction:
+    """Append one governance journal row (intent/applied record)."""
+    entry = SecurityFindingAction(
+        finding_id=finding_id,
+        action=action,
+        actor=actor,
+        justification=justification,
+        before_status=before_status,
+        after_status=after_status,
+        payload=payload or {},
+        outcome=outcome,
+    )
+    session.add(entry)
+    return entry
+
+
 async def apply_triage_verdicts(
     session_factory: async_sessionmaker[AsyncSession],
     scope: str,
     result: SecurityTriageResult,
-) -> list[str]:
-    """Write the agent's verdicts back onto the finding rows.
+    *,
+    connection_id: str = "",
+    observed: Observation | None = None,
+    auto_accept: bool = False,
+    actor: str = AI_TRIAGE_ACTOR,
+) -> AppliedVerdicts:
+    """Record the agent's verdicts as SUGGESTIONS on the finding rows.
 
-    Joins on the fingerprint (the id the agent was fed); unknown ids are
-    ignored (the model hallucinated one). Returns the applied fingerprints.
+    R25 governance:
+
+    - **Separate from status**: the verdict lands on
+      ``suggested_verdict``/``suggested_at``/``suggested_by`` with the
+      justification as ``triage_note``. The authoritative ``status``
+      moves ONLY when *auto_accept* is set (the explicit opt-in config)
+      — otherwise an authorized actor confirms via
+      :func:`confirm_finding_verdict`.
+    - **Optimistic binding**: with *observed* (the snapshot taken at
+      triage start), each suggestion applies as ``UPDATE … WHERE id=…
+      AND version=…`` — a manual status change during the LLM call bumps
+      the version, the write MISSES, and the manual decision stands
+      (journaled as ``skipped``). Verdicts whose fingerprint is not in
+      the snapshot (hallucinated, or a suppressed/out-of-batch row) are
+      NEVER applied.
+
+    Returns the applied fingerprints and the governance counters.
     """
+    applied = AppliedVerdicts()
     if not result.findings:
-        return []
-    applied: list[str] = []
-    async with session_factory() as session:
-        async with session.begin():
+        return applied
+
+    if observed is None:
+        # Legacy best-effort path: pin whatever the rows carry NOW (no
+        # LLM-call-race protection — callers should pass a snapshot).
+        async with session_factory() as session:
             rows = (
                 (
                     await session.execute(
-                        select(SecurityFinding).where(SecurityFinding.scope == scope)
+                        select(SecurityFinding).where(
+                            SecurityFinding.connection_id == connection_id,
+                            SecurityFinding.scope == scope,
+                        )
                     )
                 )
                 .scalars()
                 .all()
             )
-            by_fingerprint = {row.fingerprint: row for row in rows}
+        observed = observe_batch(list(rows))
+
+    now = utcnow()
+    async with session_factory() as session:
+        async with session.begin():
             for verdict in result.findings:
-                row = by_fingerprint.get(verdict.id)
-                if row is None:
+                pinned = observed.get(verdict.id)
+                if pinned is None:
+                    # Out of batch (hallucinated / suppressed / not pulled
+                    # this pass): never applied, never journaled against a
+                    # row that may not exist.
+                    applied.out_of_batch.append(verdict.id)
                     continue
-                row.status = "false_positive" if verdict.is_false_positive else "triaged"
-                row.triage_note = verdict.justification or verdict.remediation or ""
-                applied.append(verdict.id)
+                finding_id, pinned_version = pinned
+                new_status = "false_positive" if verdict.is_false_positive else "triaged"
+                note = verdict.justification or verdict.remediation or ""
+                values: dict[str, Any] = {
+                    "suggested_verdict": new_status,
+                    "suggested_at": now,
+                    "suggested_by": actor,
+                    "triage_note": note,
+                    "version": SecurityFinding.version + 1,
+                }
+                if auto_accept:
+                    values["status"] = new_status
+                db_result = await session.execute(
+                    update(SecurityFinding)
+                    .where(
+                        SecurityFinding.id == finding_id,
+                        SecurityFinding.version == pinned_version,
+                        SecurityFinding.scope == scope,
+                        SecurityFinding.connection_id == connection_id,
+                    )
+                    .values(**values)
+                )
+                if cast("CursorResult[Any]", db_result).rowcount != 1:
+                    # The row changed since the snapshot (a manual status
+                    # change won the race) — the stale verdict must not
+                    # overwrite it.
+                    applied.superseded.append(verdict.id)
+                    _journal(
+                        session,
+                        finding_id=finding_id,
+                        action="suggest_verdict",
+                        actor=actor,
+                        justification=note,
+                        payload={
+                            "verdict": new_status,
+                            "observed_version": pinned_version,
+                            "reason": "version_changed_since_snapshot",
+                        },
+                        outcome="skipped",
+                    )
+                    continue
+
+                applied.applied.append(verdict.id)
+                _journal(
+                    session,
+                    finding_id=finding_id,
+                    action="suggest_verdict",
+                    actor=actor,
+                    justification=note,
+                    before_status="open",
+                    after_status=new_status if auto_accept else "open",
+                    payload={"verdict": new_status, "auto_accept": auto_accept},
+                )
+                if auto_accept:
+                    applied.confirmed += 1
+                    _journal(
+                        session,
+                        finding_id=finding_id,
+                        action="confirm_verdict",
+                        actor="auto_accept",
+                        justification=note,
+                        before_status="open",
+                        after_status=new_status,
+                        payload={"verdict": new_status},
+                    )
     return applied
+
+
+async def confirm_finding_verdict(
+    session_factory: async_sessionmaker[AsyncSession],
+    finding_id: str,
+    actor: str,
+    *,
+    accept: bool = True,
+    justification: str = "",
+    triagers: str = "",
+) -> dict[str, Any]:
+    """Authoritative confirmation of a suggested verdict (R25).
+
+    *actor* must be on the ``FORGE_SECURITY_TRIAGERS`` allowlist (empty
+    allowlist = nobody is authorized). ``accept=True`` promotes the
+    existing suggestion to ``status``; ``accept=False`` rejects it (the
+    suggestion clears, the finding stays ``open``). Both bump ``version``
+    and journal the decision with the actor's justification.
+    """
+    allowed = authorized_triagers(triagers)
+    if actor not in allowed:
+        raise PermissionError(f"actor {actor!r} is not an authorized security triager")
+    async with session_factory() as session:
+        async with session.begin():
+            row = (
+                await session.execute(
+                    select(SecurityFinding).where(SecurityFinding.id == finding_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise LookupError(f"finding {finding_id} not found")
+            if row.suggested_verdict is None:
+                raise RuntimeError(f"finding {finding_id} carries no suggested verdict to confirm")
+            note = justification or row.triage_note or ""
+            if accept:
+                new_status = row.suggested_verdict
+                row.status = new_status
+                row.version += 1
+                _journal(
+                    session,
+                    finding_id=finding_id,
+                    action="confirm_verdict",
+                    actor=actor,
+                    justification=note,
+                    before_status="open",
+                    after_status=new_status,
+                    payload={"verdict": new_status},
+                )
+            else:
+                new_status = row.status
+                row.suggested_verdict = None
+                row.suggested_at = None
+                row.suggested_by = None
+                row.version += 1
+                _journal(
+                    session,
+                    finding_id=finding_id,
+                    action="reject_verdict",
+                    actor=actor,
+                    justification=note,
+                    before_status=row.status,
+                    after_status=row.status,
+                    payload={"rejected": True},
+                )
+            return {
+                "id": finding_id,
+                "status": row.status,
+                "suggested_verdict": row.suggested_verdict,
+            }
 
 
 # ----------------------------------------------------------------------
@@ -290,6 +582,8 @@ async def _execute_security_command_inner(
     github_client: Any | None,
     triage_runner: TriageRunner | None,
 ) -> dict[str, Any]:
+    connection_id = resolve_connection_id(metadata, provider, scope)
+
     # 1. Best-effort refresh so triage reasons over current data.
     outcome.refresh_created = await _refresh(
         settings,
@@ -297,13 +591,14 @@ async def _execute_security_command_inner(
         metadata,
         provider=provider,
         scope=scope,
+        connection_id=connection_id,
         gitlab=gitlab,
         github_client=github_client,
         outcome=outcome,
     )
 
-    # 2. Pull the open batch.
-    rows = await open_findings_for_scope(session_factory, scope)
+    # 2. Pull the open batch and pin its versions (optimistic binding).
+    rows = await open_findings_for_scope(session_factory, scope, connection_id=connection_id)
     outcome.considered = len(rows)
 
     if not rows:
@@ -311,6 +606,8 @@ async def _execute_security_command_inner(
         await _post_comment(metadata, gitlab=gitlab, github_client=github_client, body=body)
         outcome.comment_posted = True
         return outcome.as_dict()
+
+    observed = observe_batch(rows)
 
     # 3. Triage (bounded batch, severity-sorted).
     if triage_runner is None:
@@ -322,18 +619,41 @@ async def _execute_security_command_inner(
     result = await triage_runner(rows)
     verdicts = {verdict.id: verdict for verdict in result.findings}
 
-    # 4. Write triage status back.
-    applied = await apply_triage_verdicts(session_factory, scope, result)
+    # 4. Write verdicts back as SUGGESTIONS (status moves only on the
+    # explicit auto-accept opt-in — default OFF, R25).
+    auto_accept = bool(getattr(settings, "FORGE_SECURITY_AUTO_ACCEPT", False))
+    applied = await apply_triage_verdicts(
+        session_factory,
+        scope,
+        result,
+        connection_id=connection_id,
+        observed=observed,
+        auto_accept=auto_accept,
+    )
+    outcome.suggested = len(applied.applied)
+    outcome.confirmed = applied.confirmed
+    outcome.superseded = len(applied.superseded)
+    outcome.out_of_batch = len(applied.out_of_batch)
     outcome.triaged = sum(
         1
-        for fingerprint in applied
+        for fingerprint in applied.applied
         if not (verdicts.get(fingerprint) and verdicts[fingerprint].is_false_positive)
     )
-    outcome.false_positives = len(applied) - outcome.triaged
+    outcome.false_positives = len(applied.applied) - outcome.triaged
 
-    # 4b. Optional remote dismissal (GitHub only, operator opt-in).
+    # 4b. Privileged remote dismissal (GitHub only, operator opt-in):
+    # confirmed false positives only — never a bare suggestion (R25).
     if bool(getattr(settings, "FORGE_SECURITY_REMOTE_DISMISS", False)) and provider == "github":
-        outcome.remote_dismissed = await _remote_dismiss(github_client, owner, repo, rows, verdicts)
+        outcome.remote_dismissed = await _remote_dismiss(
+            github_client,
+            owner,
+            repo,
+            session_factory,
+            scope=scope,
+            connection_id=connection_id,
+            fingerprints=set(applied.applied),
+            verdicts=verdicts,
+        )
 
     # 5. Comment.
     body = format_triage_comment(rows, verdicts, result, scope)
@@ -360,6 +680,7 @@ async def _refresh(
     *,
     provider: str,
     scope: str,
+    connection_id: str,
     gitlab: Any | None,
     github_client: Any | None,
     outcome: TriageOutcome,
@@ -369,7 +690,13 @@ async def _refresh(
     if provider == "github" and github_client is not None:
         owner, repo = scope.split("/", 1)
         try:
-            result = await ingest_github_alerts(github_client, session_factory, owner, repo)
+            result = await ingest_github_alerts(
+                github_client,
+                session_factory,
+                owner,
+                repo,
+                connection_id=connection_id,
+            )
             created += result.created
             outcome.refresh_errors.extend(result.errors)
         except Exception as exc:  # a broken surface must not kill the step
@@ -388,6 +715,7 @@ async def _refresh(
                     int(pipeline.id),
                     ref=pipeline.ref,
                     sha=pipeline.sha,
+                    connection_id=connection_id,
                 )
                 created += result.created
                 outcome.refresh_errors.extend(result.errors)
@@ -405,12 +733,13 @@ async def _latest_finished_pipeline(gitlab: Any, project_id: int) -> Pipeline | 
 def _github_subject(metadata: dict[str, Any]) -> tuple[str, str]:
     full = str(metadata.get("repo_full_name") or "")
     if "/" in full:
-        return full.split("/", 1)
+        owner, repo = full.split("/", 1)
+        return owner, repo
     return "", ""
 
 
 # ----------------------------------------------------------------------
-# Remote dismissal (research §4.2 enum quirks)
+# Remote dismissal — separate privileged action (research §4.2 enum quirks)
 # ----------------------------------------------------------------------
 
 
@@ -418,47 +747,139 @@ async def _remote_dismiss(
     github_client: Any,
     owner: str,
     repo: str,
-    rows: list[SecurityFinding],
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    scope: str,
+    connection_id: str,
+    fingerprints: set[str],
     verdicts: dict[str, SecurityFindingResult],
 ) -> int:
-    """Dismiss the false-positive GitHub alerts with a machine rationale."""
+    """Dismiss CONFIRMED false-positive GitHub alerts, journal-first.
+
+    R25: this is a privileged action, gated by the operator's
+    ``FORGE_SECURITY_REMOTE_DISMISS`` grant (checked by the caller) — and
+    it only ever targets findings whose AUTHORITATIVE status is already
+    ``false_positive``. A model suggestion alone can never close a remote
+    alert. Each dismissal writes an intent journal row (``requested``)
+    BEFORE the provider call and completes it (``succeeded``/``failed``)
+    after; a success also moves the local mirror to ``dismissed``.
+    """
+    if not fingerprints:
+        return 0
+    async with session_factory() as session:
+        candidates = (
+            (
+                await session.execute(
+                    select(SecurityFinding).where(
+                        SecurityFinding.connection_id == connection_id,
+                        SecurityFinding.scope == scope,
+                        SecurityFinding.status == "false_positive",
+                        SecurityFinding.fingerprint.in_(fingerprints),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        targets = [(row.id, row.source, row.fingerprint) for row in candidates]
+
     dismissed = 0
-    for row in rows:
-        verdict = verdicts.get(row.fingerprint)
-        if verdict is None or not verdict.is_false_positive:
-            continue
-        rationale = f"forge triage ({row.fingerprint[:12]}): {verdict.justification}"
+    for finding_id, source, fingerprint in targets:
+        verdict = verdicts.get(fingerprint)
+        rationale = f"forge triage ({fingerprint[:12]}): {verdict.justification if verdict else ''}"
+        # Intent FIRST, strictly before the remote effect (ADR-0005 shape).
+        async with session_factory() as session:
+            async with session.begin():
+                entry = _journal(
+                    session,
+                    finding_id=finding_id,
+                    action="remote_dismiss",
+                    actor="config:FORGE_SECURITY_REMOTE_DISMISS",
+                    justification=verdict.justification if verdict else "",
+                    before_status="false_positive",
+                    payload={"source": source, "alert": fingerprint},
+                    outcome="requested",
+                )
+                await session.flush()  # assign the journal row's id
+                entry_id = entry.id
         try:
-            if row.source == "github_code_scanning":
-                await github_client.dismiss_code_scanning_alert(
-                    owner,
-                    repo,
-                    int(row.fingerprint),
-                    dismissed_reason="false positive",  # space enum (§4.2)
-                    dismissed_comment=rationale,
-                )
-            elif row.source == "github_secret":
-                await github_client.resolve_secret_scanning_alert(
-                    owner,
-                    repo,
-                    int(row.fingerprint),
-                    resolution="false_positive",  # underscore enum (§4.2)
-                    resolution_comment=rationale,
-                )
-            elif row.source == "github_dependabot":
-                await github_client.dismiss_dependabot_alert(
-                    owner,
-                    repo,
-                    int(row.fingerprint),
-                    dismissed_reason="inaccurate",  # closest enum to false positive
-                    dismissed_comment=rationale,
-                )
-            else:
-                continue
-            dismissed += 1
+            await _dismiss_remote_alert(github_client, owner, repo, source, fingerprint, rationale)
         except Exception as exc:
-            logger.warning("Remote dismissal failed for %s: %s", row.fingerprint[:12], exc)
+            logger.warning("Remote dismissal failed for %s: %s", fingerprint[:12], exc)
+            async with session_factory() as session:
+                async with session.begin():
+                    session.add(
+                        SecurityFindingAction(
+                            finding_id=finding_id,
+                            action="remote_dismiss",
+                            actor="config:FORGE_SECURITY_REMOTE_DISMISS",
+                            justification=verdict.justification if verdict else "",
+                            payload={"source": source, "alert": fingerprint, "error": str(exc)},
+                            outcome="failed",
+                        )
+                    )
+            continue
+
+        dismissed += 1
+        async with session_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(SecurityFinding).where(SecurityFinding.id == finding_id)
+                    )
+                ).scalar_one()
+                row.status = "dismissed"
+                row.version += 1
+                session.add(
+                    SecurityFindingAction(
+                        finding_id=finding_id,
+                        action="remote_dismiss",
+                        actor="config:FORGE_SECURITY_REMOTE_DISMISS",
+                        justification=verdict.justification if verdict else "",
+                        before_status="false_positive",
+                        after_status="dismissed",
+                        payload={"source": source, "alert": fingerprint, "intent_id": entry_id},
+                        outcome="succeeded",
+                    )
+                )
     return dismissed
+
+
+async def _dismiss_remote_alert(
+    github_client: Any,
+    owner: str,
+    repo: str,
+    source: str,
+    fingerprint: str,
+    rationale: str,
+) -> None:
+    """The provider PATCH, with the research §4.2 enum quirks per surface."""
+    if source == "github_code_scanning":
+        await github_client.dismiss_code_scanning_alert(
+            owner,
+            repo,
+            int(fingerprint),
+            dismissed_reason="false positive",  # space enum (§4.2)
+            dismissed_comment=rationale,
+        )
+    elif source == "github_secret":
+        await github_client.resolve_secret_scanning_alert(
+            owner,
+            repo,
+            int(fingerprint),
+            resolution="false_positive",  # underscore enum (§4.2)
+            resolution_comment=rationale,
+        )
+    elif source == "github_dependabot":
+        await github_client.dismiss_dependabot_alert(
+            owner,
+            repo,
+            int(fingerprint),
+            dismissed_reason="inaccurate",  # closest enum to false positive
+            dismissed_comment=rationale,
+        )
+    else:
+        raise ValueError(f"source {source} has no remote-dismiss surface")
 
 
 # ----------------------------------------------------------------------
@@ -519,8 +940,9 @@ def format_triage_comment(
     """The grouped triage comment: severity sections, fingerprints, actions.
 
     Grouping is by the STORED severity of every considered finding (so
-    triaged-but-unverdicted rows still show), with the agent's verdict and
-    suggested action attached where one exists.
+    triaged-but-unverdicted rows still show), with the agent's SUGGESTED
+    action attached where one exists — suggestions await an authorized
+    confirmation before any status moves (R25).
     """
     confirmed = [v for v in result.findings if not v.is_false_positive]
     false_pos = [v for v in result.findings if v.is_false_positive]
@@ -528,7 +950,7 @@ def format_triage_comment(
         "## \U0001f6e1\ufe0f Forge Security Triage",
         "",
         f"**Risk level:** {result.risk_level.upper()} — "
-        f"{len(confirmed)} confirmed, {len(false_pos)} likely false positive "
+        f"{len(confirmed)} suggested confirmed, {len(false_pos)} suggested false positive "
         f"(of {len(rows)} open finding(s) on `{scope}`).",
         "",
     ]
@@ -553,8 +975,8 @@ def format_triage_comment(
         )
     lines += [
         "Triaged by forge \u00b7 security-triage v1.0 \u2014 fingerprints are stable "
-        "across scans; verdicts are recorded in forge, never inferred from scan "
-        "silence." + unverdicted_note
+        "across scans; verdicts are recorded as forge SUGGESTIONS (an authorized "
+        "confirm moves the status), never inferred from scan silence." + unverdicted_note
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -573,13 +995,15 @@ def _finding_lines(row: SecurityFinding, verdict: SecurityFindingResult | None) 
         return [
             f"- **{row.title or 'Unnamed finding'}** — `{location}` "
             f"\u00b7 {row.source} \u00b7 fingerprint {fingerprint}",
-            f"  \u2705 **False positive** \u2014 {verdict.justification}",
+            f"  \u2705 **Suggested: false positive** \u2014 {verdict.justification} "
+            "*(awaiting confirmation)*",
         ]
     action = verdict.remediation or verdict.justification or "review required"
     return [
         f"- **{row.title or 'Unnamed finding'}** — `{location}` "
         f"\u00b7 {row.source} \u00b7 fingerprint {fingerprint}",
-        f"  \U0001f534 **Confirmed** ({verdict.severity}) \u2014 action: {action}",
+        f"  \U0001f534 **Suggested: confirmed** ({verdict.severity}) \u2014 action: {action} "
+        "*(awaiting confirmation)*",
     ]
 
 
@@ -593,11 +1017,18 @@ def _empty_comment(scope: str) -> str:
 
 
 __all__ = [
+    "AI_TRIAGE_ACTOR",
     "TRIAGE_BATCH",
+    "AppliedVerdicts",
+    "Observation",
     "TriageRunner",
     "apply_triage_verdicts",
+    "authorized_triagers",
+    "confirm_finding_verdict",
     "execute_security_command",
     "format_triage_comment",
     "normalize_severity",
+    "observe_batch",
     "open_findings_for_scope",
+    "resolve_connection_id",
 ]
