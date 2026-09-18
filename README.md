@@ -40,8 +40,12 @@ issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
 - **Durable by design** ([ADR-0017](docs/adr/0017-durable-step-runtime.md)):
   commands and steps live in Postgres; a worker crash at the six
   failure-injection checkpoints (ingress, claim, gate, publish, draft,
-  evidence) converges — proven by a failure-injection suite (two workers,
-  real Postgres, kill at each checkpoint).
+  evidence) converges — proven by two failure-injection suites: a coroutine
+  profile (two in-process workers, real Postgres, kill at each checkpoint)
+  and an OS-process profile that SIGKILLs real `python -m forge.worker`
+  subprocesses at each checkpoint and requires a fresh process to adopt the
+  durable state (nightly CI; `FORGE_PG_TEST_URL` +
+  `FORGE_OS_FI_REDIS_URL`).
 - **Proposal-only execution lane**
   ([ADR-0016](docs/adr/0016-candidate-bundle-trusted-publisher.md)): coding
   agents run in ephemeral CI with **no write credentials and no forge

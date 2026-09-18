@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly: runs everything, including the manual-only integration-os job
+  # below. Push/PR runs never touch it — real OS-process failure injection
+  # (worker subprocesses, SIGKILL drills) adds ~10 minutes and must not slow
+  # the main gate.
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 # Pushes to the same branch cancel superseding runs.
 concurrency:
@@ -123,3 +130,53 @@ jobs:
 
       - name: Failure-injection exit bar (real Postgres)
         run: uv run pytest tests/test_failure_injection.py -q
+
+  # Real-OS-process failure injection (review R20): tests/
+  # test_failure_injection_os.py drives REAL `python -m forge.worker`
+  # subprocesses to each checkpoint and SIGKILLs them, against the real
+  # Postgres lab (schema from `python -m forge.migrate`, R22). The worker
+  # requires Redis, so this job needs both services. Nightly / manual only:
+  # process spawns plus the worker's real 5s/15s/30s poll cadences put the
+  # suite around 10 minutes — kept OFF the PR gate.
+  integration-os:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Same runner-VM pattern as the integration job above: the service
+      # containers are reached via their mapped localhost ports.
+      FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5432/forge
+      FORGE_OS_FI_REDIS_URL: redis://127.0.0.1:6379/5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies (with the postgres extra)
+        run: uv sync --extra postgres
+
+      - name: OS-process failure injection (SIGKILL drills on real workers)
+        run: uv run pytest tests/test_failure_injection_os.py -q
