@@ -485,8 +485,12 @@ def wait_status(control, run_id: str, *statuses: str, **kwargs):
 
 
 async def all_steps(control) -> list[StepRun]:
+    """The COMMAND-runtime steps. R07 checkpoint rows
+    (step_name="checkpoint:*") live in the same table and are not part of
+    these contracts — they are store entries, not schedulable work."""
     async with control() as session:
-        return list((await session.execute(select(StepRun))).scalars().all())
+        rows = list((await session.execute(select(StepRun))).scalars().all())
+    return [row for row in rows if not row.step_name.startswith("checkpoint:")]
 
 
 async def wait_steps_settled(control, *, at_least: int = 1, timeout: float = 30.0) -> list[StepRun]:
