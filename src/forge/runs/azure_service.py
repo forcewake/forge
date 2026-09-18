@@ -60,6 +60,7 @@ import asyncio
 import difflib
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -131,6 +132,11 @@ from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, is_harness_backend
 from forge.runs.candidate import attempt_base_for
 from forge.repository.changeset import validate_changeset
+from forge.runs.consistency import (
+    assert_ready_invariants,
+    ready_evidence,
+    ready_reason,
+)
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
@@ -148,7 +154,7 @@ from forge.runs.revival import (
     retry_rejection,
     terminalize_failure,
 )
-from forge.runs.verification import PRODUCER_AZURE_BUILD, VerificationResult
+from forge.runs.verification import PRODUCER_AZURE_BUILD
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -171,6 +177,11 @@ _VERIFICATION_NOTE = (
     "Branch-policy Build validation on the PR is the verification surface — "
     "the run waits for the candidate commit's builds before review."
 )
+
+#: ADR-0027: the Azure DevOps situational detail after the shared
+#: "unverified — " ready-reason prefix (forge.runs.consistency) — no CI
+#: build ran for the candidate commit (R02).
+UNVERIFIED_DETAIL = "no CI configured"
 
 #: Backoff the publication-intent scanner applies to an open intent whose
 #: probe says "nothing landed, head intact" — the run's own publish leg owns
@@ -2298,12 +2309,15 @@ class AzureRunService:
         candidate_sha: str,
         base_sha: str,
         verified: bool = True,
+        verification_evidence: Mapping[str, Any] | None = None,
     ) -> None:
         """Reviewing → ready_for_human.
 
         ``verified=False`` (no CI built the candidate) is honest: the run
         still reaches the human, but the reason says ``unverified`` instead
-        of implying builds passed (R02)."""
+        of implying builds passed (R02). The reason wording and the
+        finalization iron checks come from :mod:`forge.runs.consistency`
+        (ADR-0027) — the GitLab leg's one source, not an Azure fork of it."""
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -2388,15 +2402,15 @@ class AzureRunService:
             )
             return
 
-        reason = " · ".join(
-            part
-            for part in (
-                "unverified — no CI configured" if not verified else None,
-                "review raised concerns — merge is a human decision"
-                if verdict == "concerns"
-                else "merge is a human decision",
-            )
-            if part
+        # ADR-0027: one reason source and the iron finalization checks,
+        # shared with the GitLab/GitHub legs (forge.runs.consistency).
+        reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
+        assert_ready_invariants(
+            FlowStatus.READY_FOR_HUMAN.value,
+            {"verification": dict(verification_evidence or {})},
+            candidate_sha,
+            reviewed_sha=str((stored or {}).get("sha") or ""),
+            reason=reason,
         )
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -2875,15 +2889,16 @@ class AzureRunService:
                 return  # keep waiting — builds may still queue
             # No CI build ran for this candidate — proceed to review as
             # honestly unverified (R02: never presented as verified).
+            verification_fragment = ready_evidence(
+                False,
+                candidate_sha,
+                PRODUCER_AZURE_BUILD,
+                summary="no CI build ran for the candidate commit",
+                status="not_configured",
+            )
             await self._merge_run_evidence(
                 run_id,
-                {
-                    "verification": VerificationResult.not_configured(
-                        candidate_sha,
-                        PRODUCER_AZURE_BUILD,
-                        summary="no CI build ran for the candidate commit",
-                    ).as_evidence()
-                },
+                {"verification": verification_fragment},
             )
             logger.info("No CI builds configured for %s — review as unverified", run_id[:8])
             await self._transition(
@@ -2897,6 +2912,7 @@ class AzureRunService:
                 candidate_sha=candidate_sha,
                 base_sha=run.base_sha or "",
                 verified=False,
+                verification_evidence=verification_fragment,
             )
             return
 
@@ -2921,19 +2937,19 @@ class AzureRunService:
             )
             return
 
+        # ADR-0027: the unified R02 evidence shape via forge.runs.consistency.
+        verification_fragment = ready_evidence(
+            True,
+            candidate_sha,
+            PRODUCER_AZURE_BUILD,
+            summary="all candidate builds succeeded",
+            surface=(
+                {"name": _build_name(b), "result": str(b.get("result") or "")} for b in builds
+            ),
+        )
         await self._merge_run_evidence(
             run_id,
-            {
-                "verification": VerificationResult.passed(
-                    candidate_sha,
-                    PRODUCER_AZURE_BUILD,
-                    summary="all candidate builds succeeded",
-                    surface=tuple(
-                        {"name": _build_name(b), "result": str(b.get("result") or "")}
-                        for b in builds
-                    ),
-                ).as_evidence()
-            },
+            {"verification": verification_fragment},
         )
         await self._transition(
             run_id, FlowStatus.EVALUATING_CI, reason="candidate builds succeeded"
@@ -2946,6 +2962,7 @@ class AzureRunService:
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
             verified=True,
+            verification_evidence=verification_fragment,
         )
 
     async def _candidate_builds(self, candidate_sha: str, *, since: datetime | None) -> list[dict]:

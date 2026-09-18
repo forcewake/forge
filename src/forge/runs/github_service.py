@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -112,6 +113,12 @@ from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
 from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
+from forge.runs.consistency import (
+    assert_ready_invariants,
+    ready_evidence,
+    ready_reason,
+    verified_verdict,
+)
 from forge.runs.harness_selection import (
     SHIPPED_DRIVERS,
     HarnessSelection,
@@ -131,6 +138,7 @@ from forge.runs.revival import (
     retry_rejection,
     terminalize_failure,
 )
+from forge.runs.verification import PRODUCER_GITHUB_CHECKS
 from forge.runs.service import (
     RUN_SPEC_SCHEMA_VERSION,
     _CANCEL_RE,
@@ -148,6 +156,11 @@ logger = logging.getLogger(__name__)
 _VERIFICATION_NOTE = (
     "Actions checks on the head are the verification surface — no required checks are enforced yet."
 )
+
+#: ADR-0027: the GitHub situational detail after the shared "unverified — "
+#: ready-reason prefix (forge.runs.consistency) — no CI checks exist on the
+#: repo (R02).
+UNVERIFIED_DETAIL = "no CI configured"
 
 #: Backoff the publication-intent scanner applies to an open intent whose
 #: probe says "nothing landed, head intact" — the run's own publish leg owns
@@ -2899,9 +2912,16 @@ class GitHubRunService:
                 return  # keep waiting — checks may still register
             # No independent CI configured on this repo — proceed to review
             # as honestly unverified (R02: never presented as verified).
+            verification_fragment = ready_evidence(
+                False,
+                candidate_sha,
+                PRODUCER_GITHUB_CHECKS,
+                summary="no CI checks configured for the candidate commit",
+                status="not_configured",
+            )
             await self._merge_run_evidence(
                 run_id,
-                {"verification": {"status": "not_configured", "candidate_sha": candidate_sha}},
+                {"verification": verification_fragment},
             )
             logger.info("No CI checks configured for %s — review as unverified", run_id[:8])
             async with self._session_factory() as session:
@@ -2920,6 +2940,7 @@ class GitHubRunService:
                 candidate_sha=candidate_sha,
                 base_sha=run.base_sha or "",
                 verified=False,
+                verification_evidence=verification_fragment,
             )
             return
 
@@ -2949,17 +2970,21 @@ class GitHubRunService:
             )
             return
 
+        # ADR-0027: the unified R02 evidence shape (one key set on every
+        # provider — ``tested_oid``/``surface`` via forge.runs.consistency;
+        # the hand-rolled ``candidate_sha``/``checks`` variant is gone).
+        verification_fragment = ready_evidence(
+            True,
+            candidate_sha,
+            PRODUCER_GITHUB_CHECKS,
+            summary="all PR checks succeeded",
+            surface=(
+                {"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks
+            ),
+        )
         await self._merge_run_evidence(
             run_id,
-            {
-                "verification": {
-                    "status": "passed",
-                    "candidate_sha": candidate_sha,
-                    "checks": [
-                        {"name": c.get("name"), "conclusion": c.get("conclusion")} for c in checks
-                    ],
-                }
-            },
+            {"verification": verification_fragment},
         )
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -2977,6 +3002,7 @@ class GitHubRunService:
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
             verified=True,
+            verification_evidence=verification_fragment,
         )
 
     async def resume_verification(self, run_id: str) -> None:
@@ -3009,12 +3035,10 @@ class GitHubRunService:
                 run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
             )
             return
-        # R02: the recorded verdict counts only when bound to THIS candidate.
-        verified = (
-            str(verification.get("status") or "") == "passed"
-            and str(verification.get("candidate_sha") or verification.get("tested_oid") or "")
-            == candidate_sha
-        )
+        # R02: the recorded verdict counts only when bound to THIS candidate
+        # (the shared reading, ADR-0027 — both evidence key spellings
+        # tolerated for pre-consolidation rows).
+        verified = verified_verdict(verification, candidate_sha)
         await self._review_and_ready(
             run_id,
             project_id=project_id,
@@ -3023,6 +3047,7 @@ class GitHubRunService:
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
             verified=verified,
+            verification_evidence=verification,
         )
 
     async def _review_and_ready(
@@ -3035,12 +3060,16 @@ class GitHubRunService:
         candidate_sha: str,
         base_sha: str,
         verified: bool = True,
+        verification_evidence: Mapping[str, Any] | None = None,
     ) -> None:
         """Reviewing → ready_for_human.
 
         `verified=False` (no independent CI configured) is honest: the run
         still reaches the human, but the reason and evidence say
-        `unverified` instead of implying checks passed (R02)."""
+        `unverified` instead of implying checks passed (R02). The reason
+        wording and the finalization iron checks come from
+        :mod:`forge.runs.consistency` (ADR-0027) — the GitLab leg's one
+        source, not a GitHub fork of it."""
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -3126,15 +3155,15 @@ class GitHubRunService:
             return
 
         verified = bool(verified)
-        reason = " · ".join(
-            part
-            for part in (
-                "unverified — no CI configured" if not verified else None,
-                "review raised concerns — merge is a human decision"
-                if verdict == "concerns"
-                else "merge is a human decision",
-            )
-            if part
+        # ADR-0027: one reason source and the iron finalization checks,
+        # shared with the GitLab/Azure legs (forge.runs.consistency).
+        reason = ready_reason(verified, verdict, UNVERIFIED_DETAIL)
+        assert_ready_invariants(
+            FlowStatus.READY_FOR_HUMAN.value,
+            {"verification": dict(verification_evidence or {})},
+            candidate_sha,
+            reviewed_sha=str((stored or {}).get("sha") or ""),
+            reason=reason,
         )
         async with self._session_factory() as session:
             controller = Controller(session)

@@ -43,6 +43,7 @@ STATUS_UNVERIFIED = "unverified"
 #: The reporting system behind a verdict — part of the evidence so an
 #: operator can tell WHO claimed a check passed.
 PRODUCER_GITLAB_PIPELINE = "gitlab-pipeline"
+PRODUCER_GITHUB_CHECKS = "github-checks"
 PRODUCER_AZURE_BUILD = "azure-build"
 
 
