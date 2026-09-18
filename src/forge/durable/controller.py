@@ -122,12 +122,15 @@ for _status in ALLOWED_TRANSITIONS:
         ALLOWED_TRANSITIONS[_status] = ALLOWED_TRANSITIONS[_status] | _FROM_ANY_TERMINAL
 
 
-#: The revival edge (Tier-1 auto-revive / Tier-2 operator ``/retry``): the
-#: only walk out of a terminal status, and only to ``proposing``. Deliberately
-#: NOT part of ``ALLOWED_TRANSITIONS`` — ``transition`` must never leave a
-#: terminal state on its own; :meth:`Controller.revive_transition` is the
-#: explicit, journaled exception, and ``cancelled``/``ready_for_human`` are
-#: excluded from it on purpose (a revoked publication grant stays revoked).
+#: The terminal-exit edges: the revival edge (Tier-1 auto-revive / Tier-2
+#: operator ``/retry`` → ``proposing``) and the A13 plan-restart edge
+#: (a PRE-GATE ``blocked(config_…)`` run → ``preflight``, fenced to runs
+#: that never froze a spec). Deliberately NOT part of ``ALLOWED_TRANSITIONS``
+#: — ``transition`` must never leave a terminal state on its own;
+#: :meth:`Controller.revive_transition` and
+#: :meth:`Controller.restart_plan_transition` are the explicit, journaled
+#: exceptions, and ``cancelled``/``ready_for_human`` are excluded from them
+#: on purpose (a revoked publication grant stays revoked).
 _REVIVAL_SOURCES: frozenset[FlowStatus] = frozenset({FlowStatus.BLOCKED, FlowStatus.FAILED})
 
 
@@ -464,6 +467,56 @@ class Controller:
                     "flow_run_id": run_id,
                     "from": current.value,
                     "to": FlowStatus.PROPOSING.value,
+                    "reason": reason,
+                    "revival": authorized_by,
+                },
+            )
+        )
+        await self.session.flush()
+        return run
+
+    async def restart_plan_transition(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        authorized_by: str,
+    ) -> FlowRun:
+        """Walk a PRE-GATE ``blocked`` run back to ``preflight`` (A13).
+
+        The plan-restart edge — beside :meth:`revive_transition`, one of
+        only two walks out of a terminal status, and this one is fenced:
+        the run must never have frozen a RunSpec (``spec_digest`` empty —
+        the gate was never opened, nothing was approved). It exists for the
+        A13 config gate: a run parked ``blocked(config_…)`` before its
+        first paid call re-enters planning once the config read recovers,
+        exactly as a crashed ``/implement`` would. A post-freeze run can
+        only revive forward to ``proposing`` (:meth:`revive_transition`) —
+        an approved input is never re-planned past its gate. Journaled like
+        the revival edge; raises :class:`InvalidTransition` otherwise.
+        """
+        run = await self.session.get(FlowRun, run_id)
+        if run is None:
+            raise RunNotFound(f"flow run {run_id!r} not found")
+        current = FlowStatus(run.status)
+        if current is not FlowStatus.BLOCKED:
+            raise InvalidTransition(f"plan-restart edge requires 'blocked', not {current.value!r}")
+        if run.spec_digest:
+            raise InvalidTransition(
+                f"run {run_id!r} has a frozen spec — plan restart refused (revive instead)"
+            )
+
+        run.status = FlowStatus.PREFLIGHT.value
+        run.status_reason = (reason or "")[:200]
+        run.updated_at = datetime.now(timezone.utc)
+        self.session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type=TRANSITION_EVENT_TYPE,
+                payload={
+                    "flow_run_id": run_id,
+                    "from": current.value,
+                    "to": FlowStatus.PREFLIGHT.value,
                     "reason": reason,
                     "revival": authorized_by,
                 },

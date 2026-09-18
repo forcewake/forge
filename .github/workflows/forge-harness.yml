@@ -16,10 +16,13 @@
 # publishes (create_commit_on_branch + Draft PR).
 #
 # Dispatched by forge via workflow_dispatch with inputs:
-#   run_id, attempt_base_oid, driver, model, issue_number, plan_note_id
-#   (see forge.execution.github_actions; the plan/issue TEXT is fetched by
-#   the lane from the issue + the plan comment addressed by plan_note_id —
-#   no input size limits; empty plan_note_id = legacy scan, unenforced)
+#   run_id, attempt_base_oid, driver, model, issue_number, plan_note_id,
+#   envelope_digest, spec_digest
+#   (see forge.execution.github_actions; the approved plan/task bytes are
+#   fetched by the lane from the plan comment addressed by plan_note_id and
+#   re-verified against envelope_digest + spec_digest — A03: fail-closed on
+#   any post-approval byte change; no input size limits; empty
+#   envelope_digest = legacy replay, unenforced)
 #
 # The driver step is rendered by forge's HarnessDriver.build_script()
 # (Stage D) — the template only provisions the lane.
@@ -52,6 +55,18 @@ on:
         type: string
       plan_note_id:
         description: "issue comment id of the approved forge plan (empty = legacy scan)"
+        required: false
+        default: ""
+        type: string
+      envelope_digest:
+        description: >-
+          sha256 of the approved brief envelope (A03; the lane re-verifies the
+          comment's approved bytes against it, fail-closed; empty = legacy replay)
+        required: false
+        default: ""
+        type: string
+      spec_digest:
+        description: "digest of the frozen executable RunSpec the envelope binds (A03)"
         required: false
         default: ""
         type: string
@@ -120,9 +135,11 @@ jobs:
       # Set explicitly in repo Actions secrets.
       - name: Render the implementation brief
         env:
-          # Read-only runner token: fetches the issue body + the forge plan
-          # comment (the APPROVED plan) and renders .forge/brief.md via the
-          # shared prompt builder. Nothing is written to the repository.
+          # Read-only runner token: fetches the forge plan comment (the
+          # APPROVED plan + task bytes) and renders .forge/brief.md via the
+          # shared prompt builder. The live issue body is NOT read for the
+          # task text on the enforced path (A03). Nothing is written to
+          # the repository.
           GITHUB_TOKEN: ${{ github.token }}
           FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
           # R05: bind the brief to the EXACT approved plan comment — the
@@ -131,6 +148,14 @@ jobs:
           # id) fail-closed. Empty on a legacy replay: the lane then falls
           # back to the heuristic scan, loudly unenforced.
           FORGE_PLAN_NOTE_ID: ${{ inputs.plan_note_id }}
+          # A03: the approved BriefEnvelope — the lane extracts the approved
+          # task/plan sections from that comment, re-computes this digest
+          # over exactly those bytes and fails closed on mismatch
+          # ("approved brief bytes changed after approval (re-approval
+          # required)"). Both empty on a legacy replay: the lane then reads
+          # the task text LIVE, loudly unenforced.
+          FORGE_ENVELOPE_DIGEST: ${{ inputs.envelope_digest }}
+          FORGE_SPEC_DIGEST: ${{ inputs.spec_digest }}
           # The run id the plan comment must mention (tamper guard: another
           # run's plan can never ride this lane's brief).
           FORGE_RUN_ID: ${{ inputs.run_id }}

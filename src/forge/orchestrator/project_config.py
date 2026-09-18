@@ -1,12 +1,51 @@
+"""Typed, honest reads of a project's ``.forge.yml`` (review finding A13).
+
+The legacy ``load_project_config`` conflated four different facts — "the
+config does not exist", "the config is valid", "the read failed", and "the
+config is malformed" — because it caught ANY exception and fell back to
+``ProjectConfig()``. A transient 401/403/5xx or a malformed RESTRICTED
+config therefore silently produced an UNRESTRICTED run: the empty
+``implement_paths`` of the default profile looked exactly like "the
+project scoped nothing", and the run's path scope WIDENED on a read
+failure.
+
+This module ends that with the same shape the R14 blob-read contract
+(:mod:`forge.gitlab.blob_reads`) gave base-content reads:
+
+- :class:`ConfigReadResult` — the outcome of ONE config read, with
+  ``status ∈ {confirmed_absent, valid, unreadable, invalid}``. Only a
+  provider-confirmed 404 (or a content-empty file) is
+  ``confirmed_absent`` — the ONE status that may earn the documented
+  default profile. Transport/permission failures are ``unreadable``; a
+  payload that parses but is not a usable mapping is ``invalid``.
+  ``valid`` carries the parsed :class:`ProjectConfig` PLUS the read
+  provenance (ref + sha256 of the config bytes) that the executable
+  RunSpec freezes (A13 §4).
+- :func:`read_project_config` — the typed reader the run start paths
+  MUST use. Never raises: every failure is a status.
+- :func:`load_project_config` — the LEGACY tolerant wrapper for the
+  reactive review lanes (orchestrator / flow runner). RUN START PATHS
+  MUST NOT USE IT — a config failure may never degrade a run's scope.
+
+Policy (A13): permissions may narrow, never widen. ``unreadable`` /
+``invalid`` block the run (``config_unreadable`` / ``config_invalid``)
+with zero paid calls; :mod:`forge.runs.revival` retries the read and the
+run re-enters planning once the config is readable again. Post-freeze
+legs never re-read the config at all — they scope from the spec's frozen
+``allowed_paths``.
+"""
+
 from __future__ import annotations
 
-import base64
 import logging
 import time
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+from forge.gitlab.blob_reads import BlobReadResult, decode_blob_content
 
 if TYPE_CHECKING:
     from forge.gitlab.client import GitLabClient
@@ -17,7 +56,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 300  # 5 minutes
-_cache: dict[int, tuple[ProjectConfig, float]] = {}
+# config -> (config or None for confirmed-absent, content sha256, read ref, ts)
+_cache: dict[int, tuple[ProjectConfig | None, str, str, float]] = {}
+
+#: The config path every provider reads (the config authority).
+CONFIG_FILE = ".forge.yml"
+
+#: Blocked-run reasons a failed config read parks a run with (A13): the
+#: machine-readable prefixes every consumer blocks with until the config
+#: read recovers.
+CONFIG_UNREADABLE = "config_unreadable"
+CONFIG_INVALID = "config_invalid"
+
+#: The spec provenance statuses (the honest subset frozen into the
+#: executable RunSpec — a failed read freezes NOTHING: the run is blocked).
+ConfigProvenanceStatus = Literal["valid", "confirmed_absent"]
+
+ConfigReadStatus = Literal["confirmed_absent", "valid", "unreadable", "invalid"]
+
+#: The ONLY statuses a config read may produce (validated in ``__post_init__``).
+_STATUSES = ("confirmed_absent", "valid", "unreadable", "invalid")
 
 
 class ProjectConfig(BaseModel):
@@ -53,8 +111,225 @@ class ProjectConfig(BaseModel):
     )
 
 
-def _default_config() -> ProjectConfig:
-    return ProjectConfig()
+@dataclass(frozen=True)
+class ConfigReadResult:
+    """The outcome of ONE authoritative read of ``.forge.yml`` (A13).
+
+    Honesty rules, enforced by construction:
+
+    - ``config``/``content_sha256`` are set ONLY when ``status == "valid"`` —
+      ``content_sha256`` is the plain lowercase hex sha256 of the config
+      file's utf-8 bytes (the provenance the executable RunSpec freezes).
+    - ``detail`` is a human-readable fragment for blocked-run evidence —
+      empty for ``confirmed_absent``/``valid`` unless the absence carried
+      one.
+    - :attr:`blocked_reason` is the parked-run reason for a failed read
+      (``None`` when the run may proceed).
+    """
+
+    status: ConfigReadStatus
+    ref: str = ""
+    config: ProjectConfig | None = None
+    content_sha256: str = ""
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in _STATUSES:
+            raise ValueError(f"unknown config read status: {self.status!r}")
+        if self.status == "valid":
+            if not isinstance(self.config, ProjectConfig):
+                raise ValueError("a valid config read must carry a ProjectConfig")
+            if len(self.content_sha256) != 64 or any(
+                c not in "0123456789abcdef" for c in self.content_sha256
+            ):
+                raise ValueError("a valid config read must carry a sha256 digest")
+        elif self.config is not None or self.content_sha256:
+            raise ValueError(f"status {self.status!r} must not carry config content")
+
+    # -- constructors ------------------------------------------------------
+
+    @classmethod
+    def confirmed_absent(cls, ref: str = "", detail: str = "") -> ConfigReadResult:
+        """Provider-confirmed absence — the ONLY status that proves the
+        project carries no config and may therefore run the documented
+        default profile."""
+        return cls(status="confirmed_absent", ref=ref, detail=detail)
+
+    @classmethod
+    def valid(
+        cls, config: ProjectConfig, *, ref: str = "", content_sha256: str
+    ) -> ConfigReadResult:
+        """A successfully parsed config, with its content provenance."""
+        return cls(
+            status="valid",
+            ref=ref,
+            config=config,
+            content_sha256=content_sha256,
+        )
+
+    @classmethod
+    def unreadable(cls, ref: str = "", detail: str = "") -> ConfigReadResult:
+        """The read failed (401/403/429/5xx/transport/undecodable) — whether
+        a config exists, and what it restricts, is UNKNOWN. Never degrades
+        to the default profile."""
+        return cls(status="unreadable", ref=ref, detail=detail)
+
+    @classmethod
+    def invalid(cls, ref: str = "", detail: str = "") -> ConfigReadResult:
+        """The config exists but is unusable (bad YAML, not a mapping,
+        schema-violating fields) — its restrictions are UNKNOWN."""
+        return cls(status="invalid", ref=ref, detail=detail)
+
+    # -- views -------------------------------------------------------------
+
+    @property
+    def needs_block(self) -> bool:
+        """Whether a run start must park on this read (A13 policy)."""
+        return self.status in ("unreadable", "invalid")
+
+    @property
+    def blocked_reason(self) -> str | None:
+        """The ``blocked(...)`` reason for a failed read; ``None`` otherwise."""
+        if self.status == "unreadable":
+            return f"{CONFIG_UNREADABLE}: {self.detail or 'config read failed'}"
+        if self.status == "invalid":
+            return f"{CONFIG_INVALID}: {self.detail or 'config is unusable'}"
+        return None
+
+    @property
+    def provenance_status(self) -> ConfigProvenanceStatus | Literal[""]:
+        """The provenance status to freeze into the executable spec (A13 §4).
+
+        Empty ONLY for a failed read — which never reaches the freeze: the
+        run is parked instead. The empty case exists so the field is
+        total over the result type.
+        """
+        if self.status in ("valid", "confirmed_absent"):
+            return self.status  # type: ignore[return-value]
+        return ""
+
+
+def _parse_project_config(content: str) -> ProjectConfig:
+    """Parse ``.forge.yml`` text into a :class:`ProjectConfig`.
+
+    Raises :class:`ValueError` (bad YAML, not a mapping) or
+    :class:`pydantic.ValidationError` (schema-violating fields) — the
+    caller turns both into ``invalid``, never into defaults.
+    """
+    data = yaml.safe_load(content)
+    if not isinstance(data, dict):
+        raise ValueError("expected a top-level mapping")
+    # Support both top-level and nested under "forge" key
+    forge_data = data.get("forge", data)
+    # Parse per-agent MCP server overrides
+    mcp_raw = forge_data.get("mcp_servers")
+    mcp_servers = None
+    if isinstance(mcp_raw, dict):
+        mcp_servers = {}
+        for agent_name, agent_cfg in mcp_raw.items():
+            if isinstance(agent_cfg, dict):
+                mcp_servers[agent_name] = agent_cfg.get("mcp_servers", [])
+            elif isinstance(agent_cfg, list):
+                mcp_servers[agent_name] = agent_cfg
+
+    # v0.7 monorepo path scoping: `implement.paths` — the glob
+    # allowlist every /implement run of this project is frozen with.
+    implement = forge_data.get("implement")
+    implement_paths: list[str] = []
+    if isinstance(implement, dict):
+        raw_paths = implement.get("paths")
+        if isinstance(raw_paths, list):
+            implement_paths = [str(p) for p in raw_paths if str(p).strip()]
+
+    return ProjectConfig(
+        enabled_agents=forge_data.get("enabled_agents"),
+        disabled_agents=forge_data.get("disabled_agents", []),
+        review_rules=forge_data.get("review_rules", []),
+        skip_paths=forge_data.get("skip_paths", []),
+        implement_paths=implement_paths,
+        mcp_servers=mcp_servers,
+    )
+
+
+async def _read_config_blob(
+    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
+    project_id: int,
+    ref: str,
+) -> BlobReadResult:
+    """One authoritative read of :data:`CONFIG_FILE` as a
+    :class:`~forge.gitlab.blob_reads.BlobReadResult` (reusing the R14
+    primitives — the config is fetched over the same provider surface).
+
+    Prefers the client's own typed ``read_blob``; a client that only
+    exposes ``get_file`` is read through it. Both paths classify
+    conservatively: any exception at all is ``unavailable`` — only a
+    provider-confirmed 404 (via ``read_blob``) may vouch for absence.
+    """
+    if hasattr(type(client), "read_blob"):
+        try:
+            return await client.read_blob(project_id, CONFIG_FILE, ref)
+        except Exception as exc:  # noqa: BLE001 — typed conservatism IS the contract
+            return BlobReadResult.unavailable(
+                f"{CONFIG_FILE!r} at {ref!r}: config read failed: {exc}"
+            )
+    try:
+        repo_file = await client.get_file(project_id, CONFIG_FILE, ref)
+    except Exception as exc:  # noqa: BLE001 — typed conservatism IS the contract
+        return BlobReadResult.unavailable(f"{CONFIG_FILE!r} at {ref!r}: config read failed: {exc}")
+    return decode_blob_content(repo_file.content, repo_file.encoding, path=CONFIG_FILE, ref=ref)
+
+
+async def read_project_config(
+    client: GitLabClient | GitHubRepositoryReader | AzureRepositoryReader,
+    project_id: int,
+    ref: str = "HEAD",
+) -> ConfigReadResult:
+    """Load ``.forge.yml`` from a project's repo as a TYPED result (A13).
+
+    The client duck-types the shared ``read_blob`` surface, so GitLab,
+    GitHub and Azure DevOps (AZ-2 wiring of the AzureRepositoryReader,
+    ADR-0024) all read project config unchanged. Valid configs and
+    provider-confirmed absences are cached per project with a 5-minute
+    TTL; ``unreadable``/``invalid`` results are NEVER cached — the
+    reconciler's retry pass must see a fresh read.
+
+    Never raises: every failure mode is one of the four statuses, so a
+    caller cannot accidentally swallow a read failure into defaults.
+    """
+    now = time.monotonic()
+    cached = _cache.get(project_id)
+    if cached is not None:
+        config, sha256, cached_ref, ts = cached
+        if now - ts < _CACHE_TTL:
+            if config is None:
+                return ConfigReadResult.confirmed_absent(ref=cached_ref)
+            return ConfigReadResult.valid(config, ref=cached_ref, content_sha256=sha256)
+
+    blob = await _read_config_blob(client, project_id, ref)
+    if blob.confirmed_absent:
+        _cache[project_id] = (None, "", ref, now)
+        return ConfigReadResult.confirmed_absent(ref=ref)
+    if not blob.usable:
+        # forbidden / unavailable / incomplete — the R14 taxonomy: absence
+        # NOT proven, so the default profile is NOT earned.
+        return ConfigReadResult.unreadable(ref=ref, detail=blob.detail or blob.status)
+    assert isinstance(blob.content, str)  # decode_blob_content only yields text
+    if not blob.content.strip():
+        # A content-empty file asserts nothing — the honest default
+        # profile (identical semantics to absence, no phantom restrictions).
+        _cache[project_id] = (None, "", ref, now)
+        return ConfigReadResult.confirmed_absent(ref=ref, detail="config file is empty")
+    try:
+        config = _parse_project_config(blob.content)
+    except (yaml.YAMLError, ValidationError, ValueError) as exc:
+        # The file EXISTS and restricts something — its restrictions are
+        # unknown, so the run must not silently go unscoped.
+        logger.warning("Invalid %s in project %d: %s", CONFIG_FILE, project_id, exc)
+        return ConfigReadResult.invalid(ref=ref, detail=str(exc)[:300])
+
+    logger.debug("Loaded %s for project %d", CONFIG_FILE, project_id)
+    _cache[project_id] = (config, blob.content_sha256, ref, now)
+    return ConfigReadResult.valid(config, ref=ref, content_sha256=blob.content_sha256)
 
 
 async def load_project_config(
@@ -62,69 +337,27 @@ async def load_project_config(
     project_id: int,
     ref: str = "HEAD",
 ) -> ProjectConfig:
-    """Load .forge.yml from a project's repo. Return defaults if not found.
+    """LEGACY tolerant view of :func:`read_project_config` — defaults on
+    every failure.
 
-    The client duck-types the shared ``get_file`` read surface, so GitLab,
-    GitHub and Azure DevOps (AZ-2 wiring of the AzureRepositoryReader,
-    ADR-0024) all load project config unchanged. Results are cached per
-    project with a 5-minute TTL.
+    The reactive review lanes (orchestrator, flow runner) still consume
+    this: a failed review-lane read costs review coverage, not run scope,
+    so the failure is logged loudly and degraded — never raised into the
+    webhook path. RUN START PATHS MUST NOT USE THIS: a config-read
+    failure must park a run (``blocked(config_…)``), never widen its
+    scope — use :func:`read_project_config`.
     """
-    now = time.monotonic()
-    cached = _cache.get(project_id)
-    if cached is not None:
-        config, ts = cached
-        if now - ts < _CACHE_TTL:
-            return config
-
-    try:
-        repo_file = await client.get_file(project_id, ".forge.yml", ref)
-        content = repo_file.content
-        if repo_file.encoding == "base64":
-            content = base64.b64decode(content).decode("utf-8")
-
-        data = yaml.safe_load(content)
-        if not isinstance(data, dict):
-            logger.warning("Invalid .forge.yml in project %d: expected mapping", project_id)
-            config = _default_config()
-        else:
-            # Support both top-level and nested under "forge" key
-            forge_data = data.get("forge", data)
-            # Parse per-agent MCP server overrides
-            mcp_raw = forge_data.get("mcp_servers")
-            mcp_servers = None
-            if isinstance(mcp_raw, dict):
-                mcp_servers = {}
-                for agent_name, agent_cfg in mcp_raw.items():
-                    if isinstance(agent_cfg, dict):
-                        mcp_servers[agent_name] = agent_cfg.get("mcp_servers", [])
-                    elif isinstance(agent_cfg, list):
-                        mcp_servers[agent_name] = agent_cfg
-
-            # v0.7 monorepo path scoping: `implement.paths` — the glob
-            # allowlist every /implement run of this project is frozen with.
-            implement = forge_data.get("implement")
-            implement_paths: list[str] = []
-            if isinstance(implement, dict):
-                raw_paths = implement.get("paths")
-                if isinstance(raw_paths, list):
-                    implement_paths = [str(p) for p in raw_paths if str(p).strip()]
-
-            config = ProjectConfig(
-                enabled_agents=forge_data.get("enabled_agents"),
-                disabled_agents=forge_data.get("disabled_agents", []),
-                review_rules=forge_data.get("review_rules", []),
-                skip_paths=forge_data.get("skip_paths", []),
-                implement_paths=implement_paths,
-                mcp_servers=mcp_servers,
-            )
-        logger.debug("Loaded .forge.yml for project %d", project_id)
-    except Exception:
-        # 404 or any other error — use defaults
-        logger.debug("No .forge.yml found for project %d, using defaults", project_id)
-        config = _default_config()
-
-    _cache[project_id] = (config, now)
-    return config
+    result = await read_project_config(client, project_id, ref)
+    if result.config is not None:
+        return result.config
+    if result.needs_block:
+        logger.warning(
+            "Project config read for project %d failed (%s) — degrading to defaults "
+            "on the legacy review lane",
+            project_id,
+            result.blocked_reason,
+        )
+    return ProjectConfig()
 
 
 def clear_cache() -> None:

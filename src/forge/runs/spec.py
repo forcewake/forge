@@ -169,6 +169,16 @@ class ExecutableRunSpec:
     # lane-less run freezes neither key and stays byte-identical.
     harness_workflow: str = ""
     lane_pipeline_id: int | None = None
+    # A13: the frozen provenance of the project config the path scope came
+    # from — ``valid`` (``config_sha256`` pins the exact approved bytes) or
+    # ``confirmed_absent`` (the provider confirmed there is no config). A
+    # failed config read freezes NOTHING: the run parks
+    # ``blocked(config_…)`` instead. Restarts scope from THIS snapshot via
+    # ``allowed_paths`` — they never re-read the live config, so a config
+    # that later becomes unreadable can narrow... never widen.
+    config_status: str = ""
+    config_ref: str = ""
+    config_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.schema_version, int) or (
@@ -216,6 +226,21 @@ class ExecutableRunSpec:
             )
         if not self.harness_driver.strip() or not self.target_branch.strip():
             raise SpecInvalid("spec harness driver and target branch must be non-empty")
+        # A13 config provenance: all-or-nothing, and the content digest only
+        # rides a ``valid`` read — an absent config has no bytes to pin.
+        if self.config_status not in ("", "valid", "confirmed_absent"):
+            raise SpecInvalid(
+                f"spec config_status must be '', 'valid' or 'confirmed_absent', "
+                f"got {self.config_status!r}"
+            )
+        if not self.config_status and (self.config_ref or self.config_sha256):
+            raise SpecInvalid("spec config provenance requires a config_status")
+        if self.config_status == "valid":
+            _digest_or_invalid(self.config_sha256, "config_sha256")
+            if not self.config_ref.strip():
+                raise SpecInvalid("a valid config provenance must carry its read ref")
+        if self.config_status == "confirmed_absent" and self.config_sha256:
+            raise SpecInvalid("a confirmed-absent config has no content digest")
 
     # -- construction ------------------------------------------------------
 
@@ -251,6 +276,9 @@ class ExecutableRunSpec:
         allowed_paths: Sequence[str] = (),
         harness_workflow: str = "",
         lane_pipeline_id: int | None = None,
+        config_status: str = "",
+        config_ref: str = "",
+        config_sha256: str = "",
     ) -> ExecutableRunSpec:
         """Freeze the executable spec from plan-time values (F14, R04).
 
@@ -292,6 +320,9 @@ class ExecutableRunSpec:
             selection_reason=str(selection_reason or "default"),
             harness_workflow=str(harness_workflow or "").strip(),
             lane_pipeline_id=(int(lane_pipeline_id) if lane_pipeline_id is not None else None),
+            config_status=str(config_status or "").strip(),
+            config_ref=str(config_ref or "").strip(),
+            config_sha256=str(config_sha256 or "").strip().lower(),
         )
 
     @classmethod
@@ -346,6 +377,12 @@ class ExecutableRunSpec:
                     if backend_config.get("lane_pipeline_id") is not None
                     else None
                 ),
+                # A13: optional additive section — pre-A13 documents carry
+                # none and parse with empty provenance; a malformed one is a
+                # corrupt spec (fail closed), never a silent drop.
+                config_status=str(_config_provenance(document).get("status") or "").strip(),
+                config_ref=str(_config_provenance(document).get("ref") or "").strip(),
+                config_sha256=str(_config_provenance(document).get("sha256") or "").strip().lower(),
             )
         except (ValueError, TypeError) as exc:
             # Numeric fields with non-numeric garbage etc. — still a corrupt
@@ -362,7 +399,10 @@ class ExecutableRunSpec:
         unscoped, unbudgeted document stays byte-identical to the pre-v0.7
         shape convention. The A02 dispatch-contract keys
         (``harness_workflow`` / ``lane_pipeline_id``) ride ``backend_config``
-        only for lane-dispatching runs, same additive convention.
+        only for lane-dispatching runs, same additive convention. A13 adds
+        the ``project_config`` provenance section whenever a run's start
+        actually read the config (``valid`` or ``confirmed_absent`` — a
+        failed read never reaches the freeze).
         """
         budgets_block: dict = {
             "commit_cycles": self.commit_cycles,
@@ -417,6 +457,15 @@ class ExecutableRunSpec:
         }
         if self.allowed_paths:
             document["allowed_paths"] = list(self.allowed_paths)
+        # A13: the frozen config provenance rides its own additive section
+        # (absent on pre-A13 documents; the content digest only when a
+        # config was actually read and validated).
+        if self.config_status:
+            document["project_config"] = {
+                "status": self.config_status,
+                "ref": self.config_ref,
+                **({"sha256": self.config_sha256} if self.config_sha256 else {}),
+            }
         return document
 
     @property
@@ -429,6 +478,20 @@ def _section(document: dict, key: str) -> dict:
     section = document.get(key)
     if not isinstance(section, dict):
         raise SpecInvalid(f"spec is missing its {key!r} section")
+    return section
+
+
+def _config_provenance(document: dict) -> dict:
+    """The optional A13 ``project_config`` provenance section.
+
+    Absent → ``{}`` (pre-A13 documents parse unchanged); present but not
+    an object → a corrupt spec (``SpecInvalid``), never a silent drop.
+    """
+    section = document.get("project_config")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise SpecInvalid("spec project_config section is malformed")
     return section
 
 

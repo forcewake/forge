@@ -45,7 +45,12 @@ from forge.gateway.azure_webhook import (
     normalize_pull_request_event,
     normalize_workitem_comment,
 )
-from forge.integrations.azure import AzureRepositoryReader, PipelineRun, PrIteration
+from forge.integrations.azure import (
+    AzureDevOpsNotFoundError,
+    AzureRepositoryReader,
+    PipelineRun,
+    PrIteration,
+)
 from forge.models.base import Base
 from forge.reactive.azure_ci_debug import execute_azure_debug_ci_command, is_forge_lane_build
 from forge.reactive.azure_review import (
@@ -138,6 +143,20 @@ class FakeLaneClient:
         # Unknown branches read as the base (the real client 404s, which the
         # service treats as "cut the branch"); the join only pins the base.
         return self.heads.get(branch, BASE_HEAD)
+
+    async def get_item(
+        self,
+        project: str,
+        repo: str,
+        path: str,
+        *,
+        version: str | None = None,
+        version_type: str | None = None,
+    ) -> dict:
+        # The lane fake carries no repository files: every items read is a
+        # provider-confirmed 404 (A13: the typed config read then honestly
+        # reports confirmed_absent and the documented default profile runs).
+        raise AzureDevOpsNotFoundError(404, f"{path} not found at {version or 'HEAD'}")
 
     async def create_branch_from(self, project: str, repo: str, branch: str, base_sha: str) -> dict:
         self.heads[branch] = base_sha

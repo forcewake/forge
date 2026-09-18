@@ -22,7 +22,8 @@ async def run_reconciler(
     interval_seconds: float = 15,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
-    """Reconcile waiting_ci, waiting_harness and crashed evidence notes until shutdown."""
+    """Reconcile waiting_ci, waiting_harness, config-blocked and crashed
+    evidence notes until shutdown."""
     shutdown_event = shutdown_event or asyncio.Event()
     logger.info("Run reconciler started (interval=%ss)", interval_seconds)
     while not shutdown_event.is_set():
@@ -32,6 +33,9 @@ async def run_reconciler(
             # Tier-1 auto-revive: re-dispatch runs whose transient-failure
             # backoff has elapsed (forge.runs.revival).
             service.evaluate_revival,
+            # A13 config-gate recovery: retry the `.forge.yml` read of runs
+            # parked blocked(config_…) and re-enter planning on recovery.
+            service.evaluate_config_recovery,
             # ADR-0017 §5: re-post the evidence note for runs that reached
             # ready_for_human before their worker died mid-announcement.
             service.evaluate_ready_evidence,

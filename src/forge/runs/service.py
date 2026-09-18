@@ -92,7 +92,7 @@ from forge.factory.llm import LLMClient, LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS, LLMPlanner
 from forge.factory.reviewer import LLMReviewer
 from forge.gitlab.client import GitLabAPIError, GitLabClient
-from forge.orchestrator.project_config import ProjectConfig, load_project_config
+from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.policy.evidence import EvidencePolicy
 from forge.repository import (
     ChangesetWriter,
@@ -140,6 +140,7 @@ from forge.runs.revival import (
     WHY_BLOCKED_RE,
     build_retry_context,
     collect_status_snapshot,
+    evaluate_config_blocks,
     evaluate_revivals,
     format_reconcile_reply,
     format_status_reply,
@@ -179,9 +180,11 @@ UNVERIFIED_DETAIL = "no verification profile configured"
 #: ADR-0018 §1 (F14): schema version of the RunSpec document. The GitLab lane
 #: freezes the EXECUTABLE spec (v3, :mod:`forge.runs.spec`) — task text, plan
 #: artifact, model route, verification contract and budgets ride beside the
-#: digests, and every consumption read verifies the document's digest. The
-#: GitHub/Azure lanes still freeze pre-executable v2 documents (their
-#: consumption propagates in a later wave), which is why this stays 2.
+#: digests, and every consumption read verifies the document's digest.
+#: A02: the GitHub/Azure lanes freeze and consume the same v3 document; runs
+#: created before that upgrade carry v2 rows and park
+#: ``blocked(spec_legacy: re-approval required)`` on their next leg
+#: (:class:`forge.runs.spec.SpecLegacy`). This historical constant stays 2.
 RUN_SPEC_SCHEMA_VERSION = 2
 
 #: ADR-0017 §3: pre-CI states a crashed worker leaves a run in after the gate
@@ -563,23 +566,28 @@ class RunService:
                 )
                 await session.commit()
         await self._apply_run_budget(run_id)
-        # v0.7 monorepo path scoping: the project's `.forge.yml`
+        # v0.7 monorepo path scoping, A13: the project's `.forge.yml`
         # ``implement.paths`` globs are resolved BEFORE the plan — they shape
-        # the plan prompt and are frozen into the RunSpec the publisher and
-        # the builtin validation enforce. A config read failure degrades to
-        # unscoped (whole repo), never aborts the run.
-        try:
-            project_config = await load_project_config(
-                self._gitlab, project_id, ref=self._target_branch()
+        # the plan prompt and are frozen into the RunSpec (with the config
+        # read's provenance) that the publisher and the builtin validation
+        # enforce. The read is TYPED (R14 pattern): only a provider-confirmed
+        # absence earns the documented default profile; an unreadable or
+        # invalid config parks the run blocked(config_…) — a read failure
+        # must never WIDEN the run's scope, and nothing was paid or
+        # committed while it waits (the reconciler retries the read).
+        config_read = await read_project_config(self._gitlab, project_id, ref=self._target_branch())
+        if config_read.needs_block:
+            await self._park_config_blocked(
+                run_id,
+                project_id=project_id,
+                issue_iid=issue_iid,
+                config_read=config_read,
+                issue_title=issue_title,
+                issue_description=issue_description,
+                author_username=author_username,
             )
-        except Exception:
-            logger.warning(
-                "Project config read failed for project %d — run is unscoped",
-                project_id,
-                exc_info=True,
-            )
-            project_config = ProjectConfig()
-        path_scope = list(project_config.implement_paths)
+            return
+        path_scope = list(config_read.config.implement_paths) if config_read.config else []
 
         plan_input_digest = step_input_digest(
             {
@@ -657,6 +665,7 @@ class RunService:
             path_scope=path_scope,
             harness_selection=harness_selection,
             budget_limits=budget_limits,
+            config_read=config_read,
         )
 
     async def _finish_plan_publication(
@@ -674,6 +683,7 @@ class RunService:
         path_scope: list[str],
         harness_selection: HarnessSelection,
         budget_limits: BudgetLimits | None,
+        config_read: ConfigReadResult | None = None,
     ) -> None:
         """Publish the plan for approval — every stage idempotent (R07).
 
@@ -760,6 +770,7 @@ class RunService:
                     plan_digest=digest,
                     allowed_paths=path_scope,
                     harness_selection=harness_selection,
+                    config_read=config_read,
                 )
                 spec_digest = canonical_json_digest(spec_document)
                 session.add(
@@ -3144,6 +3155,106 @@ class RunService:
             await self._advance_proposal(project_id, run_id)
 
     # ------------------------------------------------------------------
+    # Reconciler tick: A13 config-block recovery
+    # ------------------------------------------------------------------
+
+    async def _read_start_config(self, project_id: int) -> ConfigReadResult:
+        """The typed `.forge.yml` read a run's start path scopes from (A13)."""
+        return await read_project_config(self._gitlab, project_id, ref=self._target_branch())
+
+    async def _park_config_blocked(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_iid: int | None,
+        config_read: ConfigReadResult,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """Park a run whose `.forge.yml` read failed — BEFORE any paid call.
+
+        A13 policy: permissions may narrow, never widen. An unreadable or
+        invalid config leaves the project's restrictions UNKNOWN, so the
+        run never starts on the (wider) default profile: it parks
+        ``blocked(config_unreadable|config_invalid: detail)`` with zero
+        model calls and zero commits. The start context is stashed in the
+        evidence so the reconciler's recovery pass can re-enter planning
+        with the exact input the run was created with.
+        """
+        reason = config_read.blocked_reason or f"config_unreadable: {config_read.detail}"
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, reason)
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "config_block": {
+                        "reason": reason[:200],
+                        "issue_title": issue_title,
+                        "issue_description": issue_description,
+                        "author_username": author_username,
+                    }
+                },
+            )
+            await session.commit()
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            self._config_blocked_comment(run_id, reason),
+            run_id,
+            "config_blocked",
+        )
+        logger.warning(
+            "Run %s parked %s — no planning call was made; the reconciler retries the read",
+            run_id[:8],
+            reason,
+        )
+
+    @staticmethod
+    def _config_blocked_comment(run_id: str, reason: str) -> str:
+        return (
+            f"Run `{run_id[:8]}` is **blocked**: {reason}\n\n"
+            f"The project's `.forge.yml` could not be read. Forge never widens a run's "
+            "path scope because a config read failed — the run stays parked with no "
+            "model calls and no commits until the config is readable. The reconciler "
+            f"retries the read automatically; `/retry {run_id[:8]}` forces it sooner."
+            "\n\n*This is an automated message.*"
+        )
+
+    async def evaluate_config_recovery(self, now: datetime | None = None) -> None:
+        """One reconciler pass over runs parked ``blocked(config_…)`` (A13).
+
+        Retries the typed config read for each; a run whose config is
+        readable again (or provider-confirmed absent) walks back to
+        ``preflight`` through the fenced plan-restart edge and re-plans —
+        with zero paid calls while it waited.
+        """
+        await evaluate_config_blocks(
+            self._session_factory,
+            provider="gitlab",
+            reread=self._read_start_config,
+            replan=self._resume_config_blocked,
+            log=logger,
+        )
+
+    async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
+        """Re-enter planning for a recovered config-blocked run."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            issue_iid = run.issue_iid
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_iid=issue_iid or 0,
+            issue_title=str(stash.get("issue_title") or ""),
+            issue_description=str(stash.get("issue_description") or ""),
+            author_username=str(stash.get("author_username") or ""),
+        )
+
+    # ------------------------------------------------------------------
     # Publication-intent recovery scanner (R11)
     # ------------------------------------------------------------------
 
@@ -4039,6 +4150,7 @@ class RunService:
         plan_digest: str,
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
+        config_read: ConfigReadResult | None = None,
     ) -> dict:
         """The immutable, EXECUTABLE RunSpec document (R04, ADR-0018 §1).
 
@@ -4053,6 +4165,9 @@ class RunService:
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
         runs. ADR-0023 §3: ``backend_config`` also freezes the harness
         decision (selected driver, fallback tail, budget class, reason).
+        A13: ``config_read`` freezes the path scope's provenance — the
+        config read status, its ref and the content digest — so a restart
+        validates against the approved snapshot instead of the live file.
         """
         selection = harness_selection or self._compile_harness_selection()
         backend = self._backend_name()
@@ -4091,6 +4206,9 @@ class RunService:
             budget_max_tokens=limits.max_tokens if limits is not None else None,
             budget_wallclock_s=limits.wallclock_s if limits is not None else None,
             budget_enforcement=enforcement,
+            config_status=str(config_read.provenance_status) if config_read else "",
+            config_ref=config_read.ref if config_read else "",
+            config_sha256=config_read.content_sha256 if config_read else "",
         )
         return spec.to_document()
 

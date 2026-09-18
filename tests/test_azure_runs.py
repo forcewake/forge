@@ -44,6 +44,7 @@ from forge.integrations.azure import (
     PipelineRun,
 )
 from forge.models.base import Base
+from forge.orchestrator.project_config import clear_cache
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.azure_service import (
     AzureAgents,
@@ -2221,6 +2222,142 @@ class TestAzurePRReviewer:
 # ----------------------------------------------------------------------
 # Unit helpers
 # ----------------------------------------------------------------------
+
+
+class CountingStackPlanner:
+    """Plan-call recorder for the A13 gate: counts, records, answers stub."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.path_scopes: list[list[str] | None] = []
+
+    async def plan(self, issue_title, issue_description, *, flow_run_id=None, path_scope=None):
+        self.calls += 1
+        self.path_scopes.append(path_scope)
+        return "## Implementation plan\n\n- create the thing\n"
+
+
+class TestConfigGateA13:
+    """A13 on the AzDO lane: an unreadable/invalid `.forge.yml` parks the
+    run — scope never widens, nothing is paid while the read is retried."""
+
+    RESTRICTED = "implement:\n  paths:\n    - 'services/**'\n"
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    def seed_config(self, fake: FakeAzureDevOps, content: str) -> None:
+        # The start path reads `.forge.yml` at the target branch; the fake's
+        # get_item keys snapshots by that raw version string ("main").
+        fake.seed_snapshot("main", {".forge.yml": content})
+
+    def arm_403(self, fake: FakeAzureDevOps):
+        """403 every `.forge.yml` read until disarmed — classified by the
+        real reader's typed ``read_blob`` like a real DevOps 403. Returns
+        the original bound method for disarming."""
+        original = fake.get_item
+
+        async def flaky(project, repo, path, *, version=None, version_type=None):
+            if path.lstrip("/") == ".forge.yml":
+                raise AzureDevOpsError(403, "read forbidden")
+            return await original(project, repo, path, version=version, version_type=version_type)
+
+        fake.get_item = flaky
+        return original
+
+    async def test_403_parks_config_unreadable_with_zero_paid_calls(self, db, fake):
+        self.seed_config(fake, self.RESTRICTED)
+        self.arm_403(fake)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("config_unreadable:")
+        assert planner.calls == 0
+        assert fake.calls_of("push_commits") == []
+        assert fake.calls_of("create_branch_from") == []
+        assert run.evidence["config_block"]["issue_title"] == WORK_ITEM_TITLE
+        assert any("config_unreadable" in body for body in comments(fake))
+
+    async def test_malformed_yaml_parks_config_invalid(self, db, fake):
+        self.seed_config(fake, "not: a: valid: [[[")
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("config_invalid:")
+        assert planner.calls == 0
+
+    async def test_valid_config_freezes_scope_and_provenance(self, db, fake):
+        self.seed_config(fake, self.RESTRICTED)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["allowed_paths"] == ["services/**"]
+        provenance = spec.document["project_config"]
+        assert provenance["status"] == "valid"
+        assert provenance["sha256"] == hashlib.sha256(self.RESTRICTED.encode()).hexdigest()
+        assert planner.path_scopes == [["services/**"]]
+
+    async def test_recovery_re_enters_planning_after_the_read_recovers(self, db, fake):
+        self.seed_config(fake, self.RESTRICTED)
+        original = self.arm_403(fake)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+        run_id = await start(service)
+        assert (await get_run(db, run_id)).status == FlowStatus.BLOCKED.value
+        assert planner.calls == 0
+
+        fake.get_item = original  # the config is readable again
+        await service.evaluate_config_recovery()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner.calls == 1
+        assert planner.path_scopes == [["services/**"]]
+
+    async def test_reconciler_scan_finds_the_run_via_the_stashed_repo(self, db, fake):
+        """The module-level pass (what the reconciler loop drives) rebuilds
+        the repo's service from the stashed AzDO subject identity — the
+        durable columns carry no repo string on this lane."""
+        from forge.runs.azure_service import evaluate_azure_config_recovery
+
+        self.seed_config(fake, self.RESTRICTED)
+        original = self.arm_403(fake)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+        run_id = await start(service)
+        assert (await get_run(db, run_id)).status == FlowStatus.BLOCKED.value
+        assert planner.calls == 0
+
+        fake.get_item = original  # readable again
+        await evaluate_azure_config_recovery(
+            make_settings(),
+            ForgeConfig(),
+            db,
+            stack_factory=lambda project, repo: make_stack(fake, planner=planner),
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner.calls == 1
 
 
 class TestUnitHelpers:

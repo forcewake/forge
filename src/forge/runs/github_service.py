@@ -102,6 +102,7 @@ from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.llm import LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS
+from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import (
     GitHubAgents,
@@ -109,7 +110,7 @@ from forge.integrations.github_flow import (
     build_github_agents,
     github_factory_branch,
 )
-from forge.orchestrator.project_config import ProjectConfig, load_project_config
+from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.repository import (
     Change,
     ChangeSet,
@@ -142,11 +143,13 @@ from forge.runs.harness_selection import (
 )
 from forge.runs.publisher import spec_allowed_paths
 from forge.runs.revival import (
+    CONFIG_BLOCK_PREFIXES,
     RECONCILE_RE,
     STATUS_RE,
     WHY_BLOCKED_RE,
     build_retry_context,
     collect_status_snapshot,
+    evaluate_config_blocks,
     evaluate_revivals,
     format_reconcile_reply,
     format_status_reply,
@@ -370,24 +373,58 @@ class GitHubRunService:
             )
             return run_id
 
-        # v0.7 monorepo path scoping: the repo's `.forge.yml`
+        # The plan leg (A13-typed config read → plan → freeze → gate), shared
+        # with the config-block recovery pass.
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_description=issue_description,
+            author_username=author_username,
+        )
+        return run_id
+
+    async def _plan_and_publish(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """The planning leg: typed config read → plan → freeze → human gate.
+
+        Shared by the fresh ``/implement`` path and the A13 config-block
+        recovery pass; ends at ``waiting_approval`` (or parks the run
+        ``blocked(config_…)`` BEFORE any paid call).
+        """
+        # v0.7 monorepo path scoping, A13: the repo's `.forge.yml`
         # ``implement.paths`` globs shape the plan prompt and are frozen into
         # the RunSpec the candidate validation enforces. The repository
-        # reader duck-types the config loader's ``get_file`` surface (its
-        # ``project_id`` argument is accepted and ignored). A read failure
-        # degrades to unscoped, never aborts the run.
-        try:
-            project_config = await load_project_config(
-                self._stack.reader, project_id, ref=self._target_branch()
+        # reader duck-types the typed config reader's surface (its
+        # ``project_id`` argument is accepted and ignored). The read is
+        # TYPED (R14 pattern): only a provider-confirmed absence earns the
+        # documented default profile; an unreadable or invalid config parks
+        # the run blocked(config_…) — a read failure must never WIDEN the
+        # run's scope, and nothing was paid or committed while it waits.
+        config_read = await read_project_config(
+            self._stack.reader, project_id, ref=self._target_branch()
+        )
+        if config_read.needs_block:
+            await self._park_config_blocked(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                config_read=config_read,
+                issue_title=issue_title,
+                issue_description=issue_description,
+                author_username=author_username,
             )
-        except Exception:
-            logger.warning(
-                "Project config read failed for %s — run is unscoped",
-                self._repo_full_name,
-                exc_info=True,
-            )
-            project_config = ProjectConfig()
-        path_scope = list(project_config.implement_paths)
+            return
+        path_scope = list(config_read.config.implement_paths) if config_read.config else []
         # F22/R13 (A02 parity): the run's numeric budget is resolved and
         # opened BEFORE the first paid call — the class comes from the
         # harness decision compiled at plan time (ADR-0023 §2) and the class
@@ -490,6 +527,7 @@ class GitHubRunService:
                 plan_digest=digest,
                 allowed_paths=path_scope,
                 harness_selection=harness_selection,
+                config_read=config_read,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -501,6 +539,22 @@ class GitHubRunService:
                 )
             )
             run.spec_digest = spec_digest
+            # A03: freeze the approved BriefEnvelope beside the spec — the
+            # run's evidence carries the approved brief bytes (task title,
+            # task description, plan text; each sha256-digested) bound by
+            # envelope_digest = sha256 over the canonical envelope JSON
+            # (run_id + task bytes + plan bytes + spec_digest). The lane
+            # re-verifies the plan comment's rendered sections against the
+            # dispatched digest before it renders a brief — an edited
+            # comment/issue can never change the execution input silently.
+            envelope = build_brief_envelope(
+                run_id=run_id,
+                task_title=issue_title,
+                task_description=issue_description,
+                plan_text=plan,
+                spec_digest=spec_digest,
+            )
+            run.evidence = _merge_evidence(run.evidence, {"brief_envelope": envelope})
             await session.commit()
 
         # F22 (ADR-0018 §5): open the run's budget from the spec (idempotent
@@ -516,7 +570,14 @@ class GitHubRunService:
         await self._post_journaled_note(
             project_id,
             issue_number,
-            self._plan_comment(run_id, plan, digest, harness_selection),
+            self._plan_comment(
+                run_id,
+                plan,
+                digest,
+                harness_selection,
+                task_title=issue_title,
+                task_description=issue_description,
+            ),
             run_id,
             "post_plan_note",
         )
@@ -546,7 +607,6 @@ class GitHubRunService:
             issue_number,
             author_username,
         )
-        return run_id
 
     async def handle_go(
         self,
@@ -1157,6 +1217,107 @@ class GitHubRunService:
             logger.warning("GitHub revival of run %s without an issue — skipping", run_id[:8])
             return
         await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
+
+    # ------------------------------------------------------------------
+    # A13 config-block gate + reconciler recovery pass
+    # ------------------------------------------------------------------
+
+    async def _read_start_config(self, project_id: int) -> ConfigReadResult:
+        """The typed `.forge.yml` read a run's start path scopes from (A13)."""
+        return await read_project_config(self._stack.reader, project_id, ref=self._target_branch())
+
+    async def _park_config_blocked(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        config_read: ConfigReadResult,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """Park a run whose `.forge.yml` read failed — BEFORE any paid call.
+
+        A13 policy: permissions may narrow, never widen. An unreadable or
+        invalid config leaves the project's restrictions UNKNOWN, so the
+        run never starts on the (wider) default profile: it parks
+        ``blocked(config_unreadable|config_invalid: detail)`` with zero
+        model calls and zero commits. The start context is stashed in the
+        evidence so the reconciler's recovery pass can re-enter planning
+        with the exact input the run was created with.
+        """
+        reason = config_read.blocked_reason or f"config_unreadable: {config_read.detail}"
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, reason)
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "config_block": {
+                        "reason": reason[:200],
+                        "repo_full_name": self._repo_full_name,
+                        "issue_title": issue_title,
+                        "issue_description": issue_description,
+                        "author_username": author_username,
+                    }
+                },
+            )
+            await session.commit()
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            self._config_blocked_comment(run_id, reason),
+            run_id,
+            "config_blocked",
+        )
+        logger.warning(
+            "GitHub run %s parked %s — no planning call was made; the reconciler retries",
+            run_id[:8],
+            reason,
+        )
+
+    @staticmethod
+    def _config_blocked_comment(run_id: str, reason: str) -> str:
+        return (
+            f"Run `{run_id[:8]}` is **blocked**: {reason}\n\n"
+            f"The repository's `.forge.yml` could not be read. Forge never widens a run's "
+            "path scope because a config read failed — the run stays parked with no "
+            "model calls and no commits until the config is readable. The reconciler "
+            f"retries the read automatically; `/retry {run_id[:8]}` forces it sooner."
+            "\n\n*This is an automated message.*"
+        )
+
+    async def evaluate_config_recovery(self, now: datetime | None = None) -> None:
+        """One recovery pass over this repo's runs parked ``blocked(config_…)`` (A13).
+
+        Retries the typed config read for each; a run whose config is
+        readable again (or provider-confirmed absent) walks back to
+        ``preflight`` through the fenced plan-restart edge and re-plans —
+        with zero paid calls while it waited.
+        """
+        await evaluate_config_blocks(
+            self._session_factory,
+            provider="github",
+            reread=self._read_start_config,
+            replan=self._resume_config_blocked,
+            log=logger,
+        )
+
+    async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
+        """Re-enter planning for a recovered config-blocked run."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            issue_number = run.issue_iid
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number or 0,
+            issue_title=str(stash.get("issue_title") or ""),
+            issue_description=str(stash.get("issue_description") or ""),
+            author_username=str(stash.get("author_username") or ""),
+        )
 
     # ------------------------------------------------------------------
     # Publication-intent recovery scanner (R11)
@@ -2297,6 +2458,15 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             attempt_base = attempt_base_for(run)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
+            # A03: the approved brief envelope rides the dispatch — the lane
+            # re-computes the digest over the plan comment's APPROVED
+            # sections against these values and fails closed on mismatch.
+            # Empty on a legacy replay (run frozen pre-A03): the lane then
+            # runs its loud, unenforced fallback.
+            envelope_document = (run.evidence or {}).get("brief_envelope")
+            envelope = envelope_document if isinstance(envelope_document, dict) else {}
+            envelope_digest = str(envelope.get("envelope_digest") or "")
+            spec_digest = str(run.spec_digest or "")
         if driver is None:
             driver = spec.harness_driver
         branch = github_factory_branch(issue_number, run_id)
@@ -2341,6 +2511,14 @@ class GitHubRunService:
                     # Empty when the journal has no note (legacy replay) —
                     # the lane then falls back to the scan, unenforced.
                     "plan_note_id": str(plan_note_id) if plan_note_id else "",
+                    # A03: the approved brief envelope — the lane extracts
+                    # the approved task/plan sections from that comment,
+                    # re-computes this digest over them (+ run id + the
+                    # frozen spec digest below) and refuses the brief on
+                    # mismatch ("re-approval required"). Both empty on a
+                    # legacy replay → the lane's loud unenforced fallback.
+                    "envelope_digest": envelope_digest,
+                    "spec_digest": spec_digest,
                     # Bounded verification-failure context (check names +
                     # reason) on a repair re-dispatch; cycle 1 dispatches
                     # the same shape as always.
@@ -4081,6 +4259,7 @@ class GitHubRunService:
         plan_digest: str,
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
+        config_read: ConfigReadResult | None = None,
     ) -> dict:
         """The immutable, EXECUTABLE RunSpec document (F14, R04, A02).
 
@@ -4095,7 +4274,9 @@ class GitHubRunService:
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
         runs. Post-approval legs read the stored document through
         :meth:`_load_executable_spec` (digest-verified on every read), never
-        live Settings.
+        live Settings. A13: ``config_read`` freezes the path scope's
+        provenance (status, ref, content digest) so a restart validates
+        against the approved snapshot instead of the live file.
         """
         selection = harness_selection or self._compile_harness_selection()
         workflow = self._harness_workflow()
@@ -4136,6 +4317,9 @@ class GitHubRunService:
             budget_wallclock_s=limits.wallclock_s if limits is not None else None,
             budget_enforcement=enforcement,
             harness_workflow=workflow,
+            config_status=str(config_read.provenance_status) if config_read else "",
+            config_ref=config_read.ref if config_read else "",
+            config_sha256=config_read.content_sha256 if config_read else "",
         )
         return spec.to_document()
 
@@ -4234,7 +4418,14 @@ class GitHubRunService:
             return await spec_allowed_paths(session, run)
 
     def _plan_comment(
-        self, run_id: str, plan: str, digest: str, harness_selection: HarnessSelection
+        self,
+        run_id: str,
+        plan: str,
+        digest: str,
+        harness_selection: HarnessSelection,
+        *,
+        task_title: str = "",
+        task_description: str = "",
     ) -> str:
         # On GitHub the App's bot login is forcewake-forge[bot]; the literal
         # "@forge" mention links to an unrelated org. Bare commands suffice.
@@ -4253,9 +4444,19 @@ class GitHubRunService:
             model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
             commit_cycles=int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
         )
+        # A03: the comment is the human-readable representation of the
+        # approved bytes — the task + plan sections ride between machine
+        # markers (invisible on GitHub) so the lane can extract the EXACT
+        # approved spans and re-verify them against the frozen envelope
+        # digest before rendering the brief.
+        sections = render_approved_sections(
+            task_title=task_title,
+            task_description=task_description,
+            plan_text=plan,
+        )
         return (
             f"## Forge plan — run `{run_id[:8]}`\n\n"
-            f"{plan}\n"
+            f"{sections}\n"
             f"{implementation}\n"
             "---\n\n"
             f"**Plan digest:** `{digest}`\n\n"
@@ -4736,6 +4937,73 @@ async def evaluate_github_revival(
     )
 
 
+async def evaluate_github_config_recovery(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One A13 pass: retry the `.forge.yml` read of config-blocked GitHub runs.
+
+    The twin of the GitLab reconciler's ``evaluate_config_recovery`` slot:
+    every repo holding a run parked ``blocked(config_…)`` gets one
+    :meth:`GitHubRunService.evaluate_config_recovery` tick — a recovered
+    read re-enters planning through the fenced plan-restart edge; a still
+    failing read leaves the run parked, unpaid.
+    """
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+    for repo_full_name in await _repos_with_config_blocked(session_factory):
+        owner, _, repo = repo_full_name.partition("/")
+        if not repo:
+            logger.warning("Config-blocked run with malformed repo %r — skipping", repo_full_name)
+            continue
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service.evaluate_config_recovery()
+        except Exception:
+            # One broken repo must not stall the recovery pass.
+            logger.exception("Config-block recovery failed for %s", repo_full_name)
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def _repos_with_config_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct GitHub repos that hold a run parked ``blocked(config_…)``."""
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "github",
+                        FlowRun.status == FlowStatus.BLOCKED.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    repos: list[str] = []
+    for run in runs:
+        if not str(run.status_reason or "").startswith(CONFIG_BLOCK_PREFIXES):
+            continue
+        stash = (run.evidence or {}).get("config_block") or {}
+        repo = str(stash.get("repo_full_name") or run.github_repo_full_name or "").strip()
+        if repo:
+            repos.append(repo)
+    return list(dict.fromkeys(repos))
+
+
 async def _repos_with_due_publication_intents(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[str]:
@@ -4835,15 +5103,24 @@ async def run_github_publication_intents_reconciler(
             # A failed pass must never kill the reconciler task.
             logger.exception("GitHub publication-intent reconciler pass failed")
         try:
+            # A13 config-gate recovery rides this always-on GitHub loop —
+            # lane-independent, like the R11 recovery above.
+            await evaluate_github_config_recovery(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub config-block recovery pass failed")
+        try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
             break  # Event set — clean shutdown.
         except asyncio.TimeoutError:
-            pass  # Interval elapsed — next tick.
+            pass
     logger.info("GitHub publication-intent reconciler stopped")
 
 
 __all__ = [
     "GitHubRunService",
+    "evaluate_github_config_recovery",
     "evaluate_github_publication_intents",
     "evaluate_github_revival",
     "evaluate_github_waiting_harness",

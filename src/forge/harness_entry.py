@@ -33,7 +33,7 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
 Brief transport (the dispatch-input size question, decided): the lane
 FETCHES its own brief content from the forge API — the approved plan is
 ALREADY posted as the plan comment (E3a/AZ-2 posted it), so
-``--render-brief`` reads the GitHub issue body + that comment with the
+``--render-brief`` reads the approved bytes + that comment with the
 runner's read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`), and
 ``--render-brief-azure`` reads the Azure DevOps work item + its plan
 comment with a repo-owner-provisioned read-only token
@@ -42,9 +42,21 @@ dispatch input ever carries plan text, so no input size limit binds.
 R05 interim: the control plane journals the plan comment's id when it
 posts it and dispatches it as the ``plan_note_id`` input — the lane then
 fetches EXACTLY that comment (:envvar:`FORGE_PLAN_NOTE_ID`, validated
-fail-closed) instead of heuristically scanning the thread. Only when the
-id is absent (legacy replay / other repos) does the old scan run, loudly
-unenforced.
+fail-closed) instead of heuristically scanning the thread.
+A03 (approved bytes, not current bytes): identity alone was not enough —
+the comment body could be edited after ``/go`` and the issue body was read
+LIVE. The control plane now freezes a BriefEnvelope at approval (the task
+title/description + plan text, each sha256-digested, bound by an
+``envelope_digest`` over run_id + the bytes + the spec digest) and
+dispatches it as ``envelope_digest`` + ``spec_digest``. The enforced lane
+extracts the APPROVED sections from the bound comment
+(:func:`forge.harnesses.brief_envelope.extract_approved_sections`),
+re-computes the digest over exactly those bytes and FAILS CLOSED on
+mismatch ("approved brief bytes changed after approval (re-approval
+required)"). The live issue is never read for the task text on the
+enforced path — the brief renders the digest-verified frozen bytes. Only
+when the envelope inputs are absent (legacy replay / other repos) does the
+old live-read posture run, loudly unenforced.
 Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
 works as-is (the workflow owner may ship it however they like).
 
@@ -93,6 +105,11 @@ from forge.harnesses.prompt import (
     BriefContext,
     BriefPolicy,
     render_brief as render_shared_brief,
+)
+from forge.harnesses.brief_envelope import (
+    BriefEnvelopeError,
+    extract_approved_sections,
+    verify_brief_envelope,
 )
 from forge.harnesses.mcp import (
     McpConfigError,
@@ -289,7 +306,10 @@ class PlanBindingError(Exception):
     Fail-closed (R05): when the lane addresses the EXACT plan comment by id,
     anything unexpected about that comment (missing, wrong author, wrong
     run) aborts the brief render with a non-zero exit instead of silently
-    binding some other comment's text.
+    binding some other comment's text. Fail-closed on CONTENT too (A03):
+    when the dispatch carries the approved BriefEnvelope digest, an edited
+    comment body (or a tampered digest) fails the same way — the lane
+    executes the approved bytes, never the comment's current ones.
     """
 
 
@@ -382,29 +402,66 @@ def fetch_plan_comment(repo: str, note_id: int, token: str) -> dict:
 
 
 def fetch_issue_context(
-    repo: str, issue_number: int, token: str, *, plan_note_id: int = 0, run_id: str = ""
+    repo: str,
+    issue_number: int,
+    token: str,
+    *,
+    plan_note_id: int = 0,
+    run_id: str = "",
+    envelope_digest: str = "",
+    spec_digest: str = "",
 ) -> tuple[str, str]:
-    """Fetch (issue body, forge plan comment) via the GitHub REST API.
+    """Fetch (task text, forge plan comment bytes) for the brief render.
 
     Uses only the stdlib: the lane runs forge's code without forge's
     dependencies.
 
-    With *plan_note_id* (the journaled id of the approved plan comment,
-    dispatched as ``plan_note_id``) the plan is EXACTLY that comment —
-    fetched by id and validated fail-closed (:func:`validate_plan_comment`,
-    *run_id* cross-check) — no scanning, no identity heuristic. Only when
-    the id is absent (legacy replay / repos without the input) does the
-    old heuristic run: the latest comment by a forge bot login containing
-    a plan substring — the caller logs that binding is NOT enforced.
+    ENFORCED path (A03 — *plan_note_id* + *envelope_digest* + *spec_digest*
+    all dispatched): the plan is EXACTLY the addressed comment
+    (:func:`fetch_plan_comment`, tamper guards via
+    :func:`validate_plan_comment`), the approved task + plan sections are
+    extracted from its body
+    (:func:`forge.harnesses.brief_envelope.extract_approved_sections`) and
+    re-verified against the dispatched envelope digest
+    (:func:`forge.harnesses.brief_envelope.verify_brief_envelope`) — any
+    mismatch raises :class:`PlanBindingError` ("approved brief bytes changed
+    after approval (re-approval required)"). The returned task text is the
+    frozen title + description from the verified sections; the LIVE issue
+    is never fetched — an issue edit after approval cannot touch the brief.
+
+    LEGACY path (any envelope input absent): the pre-A03 posture — the plan
+    comes from the bound comment (validated, fail-closed) when
+    *plan_note_id* is present, else from the loud unenforced heuristic scan;
+    the task text is the LIVE issue body. The caller logs that the envelope
+    binding is NOT enforced.
     """
+    if plan_note_id and envelope_digest and spec_digest:
+        body = validate_plan_comment(
+            fetch_plan_comment(repo, plan_note_id, token),
+            run_id=run_id,
+            # The tamper-guard identity: the repo's configured forge App
+            # login (the shipped App logins apply when unset).
+            expected_login=os.environ.get("FORGE_GITHUB_BOT_LOGIN", "").strip(),
+        )
+        try:
+            task_title, task_description, plan = extract_approved_sections(body)
+            verify_brief_envelope(
+                envelope_digest,
+                run_id=run_id,
+                task_title=task_title,
+                task_description=task_description,
+                plan_text=plan,
+                spec_digest=spec_digest,
+            )
+        except BriefEnvelopeError as exc:
+            raise PlanBindingError(str(exc)) from exc
+        return f"{task_title}\n{task_description}", plan
     issue = _github_get_json(f"https://api.github.com/repos/{repo}/issues/{issue_number}", token)
     body = str(issue.get("body") or "")
     if plan_note_id:
         return body, validate_plan_comment(
             fetch_plan_comment(repo, plan_note_id, token),
             run_id=run_id,
-            # The tamper-guard identity: the repo's configured forge App
-            # login (the shipped App logins apply when unset).
             expected_login=os.environ.get("FORGE_GITHUB_BOT_LOGIN", "").strip(),
         )
     comments = _github_get_json(
@@ -1016,6 +1073,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--envelope-digest",
+        default=None,
+        help=(
+            "approved BriefEnvelope digest for --render-brief (defaults to "
+            "$FORGE_ENVELOPE_DIGEST; A03 content binding, fail-closed)"
+        ),
+    )
+    parser.add_argument(
+        "--spec-digest",
+        default=None,
+        help=(
+            "frozen RunSpec digest bound by the envelope for --render-brief "
+            "(defaults to $FORGE_SPEC_DIGEST)"
+        ),
+    )
+    parser.add_argument(
         "--render-brief-azure",
         action="store_true",
         help="fetch work item + forge plan from Azure DevOps and render the quality brief",
@@ -1071,6 +1144,21 @@ def main(argv: list[str] | None = None) -> int:
             else os.environ.get("FORGE_PLAN_NOTE_ID") or ""
         ).strip()
         run_id = (os.environ.get("FORGE_RUN_ID") or "").strip()
+        # A03: the approved-brief-bytes binding — the dispatched envelope +
+        # spec digests turn the bound-comment transport into a content
+        # check. Any of them absent (legacy replay) keeps the pre-A03
+        # posture: task bytes read LIVE from the issue, loudly unenforced.
+        envelope_digest = str(
+            args.envelope_digest
+            if args.envelope_digest is not None
+            else os.environ.get("FORGE_ENVELOPE_DIGEST") or ""
+        ).strip()
+        spec_digest_raw = (
+            args.spec_digest
+            if args.spec_digest is not None
+            else os.environ.get("FORGE_SPEC_DIGEST") or ""
+        )
+        spec_digest = str(spec_digest_raw).strip()
         try:
             plan_note_id = int(plan_note_raw) if plan_note_raw else 0
         except ValueError:
@@ -1081,9 +1169,22 @@ def main(argv: list[str] | None = None) -> int:
                 "enforced; falling back to the legacy plan-comment scan",
                 file=sys.stderr,
             )
+        elif not (envelope_digest and spec_digest):
+            print(
+                "harness_entry: FORGE_ENVELOPE_DIGEST/FORGE_SPEC_DIGEST absent (legacy "
+                "replay) — approved-brief-bytes binding NOT enforced; task text is read "
+                "LIVE from the issue",
+                file=sys.stderr,
+            )
         try:
             body, plan = fetch_issue_context(
-                repo, issue_number, token, plan_note_id=plan_note_id, run_id=run_id
+                repo,
+                issue_number,
+                token,
+                plan_note_id=plan_note_id,
+                run_id=run_id,
+                envelope_digest=envelope_digest,
+                spec_digest=spec_digest,
             )
         except PlanBindingError as exc:
             return _finish("failed", f"harness_entry: {exc}")
@@ -1119,6 +1220,13 @@ def main(argv: list[str] | None = None) -> int:
                 "harness_entry: --render-brief-azure needs --org-url/--project/"
                 "--issue/FORGE_AZDO_READ_TOKEN",
             )
+        # A03 KNOWN GAP (out of scope for this pass): the AzDO lane still
+        # reads the LIVE work item and scans the LATEST matching bot plan
+        # comment — no BriefEnvelope digest is dispatched or verified here,
+        # so a work-item edit or a different/substituted plan comment after
+        # approval can still change the execution input. Deliberately NOT
+        # faked: the GitHub envelope path above is the only enforced
+        # approved-bytes transport in this slice.
         body, plan = fetch_workitem(org_url, project, issue_number, token, bot_name=bot_name)
         brief_path = Path(args.brief or ".forge/brief.md")
         brief_path.parent.mkdir(parents=True, exist_ok=True)

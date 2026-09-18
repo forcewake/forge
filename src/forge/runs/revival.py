@@ -41,6 +41,7 @@ from forge.durable.models import ActionLog, FlowRun, PublicationIntent, RunBudge
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-light
     from forge.config import Settings
+    from forge.orchestrator.project_config import ConfigReadResult
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +312,134 @@ async def _complete_auto_revive(
         controller = Controller(session)
         await controller.complete_action(action_id, status, result or None)  # type: ignore[arg-type]
         await session.commit()
+
+
+# ----------------------------------------------------------------------
+# A13: the config-block recovery pass
+# ----------------------------------------------------------------------
+
+#: Reason prefixes marking a run parked by the A13 config gate
+#: (``blocked(config_unreadable: …)`` / ``blocked(config_invalid: …)``).
+#: The reconciler retries those reads; a run whose config reads again (or
+#: is provider-confirmed absent) re-enters planning — nothing was paid or
+#: committed while it waited, and its scope never widened meanwhile.
+CONFIG_BLOCK_PREFIXES = ("config_unreadable", "config_invalid")
+
+
+async def evaluate_config_blocks(
+    session_factory: async_sessionmaker,
+    *,
+    provider: str,
+    reread: Callable[[int], Awaitable["ConfigReadResult"]],
+    replan: Callable[[str, dict], Awaitable[None]],
+    log: logging.Logger = logger,
+) -> int:
+    """One reconciler pass over runs parked ``blocked(config_…)`` (A13).
+
+    For every blocked run of *provider* whose reason is a config gate:
+
+    - the read is retried through *reread* (a typed
+      :class:`~forge.orchestrator.project_config.ConfigReadResult`) — a
+      still-failing read leaves the run parked (the retry is free);
+    - a recovered read (``valid`` or provider-confirmed absence) walks the
+      run back to ``preflight`` through the journaled plan-restart edge
+      (:meth:`Controller.restart_plan_transition` — fenced to runs that
+      never froze a spec, so an approved input is never re-planned past
+      its gate) and hands it to *replan* with the stashed start context.
+
+    A run with a live sibling run stays parked: a fresh ``/implement``
+    wins over a parked run (ADR-0017, same as the revival stamps).
+
+    Returns the number of runs re-entering planning.
+    """
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == provider,
+                        FlowRun.status == FlowStatus.BLOCKED.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        candidates: list[tuple[str, int, dict]] = [
+            (
+                run.id,
+                run.project_id,
+                dict((run.evidence or {}).get("config_block") or {}),
+            )
+            for run in runs
+            if str(run.status_reason or "").startswith(CONFIG_BLOCK_PREFIXES)
+        ]
+
+    resumed = 0
+    for run_id, project_id, stash in candidates:
+        try:
+            result = await reread(project_id)
+        except Exception:
+            # A retry pass must never kill the reconciler task.
+            log.exception("Config-block retry read failed for run %s", run_id[:8])
+            continue
+        if result.needs_block:
+            continue  # still unreadable/invalid — stay parked, stay unpaid
+        try:
+            if not await _begin_config_recovery(session_factory, provider, run_id, log=log):
+                continue
+        except Exception:
+            # Another pass/worker may have taken it; never stall the loop.
+            log.exception("Config-recovery walk failed for run %s", run_id[:8])
+            continue
+        try:
+            await replan(run_id, stash)
+        except Exception:
+            log.exception("Config-recovery replan failed for run %s", run_id[:8])
+        else:
+            resumed += 1
+    return resumed
+
+
+async def _begin_config_recovery(
+    session_factory: async_sessionmaker,
+    provider: str,
+    run_id: str,
+    *,
+    log: logging.Logger,
+) -> bool:
+    """Walk one config-blocked run back to ``preflight`` (guarded).
+
+    Consumes the parked state exactly once: a second pass finds the run no
+    longer ``blocked`` and does nothing. ``False`` when the run was taken
+    (terminal, or superseded by a live sibling run).
+    """
+    async with session_factory() as session:
+        controller = Controller(session)
+        run = await session.get(FlowRun, run_id)
+        if run is None or run.status != FlowStatus.BLOCKED.value:
+            return False
+        if await has_active_run(
+            session,
+            provider=provider,
+            project_id=run.project_id,
+            issue_iid=run.issue_iid,
+            repo_full_name=run.github_repo_full_name,
+            exclude_run_id=run.id,
+        ):
+            log.info(
+                "Run %s config recovered but a sibling run is active — stays parked",
+                run_id[:8],
+            )
+            return False
+        await controller.restart_plan_transition(
+            run_id,
+            reason="project config readable again — re-entering planning (A13)",
+            authorized_by="config_recovery",
+        )
+        await session.commit()
+    log.info("Run %s config recovered — re-entering planning", run_id[:8])
+    return True
 
 
 # ----------------------------------------------------------------------

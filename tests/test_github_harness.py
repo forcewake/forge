@@ -9,6 +9,7 @@ classification and the worker-side reconciler tick, all over
 """
 
 import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -224,6 +225,10 @@ class TestGoDispatchesHarness:
             for comment in fake.issue_comments[REPO][ISSUE]
             if comment["body"].startswith("## Forge plan")
         )
+        # A03: the approved BriefEnvelope digest + the frozen spec digest
+        # ride along — the lane re-verifies the comment's approved bytes
+        # against them, fail-closed.
+        envelope = run.evidence["brief_envelope"]
         assert dispatch["inputs"] == {
             "run_id": run_id,
             "attempt_base_oid": BASE_HEAD,
@@ -234,6 +239,8 @@ class TestGoDispatchesHarness:
             "issue_number": str(ISSUE),
             # The journaled plan comment id, as a string (wire typing).
             "plan_note_id": str(plan_comment["id"]),
+            "envelope_digest": envelope["envelope_digest"],
+            "spec_digest": run.spec_digest,
         }
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []
@@ -274,6 +281,62 @@ class TestGoDispatchesHarness:
             # A02: the frozen Actions dispatch contract.
             "harness_workflow": WORKFLOW,
         }
+
+    async def test_brief_envelope_freezes_the_approved_bytes(self, db, fake):
+        """A03: at freeze the run's evidence carries the approved brief
+        bytes (task title/description + plan text, each sha256-digested)
+        bound by envelope_digest over run_id + the bytes + the spec digest;
+        the posted plan comment renders the SAME bytes between machine
+        markers, so the lane's extract → re-verify round trip passes on the
+        intact comment and the frozen task bytes never depend on the live
+        issue."""
+        from forge.harnesses.brief_envelope import (
+            build_brief_envelope,
+            extract_approved_sections,
+            verify_brief_envelope,
+        )
+
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        envelope = run.evidence["brief_envelope"]
+        assert envelope["task_title"] == ISSUE_TITLE
+        assert envelope["task_description"] == ISSUE_DESC
+        assert envelope["spec_digest"] == run.spec_digest == spec.digest
+        assert envelope["task_title_digest"] == hashlib.sha256(ISSUE_TITLE.encode()).hexdigest()
+        assert envelope == build_brief_envelope(
+            run_id=run_id,
+            task_title=ISSUE_TITLE,
+            task_description=ISSUE_DESC,
+            plan_text=envelope["plan_text"],
+            spec_digest=run.spec_digest,
+        )
+
+        # The posted comment carries the approved bytes between the
+        # markers; extraction + the dispatched digest verify byte-exact.
+        plan_comment = next(
+            comment
+            for comment in fake.issue_comments[REPO][ISSUE]
+            if comment["body"].startswith("## Forge plan")
+        )
+        title, description, plan = extract_approved_sections(plan_comment["body"])
+        assert (title, description) == (ISSUE_TITLE, ISSUE_DESC)
+        assert plan == envelope["plan_text"]
+        verify_brief_envelope(
+            envelope["envelope_digest"],
+            run_id=run_id,
+            task_title=title,
+            task_description=description,
+            plan_text=plan,
+            spec_digest=run.spec_digest,
+        )
 
     async def test_post_gate_model_drift_never_reaches_the_dispatch(self, db, fake):
         """A02: the model input comes from the spec — a FORGE_HARNESS_MODEL

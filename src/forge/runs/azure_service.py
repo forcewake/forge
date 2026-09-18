@@ -134,7 +134,7 @@ from forge.integrations.azure import (
     FileChange,
     PipelineRun,
 )
-from forge.orchestrator.project_config import ProjectConfig, load_project_config
+from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.repository import Change, ChangeSet, Operation
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, is_harness_backend
@@ -156,11 +156,13 @@ from forge.runs.harness_selection import (
     validate_preference,
 )
 from forge.runs.revival import (
+    CONFIG_BLOCK_PREFIXES,
     RECONCILE_RE,
     STATUS_RE,
     WHY_BLOCKED_RE,
     build_retry_context,
     collect_status_snapshot,
+    evaluate_config_blocks,
     evaluate_revivals,
     format_reconcile_reply,
     format_status_reply,
@@ -660,21 +662,56 @@ class AzureRunService:
             )
             return run_id
 
-        # v0.7 monorepo path scoping (same as the GitHub path): the repo's
-        # `.forge.yml` `implement.paths` globs shape the plan prompt and are
-        # frozen into the RunSpec. A read failure degrades to unscoped.
-        try:
-            project_config = await load_project_config(
-                self._stack.reader, project_id, ref=self._target_branch()
+        # The plan leg (A13-typed config read → plan → freeze → gate), shared
+        # with the config-block recovery pass.
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_description=issue_description,
+            author_username=author_username,
+        )
+        return run_id
+
+    async def _plan_and_publish(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """The planning leg: typed config read → plan → freeze → human gate.
+
+        Shared by the fresh ``/implement`` path and the A13 config-block
+        recovery pass; ends at ``waiting_approval`` (or parks the run
+        ``blocked(config_…)`` BEFORE any paid call).
+        """
+        # v0.7 monorepo path scoping (same as the GitHub path), A13: the
+        # repo's `.forge.yml` `implement.paths` globs shape the plan prompt
+        # and are frozen into the RunSpec. The read is TYPED (R14 pattern):
+        # only a provider-confirmed absence earns the documented default
+        # profile; an unreadable or invalid config parks the run
+        # blocked(config_…) — a read failure must never WIDEN the run's
+        # scope, and nothing was paid or committed while it waits.
+        config_read = await read_project_config(
+            self._stack.reader, project_id, ref=self._target_branch()
+        )
+        if config_read.needs_block:
+            await self._park_config_blocked(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                config_read=config_read,
+                issue_title=issue_title,
+                issue_description=issue_description,
+                author_username=author_username,
             )
-        except Exception:
-            logger.warning(
-                "Project config read failed for %s — run is unscoped",
-                self._repo_full_name,
-                exc_info=True,
-            )
-            project_config = ProjectConfig()
-        path_scope = list(project_config.implement_paths)
+            return
+        path_scope = list(config_read.config.implement_paths) if config_read.config else []
         # F22/R13 (A02 parity): the run's numeric budget is resolved and
         # opened BEFORE the first paid call — the class comes from the
         # harness decision compiled at plan time (ADR-0023 §2) and the class
@@ -786,6 +823,7 @@ class AzureRunService:
                 plan_digest=digest,
                 allowed_paths=path_scope,
                 harness_selection=harness_selection,
+                config_read=config_read,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -842,7 +880,6 @@ class AzureRunService:
             issue_number,
             author_username,
         )
-        return run_id
 
     async def handle_go(
         self,
@@ -1716,6 +1753,111 @@ class AzureRunService:
             await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
         else:
             await self._advance_publish(run_id, project_id=project_id, issue_number=issue_number)
+
+    # ------------------------------------------------------------------
+    # A13 config-block gate + reconciler recovery pass
+    # ------------------------------------------------------------------
+
+    async def _read_start_config(self, project_id: int) -> ConfigReadResult:
+        """The typed `.forge.yml` read a run's start path scopes from (A13)."""
+        return await read_project_config(self._stack.reader, project_id, ref=self._target_branch())
+
+    async def _park_config_blocked(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        config_read: ConfigReadResult,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """Park a run whose `.forge.yml` read failed — BEFORE any paid call.
+
+        A13 policy: permissions may narrow, never widen. An unreadable or
+        invalid config leaves the project's restrictions UNKNOWN, so the
+        run never starts on the (wider) default profile: it parks
+        ``blocked(config_unreadable|config_invalid: detail)`` with zero
+        model calls and zero commits. The start context is stashed in the
+        evidence so the reconciler's recovery pass can re-enter planning
+        with the exact input the run was created with.
+        """
+        reason = config_read.blocked_reason or f"config_unreadable: {config_read.detail}"
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, reason)
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "config_block": {
+                        "reason": reason[:200],
+                        # The Azure string subject identity rides evidence
+                        # (the durable subject columns are int-typed) — the
+                        # recovery pass needs it to rebuild this repo's
+                        # service.
+                        "repo_full_name": self._repo_full_name,
+                        "issue_title": issue_title,
+                        "issue_description": issue_description,
+                        "author_username": author_username,
+                    }
+                },
+            )
+            await session.commit()
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            self._config_blocked_comment(run_id, reason),
+            run_id,
+            "config_blocked",
+        )
+        logger.warning(
+            "Azure DevOps run %s parked %s — no planning call was made; the reconciler retries",
+            run_id[:8],
+            reason,
+        )
+
+    @staticmethod
+    def _config_blocked_comment(run_id: str, reason: str) -> str:
+        return (
+            f"Run `{run_id[:8]}` is **blocked**: {reason}\n\n"
+            f"The repository's `.forge.yml` could not be read. Forge never widens a run's "
+            "path scope because a config read failed — the run stays parked with no "
+            "model calls and no commits until the config is readable. The reconciler "
+            f"retries the read automatically; `/retry {run_id[:8]}` forces it sooner."
+            "\n\n*This is an automated message.*"
+        )
+
+    async def evaluate_config_recovery(self, now: datetime | None = None) -> None:
+        """One recovery pass over this repo's runs parked ``blocked(config_…)`` (A13).
+
+        Retries the typed config read for each; a run whose config is
+        readable again (or provider-confirmed absent) walks back to
+        ``preflight`` through the fenced plan-restart edge and re-plans —
+        with zero paid calls while it waited.
+        """
+        await evaluate_config_blocks(
+            self._session_factory,
+            provider="azure_devops",
+            reread=self._read_start_config,
+            replan=self._resume_config_blocked,
+            log=logger,
+        )
+
+    async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
+        """Re-enter planning for a recovered config-blocked run."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            issue_number = run.issue_iid
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number or 0,
+            issue_title=str(stash.get("issue_title") or ""),
+            issue_description=str(stash.get("issue_description") or ""),
+            author_username=str(stash.get("author_username") or ""),
+        )
 
     # ------------------------------------------------------------------
     # Publish leg: gate → lane dispatch OR builtin CAS publish
@@ -3884,6 +4026,7 @@ class AzureRunService:
         plan_digest: str,
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
+        config_read: ConfigReadResult | None = None,
     ) -> dict:
         """The immutable, EXECUTABLE RunSpec document (F14, R04, A02).
 
@@ -3898,7 +4041,9 @@ class AzureRunService:
         ``allowed_paths`` (v0.7 monorepo scoping) is present only for scoped
         runs. Post-approval legs read the stored document through
         :meth:`_load_executable_spec` (digest-verified on every read), never
-        live Settings.
+        live Settings. A13: ``config_read`` freezes the path scope's
+        provenance (status, ref, content digest) so a restart validates
+        against the approved snapshot instead of the live file.
         """
         selection = harness_selection or self._compile_harness_selection()
         lane = self._lane_pipeline_id()
@@ -3939,6 +4084,9 @@ class AzureRunService:
             budget_wallclock_s=limits.wallclock_s if limits is not None else None,
             budget_enforcement=enforcement,
             lane_pipeline_id=lane,
+            config_status=str(config_read.provenance_status) if config_read else "",
+            config_ref=config_read.ref if config_read else "",
+            config_sha256=config_read.content_sha256 if config_read else "",
         )
         return spec.to_document()
 
@@ -4580,6 +4728,75 @@ async def evaluate_azure_revival(
     )
 
 
+async def evaluate_azure_config_recovery(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], AzureAgents] | None = None,
+) -> None:
+    """One A13 pass: retry the `.forge.yml` read of config-blocked AzDO runs.
+
+    The twin of the GitLab reconciler's ``evaluate_config_recovery`` slot:
+    every repo holding a run parked ``blocked(config_…)`` gets one
+    :meth:`AzureRunService.evaluate_config_recovery` tick — a recovered
+    read re-enters planning through the fenced plan-restart edge; a still
+    failing read leaves the run parked, unpaid.
+    """
+    if stack_factory is None:
+        stack_factory = lambda p, r: build_azure_agents(  # noqa: E731 — trivial default
+            settings, session_factory, p, r
+        )
+    for repo_full_name in await _repos_with_config_blocked(session_factory):
+        project, repo_name = repo_full_name.split("/", 1)
+        stack = stack_factory(project, repo_name)
+        try:
+            service = AzureRunService(
+                session_factory,
+                settings,
+                forge_config,
+                stack=stack,
+                repo_full_name=repo_full_name,
+            )
+            await service.evaluate_config_recovery()
+        except Exception:
+            # One broken repo must not stall the recovery pass.
+            logger.exception("Config-block recovery failed for %s", repo_full_name)
+
+
+async def _repos_with_config_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct AzDO ``project/repo`` subjects holding config-blocked runs.
+
+    The subject identity comes from the run's config-block stash (the
+    string identity rides evidence on this lane), falling back to the
+    durable column for runs that already carried it.
+    """
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "azure_devops",
+                        FlowRun.status == FlowStatus.BLOCKED.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    repos: list[str] = []
+    for run in runs:
+        if not str(run.status_reason or "").startswith(CONFIG_BLOCK_PREFIXES):
+            continue
+        stash = (run.evidence or {}).get("config_block") or {}
+        repo = str(stash.get("repo_full_name") or run.github_repo_full_name or "").strip()
+        if repo:
+            repos.append(repo)
+    return list(dict.fromkeys(repos))
+
+
 async def _repos_with_due_publication_intents(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[str]:
@@ -4650,6 +4867,7 @@ __all__ = [
     "AzureRunService",
     "azure_factory_branch",
     "build_azure_agents",
+    "evaluate_azure_config_recovery",
     "evaluate_azure_publication_intents",
     "evaluate_azure_waiting_ci",
     "execute_azure_run_command",
@@ -4718,6 +4936,14 @@ async def run_azure_harness_reconciler(
             )
         except Exception:
             logger.exception("Azure DevOps revival reconciler pass failed")
+        try:
+            # A13 config-gate recovery: retry the `.forge.yml` read of runs
+            # parked blocked(config_…); re-enter planning on recovery.
+            await evaluate_azure_config_recovery(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("Azure DevOps config-block recovery pass failed")
         try:
             # R11 recovery: probe-and-resolve stranded publication intents.
             await evaluate_azure_publication_intents(

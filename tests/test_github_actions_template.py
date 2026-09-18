@@ -48,6 +48,12 @@ class TestWorkflowTemplateContract:
             # the lane binds its brief to EXACTLY that comment (empty on a
             # legacy replay = heuristic scan, unenforced).
             "plan_note_id",
+            # A03: the approved BriefEnvelope — the lane re-computes this
+            # digest over the comment's approved task/plan bytes (+ run id
+            # + the frozen spec digest) and fails closed on mismatch
+            # (empty on a legacy replay = live task bytes, unenforced).
+            "envelope_digest",
+            "spec_digest",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
@@ -55,6 +61,10 @@ class TestWorkflowTemplateContract:
             assert inputs[required]["required"] is True
         assert inputs["plan_note_id"]["required"] is False
         assert inputs["plan_note_id"]["default"] == ""
+        assert inputs["envelope_digest"]["required"] is False
+        assert inputs["envelope_digest"]["default"] == ""
+        assert inputs["spec_digest"]["required"] is False
+        assert inputs["spec_digest"]["default"] == ""
 
     def test_brief_is_rendered_from_the_issue_before_the_driver_runs(self):
         """The approved plan lives as the forge plan comment on the issue —
@@ -76,6 +86,11 @@ class TestWorkflowTemplateContract:
         # env from the dispatch inputs.
         assert brief_step["env"]["FORGE_PLAN_NOTE_ID"] == "${{ inputs.plan_note_id }}"
         assert brief_step["env"]["FORGE_RUN_ID"] == "${{ inputs.run_id }}"
+        # A03: the approved-brief-bytes binding — the envelope + spec
+        # digests ride as env from the dispatch inputs; the lane fails
+        # closed when the comment's approved sections stop matching.
+        assert brief_step["env"]["FORGE_ENVELOPE_DIGEST"] == "${{ inputs.envelope_digest }}"
+        assert brief_step["env"]["FORGE_SPEC_DIGEST"] == "${{ inputs.spec_digest }}"
         # The driver step runs AFTER the brief step and only runs the driver.
         names = [step.get("name") for step in steps]
         assert names.index("Render the implementation brief") < names.index("Run harness driver")
@@ -168,6 +183,15 @@ class TestWorkflowTemplateContract:
             assert 'forge-output/" >> .git/info/exclude' in text
             assert "path: forge-output" in text
             assert ".forge-output" not in text
+
+    def test_the_dogfood_mirror_declares_the_same_envelope_surface(self):
+        """A03 mirror parity: the envelope + spec digest inputs and their
+        FORGE_* env wiring ship in BOTH workflow files."""
+        for text in (TEMPLATE.read_text(), MIRROR.read_text()):
+            assert "envelope_digest:" in text
+            assert "spec_digest:" in text
+            assert "FORGE_ENVELOPE_DIGEST: ${{ inputs.envelope_digest }}" in text
+            assert "FORGE_SPEC_DIGEST: ${{ inputs.spec_digest }}" in text
 
     def test_driver_step_runs_the_harness_entry_point(self):
         workflow = load_template()

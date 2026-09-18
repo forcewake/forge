@@ -30,8 +30,10 @@ from forge.durable import (
 )
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.reviewer import ReviewVerdict
+from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
+from forge.orchestrator.project_config import clear_cache
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.github_service import GitHubRunService, execute_github_run_command
 from forge.runs.service import task_digest_of
@@ -1191,6 +1193,144 @@ class TestSupersededDraftPR:
 # ----------------------------------------------------------------------
 # A02: the executable spec v3 on the GitHub path
 # ----------------------------------------------------------------------
+
+
+class CountingStackPlanner:
+    """Plan-call recorder for the A13 gate: counts, records, answers stub."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.path_scopes: list[list[str] | None] = []
+
+    async def plan(self, issue_title, issue_description, *, flow_run_id=None, path_scope=None):
+        self.calls += 1
+        self.path_scopes.append(path_scope)
+        return "## Implementation plan\n\n- create the thing\n"
+
+
+class TestConfigGateA13:
+    """A13: an unreadable/invalid `.forge.yml` parks the run — scope never
+    widens, nothing is paid while the reconciler retries the read."""
+
+    RESTRICTED = "implement:\n  paths:\n    - 'services/**'\n"
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    def arm_403(self, fake: FakeGitHub):
+        """403 every `.forge.yml` read until disarmed — routed through the
+        fake's typed ``read_blob`` like a real GitHub 403. Returns the
+        original bound method for disarming."""
+        original = fake.get_file
+
+        async def flaky(project_id, file_path, ref="HEAD"):
+            if file_path == ".forge.yml":
+                raise GitHubAPIError(403, "read forbidden")
+            return await original(project_id, file_path, ref)
+
+        fake.get_file = flaky
+        return original
+
+    async def test_403_parks_config_unreadable_with_zero_paid_calls(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
+        self.arm_403(fake)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("config_unreadable:")
+        assert planner.calls == 0
+        assert fake.calls_of("create_draft_pr") == []
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert run.evidence["config_block"]["issue_title"] == ISSUE_TITLE
+        assert any("config_unreadable" in body for body in comments(fake))
+
+    async def test_malformed_yaml_parks_config_invalid(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": "not: a: valid: [[["})
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("config_invalid:")
+        assert planner.calls == 0
+
+    async def test_confirmed_404_freezes_absence_provenance(self, db, fake):
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner.calls == 1
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert "allowed_paths" not in spec.document
+        assert spec.document["project_config"]["status"] == "confirmed_absent"
+
+    async def test_valid_config_freezes_scope_and_provenance(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+        assert spec.document["allowed_paths"] == ["services/**"]
+        provenance = spec.document["project_config"]
+        assert provenance["status"] == "valid"
+        assert provenance["sha256"] == hashlib.sha256(self.RESTRICTED.encode()).hexdigest()
+        assert planner.path_scopes == [["services/**"]]
+
+    async def test_recovery_re_enters_planning_after_the_read_recovers(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
+        original = self.arm_403(fake)
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+        run_id = await start(service)
+        assert (await get_run(db, run_id)).status == FlowStatus.BLOCKED.value
+        assert planner.calls == 0
+
+        fake.get_file = original  # the config is readable again
+        await service.evaluate_config_recovery()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner.calls == 1
+        assert planner.path_scopes == [["services/**"]]
+
+    async def test_still_failing_read_leaves_the_run_parked(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
+        planner = CountingStackPlanner()
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+        self.arm_403(fake)
+        run_id = await start(service)
+        assert (await get_run(db, run_id)).status == FlowStatus.BLOCKED.value
+
+        await service.evaluate_config_recovery()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert run.status_reason.startswith("config_unreadable:")
+        assert planner.calls == 0
 
 
 class TestExecutableSpecA02:
