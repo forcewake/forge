@@ -180,3 +180,30 @@ jobs:
 
       - name: OS-process failure injection (SIGKILL drills on real workers)
         run: uv run pytest tests/test_failure_injection_os.py -q
+
+  # Release-artifact canary (review R30): builds the Containerfile from the
+  # pushed commit and runs scripts/canary_smoke.py against the BUILT IMAGE —
+  # the real alembic chain on a fresh Postgres (R22: never create_all), the
+  # boot gate at head, /health ok, MCP mount fail-closed (401), doctor on the
+  # in-container env — plus the previous-release → this-tree schema upgrade
+  # when ghcr.io/forcewake/forge:latest is pullable (first release or a
+  # private registry: the stage self-skips). Nightly / manual only, next to
+  # integration-os: container build + pulls add minutes and must not sit on
+  # the PR gate. The tag-triggered release workflow runs the SAME script
+  # against the pushed digest before any mutable tag moves.
+  release-canary:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the canary image
+        run: docker build -f Containerfile -t forge:canary .
+
+      # Stdlib-only script: no uv sync needed, it only drives the runtime CLI.
+      - name: Canary the built image
+        run: |
+          python3 scripts/canary_smoke.py forge:canary \
+            --allow-unpinned \
+            --previous-image ghcr.io/forcewake/forge:latest \
+            --stages fresh,migrate

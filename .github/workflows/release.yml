@@ -1,11 +1,16 @@
 name: release
 
-# Publishes the release image to GHCR on a version tag:
-#   build (Containerfile) → smoke → push — one digest, same image.
+# Publishes the release image to GHCR on a version tag. R30: the release
+# ARTIFACT is the smoke target — build once, push BY DIGEST, canary that
+# digest against a disposable Postgres (fresh-DB recipe + previous-release
+# schema upgrade, real alembic chain, NO source mount), and only then attach
+# the mutable tags and sign. The digest — not `latest` — is what this job
+# publishes for deployers to pin.
+#
 # Publishes only when FORGE_RELEASE_TOKEN (a PAT with write:packages) is
 # present as a repo/org secret; otherwise the job fails with the setup
-# instruction (the tag itself is the release; GHCR follows when the
-# secret lands).
+# instruction (the tag itself is the release; GHCR follows when the secret
+# lands).
 on:
   push:
     tags:
@@ -17,6 +22,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # cosign keyless signing (Fulcio OIDC)
+      attestations: write # actions/attest-build-provenance
     steps:
       - uses: actions/checkout@v4
 
@@ -29,22 +36,100 @@ jobs:
             exit 1
           fi
 
+      # The canary asserts /health reports the tag's version; /health serves
+      # forge.__version__ from src/forge/__init__.py. Fail the release here,
+      # before any build, when the tag and the code disagree.
+      - name: Guard — tag must match forge.__version__
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/forge/__init__.py)"
+          if [ "$TAG" != "$CODE" ]; then
+            echo "::error::tag v$TAG != src/forge/__init__.py __version__ '$CODE'. Bump __version__ to the tag (pyproject version too), then re-tag."
+            exit 1
+          fi
+
       - name: Log in to GHCR
         run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Build release image
-        run: |
-          docker build -f Containerfile -t forge:smoke .
+      # Build once, push by digest. No mutable tag exists yet: nothing can
+      # pull :vX or :latest until the canary below has passed on THIS digest.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true
 
-      - name: Smoke — the image imports, reports its version and migrates a fresh DB
-        run: |
-          docker run --rm forge:smoke python -c "import forge; assert forge.__version__, 'no version'"
-          docker run --rm forge:smoke python -m forge.migrate --help >/dev/null
+      - name: Export the digest-pinned ref
+        run: echo "IMAGE=ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_ENV"
 
-      - name: Push (tag + latest)
+      # scripts/canary_smoke.py pulls the digest back from GHCR (proving the
+      # registry round-trip) and asserts, with NO source mount:
+      #   fresh:   python -m forge.migrate on a fresh Postgres (the real
+      #            alembic chain — never create_all, R22) → the R22 boot gate
+      #            passes at head (DB revision == script head) → the image CMD
+      #            serves /health ok with the tag's version, DB/Redis/LiteLLM
+      #            all ok → /mcp answers 401 unauthenticated (fail closed) →
+      #            forge doctor passes database/redis/litellm (GitLab checks
+      #            are out of scope: no GitLab fixture in CI).
+      #   migrate: the previous release's image migrates a second fresh DB,
+      #            this image must REFUSE to boot on that stale schema (R22
+      #            gate), then upgrade prev→head and pass the gate.
+      # External LLM keys are unavailable in CI: LiteLLM REACHABILITY (the
+      # boundary) is satisfied by a stub served by the image itself; no model
+      # call is made.
+      - name: Canary the digest (fresh DB + previous-release schema)
         run: |
-          IMAGE=ghcr.io/${{ github.repository }}
-          docker tag forge:smoke "$IMAGE:${GITHUB_REF_NAME#v}"
-          docker tag forge:smoke "$IMAGE:latest"
-          docker push "$IMAGE:${GITHUB_REF_NAME#v}"
-          docker push "$IMAGE:latest"
+          python3 scripts/canary_smoke.py "$IMAGE" \
+            --expected-version "${GITHUB_REF_NAME#v}" \
+            --previous-image "ghcr.io/${{ github.repository }}:latest" \
+            --stages fresh,migrate
+        # `latest` still points at the PREVIOUS release here — the tags are
+        # attached below, only after the canary passes. On the first release
+        # (or a re-run where the chains do not differ) the stage skips or
+        # waives the refusal assertion on its own.
+
+      # Only now do the mutable tags move — onto the validated digest.
+      - name: Attach tags to the validated digest
+        run: |
+          IMAGE_NAME=ghcr.io/${{ github.repository }}
+          docker buildx imagetools create \
+            -t "$IMAGE_NAME:${GITHUB_REF_NAME#v}" \
+            -t "$IMAGE_NAME:latest" \
+            "$IMAGE_NAME@${{ steps.build.outputs.digest }}"
+
+      # Keyless Sigstore signing — the digest is the thing signed, never a
+      # tag. Requires a public repo (public-good Sigstore). If forge goes
+      # private, or Rekor transparency is unacceptable, drop the two steps
+      # below and keep digest pinning + the provenance attestation
+      # (docs/research/schema-upgrade-gates.md, open question 6).
+      - uses: sigstore/cosign-installer@v4
+      - name: Sign the digest (keyless)
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attest build provenance for the digest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Publish the pinning digest
+        if: always() && steps.build.outputs.digest != ''
+        run: |
+          {
+            echo "## Release image — pin the digest, not the tag"
+            echo ""
+            echo '```'
+            echo "docker pull ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo ""
+            echo "Verify the signature:"
+            echo ""
+            echo '```'
+            echo "cosign verify ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
