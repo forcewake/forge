@@ -35,7 +35,7 @@ from forge.config import Settings
 from forge.durable import FlowRun
 from forge.models.base import Base
 from forge.runs import RunService
-from forge.runs.revival import has_active_run, resolve_retry_target
+from forge.runs.revival import has_active_run, resolve_retry_target, resolve_status_target
 from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
 from tests.fixtures.fake_gitlab import FakeGitLab
 from tests.test_runs_service import FakeWriter
@@ -684,6 +684,113 @@ class TestRetryResolutionIsProviderScoped:
         foreign = await get_run(db, runs["github"])
         assert foreign.status == "failed"
         assert foreign.commit_cycle == 1
+
+
+# ----------------------------------------------------------------------
+# A07: the full 32-char id resolves under the SAME subject scope as the
+# bare/prefix forms — two projects sharing issue_iid=7 never cross
+# ----------------------------------------------------------------------
+
+OTHER_PROJECT_ID = 202  # a second project holding the SAME issue iid
+
+
+class TestTargetResolutionIsSubjectScoped:
+    """A07: every id form (bare, 8-char prefix, full 32-char id) resolves
+    through the SAME provider/project/issue/repo predicates — a run from
+    another project that happens to share the issue iid is unaddressable."""
+
+    @staticmethod
+    async def _seed_two_projects(db) -> dict[str, str]:
+        """One dead run on each of two projects, both on issue !7."""
+        return {
+            "home": await add_run(
+                db,
+                provider="gitlab",
+                project_id=PROJECT_ID,
+                status="failed",
+                candidate_shas=["a" * 40],
+                evidence={"backend": "builtin"},
+            ),
+            "foreign": await add_run(
+                db,
+                provider="gitlab",
+                project_id=OTHER_PROJECT_ID,
+                status="failed",
+                candidate_shas=["b" * 40],
+                evidence={"backend": "builtin"},
+            ),
+        }
+
+    @staticmethod
+    def _as_form(form: str, run_id: str) -> str:
+        """The requested id as the bare / 8-char prefix / full 32-char form."""
+        return {"bare": "", "prefix": run_id[:8], "full": run_id}[form]
+
+    @pytest.mark.parametrize("form", ["bare", "prefix", "full"])
+    @pytest.mark.parametrize("resolve", [resolve_retry_target, resolve_status_target])
+    async def test_resolution_refuses_the_other_project(self, db, resolve, form):
+        runs = await self._seed_two_projects(db)
+
+        async with db() as session:
+            resolved = await resolve(
+                session,
+                provider="gitlab",
+                project_id=PROJECT_ID,
+                issue_iid=ISSUE_IID,
+                requested=self._as_form(form, runs["foreign"]),
+            )
+
+        if form == "bare":
+            # bare resolves WITHIN the command's project — the home run, never
+            # the other project's same-iid twin.
+            assert resolved is not None
+            assert resolved.id == runs["home"]
+        else:
+            # an explicit id/prefix of the other project's run is refused.
+            assert resolved is None
+
+    @pytest.mark.parametrize("form", ["prefix", "full"])
+    async def test_gitlab_retry_of_other_project_is_inert(self, db, fake_gitlab, monkeypatch, form):
+        runs = await self._seed_two_projects(db)
+        service = make_service(db, fake_gitlab)
+        dispatched: list[str] = []
+
+        async def fake_advance(project_id: int, run_id: str, **kwargs) -> None:
+            dispatched.append(run_id)
+
+        monkeypatch.setattr(service, "_advance_proposal", fake_advance)
+        monkeypatch.setattr(service, "_advance_harness", fake_advance)
+
+        await service.handle_retry_note(
+            PROJECT_ID,
+            f"@forge /retry {self._as_form(form, runs['foreign'])}",
+            "alice",
+            ISSUE_IID,
+        )
+
+        # rejected command: zero advance legs (model calls/commits), zero
+        # notes (metadata), and the foreign run untouched (no cycle granted).
+        assert dispatched == []
+        assert fake_gitlab.notes == []
+        foreign = await get_run(db, runs["foreign"])
+        assert foreign.status == "failed"
+        assert foreign.commit_cycle == 1
+
+    @pytest.mark.parametrize("form", ["prefix", "full"])
+    async def test_gitlab_status_of_other_project_reports_nothing(self, db, fake_gitlab, form):
+        runs = await self._seed_two_projects(db)
+        service = make_service(db, fake_gitlab)
+
+        await service.handle_status_note(
+            PROJECT_ID,
+            f"@forge /status {self._as_form(form, runs['foreign'])}",
+            "alice",
+            ISSUE_IID,
+        )
+
+        # the honest "nothing here" reply — never the foreign run's metadata.
+        assert fake_gitlab.notes_containing("No forge run found")
+        assert not fake_gitlab.notes_containing(runs["foreign"][:8])
 
 
 # ----------------------------------------------------------------------

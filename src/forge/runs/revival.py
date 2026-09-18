@@ -32,7 +32,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.controller import TERMINAL_STATUSES, Controller, FlowStatus, as_aware_utc
@@ -349,6 +349,30 @@ async def has_active_run(
     return (await session.execute(query.limit(1))).scalar() is not None
 
 
+def _subject_query(
+    *,
+    provider: str,
+    project_id: int,
+    issue_iid: int | None,
+    repo_full_name: str | None,
+) -> Select:
+    """The subject-scoped base query EVERY target resolution starts from (A07).
+
+    Provider + connection + project + repo + issue — the full subject — is
+    mandatory for every id form (bare, 8-char prefix, and the full 32-char id
+    alike): a run from another project that happens to share the issue iid is
+    invisible here, exactly like the provider-scoped ``/cancel`` lookups.
+    """
+    query = select(FlowRun).where(
+        FlowRun.provider == provider,
+        FlowRun.project_id == project_id,
+        FlowRun.issue_iid == issue_iid,
+    )
+    if repo_full_name is not None:
+        query = query.where(FlowRun.github_repo_full_name == repo_full_name)
+    return query
+
+
 async def resolve_retry_target(
     session: AsyncSession,
     *,
@@ -363,14 +387,15 @@ async def resolve_retry_target(
     Mirrors ``/cancel``'s resolution: an explicit 32-char id, a unique 8-char
     prefix among the issue's runs, or — bare — the most recent
     ``failed``/``blocked`` run for the issue. ``None`` when nothing matches.
+    Every form resolves through the SAME subject-scoped query (A07) — the
+    full id no longer takes a looser lookup.
     """
-    query = select(FlowRun).where(
-        FlowRun.provider == provider,
-        FlowRun.project_id == project_id,
-        FlowRun.issue_iid == issue_iid,
+    query = _subject_query(
+        provider=provider,
+        project_id=project_id,
+        issue_iid=issue_iid,
+        repo_full_name=repo_full_name,
     )
-    if repo_full_name is not None:
-        query = query.where(FlowRun.github_repo_full_name == repo_full_name)
 
     if not requested:
         dead = query.where(FlowRun.status.in_(sorted(_RETRYABLE_STATUSES))).order_by(
@@ -379,12 +404,8 @@ async def resolve_retry_target(
         return (await session.execute(dead)).scalars().first()
 
     if len(requested) == 32:
-        run = await session.get(FlowRun, requested)
-        if run is None or run.provider != provider or run.issue_iid != issue_iid:
-            return None
-        if repo_full_name is not None and run.github_repo_full_name != repo_full_name:
-            return None
-        return run
+        exact = query.where(FlowRun.id == requested)
+        return (await session.execute(exact.limit(1))).scalars().first()
 
     matches = (
         (
@@ -460,27 +481,24 @@ async def resolve_status_target(
     Same resolution discipline as :func:`resolve_retry_target` — explicit
     32-char id, unique 8-char prefix among the issue's runs, or — bare — the
     most recent run of ANY state for the issue (a status question is about
-    the latest run, alive or dead). ``None`` when nothing matches.
+    the latest run, alive or dead). ``None`` when nothing matches. Every
+    form resolves through the SAME subject-scoped query (A07) — the full id
+    no longer takes a looser lookup.
     """
-    query = select(FlowRun).where(
-        FlowRun.provider == provider,
-        FlowRun.project_id == project_id,
-        FlowRun.issue_iid == issue_iid,
+    query = _subject_query(
+        provider=provider,
+        project_id=project_id,
+        issue_iid=issue_iid,
+        repo_full_name=repo_full_name,
     )
-    if repo_full_name is not None:
-        query = query.where(FlowRun.github_repo_full_name == repo_full_name)
 
     if not requested:
         latest = query.order_by(FlowRun.updated_at.desc())
         return (await session.execute(latest)).scalars().first()
 
     if len(requested) == 32:
-        run = await session.get(FlowRun, requested)
-        if run is None or run.provider != provider or run.issue_iid != issue_iid:
-            return None
-        if repo_full_name is not None and run.github_repo_full_name != repo_full_name:
-            return None
-        return run
+        exact = query.where(FlowRun.id == requested)
+        return (await session.execute(exact.limit(1))).scalars().first()
 
     matches = (
         (

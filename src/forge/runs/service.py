@@ -1070,6 +1070,12 @@ class RunService:
 
         requested = (match.group(1) or "").lower()
         run_id: str | None = None
+        # A07: the dispatch legs below aim at the VERIFIED run's subject, read
+        # back from the matched run — never the command context. The scoped
+        # resolution makes the two equal; reading them from the run keeps the
+        # dispatch honest even if resolution were ever widened.
+        retry_project_id = 0
+        retry_issue_iid: int | None = None
         rejection = ""
         async with self._session_factory() as session:
             run = await resolve_retry_target(
@@ -1081,6 +1087,8 @@ class RunService:
             )
             if run is not None:
                 run_id = run.id
+                retry_project_id = int(run.project_id)
+                retry_issue_iid = run.issue_iid
                 rejection = retry_rejection(
                     run,
                     other_active=await has_active_run(
@@ -1123,7 +1131,7 @@ class RunService:
             run.commit_cycle = cycle + 1
             await session.commit()
 
-        branch = factory_branch(issue_iid, run_id)
+        branch = factory_branch(retry_issue_iid, run_id)
         logger.info(
             "Run %s retried by @%s — re-dispatching %s (cycle %d)",
             run_id[:8],
@@ -1147,14 +1155,14 @@ class RunService:
         try:
             if is_harness_backend(backend_name):
                 await self._advance_harness(
-                    project_id,
+                    retry_project_id,
                     run_id,
                     repair_context=repair_context,
                     repair_reason=repair_reason,
                 )
             else:
                 await self._advance_proposal(
-                    project_id,
+                    retry_project_id,
                     run_id,
                     repair_context=repair_context,
                     repair_reason=repair_reason,
@@ -1191,6 +1199,7 @@ class RunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -1212,7 +1221,7 @@ class RunService:
             project_id,
             issue_iid,
             body,
-            run_id if run is not None else "",
+            run_id,
             "status_note",
         )
 
@@ -1237,6 +1246,7 @@ class RunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -1266,7 +1276,7 @@ class RunService:
             project_id,
             issue_iid,
             body,
-            run_id if run is not None else "",
+            run_id,
             "why_blocked_note",
         )
 
@@ -4407,7 +4417,7 @@ class RunService:
             return f"!{mr_iid}"
 
     async def _post_journaled_note(
-        self, project_id: int, issue_iid: int | None, body: str, run_id: str, kind: str
+        self, project_id: int, issue_iid: int | None, body: str, run_id: str | None, kind: str
     ) -> None:
         """Post an issue note with intent/outcome journaling (ADR-0005)."""
         if issue_iid is None:

@@ -578,6 +578,97 @@ async def test_retry_prefix_resolves_a_unique_run(db, service, fake_gitlab, monk
 
 
 # ----------------------------------------------------------------------
+# R29 read-only surface + A07 subject scope: /status and /why-blocked
+# ----------------------------------------------------------------------
+
+
+async def test_status_bare_reports_the_latest_run_on_the_issue(db, service, fake_gitlab):
+    run_id = await make_run(db, status=FlowStatus.WAITING_CI.value, candidate_shas=["c1"])
+
+    await service.handle_status_note(PROJECT_ID, "@forge /status", "alice", ISSUE_IID)
+
+    assert fake_gitlab.notes_containing(f"run `{run_id[:8]}` status")
+    assert fake_gitlab.notes_containing("`waiting_ci`")
+
+
+async def test_status_full_id_reports_the_run_on_this_issue(db, service, fake_gitlab):
+    run_id = await make_run(
+        db,
+        status=FlowStatus.BLOCKED.value,
+        candidate_shas=["c1"],
+        status_reason="backend_config: boom",
+    )
+
+    await service.handle_status_note(PROJECT_ID, f"@forge /status {run_id}", "alice", ISSUE_IID)
+
+    assert fake_gitlab.notes_containing(f"run `{run_id[:8]}` status")
+    assert fake_gitlab.notes_containing("`blocked`")
+
+
+async def test_why_blocked_full_id_reports_the_run_on_this_issue(db, service, fake_gitlab):
+    run_id = await make_run(
+        db,
+        status=FlowStatus.BLOCKED.value,
+        candidate_shas=["c1"],
+        status_reason="backend_config: boom",
+    )
+
+    await service.handle_why_blocked_note(
+        PROJECT_ID, f"@forge /why-blocked {run_id}", "alice", ISSUE_IID
+    )
+
+    assert fake_gitlab.notes_containing("why blocked")
+    assert fake_gitlab.notes_containing("backend_config: boom")
+
+
+async def test_status_of_another_projects_same_iid_run_reports_nothing(db, service, fake_gitlab):
+    """A07: a full 32-char id of a run on ANOTHER project that shares the
+    issue iid resolves to nothing here — the reply carries no foreign state
+    and the foreign run itself is untouched (read-only command)."""
+    foreign_id = await make_run(
+        db,
+        project_id=202,
+        status=FlowStatus.BLOCKED.value,
+        candidate_shas=["c9"],
+        status_reason="backend_config: foreign secret",
+    )
+
+    await service.handle_status_note(PROJECT_ID, f"@forge /status {foreign_id}", "alice", ISSUE_IID)
+
+    assert fake_gitlab.notes_containing("No forge run found")
+    assert not fake_gitlab.notes_containing("foreign secret")
+    assert not fake_gitlab.notes_containing(foreign_id[:8])
+    assert (await read_run(db, foreign_id)).status == FlowStatus.BLOCKED.value
+
+
+async def test_retry_of_another_projects_same_iid_run_is_inert(
+    db, service, fake_gitlab, monkeypatch
+):
+    """A07: the same refusal for /retry — an explicit (prefix or full) id of
+    another project's run grants no cycle, dispatches nothing, posts no note."""
+    foreign_id = await make_run(
+        db,
+        project_id=202,
+        status=FlowStatus.BLOCKED.value,
+        commit_cycle=2,
+        candidate_shas=["c9"],
+        evidence={"backend": "builtin"},
+    )
+    dispatched: list[tuple[int, str, dict]] = []
+    monkeypatch.setattr(service, "_advance_proposal", advance_recorder(dispatched))
+    monkeypatch.setattr(service, "_advance_harness", advance_recorder(dispatched))
+
+    for requested in (foreign_id, foreign_id[:8]):
+        await service.handle_retry_note(PROJECT_ID, retry_note(requested), "alice", ISSUE_IID)
+
+    assert dispatched == []
+    assert fake_gitlab.notes == []
+    foreign = await read_run(db, foreign_id)
+    assert foreign.status == FlowStatus.BLOCKED.value
+    assert foreign.commit_cycle == 2
+
+
+# ----------------------------------------------------------------------
 # Parity: one classification, one budget, three lanes
 # ----------------------------------------------------------------------
 

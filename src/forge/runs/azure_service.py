@@ -786,7 +786,13 @@ class AzureRunService:
 
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            if run.provider != "azure_devops" or run.issue_iid != issue_number:
+            if (
+                # A07: the full subject — provider AND project, like every
+                # other explicit-id resolution on this lane.
+                run.provider != "azure_devops"
+                or run.project_id != project_id
+                or run.issue_iid != issue_number
+            ):
                 logger.info("Azure DevOps /go references unknown run %s — ignoring", run_id[:8])
                 return
             if run.status != FlowStatus.WAITING_APPROVAL.value:
@@ -907,7 +913,12 @@ class AzureRunService:
                     return
             elif len(requested) == 32:
                 run = await session.get(FlowRun, requested)
-                if run is None or run.provider != "azure_devops" or run.issue_iid != issue_number:
+                if (
+                    run is None
+                    or run.provider != "azure_devops"
+                    or run.project_id != project_id
+                    or run.issue_iid != issue_number
+                ):
                     logger.info(
                         "Azure DevOps /cancel references unknown run %s — ignoring",
                         requested[:8],
@@ -916,12 +927,16 @@ class AzureRunService:
             else:
                 # Short id (plan comments show the 8-char form): resolve by
                 # prefix among the work item's runs; ambiguity means no action.
+                # A07: the same subject scope as the bare and full-id forms —
+                # project included, so a same-iid run of another project never
+                # resolves here.
                 runs = (
                     (
                         await session.execute(
                             select(FlowRun)
                             .where(
                                 FlowRun.provider == "azure_devops",
+                                FlowRun.project_id == project_id,
                                 FlowRun.issue_iid == issue_number,
                                 FlowRun.id.like(f"{requested}%"),
                             )
@@ -1025,6 +1040,12 @@ class AzureRunService:
 
         requested = (match.group(1) or "").lower()
         run_id: str | None = None
+        # A07: the dispatch legs below aim at the VERIFIED run's subject, read
+        # back from the matched run — never the command context. The scoped
+        # resolution makes the two equal; reading them from the run keeps the
+        # dispatch honest even if resolution were ever widened.
+        retry_project_id = 0
+        retry_issue_number = 0
         rejection = ""
         async with self._session_factory() as session:
             run = await resolve_retry_target(
@@ -1036,6 +1057,8 @@ class AzureRunService:
             )
             if run is not None:
                 run_id = run.id
+                retry_project_id = int(run.project_id)
+                retry_issue_number = int(run.issue_iid or 0)
                 rejection = retry_rejection(
                     run,
                     other_active=await has_active_run(
@@ -1080,7 +1103,7 @@ class AzureRunService:
             run.commit_cycle = cycle + 1
             await session.commit()
 
-        branch = azure_factory_branch(issue_number, run_id)
+        branch = azure_factory_branch(retry_issue_number, run_id)
         logger.info(
             "Azure DevOps run %s retried by @%s — re-dispatching %s (cycle %d)",
             run_id[:8],
@@ -1104,8 +1127,8 @@ class AzureRunService:
             if self._lane_pipeline_id():
                 await self._advance_harness(
                     run_id,
-                    project_id=project_id,
-                    issue_number=issue_number,
+                    project_id=retry_project_id,
+                    issue_number=retry_issue_number,
                     repair_context=repair_context,
                 )
             else:
@@ -1115,7 +1138,7 @@ class AzureRunService:
                     repair_reason,
                 )
                 await self._advance_publish(
-                    run_id, project_id=project_id, issue_number=issue_number
+                    run_id, project_id=retry_project_id, issue_number=retry_issue_number
                 )
         except Exception as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
@@ -1149,6 +1172,7 @@ class AzureRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -1172,7 +1196,7 @@ class AzureRunService:
             project_id,
             issue_number,
             body,
-            run_id if run is not None else "",
+            run_id,
             "status_note",
         )
 
@@ -1193,6 +1217,7 @@ class AzureRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -1226,7 +1251,7 @@ class AzureRunService:
             project_id,
             issue_number,
             body,
-            run_id if run is not None else "",
+            run_id,
             "why_blocked_note",
         )
 
@@ -3600,7 +3625,7 @@ class AzureRunService:
         )
 
     async def _post_journaled_comment(
-        self, project_id: int, issue_number: int, body: str, run_id: str, kind: str
+        self, project_id: int, issue_number: int, body: str, run_id: str | None, kind: str
     ) -> None:
         """Post a work-item comment with intent/outcome journaling (ADR-0005)."""
         async with self._session_factory() as session:

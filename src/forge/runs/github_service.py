@@ -461,6 +461,8 @@ class GitHubRunService:
             if (
                 run is None
                 or run.provider != "github"
+                # A07: the full subject — project as well as repo identity.
+                or run.project_id != project_id
                 or run.github_repo_full_name != self._repo_full_name
             ):
                 logger.info("GitHub /go references unknown run %s — ignoring", run_id[:8])
@@ -622,6 +624,7 @@ class GitHubRunService:
                 if (
                     run is None
                     or run.provider != "github"
+                    or run.project_id != project_id
                     or run.github_repo_full_name != self._repo_full_name
                     or run.issue_iid != issue_number
                 ):
@@ -632,12 +635,16 @@ class GitHubRunService:
             else:
                 # Short id (plan comments show the 8-char form): resolve by
                 # prefix among the issue's runs; ambiguity means no action.
+                # A07: the same subject scope as the bare and full-id forms —
+                # project included, so a same-iid run of another project (or
+                # another connection's same-named repo) never resolves here.
                 runs = (
                     (
                         await session.execute(
                             select(FlowRun)
                             .where(
                                 FlowRun.provider == "github",
+                                FlowRun.project_id == project_id,
                                 FlowRun.github_repo_full_name == self._repo_full_name,
                                 FlowRun.issue_iid == issue_number,
                                 FlowRun.id.like(f"{requested}%"),
@@ -737,6 +744,12 @@ class GitHubRunService:
 
         requested = (match.group(1) or "").lower()
         run_id: str | None = None
+        # A07: the dispatch leg below aims at the VERIFIED run's subject, read
+        # back from the matched run — never the command context. The scoped
+        # resolution makes the two equal; reading them from the run keeps the
+        # dispatch honest even if resolution were ever widened.
+        retry_project_id = 0
+        retry_issue_number = 0
         rejection = ""
         async with self._session_factory() as session:
             run = await resolve_retry_target(
@@ -749,6 +762,8 @@ class GitHubRunService:
             )
             if run is not None:
                 run_id = run.id
+                retry_project_id = int(run.project_id)
+                retry_issue_number = int(run.issue_iid or 0)
                 rejection = retry_rejection(
                     run,
                     other_active=await has_active_run(
@@ -791,7 +806,7 @@ class GitHubRunService:
             run.commit_cycle = cycle + 1
             await session.commit()
 
-        branch = github_factory_branch(issue_number, run_id)
+        branch = github_factory_branch(retry_issue_number, run_id)
         logger.info(
             "GitHub run %s retried by @%s — re-dispatching %s (cycle %d)",
             run_id[:8],
@@ -814,8 +829,8 @@ class GitHubRunService:
         try:
             await self._advance_harness(
                 run_id,
-                project_id=project_id,
-                issue_number=issue_number,
+                project_id=retry_project_id,
+                issue_number=retry_issue_number,
                 repair_context=repair_context,
                 repair_reason=repair_reason,
             )
@@ -851,6 +866,7 @@ class GitHubRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -873,7 +889,7 @@ class GitHubRunService:
             project_id,
             issue_number,
             body,
-            run_id if run is not None else "",
+            run_id,
             "status_note",
         )
 
@@ -894,6 +910,7 @@ class GitHubRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        run_id: str | None = None
         async with self._session_factory() as session:
             run = await resolve_status_target(
                 session,
@@ -926,7 +943,7 @@ class GitHubRunService:
             project_id,
             issue_number,
             body,
-            run_id if run is not None else "",
+            run_id,
             "why_blocked_note",
         )
 
@@ -3779,7 +3796,7 @@ class GitHubRunService:
         )
 
     async def _post_journaled_note(
-        self, project_id: int, issue_number: int, body: str, run_id: str, kind: str
+        self, project_id: int, issue_number: int, body: str, run_id: str | None, kind: str
     ) -> int | None:
         """Post an issue comment with intent/outcome journaling (ADR-0005).
 
