@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +235,71 @@ class Settings(BaseSettings):
     FORGE_EVIDENCE_DENY_PATTERNS: str = "glpat-,ghs_,sk-,xai-"
     FORGE_EVIDENCE_MAX_CHARS: int = 8000
 
+    # ADR-0018 §5 (R13) numeric run budgets: JSON object of named budget
+    # profiles — name → {"max_calls", "max_tokens", "wallclock_s"} (each an
+    # optional positive int; omit/null = unlimited on that axis). A run's
+    # budget class (frozen in the RunSpec) names the profile resolved AT
+    # FREEZE TIME into numeric ceilings stored IN the spec; unknown class
+    # names fall back to the "standard" profile. Unset/empty — no numeric
+    # ceilings anywhere (runs are unlimited; no budget rows are opened),
+    # byte-compatible with pre-R13 behavior. Malformed JSON fails startup
+    # (fail closed, like FORGE_MCP_SCOPED_TOKENS) — a silently unlimited
+    # budget would defeat the point of configuring one. The forge.yml form
+    # (``budget_profiles:``) wins when both are set.
+    FORGE_BUDGET_PROFILES: str = ""
+
+
+def _positive_int_or_none(value: object, where: str) -> int | None:
+    """A usable positive budget ceiling, or ``None`` (absent/null = unset).
+
+    Any other value — garbage, bool, zero, negative — is a configuration
+    error, never a silent unlimited: a mistyped ceiling must fail loudly
+    instead of disarming the budget.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{where} must be a positive int or null, got {value!r}")
+    return value
+
+
+def validate_budget_profiles(raw: object) -> dict[str, dict[str, Any]]:
+    """Validate a budget-profiles mapping (ADR-0018 §5, R13) — ``ValueError``
+    on any defect, so a broken configuration fails startup instead of
+    silently running unlimited."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("budget_profiles must be a mapping of name → limits")
+    profiles: dict[str, dict[str, Any]] = {}
+    for name, entry in raw.items():
+        key = str(name).strip()
+        if not key:
+            raise ValueError("budget_profiles entries must have non-empty names")
+        if not isinstance(entry, dict):
+            raise ValueError(f"budget_profiles[{key!r}] must be a mapping of limit names to ints")
+        profiles[key] = {
+            axis: _positive_int_or_none(entry.get(axis), f"budget_profiles[{key!r}][{axis!r}]")
+            for axis in ("max_calls", "max_tokens", "wallclock_s")
+        }
+    return profiles
+
+
+def parse_budget_profiles(raw: str | None) -> dict[str, dict[str, Any]]:
+    """The FORGE_BUDGET_PROFILES JSON form — ``ValueError`` when malformed.
+
+    Fail closed like FORGE_MCP_SCOPED_TOKENS: a profile JSON that does not
+    parse must abort startup, never degrade to unlimited runs.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_BUDGET_PROFILES is not valid JSON: {exc}") from exc
+    return validate_budget_profiles(data)
+
 
 class ForgeConfig:
     """Optional YAML-based configuration loaded from forge.yml.
@@ -289,6 +355,11 @@ class ForgeConfig:
         "implement": {
             "harnesses": [],
         },
+        # ADR-0018 §5 (R13): named numeric budget profiles — the forge.yml
+        # form of FORGE_BUDGET_PROFILES (wins when both are set). Name →
+        # {"max_calls", "max_tokens", "wallclock_s"}; a run's budget class
+        # names the profile frozen into its RunSpec.
+        "budget_profiles": {},
         "mcp_servers": {},
     }
 
@@ -368,6 +439,19 @@ class ForgeConfig:
     @property
     def mcp_servers(self) -> dict[str, Any]:
         return self._data["mcp_servers"]
+
+    @property
+    def budget_profiles(self) -> dict[str, dict[str, Any]]:
+        """``budget_profiles`` — the named numeric run budgets (ADR-0018 §5).
+
+        Each entry maps a budget class (the harness selection's
+        ``budget_class``) to its numeric ceilings: ``max_calls``,
+        ``max_tokens`` and ``wallclock_s``, each an optional positive int
+        (omit/``None`` = unlimited on that axis). Invalid entries are refused
+        with ``ValueError`` — a contradictory budget configuration is never
+        silently repaired into an unlimited run.
+        """
+        return validate_budget_profiles(self._data.get("budget_profiles"))
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)

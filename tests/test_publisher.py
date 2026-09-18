@@ -14,9 +14,10 @@ import pytest
 
 from forge.durable import ActionLog, Controller, FlowRun, RunSpec
 from forge.durable.identity import factory_branch
+from forge.gitlab.blob_reads import BlobReadResult
 from forge.models.base import Base
 from forge.repository import ChangesetWriter
-from forge.runs.candidate import CandidateError, parse_unified_diff
+from forge.runs.candidate import _blob_digests, CandidateError, parse_unified_diff
 from forge.runs.publisher import (
     PolicyViolation,
     PublishResult,
@@ -535,3 +536,187 @@ class TestGrantGeneration:
         )
         assert result.ok
         assert result.superseded is False
+
+
+class TestAuthoritativeBaseReads:
+    """R14 at the publication boundary: the base reads are TYPED.
+
+    Only a provider-confirmed ``not_found`` may make a path absent — a
+    ``forbidden`` / ``unavailable`` / ``incomplete`` read fails validation
+    (``authoritative_read_failed``) BEFORE any remote effect, instead of
+    forging existence facts (a create-over-existing flip). The R08/R09
+    digest verification keeps running on every path that survives.
+    """
+
+    def stub_read_blob(self, fake_gitlab, monkeypatch, result_for):
+        """Replace the fake's typed read with one answering *result_for(path)*."""
+
+        async def _read(project_id, file_path, ref="HEAD"):
+            return result_for(file_path)
+
+        monkeypatch.setattr(fake_gitlab, "read_blob", _read)
+
+    async def test_forbidden_base_read_rejects_without_commit(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        fake_gitlab.seed_file("src/mod.py", "keep\nold\ntail\n")
+        self.stub_read_blob(
+            fake_gitlab,
+            monkeypatch,
+            lambda path: BlobReadResult.forbidden(
+                f"gitlab api error 403: forbidden for {path!r}"
+            ),
+        )
+        run = await persisted(db, make_run())
+        diff = _modify_diff("src/mod.py", "old", "new")
+
+        result = await publish(db, fake_gitlab, run, bundle_for(diff))
+
+        assert not result.ok
+        assert "authoritative_read_failed" in result.reason
+        assert "forbidden" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_unavailable_base_read_rejects_without_commit(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        fake_gitlab.seed_file("src/mod.py", "keep\nold\ntail\n")
+        self.stub_read_blob(
+            fake_gitlab,
+            monkeypatch,
+            lambda path: BlobReadResult.unavailable("gitlab transport error: timed out"),
+        )
+        run = await persisted(db, make_run())
+
+        result = await publish(db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new")))
+
+        assert not result.ok
+        assert "authoritative_read_failed" in result.reason
+        assert "unavailable" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_incomplete_base_read_rejects_without_commit(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        self.stub_read_blob(
+            fake_gitlab,
+            monkeypatch,
+            lambda path: BlobReadResult.incomplete(f"{path!r}: content is not valid UTF-8"),
+        )
+        run = await persisted(db, make_run())
+
+        result = await publish(db, fake_gitlab, run, bundle_for(_modify_diff("src/mod.py", "old", "new")))
+
+        assert not result.ok
+        assert "authoritative_read_failed" in result.reason
+        assert "incomplete" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_read_failure_never_reports_a_missing_file_for_delete(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        # A delete whose base read fails must be blocked as a read failure —
+        # NOT waved through as "file does not exist" (or the reverse: silently
+        # deleted against unreadable evidence).
+        self.stub_read_blob(
+            fake_gitlab,
+            monkeypatch,
+            lambda path: BlobReadResult.unavailable("gitlab api error 500: exploded"),
+        )
+        run = await persisted(db, make_run())
+        diff = (
+            "diff --git a/src/gone.py b/src/gone.py\n"
+            "deleted file mode 100644\n"
+            "--- a/src/gone.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-one\n"
+            "-two\n"
+        )
+
+        result = await publish(db, fake_gitlab, run, bundle_for(diff))
+
+        assert not result.ok
+        assert "authoritative_read_failed" in result.reason
+        assert "file does not exist" not in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_confirmed_not_found_still_allows_the_create(self, db, fake_gitlab):
+        # The honest positive control: a provider-confirmed absence is exactly
+        # what a create needs — nothing about it changed.
+        run = await persisted(db, make_run())
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_create_diff("forge-demo/x.md", "hello\n"))
+        )
+        assert result.ok
+
+    async def test_create_over_confirmed_existing_is_rejected(self, db, fake_gitlab):
+        # The strict read FOUND the file — a create would overwrite it.
+        fake_gitlab.seed_file("src/exists.py", "already here\n")
+        run = await persisted(db, make_run())
+
+        result = await publish(
+            db, fake_gitlab, run, bundle_for(_create_diff("src/exists.py", "rogue\n"))
+        )
+
+        assert not result.ok
+        assert "already exists in the base snapshot" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_stale_base_digest_still_rejects_the_modify(self, db, fake_gitlab):
+        # R08 intact: a candidate diffed against a different base blob is
+        # rejected (stale_base), never fuzzy-applied.
+        fake_gitlab.seed_file("src/mod.py", "keep\nold\ntail\n")
+        run = await persisted(db, make_run())
+        diff = (
+            "diff --git a/src/mod.py b/src/mod.py\n"
+            f"index {'f' * 40}..{'e' * 40} 100644\n"
+            "--- a/src/mod.py\n"
+            "+++ b/src/mod.py\n"
+            "@@ -2,1 +2,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        result = await publish(db, fake_gitlab, run, bundle_for(diff))
+
+        assert not result.ok
+        assert "stale_base" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_intended_digest_verifies_the_materialized_result(
+        self, db, fake_gitlab
+    ):
+        # R09 intact end-to-end: the diff's own new blob OID must equal the
+        # materialized result — a wrong claim is an internal error, never a
+        # publish; the correct claim publishes exactly the expected text.
+        base = "keep\nold\ntail\n"
+        expected = "keep\nnew\ntail\n"
+        fake_gitlab.seed_file("src/mod.py", base)
+        run = await persisted(db, make_run())
+        # _blob_digests returns TAGGED claims ("blob:<hex>") — the diff's
+        # index line carries the raw hex.
+        (old_oid, _) = _blob_digests(base)
+        (new_oid, _) = _blob_digests(expected)
+        old_hex, new_hex = old_oid.removeprefix("blob:"), new_oid.removeprefix("blob:")
+        diff = (
+            "diff --git a/src/mod.py b/src/mod.py\n"
+            f"index {old_hex}..{'d' * 40} 100644\n"
+            "--- a/src/mod.py\n"
+            "+++ b/src/mod.py\n"
+            "@@ -2,1 +2,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        bad = await publish(db, fake_gitlab, run, bundle_for(diff))
+        assert not bad.ok
+        assert "result_digest_mismatch" in bad.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+        diff_ok = diff.replace(f"..{'d' * 40}", f"..{new_hex}")
+        good = await publish(db, fake_gitlab, run, bundle_for(diff_ok))
+        assert good.ok
+        (commit_call,) = fake_gitlab.calls_of("create_commit")
+        (action,) = commit_call[1][2]
+        assert action["content"] == expected

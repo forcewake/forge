@@ -7,6 +7,11 @@ from urllib.parse import quote
 
 import httpx
 
+from forge.gitlab.blob_reads import (
+    BlobReadResult,
+    blob_result_for_http_status,
+    decode_blob_content,
+)
 from forge.gitlab.schemas import (
     Diff,
     Discussion,
@@ -305,6 +310,31 @@ class GitLabClient:
             params={"ref": ref},
         )
         return RepositoryFile.model_validate(resp.json())
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> BlobReadResult:
+        """One AUTHORITATIVE blob read as a typed result (R14).
+
+        Unlike :meth:`get_file` — which raises and leaves every caller to
+        classify errors (the catch-all conflations R14 removed) — this
+        returns the provider-verified outcome: ONLY a GitLab 404 is
+        ``not_found``; 401/403 are ``forbidden``; any other API failure or
+        a transport-level timeout/network error is ``unavailable``; an
+        undecodable payload is ``incomplete``. Consumers key the
+        create-vs-update existence policy off this — a failed read must
+        never be able to forge "file does not exist".
+        """
+        try:
+            repo_file = await self.get_file(project_id, file_path, ref)
+        except GitLabAPIError as exc:
+            return blob_result_for_http_status(
+                exc.status_code,
+                f"gitlab api error {exc.status_code}: {exc.message[:200]}",
+            )
+        except httpx.HTTPError as exc:
+            return BlobReadResult.unavailable(f"gitlab transport error: {exc}")
+        return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)
 
     async def get_tree(
         self,

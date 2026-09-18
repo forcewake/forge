@@ -54,6 +54,7 @@ from urllib.parse import quote
 
 import httpx
 
+from forge.gitlab.blob_reads import BlobReadResult, decode_blob_content
 from forge.gitlab.events import UserInfo
 from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
 
@@ -497,6 +498,43 @@ class AzureDevOpsClient:
             if object_id:
                 return str(object_id)
         raise AzureDevOpsNotFoundError(404, f"branch head not found for {branch!r}")
+
+    async def list_commits(
+        self, project: str, repo: str, branch: str, top: int = 30
+    ) -> list[dict[str, Any]]:
+        """List commits on *branch*, newest first (the R11 probe read).
+
+        ``GET .../commits?searchCriteria.itemVersion.version=<branch>`` —
+        the branch-scoped listing the research doc §5.1 prescribes for
+        reconciling a lost push response. Returns client-normalized
+        ``{"commit_id", "comment", "parents"}`` dicts so the
+        publication-intent probe's matcher
+        (:func:`forge.durable.intents.commit_matches`) works identically
+        across providers.
+        """
+        params: dict[str, Any] = {
+            "searchCriteria.itemVersion.version": branch,
+            "searchCriteria.itemVersion.versionType": "branch",
+            "$top": top,
+        }
+        response = await self._get(
+            f"/{quote(project)}/_apis/git/repositories/{quote(repo)}/commits", params=params
+        )
+        data = response.json()
+        value = data.get("value") if isinstance(data, dict) else data
+        commits: list[dict[str, Any]] = []
+        for raw in value or []:
+            if not isinstance(raw, dict):
+                continue
+            parents = raw.get("parents") or raw.get("parentCommitIds") or []
+            commits.append(
+                {
+                    "commit_id": str(raw.get("commitId") or ""),
+                    "comment": str(raw.get("comment") or ""),
+                    "parents": [str(parent) for parent in parents],
+                }
+            )
+        return commits
 
     async def get_item(
         self,
@@ -1321,6 +1359,54 @@ class AzureRepositoryReader:
             return base64.b64decode(repo_file.content).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             raise AzureDevOpsError(200, f"{file_path!r}: undecodable content") from exc
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> BlobReadResult:
+        """One AUTHORITATIVE blob read as a typed result (R14).
+
+        Provider-verified outcome for the create-vs-update existence
+        policy: a DevOps 404 is ``not_found`` (NOTE §1.4: Azure conflates
+        "missing OR no permission" in 404 — it is still the provider's only
+        absence signal, and everything ambiguous AROUND it stays honest:
+        401/HTML-envelope auth errors are ``forbidden``, throttles/5xx/
+        transport errors ``unavailable``, and the reader's own
+        no-inline-content and symlink refusals ``incomplete``). Strict
+        UTF-8 decode — never ``errors="replace"``-mangled.
+        """
+        try:
+            repo_file = await self.get_file(project_id, file_path, ref)
+        except AzureDevOpsRateLimited as exc:
+            return BlobReadResult.unavailable(
+                f"{file_path!r} at {ref!r}: throttled "
+                f"(retry after {exc.retry_after}s): {exc.message[:200]}"
+            )
+        except AzureDevOpsAuthError as exc:
+            return BlobReadResult.forbidden(
+                f"azure devops auth error {exc.status_code}: {exc.message[:200]}"
+            )
+        except AzureDevOpsError as exc:
+            status = exc.status_code
+            if status == 404:
+                return BlobReadResult.not_found(
+                    f"azure devops 404: {exc.message[:200]}"
+                )
+            if status in (200, 422):
+                # The reader's own honesty refusals (no inline content,
+                # symlink) — the path exists but delivered nothing usable.
+                return BlobReadResult.incomplete(
+                    f"{file_path!r} at {ref!r}: {exc.message[:200]}"
+                )
+            if status in (401, 403):
+                return BlobReadResult.forbidden(
+                    f"azure devops error {status}: {exc.message[:200]}"
+                )
+            return BlobReadResult.unavailable(
+                f"azure devops error {status}: {exc.message[:200]}"
+            )
+        except httpx.HTTPError as exc:
+            return BlobReadResult.unavailable(f"azure devops transport error: {exc}")
+        return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)
 
     async def get_tree(
         self,

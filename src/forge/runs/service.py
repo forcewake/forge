@@ -47,7 +47,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from forge.config import ForgeConfig, Settings
+from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     TRANSITION_EVENT_TYPE,
     ActionLog,
@@ -67,7 +67,15 @@ from forge.durable import (
     is_valid,
     record_approval,
 )
-from forge.durable.budgets import BudgetGuard
+from forge.durable.budgets import (
+    BUDGET_EXHAUSTED,
+    BudgetGuard,
+    BudgetLimits,
+    budget_block_reason,
+    open_budget,
+    reconcile_harness_receipt,
+    resolve_budget_limits,
+)
 from forge.durable.controller import TERMINAL_STATUSES
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.factory.llm import LLMClient, LLMError, LLMResponseError
@@ -179,6 +187,21 @@ _RETRY_RE = re.compile(r"/retry(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 REPAIR_LOG_PER_JOB_CHARS = 4000
 REPAIR_CONTEXT_MAX_CHARS = 12000
 REPAIR_MAX_FAILED_JOBS = 3
+
+
+def budget_enforcement_for_backend(backend: str) -> str:
+    """The honest enforcement level of a lane for its frozen budget (R13 §4).
+
+    ``full`` — every model dispatch of the lane is intercepted before the
+    provider is contacted (the builtin lane: each call reserves through the
+    :class:`~forge.durable.budgets.BudgetGuard`, so calls, tokens AND the
+    wall clock are enforced). ``partial`` — CLI harness lanes: forge makes no
+    per-call interception (the model calls happen inside the CI job), so only
+    the wall clock and the episode count are enforced at dispatch/poll time;
+    call/token ceilings are reconciled after the fact from the artifact's
+    usage receipt and are never claimed as enforced.
+    """
+    return "partial" if is_harness_backend(backend) else "full"
 
 
 def forge_token(settings: Settings) -> str:
@@ -417,7 +440,25 @@ class RunService:
             )
             return run_id
 
-        # F22: bind the run's budget guard before the first paid call.
+        # F22/R13: the run's numeric budget is resolved and opened BEFORE the
+        # first paid call. The budget class comes from the harness decision
+        # (compiled at plan time, ADR-0023 §2 — it does not depend on the
+        # plan text), the class names a numeric profile resolved AT FREEZE
+        # TIME, and the ceilings freeze into the RunSpec below. Opening the
+        # row first is what makes the PLANNER itself reserve; without a
+        # finite profile nothing is opened (unlimited run, byte-compatible).
+        harness_selection = self._compile_harness_selection()
+        budget_limits = self._budget_limits_for_class(harness_selection.budget_class)
+        if budget_limits is not None:
+            async with self._session_factory() as session:
+                await open_budget(
+                    session,
+                    run_id=run_id,
+                    wallclock_s=budget_limits.wallclock_s,
+                    max_calls=budget_limits.max_calls,
+                    max_tokens=budget_limits.max_tokens,
+                )
+                await session.commit()
         await self._apply_run_budget(run_id)
         # v0.7 monorepo path scoping: the project's `.forge.yml`
         # ``implement.paths`` globs are resolved BEFORE the plan — they shape
@@ -444,16 +485,23 @@ class RunService:
                 path_scope=path_scope or None,
             )
         except (LLMError, LLMResponseError) as exc:
-            await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
+            # R13: a budget refusal never contacts the provider and never
+            # unblocks by retrying the same run — classify it visibly as
+            # blocked(budget_exhausted), not a planning failure.
+            if str(exc) == BUDGET_EXHAUSTED:
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"{BUDGET_EXHAUSTED}: planner refused — run budget cannot grant a call",
+                )
+            else:
+                await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
             raise
         digest = plan_digest_of(plan)
         task_digest = task_digest_of(issue_title, issue_description)
         now = datetime.now(timezone.utc)
         plan_summary = self._plan_summary(plan)
         plan_files_hint = self._plan_files_hint()
-        # ADR-0023 §2: the harness decision is compiled at plan time and
-        # frozen into the RunSpec — part of what the gate approves.
-        harness_selection = self._compile_harness_selection()
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -475,6 +523,22 @@ class RunService:
                         "summary": plan_summary,
                         "files_hint": plan_files_hint,
                     },
+                    # R13 §4: the honest enforcement record — what the frozen
+                    # budget actually enforces on THIS lane, and which ceilings
+                    # ride in the spec. Absent when no finite profile applies.
+                    **(
+                        {
+                            "budget": {
+                                "budget_class": harness_selection.budget_class,
+                                "enforcement": budget_enforcement_for_backend(self._backend_name()),
+                                "max_calls": budget_limits.max_calls,
+                                "max_tokens": budget_limits.max_tokens,
+                                "wallclock_s": budget_limits.wallclock_s,
+                            }
+                        }
+                        if budget_limits is not None
+                        else {}
+                    ),
                 },
             )
             # F14/R04 (ADR-0018 §1): freeze the EXECUTABLE RunSpec at plan
@@ -557,7 +621,8 @@ class RunService:
         """Bind the run's budget guard to the factory agents (F22).
 
         Agents are shared across the service instance; the budget lives in
-        the database and is re-loaded per execution leg.
+        the database and is re-loaded per execution leg. ``None`` (no budget
+        row — unlimited run) clears any previous binding.
         """
         from forge.durable import load_budget_guard
 
@@ -566,6 +631,26 @@ class RunService:
             client = getattr(agent, "_llm", None)
             if client is not None and hasattr(client, "set_budget"):
                 client.set_budget(guard)
+
+    def _budget_profiles(self) -> dict[str, dict[str, Any]]:
+        """The configured numeric budget profiles (R13): forge.yml first
+        (``budget_profiles:``), else the FORGE_BUDGET_PROFILES JSON — the
+        same precedence as the harness preference."""
+        from_config = self._config.budget_profiles
+        if from_config:
+            return from_config
+        return parse_budget_profiles(
+            str(getattr(self._settings, "FORGE_BUDGET_PROFILES", "") or "")
+        )
+
+    def _budget_limits_for_class(self, budget_class: str) -> BudgetLimits | None:
+        """The numeric ceilings of *budget_class*'s profile, or ``None``.
+
+        Thin wrapper over :func:`forge.durable.budgets.resolve_budget_limits`
+        (unknown classes degrade to ``standard``; nothing configured → no
+        ceilings).
+        """
+        return resolve_budget_limits(self._budget_profiles(), budget_class)
 
     async def _find_active_run(self, project_id: int, issue_iid: int | None) -> FlowRun | None:
         """The latest non-terminal run for the issue, or None.
@@ -1327,6 +1412,11 @@ class RunService:
         left behind are not re-entered — the walk continues from where the
         durable state says it is (ADR-0017 §3).
         """
+        # F22/R13: (re)bind this run's budget guard before any paid call —
+        # the guard lives per run in the database, and the service instance
+        # handling this leg may be fresh (the worker builds one per command),
+        # so the start_run binding cannot be relied on here.
+        await self._apply_run_budget(run_id)
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             # F02/R06: ONE context owns this attempt's bases — the implementer
@@ -1417,7 +1507,17 @@ class RunService:
                 )
                 return
             except (LLMError, LLMResponseError) as exc:
-                await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
+                # R13: a budget refusal means the provider was never
+                # contacted and no in-run retry can succeed — classify it
+                # blocked(budget_exhausted), not a proposal failure.
+                if str(exc) == BUDGET_EXHAUSTED:
+                    await self._to_terminal(
+                        run_id,
+                        FlowStatus.BLOCKED,
+                        f"{BUDGET_EXHAUSTED}: proposer refused — run budget cannot grant a call",
+                    )
+                else:
+                    await self._to_terminal(run_id, FlowStatus.FAILED, f"proposal_failed: {exc}")
                 return
             # R06: persist the attempt (number, manifest, previous candidate)
             # the moment it materializes — the durable record a resumed walk
@@ -1493,6 +1593,14 @@ class RunService:
                     changeset,
                     start_ref=attempt.attempt_base,
                     expected_head=attempt.attempt_base,
+                    # R11 intent identity: the writer journals the durable
+                    # publication intent (stable operation key + expected
+                    # parent) BEFORE the HTTP effect; an open intent from a
+                    # crashed attempt is probed-and-adopted, never
+                    # duplicated and never misread as branch drift.
+                    provider="gitlab",
+                    repo=str(project_id),
+                    commit_cycle=attempt.cycle,
                 )
             except GitLabAPIError as exc:
                 await self._to_terminal(run_id, FlowStatus.FAILED, f"commit_failed: {exc}")
@@ -1591,6 +1699,13 @@ class RunService:
         fallback the run is already ``waiting_harness`` — it stays parked,
         only the handle moves (ADR-0004 has no waiting_harness self-loop).
         """
+        # R13: an exhausted budget (or a spent wall clock) starts no new
+        # harness episode — the dispatch is the only enforcement point a
+        # non-intercepted lane has, so it is checked before any I/O.
+        block = await self._budget_episode_block(run_id)
+        if block is not None:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, block)
+            return
         # R04: the brief, the task title and the dispatched driver come from
         # the digest-verified executable spec — never live settings and never
         # a live issue re-read. A missing/tampered spec blocks the run.
@@ -1719,6 +1834,27 @@ class RunService:
         """The configured implementer backend (ADR-0015), frozen per run."""
         raw = getattr(self._settings, "FORGE_IMPLEMENTER_BACKEND", "builtin") or "builtin"
         return str(raw).strip()
+
+    async def _budget_episode_block(
+        self, run_id: str, *, now: datetime | None = None
+    ) -> str | None:
+        """R13: why no new work may start against this run's budget, or None.
+
+        The dispatch-time gate for the harness lanes: their model calls
+        happen inside a CI job forge cannot intercept, so the wall clock and
+        the start of new episodes are enforced HERE — at the dispatch/poll
+        boundary (on the builtin lane the per-call reservations make the same
+        refusal happen inside the LLM client). An exhausted budget, or one
+        whose wall clock has run out, starts no further episode and parks the
+        run ``blocked(budget_exhausted)``.
+        """
+        async with self._session_factory() as session:
+            block = await budget_block_reason(session, run_id, now=now)
+            if block is not None:
+                # A wall-clock expiry flips the budget exhausted inside this
+                # session — commit so the stop is durable and visible.
+                await session.commit()
+            return block
 
     def _harness_backend(self, project_id: int, *, driver: str | None = None):
         """Construct the ci_harness backend for *project_id* (ADR-0015).
@@ -2139,6 +2275,11 @@ class RunService:
         """
         await self._transition(run_id, FlowStatus.REVIEWING, reason="readonly review of candidate")
 
+        # F22/R13: the reviewer's model calls reserve against the run budget
+        # too — the leg rebinds the guard itself (the serving instance may be
+        # fresh; see _advance_proposal).
+        await self._apply_run_budget(run_id)
+
         plan_summary, _ = await self._read_plan_evidence(run_id)
         try:
             review = await self._reviewer.review(
@@ -2150,7 +2291,16 @@ class RunService:
                 flow_run_id=run_id,
             )
         except (LLMError, LLMResponseError, GitLabAPIError) as exc:
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
+            # R13: a budget refusal is not a review failure — the reviewer
+            # never ran, and the run parks visibly blocked(budget_exhausted).
+            if str(exc) == BUDGET_EXHAUSTED:
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"{BUDGET_EXHAUSTED}: reviewer refused — run budget cannot grant a call",
+                )
+            else:
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"review_failed: {exc}")
             return
 
         verdict = str(getattr(review, "verdict", ""))
@@ -2485,6 +2635,15 @@ class RunService:
             )
             return
 
+        # R13: the run budget's wall clock is the second LOCAL deadline —
+        # past it the run parks blocked(budget_exhausted) without a single
+        # provider call (the same deadline-before-I/O posture as R17), so a
+        # budgeted run can never outlive its frozen wall clock on polls.
+        block = await self._budget_episode_block(run_id, now=now)
+        if block is not None:
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, block)
+            return
+
         try:
             backend = self._harness_backend(project_id)
         except ValueError as exc:
@@ -2572,10 +2731,9 @@ class RunService:
         ``action_log`` and the run stays ``waiting_harness`` on the next
         leg's handle.
 
-        TODO(F22): cancel + re-reserve the run budget per switch once
-        harness legs reserve at dispatch — today harness runs make no
-        forge-side model calls and only reconcile receipts
-        (``_record_harness_usage``), so there is no reservation to move.
+        R13: the re-dispatch below is budget-gated — ``_advance_harness``
+        refuses to start the next leg against an exhausted/spent wall clock
+        and parks the run ``blocked(budget_exhausted)`` instead.
         """
         if not bool(getattr(self._settings, "FORGE_HARNESS_FALLBACK", False)):
             return False
@@ -2759,13 +2917,19 @@ class RunService:
         )
 
     async def _record_harness_usage(self, run_id: str, bundle) -> None:
-        """F22 lite: one ``llm_calls`` row per published harness candidate.
+        """F22 lite + R13: record one harness episode's usage receipt.
 
         The receipt comes from the parsed event stream (candidate.meta.json);
-        unknown counts stay NULL — never zero, never fabricated.
+        unknown counts stay NULL — never zero, never fabricated. The same
+        receipt also reconciles the run budget as exactly one opaque call,
+        keyed by the episode (the dispatched harness pipeline) so a repeated
+        artifact poll or a crash between adopt and record cannot
+        double-consume.
         """
         usage = bundle.usage
         async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            pipeline_id = int(((run.evidence or {}).get("harness") or {}).get("pipeline_id") or 0)
             session.add(
                 LLMCall(
                     flow_run_id=run_id,
@@ -2783,6 +2947,12 @@ class RunService:
                     driver=usage.driver if usage is not None else None,
                     completeness=usage.completeness if usage is not None else "unknown",
                 )
+            )
+            await reconcile_harness_receipt(
+                session,
+                run_id,
+                usage,
+                dedupe_key=(f"{run_id}:{pipeline_id}" if pipeline_id else None),
             )
             await session.commit()
 
@@ -2964,6 +3134,13 @@ class RunService:
         decision (selected driver, fallback tail, budget class, reason).
         """
         selection = harness_selection or self._compile_harness_selection()
+        backend = self._backend_name()
+        # R13: the budget class's numeric profile is resolved AT FREEZE TIME
+        # and stored IN the spec — the gate approves exactly these ceilings
+        # and the honest enforcement level of this lane. ``None`` (no finite
+        # profile) freezes no ceiling fields at all (byte-compatible).
+        limits = self._budget_limits_for_class(selection.budget_class)
+        enforcement = budget_enforcement_for_backend(backend) if limits is not None else ""
         spec = ExecutableRunSpec.freeze(
             provider="gitlab",
             project_id=project_id,
@@ -2978,7 +3155,7 @@ class RunService:
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
             allowed_paths=allowed_paths or [],
-            backend=self._backend_name(),
+            backend=backend,
             harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
             target_branch=self._target_branch(),
             harness_driver=selection.harness,
@@ -2989,6 +3166,10 @@ class RunService:
             harness_timeout=int(
                 getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800
             ),
+            budget_max_calls=limits.max_calls if limits is not None else None,
+            budget_max_tokens=limits.max_tokens if limits is not None else None,
+            budget_wallclock_s=limits.wallclock_s if limits is not None else None,
+            budget_enforcement=enforcement,
         )
         return spec.to_document()
 

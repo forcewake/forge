@@ -24,26 +24,32 @@ budget instead of reading as spendable headroom. A refusal to grant a
 reservation marks the budget ``exhausted`` — a budget that cannot satisfy a
 reservation must not keep accepting work.
 
-Wiring (ADR-0018 §5): RunService opens the budget when the RunSpec carries
-limits — :func:`open_budget_from_spec` in the same session that freezes the
-spec at plan acceptance — and passes a :class:`BudgetGuard` (built with
-:func:`load_budget_guard`) to the planner/implementer/reviewer ``LLMClient``
-as its optional ``budget`` handle. The harness path reconciles the candidate
-meta usage receipt with :func:`reconcile_harness_receipt`.
+Wiring (ADR-0018 §5, R13): RunService opens the budget when the RunSpec
+carries limits — :func:`open_budget_from_spec` in the same session that
+freezes the spec at plan acceptance (the standard path opens it BEFORE the
+first paid call, from the budget class's numeric profile resolved at freeze
+time, so the planner itself reserves) — and passes a :class:`BudgetGuard`
+(built with :func:`load_budget_guard`) to the planner/implementer/reviewer
+``LLMClient`` as its optional ``budget`` handle. The harness path reconciles
+the candidate meta usage receipt with :func:`reconcile_harness_receipt`
+(keyed by episode so repeated artifact polls cannot double-consume), and its
+episode dispatches are gated by :func:`budget_block_reason` — wall clock and
+episode count are the only axes a non-intercepted lane can honestly enforce.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from forge.durable.controller import RunNotFound
+from forge.durable.controller import RunNotFound, as_aware_utc
 from forge.durable.models import BudgetReservation, FlowRun, RunBudget
 
 logger = logging.getLogger(__name__)
@@ -51,6 +57,10 @@ logger = logging.getLogger(__name__)
 #: The refusal reason surfaced to callers (LLMClient raises
 #: ``LLMError("budget_exhausted")`` without contacting the provider).
 BUDGET_EXHAUSTED = "budget_exhausted"
+
+#: The budget profile class every unknown budget class degrades to (R13):
+#: the same fallback rule as the harness selection's ``budget_class``.
+DEFAULT_BUDGET_CLASS = "standard"
 
 
 @dataclass(frozen=True)
@@ -140,6 +150,43 @@ def budget_limits_from_spec(spec_document: object) -> BudgetLimits | None:
     return limits
 
 
+def resolve_budget_limits(
+    profiles: dict[str, dict[str, Any]], budget_class: str
+) -> BudgetLimits | None:
+    """Resolve a budget class's numeric ceilings from the configured profiles
+    (R13): the profile *name* the run's frozen ``budget_class`` points at,
+    with unknown names degrading to the ``"standard"`` profile — never to a
+    guess. ``None`` when nothing usable is configured or every axis of the
+    resolved profile is unset: the run is then unlimited and no budget row is
+    opened. The caller freezes the result into the RunSpec at plan acceptance,
+    so a later config change can never move an approved budget.
+    """
+    profile = profiles.get(budget_class) or profiles.get(DEFAULT_BUDGET_CLASS)
+    if not isinstance(profile, dict):
+        return None
+    limits = BudgetLimits(
+        wallclock_s=_limit_or_none(profile.get("wallclock_s")),
+        max_calls=_limit_or_none(profile.get("max_calls")),
+        max_tokens=_limit_or_none(profile.get("max_tokens")),
+    )
+    if limits == BudgetLimits():
+        return None
+    return limits
+
+
+def wallclock_deadline(budget: RunBudget) -> datetime | None:
+    """The budget's absolute wall-clock deadline, or ``None`` when unlimited.
+
+    Anchored at the budget row's creation (run start — plan acceptance), so
+    the deadline is durable and every later check (reservation refusals,
+    episode gates, reconciler polls) reads the SAME clock.
+    """
+    seconds = _limit_or_none(budget.wallclock_s)
+    if seconds is None or budget.created_at is None:
+        return None
+    return as_aware_utc(budget.created_at) + timedelta(seconds=seconds)
+
+
 async def budget_for_run(session: AsyncSession, run_id: str) -> RunBudget | None:
     """The run's budget row, whatever its status, or ``None``."""
     return (
@@ -201,12 +248,15 @@ async def open_budget_from_spec(
 
     The plan-acceptance hook (ADR-0018 §5): call in the same session that
     freezes the RunSpec. Returns ``None`` (and opens nothing) when the spec
-    declares no F22 budget dimensions.
+    declares no F22 budget dimensions. R13: the row may already exist — the
+    standard path opens it BEFORE the first paid call so the planner itself
+    reserves — in which case the frozen limits stand and only the missing
+    ``spec_digest`` provenance is backfilled (limits are never moved).
     """
     limits = budget_limits_from_spec(spec_document)
     if limits is None:
         return None
-    return await open_budget(
+    budget = await open_budget(
         session,
         run_id=run_id,
         spec_digest=spec_digest,
@@ -214,6 +264,14 @@ async def open_budget_from_spec(
         max_calls=limits.max_calls,
         max_tokens=limits.max_tokens,
     )
+    if spec_digest is not None and not budget.spec_digest:
+        await session.execute(
+            update(RunBudget)
+            .where(RunBudget.id == budget.id, RunBudget.spec_digest.is_(None))
+            .values(spec_digest=spec_digest)
+        )
+        await session.flush()
+    return budget
 
 
 async def reserve(
@@ -236,6 +294,12 @@ async def reserve(
     cannot serve the standard reservation shape; ``closed``/``exhausted``
     budgets just refuse).
 
+    R13 wall clock: a budget whose ``created_at + wallclock_s`` deadline has
+    passed refuses every reservation too — and is durably exhausted, so the
+    refusal is permanent and visible. This is what makes ``wallclock_s``
+    *enforced* on interception lanes (every model dispatch passes through
+    here before the provider is contacted), not merely recorded.
+
     Amounts must be whole non-negative ints and a hold must cover at least
     one call — every dispatch consumes one, so a zero-call hold
     under-reserves it by policy — otherwise ``ValueError`` is raised before
@@ -248,6 +312,12 @@ async def reserve(
     tokens = _usage_amount(tokens, "tokens")
     if calls < 1:
         raise ValueError("budget calls must reserve at least one call")
+    deadline = wallclock_deadline(budget)
+    if deadline is not None and _utcnow() > deadline:
+        # Past the wall clock nothing is grantable any more — exhaust
+        # durably so the stop is visible in every later read.
+        await _exhaust_open(session, budget.id)
+        return None
     granted = await session.execute(
         update(RunBudget)
         .where(
@@ -387,6 +457,74 @@ async def close_budget(session: AsyncSession, budget: RunBudget) -> bool:
     return result.rowcount == 1  # type: ignore[attr-defined]
 
 
+async def budget_block_reason(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Why a NEW dispatch/episode must not start against this run, or ``None``.
+
+    The dispatch-time gate for lanes whose work does not flow through
+    :class:`BudgetGuard` reservations — the harness lanes (R13): their model
+    calls happen inside a CI job forge cannot intercept, so the *dispatch*
+    is the enforcement point. An ``exhausted`` budget blocks every new
+    episode, and a wall clock past its deadline is durably exhausted first so
+    the stop is visible. ``None`` for runs without a budget (unlimited) and
+    for ``closed`` budgets (terminal-run bookkeeping — the same posture as
+    :func:`load_budget_guard`, which hands out no guard for a finished run).
+    """
+    budget = await budget_for_run(session, run_id)
+    if budget is None or budget.status == "closed":
+        return None
+    if budget.status == "exhausted":
+        return f"{BUDGET_EXHAUSTED}: run budget is exhausted — no further dispatch"
+    deadline = wallclock_deadline(budget)
+    if deadline is not None and as_aware_utc(now or _utcnow()) > deadline:
+        await _exhaust_open(session, budget.id)
+        return (
+            f"{BUDGET_EXHAUSTED}: wall clock budget of {budget.wallclock_s}s "
+            "is spent — no further dispatch"
+        )
+    return None
+
+
+def _receipt_claim_id(budget_id: str, dedupe_key: str) -> str:
+    """The deterministic primary key of a receipt's dedupe claim row."""
+    return hashlib.sha256(f"{budget_id}:{dedupe_key}".encode("utf-8")).hexdigest()[:32]
+
+
+async def _claim_receipt_key(session: AsyncSession, budget_id: str, dedupe_key: str) -> bool:
+    """Claim an idempotency key for a harness receipt; ``False`` = seen before.
+
+    The claim is an INSERT of a marker row into ``budget_reservations`` whose
+    PRIMARY KEY is derived from (budget, key) — a concurrent or repeated
+    reconcile of the same episode loses the insert race (SAVEPOINT rollback,
+    outer transaction intact) and is told so, which is what makes a repeated
+    artifact poll a no-op instead of a second consumption. The marker is
+    added INSIDE the savepoint: on a lost race its rollback expunges the
+    pending row, leaving the outer transaction flushable. The marker shape
+    (0/0 hold, ``released=True``) never comes from :func:`reserve`, which
+    always holds at least one call and starts unreleased.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(
+                BudgetReservation(
+                    id=_receipt_claim_id(budget_id, dedupe_key),
+                    run_budget_id=budget_id,
+                    attempt_id=(f"harness-receipt:{dedupe_key}"[:100] if dedupe_key else None),
+                    reserved_calls=0,
+                    reserved_tokens=0,
+                    released=True,
+                )
+            )
+            await session.flush()
+    except IntegrityError:
+        return False
+    return True
+
+
 async def _exhaust_open(session: AsyncSession, budget_id: str) -> None:
     """Durably flip an ``open`` budget to ``exhausted`` (any other status stands).
 
@@ -432,6 +570,8 @@ async def reconcile_harness_receipt(
     session: AsyncSession,
     run_id: str,
     usage: Any,
+    *,
+    dedupe_key: str | None = None,
 ) -> RunBudget | None:
     """Reconcile a harness candidate's usage receipt against the run budget.
 
@@ -445,10 +585,18 @@ async def reconcile_harness_receipt(
     ledger row the caller writes. Actuals are recorded on ``exhausted``
     budgets too; only a ``closed`` budget ignores receipts. Returns the
     refreshed budget, or ``None`` when the run has none (or it is closed).
+
+    R13 idempotency: *dedupe_key* names the artifact's episode (e.g. the
+    harness pipeline id) — a repeated poll of the SAME episode claims the
+    same key and is a no-op, so a reconciler crash-retry or re-delivered
+    artifact cannot double-consume. ``None`` keeps the legacy count-always
+    behavior for callers with no episode identity.
     """
     budget = await budget_for_run(session, run_id)
     if budget is None or budget.status == "closed":
         return None
+    if dedupe_key is not None and not await _claim_receipt_key(session, budget.id, dedupe_key):
+        return budget
     tokens = _known_token_total(usage)
     recorded = await session.execute(
         update(RunBudget)

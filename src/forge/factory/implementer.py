@@ -9,6 +9,14 @@ apply, ever (ADR-0001).
 
 Authority is never derived from the proposal: the branch and commit message
 are pinned here from the trusted run identity, whatever the model returns.
+
+R14: authoritative evidence is never conflated. The base reads behind
+materialization go through :meth:`RepositoryReader.read_blob` typed results
+(:mod:`forge.gitlab.blob_reads`) — only a provider-confirmed ``not_found``
+proves a path absent (create allowed); ``forbidden`` / ``unavailable`` /
+``incomplete`` raise :class:`AuthoritativeReadError` so the run blocks with
+``authoritative_read_failed:`` evidence instead of a failed read silently
+flipping an update into a create.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from forge.repository.changeset import MaterializationError, materialize
 if TYPE_CHECKING:
     from forge.config import Settings
     from forge.durable import FlowRun
+    from forge.gitlab.blob_reads import BlobReadResult
     from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
     from forge.repository.changeset import ChangeSet
 
@@ -71,17 +80,39 @@ _SYSTEM_PROMPT = (
 )
 
 
+class AuthoritativeReadError(MaterializationError):
+    """An authoritative base read failed without a provider-confirmed absence (R14).
+
+    A 403, a timeout, or an undecodable payload is NOT evidence that a file
+    is missing — treating it as one can flip an update into a create.
+    Subclasses :class:`MaterializationError` so every caller that blocks a
+    run on an inapplicable proposal blocks on this too, with the
+    ``authoritative_read_failed:`` marker naming the real cause. ``detail``
+    carries the read status and provider fragment for the run's evidence.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"authoritative_read_failed: {detail}")
+
+
 class RepositoryReader(Protocol):
     """The authoritative read surface the implementer needs (ADR-0001/0019).
 
-    :class:`~forge.gitlab.client.GitLabClient` and
-    :class:`~forge.integrations.github.GitHubRepositoryReader` both satisfy it
-    structurally — the implementer is provider-agnostic (GitLab or GitHub).
+    :class:`~forge.gitlab.client.GitLabClient`,
+    :class:`~forge.integrations.github.GitHubRepositoryReader` and
+    :class:`~forge.integrations.azure.AzureRepositoryReader` all satisfy it
+    structurally — the implementer is provider-agnostic (GitLab, GitHub or
+    Azure DevOps).
     """
 
     async def get_file(
         self, project_id: int, file_path: str, ref: str = "HEAD"
     ) -> RepositoryFile: ...
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> BlobReadResult: ...
 
     async def get_tree(
         self, project_id: int, path: str = "", ref: str = "HEAD", recursive: bool = False
@@ -225,19 +256,26 @@ class LLMImplementer:
         :data:`FORGE_MATERIALIZE_MAX_FILE_CHARS` safety cap raises
         :class:`MaterializationError` instead.
 
-        Paths that do not exist in the snapshot are simply absent from the
-        result — materialize treats that as "create is allowed / update or
-        delete is impossible".
+        R14: a path is treated as absent ONLY on a provider-confirmed
+        ``not_found`` (materialize then treats it as "create is allowed /
+        update or delete is impossible"). ``forbidden``, ``unavailable``
+        and ``incomplete`` reads raise :class:`AuthoritativeReadError` —
+        the caller blocks the run with the ``authoritative_read_failed``
+        marker instead of letting a failed read flip an update into a
+        create.
         """
         unique = list(dict.fromkeys(touched_paths))
         contents: dict[str, str] = {}
         for path in unique:
-            try:
-                repo_file = await self._gitlab.get_file(project_id, path, ref=base_sha)
-            except Exception:
-                logger.info("File %r not readable at %s — skipped", path, base_sha[:8])
+            result = await self._gitlab.read_blob(project_id, path, ref=base_sha)
+            if result.confirmed_absent:
                 continue
-            text = _decode(repo_file.content, repo_file.encoding)
+            if not result.usable:
+                raise AuthoritativeReadError(
+                    f"{path} at {base_sha[:8]} read {result.status}: "
+                    f"{result.detail or 'no detail'}"
+                )
+            text = result.text()
             if len(text) > FORGE_MATERIALIZE_MAX_FILE_CHARS:
                 raise MaterializationError(
                     f"file {path!r} is {len(text)} chars at {base_sha[:8]}, over the "
@@ -255,6 +293,12 @@ class LLMImplementer:
         per_file_chars: int = IMPLEMENTER_MAX_FILE_CHARS,
         max_files: int = IMPLEMENTER_MAX_FILES,
     ) -> dict[str, str]:
+        """Prompt-evidence reads (bounded, lenient) — NOT the authoritative base.
+
+        A failed read here only shrinks what the model sees; it can never
+        forge an existence fact, because materialization runs strictly
+        against :meth:`_authoritative_contents` (R14).
+        """
         contents: dict[str, str] = {}
         for path in paths[:max_files]:
             try:
@@ -351,7 +395,14 @@ def _select_evidence_files(
 
 
 def _decode(raw_content: str, encoding: str | None = None) -> str:
-    """Decode a GitLab repository-file payload to text."""
+    """Decode a GitLab repository-file payload to text.
+
+    EVIDENCE-path decoder only (prompt display, capped and truncated):
+    undecodable bytes degrade to replacement characters there. The
+    AUTHORITATIVE path uses :func:`forge.gitlab.blob_reads.decode_blob_content`,
+    which rejects invalid UTF-8 as ``incomplete`` instead of mangling it
+    (R14).
+    """
     if encoding == "base64":
         return base64.b64decode(raw_content).decode("utf-8", errors="replace")
     # GitLab serves text files base64-encoded by default; the schema does not
@@ -363,6 +414,7 @@ def _decode(raw_content: str, encoding: str | None = None) -> str:
 
 
 __all__ = [
+    "AuthoritativeReadError",
     "FORGE_MATERIALIZE_MAX_FILE_CHARS",
     "IMPLEMENTER_MAX_INPUT_CHARS",
     "IMPLEMENTER_MAX_FILES",

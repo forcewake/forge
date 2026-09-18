@@ -28,6 +28,10 @@ class FakeGitHub:
     def __init__(self) -> None:
         # full_name -> branch -> head sha
         self.heads: dict[str, dict[str, str]] = {}
+        # full_name -> branch -> [commit dicts newest-first] — the R11 probe
+        # surface (sha / message / parent_ids), appended by
+        # create_commit_on_branch and seed_commit.
+        self.commits: dict[str, dict[str, list[dict]]] = {}
         # full_name -> path -> text content (single snapshot, like FakeGitLab)
         self.files: dict[str, dict[str, str]] = {}
         # full_name -> issue number -> issue dict
@@ -109,6 +113,20 @@ class FakeGitHub:
     def seed_workflow_runs(self, runs: list[dict]) -> None:
         self.workflow_runs.extend(runs)
 
+    def seed_commit(
+        self,
+        full_name: str,
+        branch: str,
+        sha: str,
+        message: str,
+        parents: list[str] | None = None,
+    ) -> None:
+        """Record a commit on *branch* and move its head there (probe tests)."""
+        self.commits.setdefault(full_name, {}).setdefault(branch, []).insert(
+            0, {"sha": sha, "message": message, "parent_ids": list(parents or [])}
+        )
+        self.heads.setdefault(full_name, {})[branch] = sha
+
     # -- refs / branches --------------------------------------------------------
 
     async def get_branch_head(self, owner: str, repo: str, branch: str) -> str:
@@ -163,11 +181,22 @@ class FakeGitHub:
             self.files.setdefault(full, {}).pop(path, None)
         new_oid = self._oid()
         self.heads.setdefault(full, {})[branch] = new_oid
+        self.commits.setdefault(full, {}).setdefault(branch, []).insert(
+            0, {"sha": new_oid, "message": headline, "parent_ids": [expected_head_oid]}
+        )
         return {
             "oid": new_oid,
             "url": f"https://github.test/{full}/commit/{new_oid}",
             "client_mutation_id": client_mutation_id,
         }
+
+    async def list_commits(
+        self, owner: str, repo: str, branch: str, per_page: int = 30
+    ) -> list[dict]:
+        self.calls.append(("list_commits", (owner, repo, branch, per_page)))
+        full = f"{owner}/{repo}"
+        commits = self.commits.get(full, {}).get(branch, [])
+        return [dict(commit) for commit in commits[:per_page]]
 
     # -- pull requests ----------------------------------------------------------------
 

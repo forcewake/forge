@@ -43,6 +43,11 @@ from urllib.parse import quote
 import httpx
 import jwt
 
+from forge.gitlab.blob_reads import (
+    BlobReadResult,
+    blob_result_for_http_status,
+    decode_blob_content,
+)
 from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
 
 logger = logging.getLogger(__name__)
@@ -546,6 +551,38 @@ class GitHubClient:
             json={"ref": f"refs/heads/{branch}", "sha": sha},
         )
         return dict(response.json())
+
+    async def list_commits(
+        self, owner: str, repo: str, branch: str, per_page: int = 30
+    ) -> list[dict[str, Any]]:
+        """List commits on *branch*, newest first (the R11 probe read).
+
+        ``GET /repos/{o}/{r}/commits?sha=<branch>`` — deliberately the
+        branch-scoped LIST, never ``/search/commits`` (which indexes only
+        the default branch, research §4.1). Returns client-normalized
+        ``{"sha", "message", "parent_ids"}`` dicts so the publication-intent
+        probe's matcher (:func:`forge.durable.intents.commit_matches`) works
+        identically across providers.
+        """
+        encoded = quote(branch, safe="/")
+        response = await self._get(
+            f"/repos/{owner}/{repo}/commits",
+            params={"sha": encoded, "per_page": per_page},
+        )
+        commits: list[dict[str, Any]] = []
+        for raw in response.json() or []:
+            if not isinstance(raw, dict):
+                continue
+            commit = raw.get("commit") or {}
+            parents = raw.get("parents") or []
+            commits.append(
+                {
+                    "sha": str(raw.get("sha") or ""),
+                    "message": str(commit.get("message") or ""),
+                    "parent_ids": [str(p.get("sha") or "") for p in parents if isinstance(p, dict)],
+                }
+            )
+        return commits
 
     # -- GraphQL: the publish write path ------------------------------------------
 
@@ -1212,6 +1249,34 @@ class GitHubRepositoryReader:
             return _b64_decode(repo_file.content)
         except (binascii.Error, ValueError) as exc:
             raise GitHubAPIError(200, f"{file_path!r}: undecodable base64 content") from exc
+
+    async def read_blob(
+        self, project_id: int, file_path: str, ref: str = "HEAD"
+    ) -> BlobReadResult:
+        """One AUTHORITATIVE blob read as a typed result (R14).
+
+        Provider-verified outcome for the create-vs-update existence
+        policy: ONLY a GitHub 404 is ``not_found``; 401/403 are
+        ``forbidden``; rate limits, timeouts, 5xx and other transport
+        failures are ``unavailable``; an undecodable payload is
+        ``incomplete`` (strict UTF-8 — never ``errors="replace"``-mangled).
+        A failed read must never be able to forge "file does not exist".
+        """
+        try:
+            repo_file = await self.get_file(project_id, file_path, ref)
+        except GitHubRateLimited as exc:
+            return BlobReadResult.unavailable(
+                f"{file_path!r} at {ref!r}: rate limited "
+                f"(retry after {exc.retry_after}s): {exc.message[:200]}"
+            )
+        except GitHubAPIError as exc:
+            return blob_result_for_http_status(
+                exc.status_code,
+                f"github api error {exc.status_code}: {exc.message[:200]}",
+            )
+        except httpx.HTTPError as exc:
+            return BlobReadResult.unavailable(f"github transport error: {exc}")
+        return decode_blob_content(repo_file.content, repo_file.encoding, path=file_path, ref=ref)
 
     async def get_tree(
         self,

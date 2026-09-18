@@ -30,6 +30,7 @@ from sqlalchemy.pool import StaticPool
 from forge.durable import FlowRun, RunBudget
 from forge.durable.budgets import (
     BudgetGuard,
+    budget_block_reason,
     budget_for_run,
     budget_limits_from_spec,
     close_budget,
@@ -645,6 +646,164 @@ class SimpleUsage:
         self.cached_input_tokens = cached_input_tokens
         self.output_tokens = output_tokens
         self.completeness = completeness
+
+
+async def age_budget(db, budget_id: str, *, seconds: int) -> None:
+    """Rewind a budget's created_at — the durable wall-clock anchor."""
+    from datetime import datetime, timedelta, timezone
+
+    async with db() as session:
+        budget = await session.get(RunBudget, budget_id)
+        assert budget is not None
+        budget.created_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        await session.commit()
+
+
+class TestWallclockEnforcement:
+    """R13: wallclock_s is ENFORCED at reservation time, not just recorded."""
+
+    async def test_expired_wallclock_refuses_and_exhausts(self, db):
+        budget = await openb(db, wallclock_s=100)
+        await age_budget(db, budget.id, seconds=200)
+
+        # A fresh snapshot (the guard reloads per reserve in real flows).
+        async with db() as session:
+            fresh = await budget_for_run(session, RUN_ID)
+            assert fresh is not None
+            assert await reserve(session, fresh, calls=1, tokens=0) is None
+            await session.commit()
+        after = await get_budget(db)
+        assert after.status == "exhausted"  # the stop is durable
+        assert after.consumed_calls == 0
+
+    async def test_live_wallclock_still_grants(self, db):
+        budget = await openb(db, wallclock_s=3600)
+        assert await session_reserve(db, budget, calls=1, tokens=0) is not None
+
+    async def test_exhausted_budget_refuses_further_reserves(self, db):
+        """The episode gate exhausted it; reserve must refuse cleanly too."""
+        budget = await openb(db, max_calls=1)
+        hold = await session_reserve(db, budget, calls=1, tokens=0)
+        assert hold is not None
+        async with db() as session:
+            fresh = await budget_for_run(session, RUN_ID)
+            assert fresh is not None
+            await reconcile_actual(session, hold, actual_calls=1)
+            await session.commit()
+        again = await openb(db, max_calls=1)  # re-load the exhausted row
+        assert again.status == "exhausted"
+        assert await session_reserve(db, again, calls=1, tokens=0) is None
+
+    async def test_guard_refuses_expired_wallclock_before_any_http(self, db, httpx_mock):
+        await openb(db, wallclock_s=10)
+        await age_budget(db, (await get_budget(db)).id, seconds=20)
+        guard = await load_budget_guard(db, RUN_ID)
+        assert guard is not None
+
+        client = LLMClient(settings=_settings(), session_factory=db, budget=guard)
+        with pytest.raises(LLMError, match="budget_exhausted"):
+            await client.complete(
+                tier="strong", system="s", user="u", role="planner", flow_run_id=RUN_ID
+            )
+        await client.close()
+        # The provider was never contacted.
+        assert httpx_mock.get_requests() == []
+        after = await guard.refresh()
+        assert after is not None and after.status == "exhausted"
+
+
+class TestBudgetBlockReason:
+    async def test_no_budget_and_open_budget_allow_work(self, db):
+        async with db() as session:
+            assert await budget_block_reason(session, RUN_ID) is None
+        await openb(db)
+        async with db() as session:
+            fresh = await budget_for_run(session, RUN_ID)
+            assert fresh is not None
+            assert await budget_block_reason(session, RUN_ID) is None
+
+    async def test_exhausted_budget_names_the_block(self, db):
+        budget = await openb(db, max_calls=1)
+        hold = await session_reserve(db, budget, calls=1, tokens=0)
+        assert hold is not None
+        async with db() as session:
+            fresh = await budget_for_run(session, RUN_ID)
+            assert fresh is not None
+            await reconcile_actual(session, hold, actual_calls=1)
+            await session.commit()
+            reason = await budget_block_reason(session, RUN_ID)
+        assert reason is not None and reason.startswith("budget_exhausted")
+
+    async def test_spent_wallclock_blocks_and_exhausts_durably(self, db):
+        await openb(db, wallclock_s=50)
+        await age_budget(db, (await get_budget(db)).id, seconds=100)
+        async with db() as session:
+            reason = await budget_block_reason(session, RUN_ID)
+            await session.commit()
+        assert reason is not None and "wall clock" in reason
+        assert (await get_budget(db)).status == "exhausted"
+
+    async def test_closed_budget_blocks_nothing(self, db):
+        """Closed = terminal-run bookkeeping; the gate has nothing to add."""
+        await openb(db, max_calls=1)
+        async with db() as session:
+            fresh = await budget_for_run(session, RUN_ID)
+            assert fresh is not None
+            await close_budget(session, fresh)
+            await session.commit()
+            assert await budget_block_reason(session, RUN_ID) is None
+
+
+class TestReceiptDedupe:
+    async def test_same_key_reconciles_once(self, db):
+        await openb(db, max_calls=5)
+        usage = SimpleUsage(input_tokens=21, output_tokens=7, completeness="aggregate")
+        async with db() as session:
+            first = await reconcile_harness_receipt(
+                session, RUN_ID, usage, dedupe_key="episode-1"
+            )
+            assert first is not None
+            assert first.consumed_calls == 1
+            again = await reconcile_harness_receipt(
+                session, RUN_ID, usage, dedupe_key="episode-1"
+            )
+            await session.commit()
+        assert again is not None
+        assert again.consumed_calls == 1  # the repeat was a no-op
+        assert again.consumed_tokens == 28
+
+    async def test_different_keys_reconcile_separately(self, db):
+        await openb(db, max_calls=5)
+        usage = SimpleUsage(input_tokens=10, completeness="aggregate")
+        async with db() as session:
+            await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="ep-1")
+            settled = await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="ep-2")
+            await session.commit()
+        assert settled is not None
+        assert settled.consumed_calls == 2
+
+    async def test_no_key_keeps_the_legacy_count_always_behavior(self, db):
+        await openb(db, max_calls=5)
+        usage = SimpleUsage(input_tokens=10, completeness="aggregate")
+        async with db() as session:
+            await reconcile_harness_receipt(session, RUN_ID, usage)
+            settled = await reconcile_harness_receipt(session, RUN_ID, usage)
+            await session.commit()
+        assert settled is not None
+        assert settled.consumed_calls == 2  # unkeyed callers keep today's shape
+
+    async def test_claims_survive_a_closed_then_reconciled_race(self, db):
+        """A claim consumed on a budget that is exhausted afterwards still
+        records actuals (the F22 posture), but never revives capacity."""
+        await openb(db, max_calls=1)
+        usage = SimpleUsage(input_tokens=10, completeness="aggregate")
+        async with db() as session:
+            await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="ep-1")
+            settled = await reconcile_harness_receipt(session, RUN_ID, usage, dedupe_key="ep-1")
+            await session.commit()
+        assert settled is not None
+        assert settled.status == "exhausted"  # 1 of 1 calls spent
+        assert settled.consumed_calls == 1
 
 
 class TestMigration009:

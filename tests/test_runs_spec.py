@@ -662,6 +662,92 @@ class TestExecutableRunSpec:
             ExecutableRunSpec.from_document(document)
 
 
+class TestSpecBudgetCeilings:
+    """R13: the numeric budget ceilings frozen into the budgets block —
+    additive fields, tolerant parse, honest enforcement level."""
+
+    @staticmethod
+    def make_spec(**overrides) -> ExecutableRunSpec:
+        values = dict(
+            provider="gitlab",
+            project_id=PROJECT_ID,
+            issue_iid=ISSUE_IID,
+            source_base_oid="base-sha-1",
+            task_title=ISSUE_TITLE,
+            task_description=ISSUE_DESC,
+            plan_summary="Plan summary.",
+            plan_files_hint=(),
+            plan_digest="a" * 64,
+            model_route="code",
+            policy_digest="b" * 64,
+            required_jobs=(),
+            backend="builtin",
+            harness_model="glm-5.3-flash[1m]",
+            target_branch="main",
+            harness_driver="claude-code",
+            commit_cycles=3,
+            harness_timeout=1800,
+            budget_max_calls=40,
+            budget_max_tokens=500000,
+            budget_wallclock_s=3600,
+            budget_enforcement="full",
+        )
+        values.update(overrides)
+        return ExecutableRunSpec.freeze(**values)
+
+    def test_ceilings_round_trip_through_the_document(self):
+        spec = self.make_spec()
+        document = spec.to_document()
+        assert document["budgets"] == {
+            "commit_cycles": 3,
+            "harness_timeout": 1800,
+            "max_calls": 40,
+            "max_tokens": 500000,
+            "wallclock_s": 3600,
+            "enforcement": "full",
+        }
+        assert ExecutableRunSpec.from_document(document) == spec
+
+    def test_absent_ceilings_parse_as_unlimited(self):
+        """Pre-R13 v3 documents carry none of the new keys — from_document is
+        tolerant of their absence and reads them as unlimited."""
+        legacy = self.make_spec(
+            budget_max_calls=None,
+            budget_max_tokens=None,
+            budget_wallclock_s=None,
+            budget_enforcement="",
+        )
+        document = legacy.to_document()
+        assert set(document["budgets"]) == {"commit_cycles", "harness_timeout"}
+        assert ExecutableRunSpec.from_document(document) == legacy
+
+    def test_partial_enforcement_is_a_valid_frozen_level(self):
+        spec = self.make_spec(budget_enforcement="partial")
+        assert ExecutableRunSpec.from_document(spec.to_document()).budget_enforcement == "partial"
+
+    def test_unknown_enforcement_level_is_refused(self):
+        with pytest.raises(SpecInvalid, match="budget_enforcement"):
+            self.make_spec(budget_enforcement="total")
+
+    def test_ceilings_require_an_enforcement_level(self):
+        """A ceiling without an honest enforcement claim is a spec defect —
+        never claim a cap you do not enforce, and never freeze one unnamed."""
+        with pytest.raises(SpecInvalid, match="enforcement"):
+            self.make_spec(budget_enforcement="")
+
+    def test_garbage_ceiling_is_spec_invalid(self):
+        document = self.make_spec().to_document()
+        document["budgets"]["max_calls"] = "lots"
+        with pytest.raises(SpecInvalid, match="unreadable"):
+            ExecutableRunSpec.from_document(document)
+
+    def test_non_positive_ceiling_is_spec_invalid(self):
+        document = self.make_spec().to_document()
+        document["budgets"]["wallclock_s"] = 0
+        with pytest.raises(SpecInvalid, match="unreadable"):
+            ExecutableRunSpec.from_document(document)
+
+
 class TestFrozenExecution:
     """R04: post-approval legs execute the FROZEN spec, never live config."""
 

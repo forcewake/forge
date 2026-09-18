@@ -42,6 +42,7 @@ import logging
 
 from forge.config import Settings
 from forge.durable import short_run_id
+from forge.durable.intents import commit_matches, message_with_marker
 from forge.factory.implementer import (
     FORGE_MATERIALIZE_MAX_FILE_CHARS,
     LLMImplementer,
@@ -111,6 +112,12 @@ class GitHubPublishOutcome:
     #: starts with ``candidate_invalid`` / ``changeset_invalid`` and ZERO
     #: commit-API calls were made.
     invalid: bool = False
+    #: R11: True when ``commit_oid`` is a PREVIOUS attempt's landed commit
+    #: found by the identity probe (exact operation marker + expected
+    #: parent) after a lost response or CAS refusal — adopted, never
+    #: re-posted. The caller records the intent as ``adopted`` (vs
+    #: ``committed``); the run advances identically.
+    adopted: bool = False
 
 
 class BaseContentReader(Protocol):
@@ -151,6 +158,7 @@ class GitHubPublishFlow:
         base_branch: str | None = None,
         expected_head: str | None = None,
         allowed_paths: list[str] | None = None,
+        operation_key: str | None = None,
     ) -> GitHubPublishOutcome:
         """Builtin-implementer leg: propose against the frozen base, publish.
 
@@ -167,6 +175,8 @@ class GitHubPublishFlow:
         (``validate_changeset`` / denied paths / size caps / the scope) and
         R08/R09 digest verification run BEFORE any commit-API call, and a
         violation is a blocked outcome with zero mutations (review R01).
+        ``operation_key`` is the durable publication intent's stable key
+        (R11) — stamped into the commit headline for identity probes.
         """
         if self._proposer is None:
             raise ValueError("publish_proposal requires a proposer")
@@ -193,6 +203,7 @@ class GitHubPublishFlow:
             base_branch=base,
             expected_head=expected_head,
             allowed_paths=allowed_paths,
+            operation_key=operation_key,
         )
 
     async def publish_changeset(
@@ -208,6 +219,7 @@ class GitHubPublishFlow:
         title: str | None = None,
         body: str | None = None,
         allowed_paths: list[str] | None = None,
+        operation_key: str | None = None,
     ) -> GitHubPublishOutcome:
         """Boundary-validate *changeset*, ensure the factory branch, commit.
 
@@ -223,7 +235,9 @@ class GitHubPublishFlow:
         proposal was materialized against it); otherwise the base head is
         read here. The branch is cut from that exact commit, and the commit
         mutation carries it as ``expectedHeadOid`` — any concurrent movement
-        fails the CAS and surfaces as a drift outcome.
+        fails the CAS and surfaces as a drift outcome (after the R11
+        identity probe: a previous attempt's landed commit is adopted).
+        ``operation_key`` is the durable publication intent's stable key.
         """
         base = base_branch or self._base_branch
         if expected_head is None:
@@ -241,6 +255,7 @@ class GitHubPublishFlow:
             allowed_paths=allowed_paths,
             title=title,
             body=body,
+            operation_key=operation_key,
         )
 
     async def publish_validated(
@@ -255,6 +270,7 @@ class GitHubPublishFlow:
         expected_head: str | None = None,
         title: str | None = None,
         body: str | None = None,
+        operation_key: str | None = None,
     ) -> GitHubPublishOutcome:
         """Commit an ALREADY-VALIDATED candidate (ADR-0026 transport contract).
 
@@ -263,6 +279,13 @@ class GitHubPublishFlow:
         exclusively by the publication boundary, and a raw ``ChangeSet`` is
         refused here by type — an unvalidated candidate cannot reach a
         write.
+
+        *operation_key* is the caller's durable publication intent's key
+        (R11): it is stamped into the commit headline as
+        ``(forge-op:<key>)`` so a lost response / stale CAS can be resolved
+        by the identity probe below, and reused unchanged across every
+        retry of the same intent. When omitted a fresh key is minted
+        (legacy/transport callers — unrecoverable across processes).
         """
         if not isinstance(candidate, ValidatedCandidate):
             raise TypeError(
@@ -275,6 +298,8 @@ class GitHubPublishFlow:
         changeset = candidate.changeset
         if expected_head is None:
             expected_head = await self._client.get_branch_head(owner, repo, base)
+        key = operation_key or uuid4().hex[:12]
+        headline = message_with_marker(changeset.commit_message, key)
 
         try:
             await self._ensure_branch(owner, repo, branch, expected_head)
@@ -295,20 +320,49 @@ class GitHubPublishFlow:
             change.path for change in changeset.changes if change.operation is Operation.DELETE
         ]
         # Correlation only — GitHub does NOT dedupe on clientMutationId
-        # (research §3.4); the CAS is the exactly-once guard.
-        operation_key = uuid4().hex[:12]
+        # (research §3.4); the CAS plus the headline marker probe are the
+        # exactly-once guards.
         try:
             result = await self._client.create_commit_on_branch(
                 owner,
                 repo,
                 branch,
-                headline=changeset.commit_message,
+                headline=headline,
                 additions=additions,
                 deletions=deletions,
                 expected_head_oid=expected_head,
-                client_mutation_id=operation_key,
+                client_mutation_id=key,
             )
         except GitHubStaleBranchError as exc:
+            # The CAS proves only that the tip moved — NOT that nothing
+            # landed (research §4.1): a previous attempt's response may have
+            # been lost. Probe the new tip for THIS intent's marker + the
+            # expected parent before declaring drift; adopt exactly one
+            # match, never re-post.
+            adopted_oid = await self._probe_for_intent(
+                owner, repo, branch, operation_key=key, expected_head=expected_head
+            )
+            if adopted_oid is not None:
+                logger.warning(
+                    "GitHub publish on %s CAS-refused but previous attempt's commit %s "
+                    "found by marker (forge-op:%s) — adopting",
+                    branch,
+                    adopted_oid[:8],
+                    key,
+                )
+                pr = await self.ensure_draft_pr(
+                    owner, repo, branch, base, issue_number, run_id, title, body
+                )
+                return GitHubPublishOutcome(
+                    ok=True,
+                    commit_oid=adopted_oid,
+                    expected_head_oid=expected_head,
+                    branch=branch,
+                    pr_number=int(pr["number"]) if pr else None,
+                    pr_url=pr.get("html_url") if pr else None,
+                    pr_draft=bool(pr.get("draft")) if pr else None,
+                    adopted=True,
+                )
             logger.warning(
                 "GitHub publish on %s drifted (expected %s) — reporting, not retrying",
                 branch,
@@ -333,7 +387,7 @@ class GitHubPublishFlow:
             )
         commit_oid = str(result["oid"])
 
-        pr = await self._ensure_draft_pr(
+        pr = await self.ensure_draft_pr(
             owner, repo, branch, base, issue_number, run_id, title, body
         )
         return GitHubPublishOutcome(
@@ -345,6 +399,33 @@ class GitHubPublishFlow:
             pr_url=pr.get("html_url") if pr else None,
             pr_draft=bool(pr.get("draft")) if pr else None,
         )
+
+    async def _probe_for_intent(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        *,
+        operation_key: str,
+        expected_head: str,
+    ) -> str | None:
+        """The branch tip's commit carrying THIS intent's marker + parent.
+
+        Exactly one commit whose message contains ``(forge-op:<key>)`` AND
+        whose single parent is *expected_head* proves a previous attempt of
+        this intent landed — its sha is adopted. Zero or several matches
+        return None (drift / inconclusive); the marker, not the repeating
+        human message, is the identity (R11, F07).
+        """
+        try:
+            commits = await self._client.list_commits(owner, repo, branch)
+        except GitHubAPIError:
+            logger.exception("Intent probe read failed for %s/%s@%s", owner, repo, branch)
+            return None
+        hits = commit_matches(
+            commits, operation_key=operation_key, expected_parent_oid=expected_head
+        )
+        return hits[0] if len(hits) == 1 else None
 
     async def _publish_bundle(
         self,
@@ -360,6 +441,7 @@ class GitHubPublishFlow:
         allowed_paths: list[str] | None = None,
         title: str | None = None,
         body: str | None = None,
+        operation_key: str | None = None,
     ) -> GitHubPublishOutcome:
         """The publication boundary of the GitHub transport (ADR-0026).
 
@@ -407,6 +489,7 @@ class GitHubPublishFlow:
             expected_head=expected_head,
             title=title,
             body=body,
+            operation_key=operation_key,
         )
 
     def _reader_for(self, owner: str, repo: str) -> BaseContentReader:
@@ -468,7 +551,7 @@ class GitHubPublishFlow:
         except GitHubAPIError:
             return None
 
-    async def _ensure_draft_pr(
+    async def ensure_draft_pr(
         self,
         owner: str,
         repo: str,
@@ -476,10 +559,15 @@ class GitHubPublishFlow:
         base: str,
         issue_number: int,
         run_id: str,
-        title: str | None,
-        body: str | None,
+        title: str | None = None,
+        body: str | None = None,
     ) -> dict[str, Any] | None:
-        """Find-by-head first, create only when none exists — never duplicate."""
+        """Find-by-head first, create only when none exists — never duplicate.
+
+        Public so the R11 recovery paths (this flow's own adopt branch and
+        the run service's intent scanner) can complete an adopted commit's
+        PR leg without duplicating it.
+        """
         existing = await self._find_draft_pr(owner, repo, branch, base)
         if existing is not None:
             logger.info(

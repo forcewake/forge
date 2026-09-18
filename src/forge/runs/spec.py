@@ -28,7 +28,19 @@ from dataclasses import dataclass
 #: task text, the plan artifact, the model route and the verification
 #: contract to the v2 shape. v1/v2 documents carry digests only — they are
 #: not executable and a verified read refuses them (fail closed).
+#: R13 keeps v3: the numeric budget ceilings (``max_calls``/``max_tokens``/
+#: ``wallclock_s``/``enforcement``) are ADDITIVE optional members of the
+#: ``budgets`` block — :meth:`ExecutableRunSpec.from_document` is tolerant of
+#: their absence, so pre-R13 v3 documents still parse unchanged.
 EXECUTABLE_SPEC_SCHEMA_VERSION = 3
+
+#: Honest budget enforcement levels (R13 §4), frozen with the ceilings:
+#: ``full`` — every model dispatch of the lane is intercepted (the builtin
+#: lane reserves before each provider call); ``partial`` — CLI harness lanes:
+#: only the wall clock and the episode count are enforced forge-side, the
+#: harness's own model calls are never intercepted, so call/token ceilings
+#: are reconciled after the fact and never claimed as enforced.
+BUDGET_ENFORCEMENT_LEVELS = ("full", "partial")
 
 _DIGEST_LEN = 64
 
@@ -73,6 +85,21 @@ def _string_tuple(values: object, what: str) -> tuple[str, ...]:
     return entries
 
 
+def _optional_limit(value: object, what: str) -> int | None:
+    """An optional numeric budget ceiling from a stored document (R13).
+
+    Additive-field tolerance: absence/``null`` → ``None`` (unlimited on that
+    axis — pre-R13 documents carry none of these keys). Anything else that is
+    not a positive int is a corrupt document: ``ValueError`` here becomes a
+    ``SpecInvalid`` at the caller, never a silent unlimited.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{what} must be a positive int or null, got {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class ExecutableRunSpec:
     """The typed, immutable executable input of one run (R04, ADR-0018 §1).
@@ -104,7 +131,8 @@ class ExecutableRunSpec:
     allowed_paths: tuple[str, ...]
     # Verification contract: the jobs a green pipeline must contain.
     required_jobs: tuple[str, ...]
-    # Numeric budgets.
+    # Numeric budgets: lifecycle limits (always present). The R13 enforceable
+    # ceilings ride at the end of the field order (defaulted — additive).
     commit_cycles: int
     harness_timeout: int
     # Backend / driver (ADR-0015/0023): the execution shape the gate approved.
@@ -115,6 +143,14 @@ class ExecutableRunSpec:
     harness_fallbacks: tuple[str, ...]
     budget_class: str
     selection_reason: str
+    # R13: the enforceable numeric ceilings resolved AT FREEZE TIME from the
+    # budget class's profile — ``None`` = unlimited on that axis;
+    # ``enforcement`` is the honest level the lane can actually deliver
+    # ("" = no numeric budget at all).
+    budget_max_calls: int | None = None
+    budget_max_tokens: int | None = None
+    budget_wallclock_s: int | None = None
+    budget_enforcement: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.schema_version, int) or (
@@ -139,6 +175,21 @@ class ExecutableRunSpec:
             raise SpecInvalid(f"spec commit_cycles must be >= 1, got {self.commit_cycles}")
         if self.harness_timeout < 1:
             raise SpecInvalid(f"spec harness_timeout must be >= 1, got {self.harness_timeout}")
+        for field_name in ("budget_max_calls", "budget_max_tokens", "budget_wallclock_s"):
+            value = getattr(self, field_name)
+            if value is not None and (isinstance(value, bool) or value < 1):
+                raise SpecInvalid(f"spec {field_name} must be a positive int, got {value!r}")
+        if self.budget_enforcement and self.budget_enforcement not in BUDGET_ENFORCEMENT_LEVELS:
+            raise SpecInvalid(
+                f"spec budget_enforcement must be one of {BUDGET_ENFORCEMENT_LEVELS}, "
+                f"got {self.budget_enforcement!r}"
+            )
+        if not self.budget_enforcement and (
+            self.budget_max_calls is not None
+            or self.budget_max_tokens is not None
+            or self.budget_wallclock_s is not None
+        ):
+            raise SpecInvalid("spec numeric budget ceilings require an enforcement level")
         if not self.harness_driver.strip() or not self.target_branch.strip():
             raise SpecInvalid("spec harness driver and target branch must be non-empty")
 
@@ -169,6 +220,10 @@ class ExecutableRunSpec:
         selection_reason: str = "default",
         commit_cycles: int,
         harness_timeout: int,
+        budget_max_calls: int | None = None,
+        budget_max_tokens: int | None = None,
+        budget_wallclock_s: int | None = None,
+        budget_enforcement: str = "",
         allowed_paths: Sequence[str] = (),
     ) -> ExecutableRunSpec:
         """Freeze the executable spec from plan-time values (F14, R04).
@@ -198,6 +253,10 @@ class ExecutableRunSpec:
             ),
             commit_cycles=int(commit_cycles),
             harness_timeout=int(harness_timeout),
+            budget_max_calls=budget_max_calls,
+            budget_max_tokens=budget_max_tokens,
+            budget_wallclock_s=budget_wallclock_s,
+            budget_enforcement=str(budget_enforcement or ""),
             backend=str(backend or ""),
             harness_model=str(harness_model or ""),
             target_branch=str(target_branch or ""),
@@ -238,6 +297,12 @@ class ExecutableRunSpec:
                 required_jobs=_string_tuple(verification.get("required_jobs"), "required_jobs"),
                 commit_cycles=int(budgets.get("commit_cycles") or 0),
                 harness_timeout=int(budgets.get("harness_timeout") or 0),
+                budget_max_calls=_optional_limit(budgets.get("max_calls"), "budget max_calls"),
+                budget_max_tokens=_optional_limit(budgets.get("max_tokens"), "budget max_tokens"),
+                budget_wallclock_s=_optional_limit(
+                    budgets.get("wallclock_s"), "budget wallclock_s"
+                ),
+                budget_enforcement=str(budgets.get("enforcement") or ""),
                 backend=str(backend_config.get("backend") or ""),
                 harness_model=str(backend_config.get("model") or ""),
                 target_branch=str(backend_config.get("target_branch") or ""),
@@ -258,9 +323,23 @@ class ExecutableRunSpec:
     def to_document(self) -> dict:
         """The canonical JSON document stored in ``run_specs`` (digest target).
 
-        ``allowed_paths`` is present only for scoped runs, so an unscoped
-        document stays byte-identical to the pre-v0.7 shape convention.
+        ``allowed_paths`` is present only for scoped runs, and the R13 budget
+        ceilings/enforcement only when a finite profile was resolved — an
+        unscoped, unbudgeted document stays byte-identical to the pre-v0.7
+        shape convention.
         """
+        budgets_block: dict = {
+            "commit_cycles": self.commit_cycles,
+            "harness_timeout": self.harness_timeout,
+        }
+        if self.budget_max_calls is not None:
+            budgets_block["max_calls"] = self.budget_max_calls
+        if self.budget_max_tokens is not None:
+            budgets_block["max_tokens"] = self.budget_max_tokens
+        if self.budget_wallclock_s is not None:
+            budgets_block["wallclock_s"] = self.budget_wallclock_s
+        if self.budget_enforcement:
+            budgets_block["enforcement"] = self.budget_enforcement
         document: dict = {
             "subject": {
                 "provider": self.provider,
@@ -280,10 +359,7 @@ class ExecutableRunSpec:
                 "budget_class": self.budget_class,
                 "selection_reason": self.selection_reason,
             },
-            "budgets": {
-                "commit_cycles": self.commit_cycles,
-                "harness_timeout": self.harness_timeout,
-            },
+            "budgets": budgets_block,
             "task": {
                 "title": self.task_title,
                 "description": self.task_description,

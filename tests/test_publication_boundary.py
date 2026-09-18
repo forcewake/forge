@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.durable import FlowRun, RunSpec
+from forge.gitlab.blob_reads import BlobReadResult
 from forge.integrations.github_flow import (
     GitHubPublishFlow,
     github_factory_branch,
@@ -360,3 +361,79 @@ class TestPositiveControl:
         actions = commit_call[1][2]
         assert [(a["action"], a["file_path"]) for a in actions] == [("create", "forge-demo/x.md")]
         assert actions[0]["content"] == "hello\n"
+
+
+# ----------------------------------------------------------------------
+# R14: authoritative evidence is never conflated at the boundary
+# ----------------------------------------------------------------------
+
+
+class TestAuthoritativeEvidence:
+    async def test_gitlab_forbidden_base_read_refuses_with_zero_commits(
+        self, db, fake_gitlab, monkeypatch
+    ):
+        """A 403 on an EXISTING base file is never evidence of absence."""
+        fake_gitlab.seed_file("src/app.py", "print('hi')\n")
+
+        async def forbidden_read(project_id, file_path, ref="HEAD"):
+            return BlobReadResult.forbidden(f"gitlab api error 403: denied for {file_path!r}")
+
+        monkeypatch.setattr(fake_gitlab, "read_blob", forbidden_read)
+        changeset = _cs(
+            Change(path="src/app.py", operation=Operation.UPDATE, content="print('hello')\n")
+        )
+
+        result = await publish_via_gitlab(db, fake_gitlab, changeset, None)
+
+        assert result.ok is False
+        assert "authoritative_read_failed" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+        assert fake_gitlab.calls_of("create_branch") == []
+
+    async def test_confirmed_absence_is_the_only_honest_missing(self, db, fake_gitlab):
+        """A real 404 at the base makes an update honestly unapplicable —
+        the candidate is refused for having no base content, and nothing
+        is created, updated or deleted."""
+        changeset = _cs(Change(path="never/there.py", operation=Operation.UPDATE, content="x\n"))
+
+        result = await publish_via_gitlab(db, fake_gitlab, changeset, None)
+
+        assert result.ok is False
+        assert "no authoritative base content" in result.reason
+        assert fake_gitlab.calls_of("create_commit") == []
+
+    async def test_github_unreadable_base_stays_blocked_with_zero_mutations(
+        self, fake_github, monkeypatch
+    ):
+        """The GitHub transport entry keeps refusing a candidate whose base
+        cannot be read — blocked-class, zero commit-API calls."""
+        from forge.integrations.github import GitHubAPIError
+
+        async def forbidden_text(file_path, ref="HEAD"):
+            raise GitHubAPIError(403, "read denied")
+
+        monkeypatch.setattr(fake_github, "read_text", forbidden_text)
+        changeset = _cs(
+            Change(path="src/app.py", operation=Operation.UPDATE, content="print('hello')\n")
+        )
+
+        outcome = await publish_via_github(fake_github, changeset, None)
+
+        assert outcome.ok is False
+        assert outcome.invalid is True
+        assert outcome.drift is True
+        for mutation in GH_MUTATIONS:
+            assert fake_github.calls_of(mutation) == []
+
+    async def test_github_create_over_confirmed_existing_is_refused(self, fake_github):
+        """The strict base read FOUND src/app.py — a create over it is a
+        violation, never a silent overwrite (R14 create rule)."""
+        changeset = _cs(create("src/app.py", "clobber = True\n"))
+
+        outcome = await publish_via_github(fake_github, changeset, None)
+
+        assert outcome.ok is False
+        assert outcome.invalid is True
+        assert "already exists in the base snapshot" in outcome.reason
+        for mutation in GH_MUTATIONS:
+            assert fake_github.calls_of(mutation) == []

@@ -69,6 +69,26 @@ _LLM_STATUSES: tuple[str, ...] = ("ok", "failed", "cancelled")
 #: ADR-0018 §5 (F22): closed set of run-budget lifecycle statuses. ``exhausted``
 #: budgets stop granting reservations; ``closed`` is terminal (run finished).
 _BUDGET_STATUSES: tuple[str, ...] = ("open", "exhausted", "closed")
+#: R11: closed set of publication-intent lifecycle states. ``requested`` rows
+#: exist before the HTTP effect (intent-before-I/O); ``dispatched`` rows have
+#: an effect in flight or one whose outcome was lost (crash / timeout); the
+#: four outcomes ``committed`` | ``adopted`` | ``duplicated`` | ``unknown``
+#: and ``failed`` are terminal — ``adopted`` means a probe found a PREVIOUS
+#: attempt's effect by identity and adopted it; ``duplicated`` means the ref
+#: moved away from the intent (someone else / a later repair owns the head);
+#: ``unknown`` is inconclusive and blocks the run (ADR-0005), never retried
+#: blind. The live transition graph is enforced by
+#: :func:`forge.durable.intents.complete_intent` (mirroring complete_action).
+_PUBLICATION_INTENT_STATES: tuple[str, ...] = (
+    "requested",
+    "dispatched",
+    "probing",
+    "committed",
+    "adopted",
+    "duplicated",
+    "unknown",
+    "failed",
+)
 
 
 def _status_check(name: str, values: tuple[str, ...]) -> CheckConstraint:
@@ -479,3 +499,103 @@ class BudgetReservation(Base):
     reserved_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reserved_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     released: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class PublicationIntent(Base):
+    """The durable intent to produce ONE remote publication effect (R11).
+
+    Written in the same local transaction as the ``action_log`` intent row
+    and strictly BEFORE the HTTP effect; the remote effect carries the row's
+    ``operation_key`` as a ``(forge-op:<key>)`` message marker, so an outcome
+    lost to a crash/timeout is resolved by PROBING the remote by identity —
+    never by a blind replay:
+
+    - ``operation_key`` is minted ONCE at intent creation and reused across
+      every retry of this intent (the writer's per-``apply`` uuid4 was the
+      bug — a crashed attempt's commit was unfindable by a fresh key);
+    - ``expected_parent_oid`` is the branch head captured pre-dispatch; a
+      probe match requires the found commit's parents to equal it, so a later
+      repair commit (different key, repeating human message) is never
+      attributed to this intent;
+    - state machine (``_PUBLICATION_INTENT_STATES``): ``requested`` →
+      ``dispatched`` → ``committed`` | ``adopted`` | ``duplicated`` |
+      ``unknown`` (| ``probing`` | ``failed``). ``adopted`` is a first-class
+      outcome: the remote effect of a PREVIOUS attempt exists and the caller
+      advances the run on it exactly as if it had committed itself.
+
+    The unique index makes find-or-create races collapse at the DB; the
+    ``(status, next_probe_at)`` index serves the recovery scanner (due open
+    intents first). Fields reuse forge's existing vocabulary — ``FlowRun``
+    ids, ``ActionLog``-style ``remote_result`` JSON, ``StepRun``-style
+    deadline columns.
+    """
+
+    __tablename__ = "publication_intents"
+    __table_args__ = (
+        _status_check("ck_publication_intents_status", _PUBLICATION_INTENT_STATES),
+        Index(
+            "uq_publication_intent_key",
+            "provider",
+            "repo",
+            "target_ref",
+            "idempotency_scope",
+            "operation_key",
+            unique=True,
+        ),
+        Index("ix_publication_intents_state_probe", "status", "next_probe_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: ``gitlab`` | ``github`` | ``azure_devops`` (FlowRun.provider values).
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: Provider-scoped subject: GitLab project id, GitHub ``owner/name``,
+    #: AzDO ``project/repo`` — probe correlation only.
+    repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The effect kind: ``commit`` (branch publication) today, extensible to
+    #: ``pr`` / ``comment`` / ``dispatch``.
+    operation: Mapped[str] = mapped_column(String(20), nullable=False, default="commit")
+    #: The branch the effect targets (comments/dispatches would use their
+    #: anchor here).
+    target_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Logical retry scope WITHIN (run, ref): one commit cycle per scope, so
+    #: a repair cycle mints a NEW intent (and key) while retries of the same
+    #: cycle reuse this row.
+    idempotency_scope: Mapped[str] = mapped_column(String(100), nullable=False)
+    #: ``(forge-op:<key>)`` — STABLE across retries; minted at creation.
+    operation_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: ADR-0004 commit-cycle counter copied from the run (1 = initial).
+    commit_cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    #: Candidate tree/content digest — belt-and-braces probe verification.
+    content_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Branch head captured at intent time (the CAS base); NULL = the intent
+    #: expected a root commit (empty parent list).
+    expected_parent_oid: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    #: Caller-pinned drift guard (mirrors the writer's ``expected_head``).
+    expected_head: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="requested")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    #: Jittered backoff for the recovery scanner (NULL = due now).
+    next_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: R17 shape (deadline-before-I/O); copied from the owning step when one
+    #: drives the leg.
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: The commit sha / PR number / build id once known (probe-found or
+    #: response-carried).
+    provider_object_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    remote_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )

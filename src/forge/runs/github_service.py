@@ -65,22 +65,35 @@ from forge.durable import (
     FlowStatus,
     GateAlreadyConsumed,
     GateApproval,
+    OPEN_STATES,
+    PublicationIntent,
     RunNotFound,
     RunSpec,
     StepRun,
     as_aware_utc,
     build_source_event_id,
+    classify_probe,
+    commit_matches,
+    complete_intent,
     consume_approval,
+    due_intents,
+    find_open_intent,
     is_valid,
+    mark_dispatched,
+    mint_operation_key,
+    ProbeObservation,
+    ProbeVerdict,
     record_approval,
+    record_intent,
     short_run_id,
 )
-from forge.durable.controller import TERMINAL_STATUSES
+from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.llm import LLMError, LLMResponseError
 from forge.factory.planner import PLAN_SUMMARY_CHARS
 from forge.integrations.github_flow import (
     GitHubAgents,
+    GitHubPublishOutcome,
     build_github_agents,
     github_factory_branch,
 )
@@ -125,6 +138,11 @@ logger = logging.getLogger(__name__)
 _VERIFICATION_NOTE = (
     "Actions checks on the head are the verification surface — no required checks are enforced yet."
 )
+
+#: Backoff the publication-intent scanner applies to an open intent whose
+#: probe says "nothing landed, head intact" — the run's own publish leg owns
+#: the re-dispatch; the scanner just stops polling the provider hot.
+_INTENT_PROBE_BACKOFF_SECONDS = 60
 
 
 class GitHubRunService:
@@ -748,6 +766,211 @@ class GitHubRunService:
         await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
 
     # ------------------------------------------------------------------
+    # Publication-intent recovery scanner (R11)
+    # ------------------------------------------------------------------
+
+    #: Run statuses where a publish leg is still in progress — the only
+    #: states the scanner may advance a run from on adoption.
+    _PUBLISHING_STATUSES = frozenset(
+        {
+            FlowStatus.PROPOSING.value,
+            FlowStatus.VALIDATING.value,
+            FlowStatus.COMMITTING.value,
+            FlowStatus.ENSURING_DRAFT_MR.value,
+        }
+    )
+
+    async def resolve_publication_intents(self, *, now: datetime | None = None) -> int:
+        """One recovery pass over this repo's due publication intents (R11).
+
+        For every OPEN intent (a crash/stall left its outcome unrecorded):
+        probe the remote by identity and resolve —
+        ``adopted`` (exactly one marker+parent match): the run advances to
+        ``waiting_ci`` on the FOUND commit exactly as if it had published
+        itself — unless the run is superseded/terminal (R10), in which case
+        the intent resolves ``duplicated`` and the run is never revived;
+        ``duplicated`` (head moved by someone else): intent resolved, run
+        parked ``blocked`` (branch_drift contract, never force);
+        ``unknown`` (≥2 matches): run parked ``blocked(unknown_outcome)``
+        with an operator instruction — never guessed;
+        ``redispatch`` (nothing landed, head intact): left to the run's own
+        publish leg, which re-dispatches with the SAME key — the scanner
+        never POSTs (it holds no candidate content), it only backs the next
+        probe off.
+        """
+        now = now or datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            intents = await due_intents(
+                session, provider="github", repo=self._repo_full_name, now=now
+            )
+        resolved = 0
+        for intent in intents:
+            try:
+                if await self._resolve_one_publication_intent(intent, now=now):
+                    resolved += 1
+            except Exception:
+                # One broken intent must not stall the recovery pass.
+                logger.exception("Publication-intent resolution failed for %s", intent.id[:8])
+        return resolved
+
+    async def _resolve_one_publication_intent(
+        self, intent: PublicationIntent, *, now: datetime
+    ) -> bool:
+        run = await self._load_run(intent.run_id)
+        if run is None:
+            await self._complete_intent(
+                intent.id, "duplicated", remote_result={"reason": "run_vanished"}
+            )
+            return True
+        if run.cancel_requested or run.status in {s.value for s in TERMINAL_STATUSES}:
+            # R10 superseded interplay: the publication grant is gone — a
+            # landed commit is superseded evidence, never adopted-into-READY.
+            await self._complete_intent(
+                intent.id,
+                "duplicated",
+                remote_result={"reason": "run_superseded", "run_status": run.status},
+            )
+            await self._merge_run_evidence(
+                intent.run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled_during_publication"
+                        if run.cancel_requested
+                        else f"run already {run.status}",
+                        "attempt_base": intent.expected_parent_oid,
+                    }
+                },
+            )
+            return True
+        if intent.status == "requested":
+            # mark_dispatched commits BEFORE any dispatch, so a requested
+            # intent has no effect to probe — the run's own publish leg
+            # (probe-first) owns it.
+            return False
+
+        verdict, hits = await self._probe_intent(intent)
+        if verdict is ProbeVerdict.ADOPT:
+            await self._complete_intent(
+                intent.id,
+                "adopted",
+                provider_object_id=hits[0],
+                remote_result={"sha": hits[0], "reconciled": True},
+            )
+            await self._adopt_committed_candidate(
+                run,
+                intent,
+                commit_oid=hits[0],
+                reconcile_note=f"adopted previous attempt's commit {hits[0][:8]}",
+            )
+            logger.warning(
+                "Recovered publication intent %s for run %s — adopted commit %s",
+                intent.id[:8],
+                intent.run_id[:8],
+                hits[0][:8],
+            )
+            return True
+        if verdict is ProbeVerdict.DUPLICATED:
+            await self._complete_intent(
+                intent.id, "duplicated", remote_result={"branch": intent.target_ref}
+            )
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(
+                    intent.run_id,
+                    FlowStatus.BLOCKED,
+                    f"branch_drift: {intent.target_ref} moved away from the intent "
+                    "(reconciled by the publication-intent scanner)",
+                )
+            return True
+        if verdict is ProbeVerdict.UNKNOWN:
+            await self._complete_intent(
+                intent.id, "unknown", remote_result={"matches": hits}
+            )
+            if run.status in self._PUBLISHING_STATUSES:
+                await self._to_terminal(
+                    intent.run_id, FlowStatus.BLOCKED, "commit_unknown_outcome"
+                )
+                issue_number = run.issue_iid or 0
+                await self._post_journaled_note(
+                    int(run.project_id),
+                    issue_number,
+                    f"Run `{intent.run_id[:8]}` publication outcome is **unresolved** — an "
+                    f"operator must inspect branch `{intent.target_ref}` and reconcile "
+                    "manually; forge will not re-publish over an unknown outcome.\n\n"
+                    "*This is an automated message.*",
+                    intent.run_id,
+                    "publish_unknown_outcome",
+                )
+            return True
+
+        # REDISPATCH: nothing landed, head intact — the run's publish leg
+        # re-dispatches with the same key; back the probe off so the scanner
+        # does not poll the provider hot while the leg is between retries.
+        async with self._session_factory() as session:
+            row = await session.get(PublicationIntent, intent.id)
+            if row is not None:
+                row.next_probe_at = now + timedelta(seconds=_INTENT_PROBE_BACKOFF_SECONDS)
+                await session.commit()
+        return False
+
+    async def _adopt_committed_candidate(
+        self,
+        run: FlowRun,
+        intent: PublicationIntent,
+        *,
+        commit_oid: str,
+        reconcile_note: str,
+    ) -> None:
+        """Advance a mid-publication run onto a probe-adopted commit.
+
+        The same walk a fresh publish leg would do (evidence, Draft PR,
+        waiting_ci) — the run cannot tell a replayed walk from the original.
+        A run that already moved past publishing (waiting_ci and beyond) is
+        left alone: the intent is resolved, nothing else is touched.
+        """
+        if run.status not in self._PUBLISHING_STATUSES:
+            return
+        pr = await self._stack.flow.ensure_draft_pr(
+            self._owner,
+            self._repo,
+            intent.target_ref,
+            self._target_branch(),
+            run.issue_iid or 0,
+            run.id,
+        )
+        pr_number = int(pr["number"]) if pr else None
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            for status in (
+                FlowStatus.VALIDATING,
+                FlowStatus.COMMITTING,
+                FlowStatus.ENSURING_DRAFT_MR,
+                FlowStatus.WAITING_CI,
+            ):
+                try:
+                    await controller.transition(
+                        intent.run_id, status, reason=f"publication intent: {reconcile_note}"
+                    )
+                except InvalidTransition:
+                    pass  # already past this stage — resume the walk
+            run_row = await self._get_run(session, intent.run_id)
+            run_row.mr_iid = pr_number
+            if commit_oid not in list(run_row.candidate_shas or []):
+                run_row.candidate_shas = list(run_row.candidate_shas or []) + [commit_oid]
+            run_row.evidence = _merge_evidence(
+                run_row.evidence,
+                {
+                    "published_candidate": {
+                        "sha": commit_oid,
+                        "base": intent.expected_parent_oid,
+                        "branch": intent.target_ref,
+                        "pr_number": pr_number,
+                        "reconciled": True,
+                    }
+                },
+            )
+            await session.commit()
+
+    # ------------------------------------------------------------------
     # Issue-edit replan + label-off cancel (operator busywork, event-driven)
     # ------------------------------------------------------------------
 
@@ -1149,6 +1372,158 @@ class GitHubRunService:
     # Publish leg: propose → CAS commit → Draft PR → evidence → review
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Publication intents (R11): identity before the HTTP effect
+    # ------------------------------------------------------------------
+
+    def _intent_scope(self, run: FlowRun) -> str:
+        """The logical retry scope of the run's current publication attempt."""
+        return f"cycle-{run.commit_cycle or 1}"
+
+    async def _publication_intent(
+        self,
+        run: FlowRun,
+        *,
+        branch: str,
+        expected_head: str | None,
+    ) -> PublicationIntent | None:
+        """The run's OPEN publication intent for this branch, if any.
+
+        An open intent means a previous attempt's outcome was never durably
+        recorded — the caller must PROBE before any new dispatch (never a
+        blind POST as reconciliation).
+        """
+        async with self._session_factory() as session:
+            return await find_open_intent(
+                session,
+                run_id=run.id,
+                provider="github",
+                repo=self._repo_full_name,
+                target_ref=branch,
+                operation="commit",
+                idempotency_scope=self._intent_scope(run),
+            )
+
+    async def _record_publication_intent(
+        self,
+        run: FlowRun,
+        *,
+        branch: str,
+        expected_head: str | None,
+        content_digest: str | None = None,
+    ) -> PublicationIntent:
+        """Create the ``requested`` intent — BEFORE any commit-API call.
+
+        The row is committed in its own transaction (the run state walk it
+        belongs to already committed); its ``operation_key`` is minted here
+        exactly once and reused by every retry of this attempt.
+        """
+        async with self._session_factory() as session:
+            intent = await record_intent(
+                session,
+                run_id=run.id,
+                provider="github",
+                repo=self._repo_full_name,
+                target_ref=branch,
+                idempotency_scope=self._intent_scope(run),
+                operation_key=mint_operation_key(),
+                commit_cycle=run.commit_cycle or 1,
+                content_digest=content_digest,
+                expected_parent_oid=expected_head,
+                expected_head=expected_head,
+            )
+            await session.commit()
+            return intent
+
+    async def _probe_intent(
+        self, intent: PublicationIntent
+    ) -> tuple[ProbeVerdict, list[str]]:
+        """Classify one intent's outcome against the live remote (read-only).
+
+        The identity tuple per the research doc: exactly one commit carrying
+        this intent's ``(forge-op:<key>)`` marker whose parent list equals
+        the intent-time expected parent proves the effect landed.
+        """
+        owner, repo = self._owner, self._repo
+        try:
+            head = await self._stack.client.get_branch_head(owner, repo, intent.target_ref)
+            commits = await self._stack.client.list_commits(owner, repo, intent.target_ref)
+        except Exception:
+            # A failed probe read is inconclusive, not negative — no dispatch
+            # may be derived from it.
+            logger.exception(
+                "Publication-intent probe read failed for %s@%s",
+                intent.target_ref,
+                self._repo_full_name,
+            )
+            return ProbeVerdict.UNKNOWN, []
+        hits = commit_matches(
+            commits,
+            operation_key=intent.operation_key,
+            expected_parent_oid=intent.expected_parent_oid,
+        )
+        verdict = classify_probe(
+            ProbeObservation(
+                marker_hits=tuple(hits),
+                head_oid=head,
+                expected_parent_oid=intent.expected_parent_oid,
+            )
+        )
+        return verdict, hits
+
+    async def _complete_intent(
+        self,
+        intent_id: str,
+        status: str,
+        *,
+        provider_object_id: str | None = None,
+        remote_result: dict | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            await complete_intent(
+                session,
+                intent_id,
+                status,
+                provider_object_id=provider_object_id,
+                remote_result=remote_result,
+            )
+            await session.commit()
+
+    async def _mark_intent_dispatched(self, intent: PublicationIntent) -> None:
+        async with self._session_factory() as session:
+            await mark_dispatched(session, intent.id)
+            await session.commit()
+
+    async def _load_run(self, run_id: str) -> FlowRun:
+        """The run row in a fresh session (intent-identity reads)."""
+        async with self._session_factory() as session:
+            return await self._get_run(session, run_id)
+
+    async def _complete_intent_from_outcome(
+        self, intent_id: str, outcome: GitHubPublishOutcome
+    ) -> None:
+        """Map a publish outcome onto the intent's terminal state.
+
+        ``ok`` + ``adopted`` → ``adopted`` (a probe found the effect);
+        ``ok`` → ``committed``; ``drift`` → ``duplicated`` (the ref moved
+        away from the intent); any other failure → ``failed``.
+        """
+        if outcome.ok:
+            await self._complete_intent(
+                intent_id,
+                "adopted" if outcome.adopted else "committed",
+                provider_object_id=outcome.commit_oid,
+                remote_result={
+                    "sha": outcome.commit_oid,
+                    "pr_number": outcome.pr_number,
+                    "expected_head": outcome.expected_head_oid,
+                },
+            )
+        elif outcome.drift:
+            await self._complete_intent(intent_id, "duplicated", remote_result={"reason": outcome.reason})
+        else:
+            await self._complete_intent(intent_id, "failed", remote_result={"reason": outcome.reason})
+
     async def _advance_publish(self, run_id: str, *, project_id: int, issue_number: int) -> None:
         """One gate-approved publish cycle, ending at ``ready_for_human``.
 
@@ -1176,6 +1551,80 @@ class GitHubRunService:
             )
             return
 
+        # R11: resolve the publication intent BEFORE any commit-API call.
+        # A previous attempt's open intent is probed by identity (marker +
+        # expected parent): its landed commit is adopted, never duplicated;
+        # only a proven-nothing-landed probe falls through to a dispatch —
+        # with the SAME stable operation key.
+        branch = github_factory_branch(issue_number, run_id)
+        expected_head = base_sha or None
+        run_row = await self._load_run(run_id)
+        intent = await self._publication_intent(
+            run_row, branch=branch, expected_head=expected_head
+        )
+        if intent is None:
+            intent = await self._record_publication_intent(
+                run_row, branch=branch, expected_head=expected_head
+            )
+        else:
+            verdict, hits = await self._probe_intent(intent)
+            if verdict is ProbeVerdict.ADOPT:
+                # The live R11 case: a previous attempt LANDED (its response
+                # was lost / the process stalled) — adopt it and finish the
+                # leg on the found commit. Zero new commit-API calls.
+                await self._complete_intent(
+                    intent.id,
+                    "adopted",
+                    provider_object_id=hits[0],
+                    remote_result={"sha": hits[0], "reconciled": True},
+                )
+                pr = await self._stack.flow.ensure_draft_pr(
+                    self._owner,
+                    self._repo,
+                    branch,
+                    self._target_branch(),
+                    issue_number,
+                    run_id,
+                )
+                outcome = GitHubPublishOutcome(
+                    ok=True,
+                    commit_oid=hits[0],
+                    expected_head_oid=expected_head,
+                    branch=branch,
+                    pr_number=int(pr["number"]) if pr else None,
+                    pr_url=pr.get("html_url") if pr else None,
+                    pr_draft=bool(pr.get("draft")) if pr else None,
+                    adopted=True,
+                )
+                await self._finish_publish_leg(
+                    run_id, project_id, issue_number, outcome, plan_digest
+                )
+                return
+            if verdict is ProbeVerdict.DUPLICATED:
+                # Someone else owns the ref now — the drift contract applies.
+                await self._complete_intent(
+                    intent.id, "duplicated", remote_result={"branch": branch}
+                )
+            elif verdict is ProbeVerdict.UNKNOWN:
+                await self._complete_intent(
+                    intent.id, "unknown", remote_result={"matches": hits}
+                )
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+                await self._post_journaled_note(
+                    project_id,
+                    issue_number,
+                    f"Run `{run_id[:8]}` publication outcome is **unresolved**: the remote "
+                    "probe found ambiguous evidence for this attempt. An operator must "
+                    f"inspect branch `{branch}` and reconcile manually — forge will not "
+                    "re-publish over an unknown outcome.\n\n*This is an automated message.*",
+                    run_id,
+                    "publish_unknown_outcome",
+                )
+                return
+            # REDISPATCH (nothing landed, head intact) falls through to the
+            # dispatch below, reusing the intent's stable operation key.
+
+        await self._mark_intent_dispatched(intent)
         issue_title = await self._read_issue_title(issue_number)
         outcome = await self._stack.flow.publish_proposal(
             owner=self._owner,
@@ -1185,7 +1634,9 @@ class GitHubRunService:
             issue_title=issue_title,
             plan_summary=plan_summary,
             expected_head=base_sha or None,
+            operation_key=intent.operation_key,
         )
+        await self._complete_intent_from_outcome(intent.id, outcome)
 
         if not outcome.ok:
             reason = outcome.reason or "publish_failed"
@@ -1201,14 +1652,28 @@ class GitHubRunService:
                 "publish_failed",
             )
             return
-
-        commit_oid = outcome.commit_oid or ""
         if getattr(outcome, "superseded", False):
             # The commit DID land, but a cancel won the publication race —
             # the publisher stamped superseded evidence on the run. Walking
             # toward ensuring_draft_mr/READY would resurrect a cancelled
             # run (R10).
             return
+        await self._finish_publish_leg(run_id, project_id, issue_number, outcome, plan_digest)
+
+    async def _finish_publish_leg(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        outcome: GitHubPublishOutcome,
+        plan_digest: str,
+    ) -> None:
+        """The shared publish-leg tail: candidate evidence → Draft PR → waiting_ci.
+
+        Runs identically for a fresh commit and an ADOPTED previous attempt's
+        commit (R11) — the run advances to ``waiting_ci`` on the found sha.
+        """
+        commit_oid = outcome.commit_oid or ""
         async with self._session_factory() as session:
             controller = Controller(session)
             # Walk the intermediate states the publish leg covered in one
@@ -2034,6 +2499,80 @@ class GitHubRunService:
             logger.info("Run %s fenced out of the Actions publish — standing down", run_id[:8])
             return
 
+        # R11: resolve the publication intent BEFORE the commit-API call —
+        # an open intent from a crashed attempt is probed and ADOPTED (its
+        # landed commit becomes the candidate), never duplicated; a fresh
+        # attempt persists the intent first and reuses its stable key.
+        branch = github_factory_branch(issue_number, run_id)
+        intent = await self._publication_intent(
+            await self._load_run(run_id),
+            branch=branch,
+            expected_head=bundle.attempt_base_oid,
+        )
+        if intent is None:
+            intent = await self._record_publication_intent(
+                await self._load_run(run_id),
+                branch=branch,
+                expected_head=bundle.attempt_base_oid,
+            )
+        else:
+            verdict, hits = await self._probe_intent(intent)
+            if verdict is ProbeVerdict.ADOPT:
+                await self._complete_intent(
+                    intent.id,
+                    "adopted",
+                    provider_object_id=hits[0],
+                    remote_result={"sha": hits[0], "reconciled": True},
+                )
+                pr = await self._stack.flow.ensure_draft_pr(
+                    self._owner,
+                    self._repo,
+                    branch,
+                    self._target_branch(),
+                    issue_number,
+                    run_id,
+                )
+                publish_outcome = GitHubPublishOutcome(
+                    ok=True,
+                    commit_oid=hits[0],
+                    expected_head_oid=bundle.attempt_base_oid,
+                    branch=branch,
+                    pr_number=int(pr["number"]) if pr else None,
+                    pr_url=pr.get("html_url") if pr else None,
+                    pr_draft=bool(pr.get("draft")) if pr else None,
+                    adopted=True,
+                )
+                logger.warning(
+                    "Run %s adopting previous attempt's commit %s (intent %s)",
+                    run_id[:8],
+                    hits[0][:8],
+                    intent.id[:8],
+                )
+                await self._finish_harness_publish_leg(
+                    run_id, project_id, issue_number, publish_outcome, plan_digest, handle
+                )
+                return
+            if verdict is ProbeVerdict.DUPLICATED:
+                await self._complete_intent(
+                    intent.id, "duplicated", remote_result={"branch": branch}
+                )
+            elif verdict is ProbeVerdict.UNKNOWN:
+                await self._complete_intent(
+                    intent.id, "unknown", remote_result={"matches": hits}
+                )
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, "commit_unknown_outcome")
+                await self._post_journaled_note(
+                    project_id,
+                    issue_number,
+                    f"Run `{run_id[:8]}` publication outcome is **unresolved** — an "
+                    "operator must inspect branch "
+                    f"`{branch}` and reconcile manually.\n\n*This is an automated message.*",
+                    run_id,
+                    "publish_unknown_outcome",
+                )
+                return
+
+        await self._mark_intent_dispatched(intent)
         publish_outcome = await self._stack.flow.publish_changeset(
             self._owner,
             self._repo,
@@ -2042,7 +2581,9 @@ class GitHubRunService:
             changeset=changeset,
             base_branch=self._target_branch(),
             expected_head=bundle.attempt_base_oid,
+            operation_key=intent.operation_key,
         )
+        await self._complete_intent_from_outcome(intent.id, publish_outcome)
         if not publish_outcome.ok:
             reason = publish_outcome.reason or "publish_failed"
             await self._to_terminal(
@@ -2059,7 +2600,24 @@ class GitHubRunService:
                 "publish_failed",
             )
             return
+        await self._finish_harness_publish_leg(
+            run_id, project_id, issue_number, publish_outcome, plan_digest, handle
+        )
 
+    async def _finish_harness_publish_leg(
+        self,
+        run_id: str,
+        project_id: int,
+        issue_number: int,
+        publish_outcome: GitHubPublishOutcome,
+        plan_digest: str,
+        handle: ActionsHandle,
+    ) -> None:
+        """The shared Actions-candidate tail: evidence → Draft PR → waiting_ci.
+
+        Runs identically for a fresh commit and an ADOPTED previous attempt's
+        commit (R11).
+        """
         commit_oid = publish_outcome.commit_oid or ""
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -3136,10 +3694,122 @@ async def evaluate_github_revival(
     )
 
 
+async def _repos_with_due_publication_intents(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct GitHub repos that hold an open publication intent (R11)."""
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PublicationIntent.repo)
+                    .where(
+                        PublicationIntent.provider == "github",
+                        PublicationIntent.status.in_(OPEN_STATES),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return [row for row in rows if row]
+
+
+async def evaluate_github_publication_intents(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """One recovery pass over every GitHub repo with open publication intents.
+
+    The post-restart half of the R11 fix: a worker that died between the
+    remote commit and the journal completion leaves the intent ``dispatched``
+    — this pass (the reconciler loop) probes the remote by identity and
+    resolves it: the run ADVANCES on the landed commit instead of blocking
+    on a re-publish ``branch_drift`` (the live failure this week).
+    """
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731
+            settings, session_factory, o, r
+        )
+    for repo_full_name in await _repos_with_due_publication_intents(session_factory):
+        owner, _, repo = repo_full_name.partition("/")
+        if not repo:
+            logger.warning("Publication intent with malformed repo %r — skipping", repo_full_name)
+            continue
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service.resolve_publication_intents(now=now)
+        except Exception:
+            # One broken repo must not stall the recovery pass.
+            logger.exception(
+                "Publication-intent recovery failed for %s", repo_full_name
+            )
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def run_github_publication_intents_reconciler(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    interval_seconds: float = 15,
+    shutdown_event: asyncio.Event | None = None,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """Periodic R11 recovery tick: resolve stranded publication intents.
+
+    Plain asyncio task for the worker's ``asyncio.gather`` (same shape as
+    :func:`run_github_harness_reconciler`). Runs for EVERY GitHub deployment
+    — builtin lane included: the lost-response window is lane-independent.
+    Exits when the GitHub adapter is disabled or carries no credentials.
+    """
+    if not bool(getattr(settings, "FORGE_GITHUB_ENABLED", False)):
+        return
+    try:
+        from forge.integrations.github_flow import credentials_from_settings
+
+        credentials_from_settings(settings)  # fail fast, before the loop
+    except ValueError:
+        logger.info("GitHub credentials not configured — publication-intent reconciler not started")
+        return
+
+    shutdown_event = shutdown_event or asyncio.Event()
+    logger.info(
+        "GitHub publication-intent reconciler started (interval=%ss)", interval_seconds
+    )
+    while not shutdown_event.is_set():
+        try:
+            await evaluate_github_publication_intents(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            # A failed pass must never kill the reconciler task.
+            logger.exception("GitHub publication-intent reconciler pass failed")
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
+            break  # Event set — clean shutdown.
+        except asyncio.TimeoutError:
+            pass  # Interval elapsed — next tick.
+    logger.info("GitHub publication-intent reconciler stopped")
+
+
 __all__ = [
     "GitHubRunService",
-    "execute_github_run_command",
+    "evaluate_github_publication_intents",
     "evaluate_github_revival",
     "evaluate_github_waiting_harness",
+    "execute_github_run_command",
     "run_github_harness_reconciler",
+    "run_github_publication_intents_reconciler",
 ]
