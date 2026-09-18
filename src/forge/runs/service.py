@@ -3737,26 +3737,34 @@ class RunService:
                 run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
             )
             return
-        # F13 (ADR-0018 §4): a candidate for a cancelled run is superseded —
-        # recorded as evidence only; it can never become a commit/MR because
-        # the publication grant is gone. The run stays cancelled even if the
-        # harness could not be stopped.
+        # F13 (ADR-0018 §4) + R17 liveness: a late candidate for a run that
+        # already reached ANY terminal state (cancelled, failed, blocked,
+        # ready) is superseded — recorded as evidence only, never published,
+        # and a terminal run is never revived by the callback. The
+        # publication grant is gone the moment the run left the active set.
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
+            status = run.status
+            revoked = bool(run.cancel_requested or status in {s.value for s in TERMINAL_STATUSES})
         if revoked:
+            reason = (
+                "cancelled"
+                if run.cancel_requested or status == FlowStatus.CANCELLED.value
+                else f"run already {status}"
+            )
             await self._merge_run_evidence(
                 run_id,
                 {
                     "superseded": {
-                        "reason": "cancelled",
+                        "reason": reason,
                         "attempt_base": bundle.attempt_base_oid,
                     }
                 },
             )
             logger.info(
-                "Run %s cancelled — harness candidate on %s recorded as superseded",
+                "Run %s is %s — harness candidate on %s recorded as superseded",
                 run_id[:8],
+                reason,
                 bundle.attempt_base_oid[:8],
             )
             return
@@ -3790,6 +3798,19 @@ class RunService:
             fence_check=_fence_valid,
         )
         if not result.ok:
+            if result.reason.startswith("claim_superseded"):
+                # A04: the executing claim lost its step (lease expired and a
+                # new owner reclaimed, fence moved, run binding changed) —
+                # the publisher stood down BEFORE the native call and already
+                # recorded the superseded evidence. The run's fate belongs to
+                # the live owner's re-driven leg; parking it from this stale
+                # one would fight the reclaim.
+                logger.warning(
+                    "Run %s harness publish stood down — execution claim stale (%s)",
+                    run_id[:8],
+                    result.reason,
+                )
+                return
             if result.unknown_outcome:
                 # The commit MAY exist: block as failed, never blind-retry.
                 await self._to_terminal(run_id, FlowStatus.FAILED, result.reason)

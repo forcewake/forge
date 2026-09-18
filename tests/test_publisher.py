@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 import pytest
 
-from forge.durable import ActionLog, Controller, FlowRun, RunSpec
+from forge.durable import ActionLog, Controller, FlowRun, RunSpec, bind_claim
 from forge.durable.identity import factory_branch
 from forge.gitlab.blob_reads import BlobReadResult
 from forge.models.base import Base
@@ -856,6 +856,46 @@ class TestAuthoritativeBaseReads:
         assert "authoritative_read_failed" in result.reason
         assert "file does not exist" not in result.reason
         assert fake_gitlab.calls_of("create_commit") == []
+
+
+class TestClaimOwnedDispatch:
+    """A04: the publisher arbitrates the ambient ExecutionClaim's step
+    ownership at the reservation point — a LIVE owner dispatches normally."""
+
+    async def test_bound_live_claim_still_publishes(self, db, fake_gitlab):
+        """The rightful owner is never refused: a claim whose step row still
+        shows its owner, fence token and live lease publishes exactly as an
+        unbound transport call does."""
+        from uuid import uuid4
+
+        from forge.durable import StepRun
+        from forge.worker.steps import claim_due_steps, execution_claim, schedule_command_step
+
+        run_id = "1" * 32
+        run = await persisted(db, make_run(run_id=run_id))
+        async with db() as session, session.begin():
+            step = await schedule_command_step(
+                session,
+                {"command": "advance", "project_id": PROJECT_ID},
+                source_event_id=uuid4().hex,
+            )
+            step.flow_run_id = run_id
+            step_id = step.id
+        claimed = await claim_due_steps(db, "worker-a")
+        assert [s.id for s in claimed] == [step_id]
+        claim = execution_claim(claimed[0])
+        async with db() as session:
+            live = await session.get(StepRun, step_id)
+        assert live is not None and live.lease_owner == "worker-a"
+
+        with bind_claim(claim):
+            result = await publish(
+                db, fake_gitlab, run, bundle_for(_create_diff("forge-demo/x.md", "hello\n"))
+            )
+        assert result.ok
+        assert result.superseded is False
+        branch = factory_branch(ISSUE_IID, run_id)
+        assert fake_gitlab.branches[branch], "the commit landed for the rightful owner"
 
     async def test_confirmed_not_found_still_allows_the_create(self, db, fake_gitlab):
         # The honest positive control: a provider-confirmed absence is exactly

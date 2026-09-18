@@ -31,10 +31,15 @@ sequence (validate → fence → native adapter); the pure policy half is
    ``start_ref = expected_head = attempt base``).
 
 The grant is re-checked at the RESERVATION POINT — after the long
-base-content reads, immediately before the adapter (R10): a cancel during
-the reads forbids a NEW publication reservation. A cancel that lands during
-the already-started remote commit is NOT rolled back (best-effort), but its
-completion records superseded evidence on the run and
+base-content reads, immediately before the adapter (R10) — together with the
+A04 claim-ownership arbitration: a bound
+:class:`~forge.durable.claims.ExecutionClaim` must still OWN its step row
+(same owner, same fence token, live unexpired lease, bound to this run) for
+the dispatch to happen. A stale claim stands the publish leg down with
+superseded evidence and no native call — queue ownership that lapsed
+(reaped, reassigned, expired) no longer implies effect ownership. A cancel
+that lands during the already-started remote commit is NOT rolled back
+(best-effort), but its completion records superseded evidence on the run and
 ``PublishResult.superseded`` is set instead of letting the caller walk a
 cancelled run toward ``ready_for_human``.
 
@@ -50,13 +55,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from forge.durable import FlowRun, FlowStatus, RunSpec, factory_branch, short_run_id
+from forge.durable import FlowRun, FlowStatus, RunSpec, StepRun, factory_branch, short_run_id
 from forge.durable.claims import ExecutionClaim, current_claim
+from forge.durable.controller import as_aware_utc
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
 from forge.gitlab.blob_reads import AUTHORITATIVE_READ_FAILED, BlobReadResult
 from forge.gitlab.client import GitLabAPIError, GitLabClient
@@ -403,35 +410,83 @@ async def _reload_run(
         return await session.get(FlowRun, run_id)
 
 
+#: The step status a live owner's row must still show. Mirrors
+#: ``forge.worker.steps.STEP_RUNNING`` (not imported: the worker package
+#: transitively imports this module).
+_STEP_RUNNING = "running"
+
+
+async def _claim_staleness(
+    session: AsyncSession,
+    claim: ExecutionClaim,
+    run_id: str,
+) -> str | None:
+    """Why the ambient claim no longer owns its step, or ``None`` while it does (A04).
+
+    The pre-dispatch arbitration the review demands: queue ownership must
+    imply effect ownership at EVERY effect, the publication dispatch
+    included. The step row is re-read (same fresh session as the reservation
+    re-check) and must still show the claim's owner and fence token on a
+    live, unexpired lease, bound to the run being published — a reaped,
+    reassigned, completed or lease-expired row means another execution owns
+    the work now, and THIS one must stand down before the native call. A
+    command step binds its run only at execution time, so a NULL
+    ``flow_run_id`` stays acceptable.
+    """
+    step = await session.get(StepRun, claim.step_id)
+    if step is None:
+        return "step row vanished"
+    if step.status != _STEP_RUNNING:
+        return f"step is {step.status!r}, not running"
+    if step.lease_owner != claim.owner:
+        return f"lease owner is {step.lease_owner!r}, not {claim.owner!r}"
+    if int(step.fence_token) != claim.fence_token:
+        return f"fence moved to {step.fence_token}"
+    if step.lease_expires_at is None or as_aware_utc(step.lease_expires_at) <= datetime.now(
+        timezone.utc
+    ):
+        return "lease expired"
+    if step.flow_run_id is not None and step.flow_run_id != run_id:
+        return f"step is bound to run {step.flow_run_id[:8]}"
+    return None
+
+
 async def _record_superseded_publication(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: str,
     *,
     commit_sha: str | None,
     attempt_base: str,
+    reason: str,
+    detail: str | None = None,
 ) -> None:
-    """Record on the run that a commit landed AFTER its grant was revoked.
+    """Record on the run that a publication leg must not be trusted.
 
     R10 best-effort completion: an already-started remote commit is not
-    rolled back, but the run's evidence names it as superseded so no reader
-    mistakes it for the published candidate, and the run is never walked
-    toward ``ready_for_human`` on its back.
+    rolled back, and a stale claim never dispatches at all — either way the
+    run's evidence names WHY (``reason``, with the failed dispatch's
+    ``detail``) so no reader mistakes the leg for the published candidate,
+    and the run is never walked toward ``ready_for_human`` on its back.
     """
     async with session_factory() as session:
         run = await session.get(FlowRun, run_id)
         if run is None:
             return
         evidence = dict(run.evidence or {})
-        evidence["superseded"] = {
-            "reason": "cancelled_during_publication",
+        record: dict[str, Any] = {
+            "reason": reason,
             "commit_sha": commit_sha,
             "attempt_base": attempt_base,
         }
+        if detail:
+            record["detail"] = detail
+        evidence["superseded"] = record
         run.evidence = evidence
         await session.commit()
     logger.warning(
-        "Run %s publication grant revoked mid-commit — commit %s recorded as superseded",
+        "Run %s publication superseded (%s) — commit %s recorded as superseded evidence",
         run_id[:8],
+        reason,
         (commit_sha or "?")[:8],
     )
 
@@ -474,7 +529,11 @@ async def publish_validated_candidate(
     The executing step's :class:`~forge.durable.claims.ExecutionClaim` (if
     bound) pins the publication-grant generation it was minted under: a
     cancel that bumped the run's generation after the claim fences the
-    reservation out even before the flag flips (R10).
+    reservation out even before the flag flips (R10). A04: the claim must
+    also still OWN its step at the reservation point — owner, fence token,
+    live lease and run binding are re-read immediately before the dispatch;
+    a stale claim stands the leg down with superseded evidence and no
+    native call.
 
     Write-policy profile knobs (R18, all defaulting to today's behavior):
 
@@ -570,13 +629,35 @@ async def publish_validated_candidate(
     except PolicyViolation as exc:
         return PublishResult(False, "changeset_invalid: " + "; ".join(exc.violations))
 
-    # R10 RESERVATION POINT: the reads above can take arbitrarily long —
-    # re-read the grant immediately before handing the candidate to the
-    # adapter. A cancel during the reads forbids this NEW reservation.
+    # R10 RESERVATION POINT + A04 PRE-DISPATCH ARBITRATION: the reads above
+    # can take arbitrarily long — re-read the grant immediately before
+    # handing the candidate to the adapter. A cancel during the reads forbids
+    # this NEW reservation. A bound ExecutionClaim must ALSO still own its
+    # step row (owner + fence + live lease + run binding): a stale claim
+    # stands down with superseded evidence and no native call — the reclaimed
+    # work belongs to the new owner now.
     if session_factory is not None:
-        recent = await _reload_run(session_factory, fresh.id)
-        if recent is None or not publication_grant_valid(recent, claim_generation):
-            return PublishResult(False, "publication_revoked: grant revoked during reservation")
+        async with session_factory() as session:
+            recent = await session.get(FlowRun, fresh.id)
+            if recent is None or not publication_grant_valid(recent, claim_generation):
+                return PublishResult(False, "publication_revoked: grant revoked during reservation")
+            staleness = (
+                await _claim_staleness(session, claim, fresh.id) if claim is not None else None
+            )
+        if staleness is not None:
+            await _record_superseded_publication(
+                session_factory,
+                fresh.id,
+                commit_sha=None,
+                attempt_base=attempt_base,
+                reason="publication_claim_stale",
+                detail=staleness,
+            )
+            return PublishResult(
+                False,
+                f"claim_superseded: execution claim no longer owns its step ({staleness}) — "
+                "standing down before dispatch",
+            )
 
     result = await native_publish(validated)
     if result.ok:
@@ -599,6 +680,7 @@ async def publish_validated_candidate(
                     fresh.id,
                     commit_sha=result.commit_sha,
                     attempt_base=attempt_base,
+                    reason="cancelled_during_publication",
                 )
                 return PublishResult(
                     True,

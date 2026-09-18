@@ -172,6 +172,29 @@ class TestGuardedTransition:
             await session.commit()
         assert run.status == FlowStatus.VALIDATING.value
 
+    async def test_plain_transition_routes_through_the_guarded_cas(self, db):
+        """A04: the plain entry delegates to the SAME CAS — two plain
+        transitions with one version produce exactly one applied move and one
+        typed StaleClaimError; the stale loser writes no announcement."""
+        run_id = await make_run(db, status=FlowStatus.VALIDATING.value)
+        async with db() as first, db() as second:
+            # Hold the loaded rows as a real effectful leg would (the
+            # identity map is weak) so the loser keeps its stale belief.
+            second_view = await second.get(FlowRun, run_id)
+            await first.get(FlowRun, run_id)
+            await first.commit()
+            await second.commit()
+
+            await Controller(first).transition(run_id, FlowStatus.COMMITTING, reason="actor-a")
+            await first.commit()
+            assert second_view.status == FlowStatus.VALIDATING.value
+
+            with pytest.raises(StaleClaimError):
+                await Controller(second).transition(run_id, FlowStatus.COMMITTING, reason="actor-b")
+
+        assert (await reload_run(db, run_id)).status == FlowStatus.COMMITTING.value
+        assert await outbox_count(db, run_id) == 1
+
     async def test_multi_status_expectation_for_cancel_edge(self, db):
         """The enter-from-anywhere edges take a SET of expected sources in
         one predicate."""

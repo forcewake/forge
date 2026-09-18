@@ -29,6 +29,13 @@ Rules encoded here:
   ``request_cancel`` bumps the run's cancellation generation in one
   statement with ``cancel_requested``, giving every guard a single value to
   compare (queue ownership implies effect ownership).
+- A04: the guarded CAS is THE write path. The plain :meth:`Controller.transition`
+  delegates to it (the pre-read only derives the expectation and names the
+  illegal-edge error; the WHERE still re-checks at write time), and the
+  revival edges (:meth:`Controller.revive_transition`,
+  :meth:`Controller.restart_plan_transition`) pin the terminal status they
+  read at start the same way — a stale owner's lifecycle write matches 0
+  rows and raises :class:`StaleClaimError` instead of overwriting.
 """
 
 from __future__ import annotations
@@ -250,7 +257,16 @@ class Controller:
     ) -> FlowRun:
         """Move the run to *to_status* and write one outbox row, atomically.
 
-        Raises :class:`RunNotFound` if the run does not exist and
+        A04: the write is the guarded CAS — this entry derives the
+        expectation from a pre-read (kept so an illegal edge still fails with
+        the typed :class:`InvalidTransition` BEFORE any statement) and routes
+        through the SAME conditional
+        ``UPDATE ... WHERE status = :expected`` as
+        :meth:`transition_guarded`. The WHERE re-checks at write time, so a
+        concurrent actor that moved the row between the read and the write
+        makes this caller the stale loser: 0 rows match and
+        :class:`StaleClaimError` is raised instead of a silent overwrite
+        (P07). Raises :class:`RunNotFound` if the run does not exist and
         :class:`InvalidTransition` if ADR-0004 does not allow the move.
         """
         target = _coerce_status(to_status)
@@ -265,9 +281,13 @@ class Controller:
                 f"allowed targets: {sorted(s.value for s in allowed)}"
             )
 
-        run.status = target.value
-        run.status_reason = reason
-        run.updated_at = datetime.now(timezone.utc)
+        run = await self._guarded_apply(
+            run_id,
+            target,
+            expected=[current],
+            expected_cancellation_generation=None,
+            reason=reason,
+        )
         self.session.add(
             Outbox(
                 flow_run_id=run_id,
@@ -339,6 +359,53 @@ class Controller:
                     f"allowed targets: {sorted(s.value for s in allowed)}"
                 )
 
+        run = await self._guarded_apply(
+            run_id,
+            target,
+            expected=expected,
+            expected_cancellation_generation=expected_cancellation_generation,
+            reason=reason,
+        )
+        from_label = (
+            expected[0].value if len(expected) == 1 else "/".join(sorted(s.value for s in expected))
+        )
+        self.session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type=TRANSITION_EVENT_TYPE,
+                payload={
+                    "flow_run_id": run_id,
+                    "from": from_label,
+                    "to": target.value,
+                    "reason": reason,
+                    "guarded": True,
+                },
+            )
+        )
+        await self.session.flush()
+        return run
+
+    async def _guarded_apply(
+        self,
+        run_id: str,
+        target: FlowStatus,
+        *,
+        expected: list[FlowStatus],
+        expected_cancellation_generation: int | None,
+        reason: str | None,
+    ) -> FlowRun:
+        """The ONE conditional UPDATE behind every lifecycle mutation (R10/A04).
+
+        ``UPDATE flow_runs SET status = :to ... WHERE id = :run_id AND
+        status IN (:expected) [AND cancellation_generation = :gen]`` — the
+        rowcount is the arbitration: 0 rows means a concurrent actor moved
+        the row and this caller is the stale loser (typed
+        :class:`StaleClaimError` carrying the observed state; record
+        superseded evidence, never retry blindly). The Core UPDATE bypasses
+        the ORM unit of work on purpose; the instance is re-read and
+        refreshed afterwards so callers see the applied values on their own
+        session object.
+        """
         predicate = (
             FlowRun.status == expected[0].value
             if len(expected) == 1
@@ -379,23 +446,6 @@ class Controller:
         if run is None:  # pragma: no cover — the UPDATE just matched this row
             raise RunNotFound(f"flow run {run_id!r} not found")
         await self.session.refresh(run)
-        from_label = (
-            expected[0].value if len(expected) == 1 else "/".join(sorted(s.value for s in expected))
-        )
-        self.session.add(
-            Outbox(
-                flow_run_id=run_id,
-                event_type=TRANSITION_EVENT_TYPE,
-                payload={
-                    "flow_run_id": run_id,
-                    "from": from_label,
-                    "to": target.value,
-                    "reason": reason,
-                    "guarded": True,
-                },
-            )
-        )
-        await self.session.flush()
         return run
 
     async def request_cancel(self, run_id: str) -> int:
@@ -446,6 +496,11 @@ class Controller:
         transitions": same run id, same branch, same candidate history. The
         outbox row carries ``authorized_by`` so the walk is auditable.
         Raises :class:`InvalidTransition` for any other source status.
+        A04: the walk is the guarded CAS — the terminal status read at revive
+        start is the expectation, so two racing revivals (or a revival losing
+        to any other concurrent move) produce exactly one applied walk and
+        one typed :class:`StaleClaimError`; a stale operator's revive can
+        never reopen a run that moved on.
         """
         run = await self.session.get(FlowRun, run_id)
         if run is None:
@@ -456,9 +511,13 @@ class Controller:
                 f"revival edge requires 'blocked' or 'failed', not {current.value!r}"
             )
 
-        run.status = FlowStatus.PROPOSING.value
-        run.status_reason = (reason or "")[:200]
-        run.updated_at = datetime.now(timezone.utc)
+        run = await self._guarded_apply(
+            run_id,
+            FlowStatus.PROPOSING,
+            expected=[current],
+            expected_cancellation_generation=None,
+            reason=(reason or "")[:200],
+        )
         self.session.add(
             Outbox(
                 flow_run_id=run_id,
@@ -494,6 +553,8 @@ class Controller:
         only revive forward to ``proposing`` (:meth:`revive_transition`) —
         an approved input is never re-planned past its gate. Journaled like
         the revival edge; raises :class:`InvalidTransition` otherwise.
+        A04: same CAS discipline as the revival edge — the ``blocked``
+        status read at start is the write-time expectation.
         """
         run = await self.session.get(FlowRun, run_id)
         if run is None:
@@ -506,9 +567,13 @@ class Controller:
                 f"run {run_id!r} has a frozen spec — plan restart refused (revive instead)"
             )
 
-        run.status = FlowStatus.PREFLIGHT.value
-        run.status_reason = (reason or "")[:200]
-        run.updated_at = datetime.now(timezone.utc)
+        run = await self._guarded_apply(
+            run_id,
+            FlowStatus.PREFLIGHT,
+            expected=[current],
+            expected_cancellation_generation=None,
+            reason=(reason or "")[:200],
+        )
         self.session.add(
             Outbox(
                 flow_run_id=run_id,

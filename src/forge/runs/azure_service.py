@@ -3133,22 +3133,34 @@ class AzureRunService:
                 run_id, FlowStatus.BLOCKED, "harness outcome without candidate bundle"
             )
             return
+        # F13 (ADR-0018 §4) + R17 liveness: a late candidate for a run that
+        # already reached ANY terminal state (cancelled, failed, blocked,
+        # ready) is superseded — recorded as evidence only, never published,
+        # and a terminal run is never revived by the callback. The
+        # publication grant is gone the moment the run left the active set.
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
-            revoked = bool(run.cancel_requested or run.status == FlowStatus.CANCELLED.value)
+            status = run.status
+            revoked = bool(run.cancel_requested or status in {s.value for s in TERMINAL_STATUSES})
         if revoked:
+            reason = (
+                "cancelled"
+                if run.cancel_requested or status == FlowStatus.CANCELLED.value
+                else f"run already {status}"
+            )
             await self._merge_run_evidence(
                 run_id,
                 {
                     "superseded": {
-                        "reason": "cancelled",
+                        "reason": reason,
                         "attempt_base": bundle.attempt_base_oid,
                     }
                 },
             )
             logger.info(
-                "Run %s cancelled — Pipelines candidate on %s recorded as superseded",
+                "Run %s is %s — Pipelines candidate on %s recorded as superseded",
                 run_id[:8],
+                reason,
                 bundle.attempt_base_oid[:8],
             )
             return

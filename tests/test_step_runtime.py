@@ -454,6 +454,48 @@ class TestFencing:
         assert await reschedule_expired_leases(db) == 0, "no lease to reap"
 
 
+class TestLateCompletionTerminalSet:
+    async def test_late_completion_after_blocked_run_records_superseded(self, db, monkeypatch):
+        """R17/R10: ANY terminal status supersedes a late result — the guard
+        is the closed TERMINAL_STATUSES set, not a cancelled-only check. A
+        run parked ``blocked`` (not cancelled) is never walked out of its
+        terminal state by a late callback either."""
+        from forge.durable import Controller
+
+        run_id = uuid4().hex
+        async with db() as session, session.begin():
+            session.add(FlowRun(id=run_id, project_id=1, issue_iid=1))
+            step = await schedule_command_step(
+                session, {"command": "advance", "project_id": 1}, source_event_id=uuid4().hex
+            )
+            step.flow_run_id = run_id
+
+        claimed = (await claim_due_steps(db, "worker-a"))[0]
+
+        # The run goes terminal while the step is in flight — blocked, not
+        # cancelled, cancel_requested untouched.
+        async with db() as session:
+            await Controller(session).transition(
+                run_id, FlowStatus.BLOCKED, reason="parked elsewhere"
+            )
+            await session.commit()
+
+        async def fake_execute(settings, forge_config, session_factory, metadata):
+            pass
+
+        monkeypatch.setattr("forge.worker.steps.execute_run_command", fake_execute)
+        await execute_claimed_step(db, object(), object(), claimed)
+
+        async with db() as session:
+            step_row = await session.get(StepRun, claimed.id)
+            run = await session.get(FlowRun, run_id)
+        assert step_row is not None and run is not None
+        assert step_row.status == "succeeded"
+        assert step_row.output["superseded"]["reason"] == "run_terminal"
+        assert step_row.output["superseded"]["run_status"] == FlowStatus.BLOCKED.value
+        assert run.status == FlowStatus.BLOCKED.value, "a late result never moves a terminal run"
+
+
 class TestRunCreationInvariant:
     def _service(self, db, fake: FakeGitLab) -> RunService:
         from forge.runs.stubs import StubImplementer, StubPlanner, StubReviewer
