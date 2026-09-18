@@ -8,7 +8,9 @@ ForgeConfig instance.
 
 from pathlib import Path
 
-from forge.config import ForgeConfig
+import pytest
+
+from forge.config import ForgeConfig, Settings, parse_driver_versions
 
 #: Nested dict sections of _DEFAULTS that must never be shared by identity.
 _NESTED_SECTIONS = (
@@ -56,3 +58,39 @@ class TestDefaultsIsolation:
         for section in _NESTED_SECTIONS:
             assert first.get(section) is not second.get(section), section
             assert first.get(section) is not ForgeConfig._DEFAULTS[section], section
+
+
+class TestDriverVersionsParser:
+    """R15: the FORGE_DRIVER_VERSIONS control-plane form — shape-only
+    validation (the closed driver-id set and the per-version charset are
+    the lane's fail-closed concern: forge.harness_entry)."""
+
+    def test_absent_and_empty_are_an_empty_map(self):
+        assert parse_driver_versions(None) == {}
+        assert parse_driver_versions("") == {}
+        assert parse_driver_versions("   ") == {}
+
+    def test_the_json_form_is_a_driver_to_version_map(self):
+        assert parse_driver_versions('{"grok-build": "1.0.30", "copilot": "latest"}') == {
+            "grok-build": "1.0.30",
+            "copilot": "latest",
+        }
+
+    def test_malformed_json_is_refused(self):
+        with pytest.raises(ValueError, match="FORGE_DRIVER_VERSIONS is not valid JSON"):
+            parse_driver_versions("{oops")
+
+    def test_a_non_object_is_refused(self):
+        with pytest.raises(ValueError, match="JSON object"):
+            parse_driver_versions('["claude-code"]')
+
+    def test_empty_keys_or_values_are_refused(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_driver_versions('{"": "1.0"}')
+        with pytest.raises(ValueError, match="non-empty"):
+            parse_driver_versions('{"claude-code": "   "}')
+
+    def test_the_settings_field_defaults_to_empty(self):
+        """Additive and empty by default: unset means the lane's known-good
+        pins apply (forge.harness_entry.DEFAULT_DRIVER_VERSIONS)."""
+        assert Settings.model_fields["FORGE_DRIVER_VERSIONS"].default == ""

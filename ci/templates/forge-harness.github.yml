@@ -103,9 +103,13 @@ jobs:
           python-version: "3.13"
 
       # The lane receives ONLY harness credentials, injected as secrets by
-      # the repo owner (never forge's publisher token):
-      #   FORGE_CLAUDE_OAUTH / ANTHROPIC_API_KEY / ZAI_API_KEY / XAI_API_KEY
-      # per driver — set explicitly in repo Actions secrets.
+      # the repo owner (never forge's publisher token) — R15: gated per
+      # driver in the step below, so a driver never sees another provider's
+      # key (capability/credential pairs: provider-native subscriptions are
+      # not interchangeable API keys):
+      #   claude-code: ANTHROPIC_* / ZAI_API_KEY   opencode: ZAI_API_KEY
+      #   grok-build: FORGE_GROK_AUTH              copilot: COPILOT_GITHUB_TOKEN
+      # Set explicitly in repo Actions secrets.
       - name: Render the implementation brief
         env:
           # Read-only runner token: fetches the issue body + the forge plan
@@ -168,11 +172,27 @@ jobs:
           # model's per-turn thinking budget (guided fix — wall time is
           # dominated by long thinking turns).
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # R15 minimal lane credentials: ONLY the selected driver's secrets
+          # render (the others resolve to '' — a driver never sees another
+          # provider's key; provider-native subscriptions are not
+          # interchangeable API keys, so each driver carries exactly the
+          # credential its unattended contract consumes. BYOK swaps are a
+          # configuration decision, never detected or enforced here).
+          #   claude-code: ANTHROPIC_* (+ ZAI_API_KEY via the
+          #     Anthropic-compatible coding endpoint)
+          #   grok-build: FORGE_GROK_AUTH (full ~/.grok/auth.json contents)
+          #   opencode: ZAI_API_KEY
+          #   copilot: COPILOT_GITHUB_TOKEN
+          ANTHROPIC_API_KEY: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
+          ANTHROPIC_AUTH_TOKEN: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
+          ANTHROPIC_BASE_URL: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_BASE_URL || '' }}
+          ZAI_API_KEY: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'opencode') && secrets.ZAI_API_KEY || '' }}
+          FORGE_GROK_AUTH: ${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}
+          COPILOT_GITHUB_TOKEN: ${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
+          # R15: per-driver CLI version pins (JSON object driver → version;
+          # "latest" = unpinned). A repo VARIABLE like FORGE_HARNESS_MCP —
+          # unset falls back to forge's known-good defaults.
+          FORGE_DRIVER_VERSIONS: ${{ vars.FORGE_DRIVER_VERSIONS }}
           # MCP (ADR-0022): canonical mcpServers JSON from a repo VARIABLE
           # (not secret — it references secrets by ${VAR} name); an empty
           # value means strict isolation with no servers.

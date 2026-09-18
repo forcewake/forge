@@ -754,6 +754,50 @@ class TestBudgetBlockReason:
             assert await budget_block_reason(session, RUN_ID) is None
 
 
+class TestReceiptNormalization:
+    """R23: the receipt's SHAPE-AWARE total feeds the budget.
+
+    Anthropic-compatible counters are disjoint (input excludes the cache —
+    the caching guide's total-input formula); OpenAI-compatible counters are
+    inclusive (the cache rides inside input and is never added on top).
+    """
+
+    async def test_anthropic_disjoint_counters_reach_the_budget_in_full(self, db):
+        from forge.runs.candidate import HarnessUsage
+
+        await openb(db, max_calls=5, max_tokens=10000)
+        usage = HarnessUsage(
+            driver="claude-code",
+            input_tokens=100,
+            cached_input_tokens=40,
+            cache_write_tokens=25,
+            output_tokens=50,
+            completeness="aggregate",
+        )
+        async with db() as session:
+            settled = await reconcile_harness_receipt(session, RUN_ID, usage)
+            await session.commit()
+        assert settled is not None
+        assert settled.consumed_tokens == 100 + 40 + 25 + 50
+
+    async def test_openai_inclusive_cache_is_still_never_added_on_top(self, db):
+        from forge.runs.candidate import HarnessUsage
+
+        await openb(db, max_calls=5, max_tokens=10000)
+        usage = HarnessUsage(
+            driver="grok-build",
+            input_tokens=100,
+            cached_input_tokens=40,
+            output_tokens=50,
+            completeness="aggregate",
+        )
+        async with db() as session:
+            settled = await reconcile_harness_receipt(session, RUN_ID, usage)
+            await session.commit()
+        assert settled is not None
+        assert settled.consumed_tokens == 150
+
+
 class TestReceiptDedupe:
     async def test_same_key_reconciles_once(self, db):
         await openb(db, max_calls=5)

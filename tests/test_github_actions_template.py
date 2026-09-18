@@ -11,6 +11,9 @@ from pathlib import Path
 import yaml
 
 TEMPLATE = Path(__file__).parents[1] / "ci" / "templates" / "forge-harness.github.yml"
+#: The dogfooding mirror (this repo runs itself through the lane); it must
+#: carry the SAME gated credential block as the shipped template.
+MIRROR = Path(__file__).parents[1] / ".github" / "workflows" / "forge-harness.yml"
 
 
 def load_template() -> dict:
@@ -173,3 +176,88 @@ class TestWorkflowTemplateContract:
 
         assert workflow["concurrency"]["group"] == "forge-${{ inputs.run_id }}"
         assert workflow["concurrency"]["cancel-in-progress"] is True
+
+
+# ----------------------------------------------------------------------
+# R15: minimal lane credentials — the driver step renders ONLY the
+# selected driver's secrets (a driver never sees another provider's key;
+# provider-native subscriptions are not interchangeable API keys), plus
+# the FORGE_DRIVER_VERSIONS pass-through for the pinned installs.
+# ----------------------------------------------------------------------
+
+
+#: driver → the credential names its lane may see (the rendered matrix).
+DRIVER_CREDENTIALS = {
+    "claude-code": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
+    "grok-build": ("FORGE_GROK_AUTH",),
+    "opencode": (),
+    "copilot": ("COPILOT_GITHUB_TOKEN",),
+}
+#: Names shared by several drivers carry their own multi-driver guard.
+SHARED_CREDENTIALS = {
+    "ZAI_API_KEY": ("claude-code", "opencode"),
+}
+
+
+class TestDriverCredentialGating:
+    def driver_env(self) -> dict:
+        workflow = load_template()
+        step = next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Run harness driver"
+        )
+        return step["env"]
+
+    def test_every_credential_line_is_guarded_by_the_selected_driver(self):
+        env = self.driver_env()
+        # Invert the matrix: credential name → the drivers that may see it.
+        owners: dict[str, tuple[str, ...]] = {}
+        for driver, names in DRIVER_CREDENTIALS.items():
+            for name in names:
+                owners[name] = (driver,)
+        owners.update(SHARED_CREDENTIALS)
+        for name, drivers in owners.items():
+            line = env[name]
+            for driver in ("claude-code", "grok-build", "opencode", "copilot"):
+                guarded = f"inputs.driver == '{driver}'" in line
+                assert guarded == (driver in drivers), (name, driver, line)
+
+    def test_copilot_lane_carries_its_documented_token(self):
+        """The documented copilot driver is unusable without it: the
+        fine-grained PAT with the "Copilot Requests" permission."""
+        line = self.driver_env()["COPILOT_GITHUB_TOKEN"]
+
+        assert line == ("${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}")
+
+    def test_grok_lane_uses_the_provider_native_subscription_only(self):
+        """FORGE_GROK_AUTH (the auth.json blob, the GitLab contract) — the
+        old XAI_API_KEY export is gone everywhere (an API key is a
+        different capability, never a grok-lane credential)."""
+        text = TEMPLATE.read_text()
+
+        assert "XAI_API_KEY" not in text
+        assert "${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}" in text
+
+    def test_driver_versions_variable_reaches_the_lane(self):
+        env = self.driver_env()
+
+        assert env["FORGE_DRIVER_VERSIONS"] == "${{ vars.FORGE_DRIVER_VERSIONS }}"
+
+    def test_the_dogfood_mirror_carries_the_same_gated_block(self):
+        template_lines = {
+            line.strip()
+            for line in TEMPLATE.read_text().splitlines()
+            if "secrets." in line and "inputs.driver ==" in line
+        }
+        mirror_lines = {
+            line.strip()
+            for line in MIRROR.read_text().splitlines()
+            if "secrets." in line and "inputs.driver ==" in line
+        }
+        # The mirror renders the SAME per-driver secret set (plus nothing,
+        # minus nothing).
+        assert "COPILOT_GITHUB_TOKEN" in MIRROR.read_text()
+        assert "XAI_API_KEY" not in MIRROR.read_text()
+        assert template_lines == mirror_lines
+        assert len(template_lines) == 6  # 3 anthropic + zai + grok + copilot

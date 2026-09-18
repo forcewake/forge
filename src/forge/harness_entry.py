@@ -47,6 +47,28 @@ unenforced.
 Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
 works as-is (the workflow owner may ship it however they like).
 
+Driver versions (R15): the driver CLIs install PINNED, never off the
+moving npm dist-tag — a CLI release can silently change lane behavior
+(flags, permission semantics, event schema) between the plan gate and
+the run. ``FORGE_DRIVER_VERSIONS`` (JSON object driver → version; the
+workflow template passes the same-named repo VARIABLE through) overrides
+:data:`DEFAULT_DRIVER_VERSIONS` per driver, and the literal ``"latest"``
+keeps the unpinned install. Every preamble echoes the installed
+``<cli> --version`` into the job log either way, so pin drift is visible,
+never silent.
+
+Lane credentials are capability/credential PAIRS (BYOK note): a
+provider-native subscription (a Claude seat, a Grok coding plan, a
+Copilot seat) is NOT an interchangeable API key — each driver consumes
+exactly the credential its own unattended contract names (claude-code:
+``ANTHROPIC_*``/ZAI via the Anthropic-compatible coding endpoint,
+grok-build: ``FORGE_GROK_AUTH`` written to ``~/.grok/auth.json``,
+opencode: ``ZAI_API_KEY``, copilot: ``COPILOT_GITHUB_TOKEN``), and the
+workflow template renders only the SELECTED driver's secrets. The
+enforcement point is the env gating in the template, nothing deeper:
+swapping a subscription for an API key is a configuration decision the
+lane never detects or polices.
+
 Stdlib + the pure prompt builder only: no forge database, no forge
 credentials — the lane runs forge's CODE, never forge's state.
 """
@@ -120,6 +142,73 @@ _CLAUDE_ALLOWED_TOOLS = (
 )
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
+
+#: R15 known-good driver CLI versions: an unpinned install rides the npm
+#: ``latest`` dist-tag, so a CLI release can silently change lane behavior
+#: between the plan gate and the run. The install preambles pin
+#: ``@<version>``; each value cites its source and is refreshed
+#: deliberately, never by an automated bump.
+DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
+    # npm registry latest at the R15 slice (2026-09-17); the lane needs
+    # --permission-prompts none, documented v2.1.259+.
+    "claude-code": "2.1.276",
+    # GROUND TRUTH 2026-09-13 (docs/research/harness-interfaces.md §3):
+    # verified against the installed CLI.
+    "grok-build": "1.0.30",
+    # npm registry latest at the R15 slice (2026-09-17).
+    "opencode": "1.18.31",
+    # npm registry latest at the R15 slice (2026-09-17).
+    "copilot": "1.0.86",
+}
+
+#: A version/dist-tag token safe to splice into an npm install spec
+#: (semver, dist-tags like ``latest``). Anything else is refused — the
+#: pin lands in a shell command and must never carry metacharacters.
+_DRIVER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def resolve_driver_versions(raw: str | None) -> dict[str, str]:
+    """The effective per-driver CLI version pins (R15).
+
+    *raw* is the ``FORGE_DRIVER_VERSIONS`` JSON object (driver → version)
+    — the workflow template passes the same-named repo VARIABLE through.
+    Absent/empty → :data:`DEFAULT_DRIVER_VERSIONS`; a per-driver override
+    wins; the literal ``"latest"`` keeps the unpinned install. Fail-closed
+    (same posture as the MCP parse): malformed JSON, a non-object, an
+    unknown driver id, or a version with characters outside
+    ``[A-Za-z0-9._-]`` raises ``ValueError`` — a typo must never silently
+    downgrade the lane to an unpinned (or shell-interpreted) install.
+    """
+    pins = dict(DEFAULT_DRIVER_VERSIONS)
+    text = str(raw or "").strip()
+    if not text:
+        return pins
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_DRIVER_VERSIONS is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("FORGE_DRIVER_VERSIONS must be a JSON object of driver → version")
+    for name, version in data.items():
+        if name not in DEFAULT_DRIVER_VERSIONS:
+            raise ValueError(
+                f"FORGE_DRIVER_VERSIONS names unknown driver {name!r} "
+                f"(expected one of {', '.join(sorted(DEFAULT_DRIVER_VERSIONS))})"
+            )
+        pin = str(version).strip()
+        if not _DRIVER_VERSION_RE.match(pin):
+            raise ValueError(
+                f"FORGE_DRIVER_VERSIONS[{name!r}]: bad version {pin!r} "
+                "(letters, digits, dot, underscore, dash only)"
+            )
+        pins[name] = pin
+    return pins
+
+
+def _npm_pin(package: str, version: str) -> str:
+    """One pinned global npm install (R15): ``package@version`` — the
+    literal ``latest`` version resolves to the unpinned dist-tag."""
+    return f"npm install -g --no-fund --no-audit {package}@{version}"
 
 
 def render_brief(issue_text: str, plan_text: str) -> str:
@@ -395,6 +484,7 @@ def render_driver_script(
     events_file: str = ".forge/events.jsonl",
     debug_log: str = ".forge/grok-debug.log",
     mcp_servers: dict | None = None,
+    driver_versions: dict[str, str] | None = None,
 ) -> str:
     """The bash script that provisions and invokes *driver* unattended.
 
@@ -404,6 +494,12 @@ def render_driver_script(
     repo's own MCP configs are locked out — injection-surface reduction);
     grok/copilot get their config files written; opencode's servers ride
     in the same ``OPENCODE_CONFIG_CONTENT`` as the permission map.
+
+    *driver_versions* (resolved ``FORGE_DRIVER_VERSIONS``,
+    :func:`resolve_driver_versions`) pins the npm installs: each preamble
+    installs ``package@<version>`` and then echoes the installed
+    ``<cli> --version`` into the job log (R15: pin drift is visible, never
+    silent). The literal ``latest`` keeps the unpinned dist-tag install.
 
     Rendered per driver from the GitLab templates' contract:
 
@@ -418,7 +514,13 @@ def render_driver_script(
       its platform binary as an optionalDependency, so a flaky registry
       silently skips it and the CLI hangs forever at startup. Both packages
       are installed explicitly, with retries (verified live, template
-      comment); ``--always-approve`` is required or headless grok HANGS.
+      comment); the platform binary follows the PINNED wrapper (the version
+      is read back from the binary just installed). The lane's ONLY grok
+      credential is the provider-native subscription auth blob
+      (``FORGE_GROK_AUTH`` → ``~/.grok/auth.json``, the GitLab template
+      contract) — an API key is a different capability and is never
+      requested here (R15 BYOK: capability/credential pairs).
+      ``--always-approve`` is required or headless grok HANGS.
       ``--trust`` loads project rules headlessly and ``--deny`` rules beat
       always-approve (R5: commit/push denied mechanically, not just asked);
     - ``opencode`` — ``run --auto`` (approves what the permission config
@@ -447,14 +549,24 @@ def render_driver_script(
     quoted_prompt = shlex.quote(TASK_PROMPT)
     events = shlex.quote(events_file)
     servers = mcp_servers or {}
+    pins = dict(DEFAULT_DRIVER_VERSIONS)
+    pins.update(driver_versions or {})
+    for name, pin in pins.items():
+        if not _DRIVER_VERSION_RE.match(pin):
+            raise ValueError(
+                f"bad driver version pin for {name!r}: {pin!r} "
+                "(letters, digits, dot, underscore, dash only)"
+            )
 
     if driver == "claude-code":
         preamble = (
             "for attempt in 1 2 3; do\n"
-            "  npm install -g --no-fund --no-audit @anthropic-ai/claude-code && break\n"
+            f"  {_npm_pin('@anthropic-ai/claude-code', pins['claude-code'])} && break\n"
             '  echo "npm install of claude-code failed (attempt $attempt), retrying..."\n'
             "  sleep $((attempt * 5))\n"
             "done\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
             "claude --version\n"
         )
         mcp_file = "/tmp/forge-mcp.json"
@@ -516,15 +628,33 @@ def render_driver_script(
     if driver == "grok-build":
         preamble = (
             "for attempt in 1 2 3; do\n"
-            "  npm install -g --no-fund --no-audit @xai-official/grok && break\n"
+            f"  {_npm_pin('@xai-official/grok', pins['grok-build'])} && break\n"
             '  echo "npm install of grok failed (attempt $attempt), retrying..."\n'
             "  sleep $((attempt * 5))\n"
             "done\n"
+            "# The platform binary follows the PINNED wrapper: GROK_VER is\n"
+            "# read back from the binary just installed (a pin on the\n"
+            "# wrapper alone would leave the optionalDependency floating).\n"
             "GROK_VER=\"$(grok --version | awk '{print $2}')\"\n"
             'npm install -g --no-fund --no-audit "@xai-official/grok-linux-x64@${GROK_VER}" \\\n'
             "  || npm install -g --no-fund --no-audit @xai-official/grok-linux-x64\n"
             "test -d /usr/local/lib/node_modules/@xai-official/grok-linux-x64\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
             "grok --version\n"
+        )
+        credential = (
+            "# R15 minimal lane credentials: the ONLY grok credential is the\n"
+            "# provider-native subscription auth blob (FORGE_GROK_AUTH — the\n"
+            "# full ~/.grok/auth.json contents, the GitLab template\n"
+            "# contract). An API key is a different capability and is never\n"
+            "# requested here (BYOK is per capability/credential pair, not\n"
+            "# interchangeable).\n"
+            "mkdir -p ~/.grok\n"
+            'if [ -n "$FORGE_GROK_AUTH" ]; then\n'
+            '  printf "%s" "$FORGE_GROK_AUTH" > ~/.grok/auth.json\n'
+            "  chmod 600 ~/.grok/auth.json\n"
+            "fi\n"
         )
         mcp_provision = (
             (
@@ -556,15 +686,22 @@ def render_driver_script(
             f"  --debug-file {shlex.quote(debug_log)} \\\n"
             f"  -p {quoted_prompt} 2>&1"
         )
-        return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
+        return (
+            preamble
+            + credential
+            + mcp_provision
+            + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
+        )
 
     if driver == "opencode":
         preamble = (
             "for attempt in 1 2 3; do\n"
-            "  npm install -g --no-fund --no-audit opencode-ai && break\n"
+            f"  {_npm_pin('opencode-ai', pins['opencode'])} && break\n"
             '  echo "npm install of opencode failed (attempt $attempt), retrying..."\n'
             "  sleep $((attempt * 5))\n"
             "done\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
             "opencode --version\n"
         )
         permission_config = json.dumps(
@@ -594,10 +731,12 @@ def render_driver_script(
     if driver == "copilot":
         preamble = (
             "for attempt in 1 2 3; do\n"
-            "  npm install -g --no-fund --no-audit @github/copilot && break\n"
+            f"  {_npm_pin('@github/copilot', pins['copilot'])} && break\n"
             '  echo "npm install of copilot failed (attempt $attempt), retrying..."\n'
             "  sleep $((attempt * 5))\n"
             "done\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
             "copilot --version\n"
         )
         mcp_provision = (
@@ -989,9 +1128,23 @@ def main(argv: list[str] | None = None) -> int:
         # silently running without the servers the task may depend on.
         return _finish("failed", f"harness_entry: {exc}")
 
+    # R15: the per-driver CLI version pins (same-named repo VARIABLE,
+    # passed through by the workflow template). Fail-closed like the MCP
+    # parse: a typo in the pins must never downgrade the lane to an
+    # unpinned (or shell-interpreted) install.
+    try:
+        driver_versions = resolve_driver_versions(os.environ.get("FORGE_DRIVER_VERSIONS"))
+    except ValueError as exc:
+        return _finish("failed", f"harness_entry: {exc}")
+
     try:
         script = render_driver_script(
-            driver, model, brief, events_file=args.events_file, mcp_servers=mcp_servers
+            driver,
+            model,
+            brief,
+            events_file=args.events_file,
+            mcp_servers=mcp_servers,
+            driver_versions=driver_versions,
         )
     except ValueError as exc:
         return _finish("failed", f"harness_entry: {exc}")

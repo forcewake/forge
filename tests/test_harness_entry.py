@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from forge.harness_entry import (
+    DEFAULT_DRIVER_VERSIONS,
     DRIVERS,
     emit_candidate_meta,
     fetch_workitem,
@@ -23,6 +24,7 @@ from forge.harness_entry import (
     parse_usage,
     render_brief,
     render_driver_script,
+    resolve_driver_versions,
 )
 
 BRIEF = ".forge/brief.md"
@@ -120,6 +122,116 @@ class TestRenderCommon:
             script = render_driver_script(driver, "m", BRIEF)
             assert shlex.quote(TASK_PROMPT) in script
             assert "brief.md" in script  # the pointer names the brief
+
+
+# ----------------------------------------------------------------------
+# Versioned drivers (R15): pinned npm installs, "latest" opt-out, the
+# resolved version echoed into the job log.
+# ----------------------------------------------------------------------
+
+#: driver id → (npm package, CLI binary) — the install/echo surface.
+_PACKAGES = {
+    "claude-code": ("@anthropic-ai/claude-code", "claude"),
+    "grok-build": ("@xai-official/grok", "grok"),
+    "opencode": ("opencode-ai", "opencode"),
+    "copilot": ("@github/copilot", "copilot"),
+}
+
+
+class TestDriverVersionPins:
+    def test_defaults_pin_every_install_to_the_known_good_version(self):
+        """No moving npm dist-tag: every preamble installs
+        ``package@<known-good>`` (a CLI release must never silently change
+        lane behavior between the plan gate and the run)."""
+        for driver in DRIVERS:
+            package, _ = _PACKAGES[driver]
+            script = render_driver_script(driver, "m", BRIEF)
+            assert f"npm install -g --no-fund --no-audit {package}" in script, driver
+            assert (
+                f"npm install -g --no-fund --no-audit {package}@{DEFAULT_DRIVER_VERSIONS[driver]}"
+            ) in script, driver
+
+    def test_every_preamble_echoes_the_resolved_version(self):
+        """The resolved CLI version lands in the job log — pin drift is
+        visible, never silent (the ``<cli> --version`` tail each preamble
+        already carried)."""
+        for driver in DRIVERS:
+            _, cli = _PACKAGES[driver]
+            assert f"{cli} --version" in render_driver_script(driver, "m", BRIEF)
+
+    def test_latest_keeps_the_unpinned_dist_tag_install(self):
+        """The documented opt-out: ``latest`` installs the moving dist-tag
+        (npm resolves it identically to the old unpinned install)."""
+        pins = dict.fromkeys(DRIVERS, "latest")
+        script = render_driver_script("claude-code", "m", BRIEF, driver_versions=pins)
+        assert "@anthropic-ai/claude-code@latest && break" in script
+        assert (
+            render_driver_script("grok-build", "m", BRIEF, driver_versions=pins).count(
+                "@xai-official/grok@latest"
+            )
+            == 1
+        )  # the platform binary stays GROK_VER-driven, not "latest"
+
+    def test_an_override_pins_just_one_driver(self):
+        pins = resolve_driver_versions('{"claude-code": "2.0.0"}')
+        script = render_driver_script("claude-code", "m", BRIEF, driver_versions=pins)
+        assert "@anthropic-ai/claude-code@2.0.0" in script
+        # Other drivers keep their defaults.
+        other = render_driver_script("copilot", "m", BRIEF, driver_versions=pins)
+        assert f"@github/copilot@{DEFAULT_DRIVER_VERSIONS['copilot']}" in other
+
+    def test_grok_platform_binary_follows_the_pinned_wrapper(self):
+        """The platform binary version is read back from the binary just
+        installed — pinning the wrapper pins the optionalDependency too."""
+        script = render_driver_script("grok-build", "m", BRIEF)
+        assert "GROK_VER=\"$(grok --version | awk '{print $2}')\"" in script
+        assert '"@xai-official/grok-linux-x64@${GROK_VER}"' in script
+
+    def test_render_refuses_a_pin_with_shell_metacharacters(self):
+        """Defense in depth: the pin is spliced into a shell command, so a
+        hand-rolled mapping (bypassing resolve_driver_versions) with
+        metacharacters is rejected, never rendered."""
+        with pytest.raises(ValueError, match="bad driver version pin"):
+            render_driver_script(
+                "claude-code", "m", BRIEF, driver_versions={"claude-code": "1.0; rm -rf /"}
+            )
+
+
+class TestResolveDriverVersions:
+    def test_absent_and_empty_fall_back_to_the_known_good_defaults(self):
+        assert resolve_driver_versions(None) == DEFAULT_DRIVER_VERSIONS
+        assert resolve_driver_versions("") == DEFAULT_DRIVER_VERSIONS
+        assert resolve_driver_versions("   ") == DEFAULT_DRIVER_VERSIONS
+
+    def test_the_json_override_wins_per_driver(self):
+        pins = resolve_driver_versions('{"grok-build": "1.0.30", "copilot": "latest"}')
+
+        assert pins["grok-build"] == "1.0.30"
+        assert pins["copilot"] == "latest"
+        assert pins["claude-code"] == DEFAULT_DRIVER_VERSIONS["claude-code"]
+
+    def test_malformed_json_fails_closed(self):
+        with pytest.raises(ValueError, match="FORGE_DRIVER_VERSIONS is not valid JSON"):
+            resolve_driver_versions('{"claude-code": ')
+
+    def test_a_non_object_fails_closed(self):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            resolve_driver_versions('["claude-code"]')
+
+    def test_an_unknown_driver_fails_closed(self):
+        with pytest.raises(ValueError, match="unknown driver 'codex'"):
+            resolve_driver_versions('{"codex": "1.0"}')
+
+    def test_a_version_with_metacharacters_fails_closed(self):
+        with pytest.raises(ValueError, match="bad version"):
+            resolve_driver_versions('{"claude-code": "1.0; x"}')
+
+    def test_a_non_string_version_is_tolerated_as_its_string_form(self):
+        """``json.loads`` happily yields numbers; the pin is the string
+        form (2.1 → "2.1") — the charset check still applies to it."""
+        pins = resolve_driver_versions('{"claude-code": 2.1}')
+
+        assert pins == {**DEFAULT_DRIVER_VERSIONS, "claude-code": "2.1"}
 
 
 # ----------------------------------------------------------------------
@@ -927,6 +1039,89 @@ class TestMain:
 
         assert rc == 0
         assert (lane / ".forge" / "exit").read_text().strip() == "completed"
+
+
+# ----------------------------------------------------------------------
+# Minimal lane credentials in the rendered scripts (R15): the grok lane
+# consumes the provider-native subscription blob; no other driver's
+# script ever touches another provider's credential.
+# ----------------------------------------------------------------------
+
+
+class TestGrokLaneCredential:
+    def test_grok_writes_the_subscription_auth_blob(self):
+        """FORGE_GROK_AUTH (full ~/.grok/auth.json contents, the GitLab
+        template contract) lands in ~/.grok/auth.json, owner-only."""
+        script = render_driver_script("grok-build", "m", BRIEF)
+
+        assert 'printf "%s" "$FORGE_GROK_AUTH" > ~/.grok/auth.json' in script
+        assert "chmod 600 ~/.grok/auth.json" in script
+        # Guarded: an unauthenticated lane still runs (the driver reports
+        # its own auth failure), it never breaks on an empty write.
+        assert 'if [ -n "$FORGE_GROK_AUTH" ]; then' in script
+
+    def test_no_other_driver_touches_another_providers_credential(self):
+        """Capability/credential pairs: only the grok script consumes
+        FORGE_GROK_AUTH, and no script consumes the workflow's other
+        provider credentials at all (env gating is the template's job)."""
+        for driver, forbidden in (
+            ("claude-code", ("FORGE_GROK_AUTH", "COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
+            ("opencode", ("FORGE_GROK_AUTH", "COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
+            ("copilot", ("FORGE_GROK_AUTH", "XAI_API_KEY")),
+            ("grok-build", ("COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
+        ):
+            script = render_driver_script(driver, "m", BRIEF)
+            for name in forbidden:
+                assert name not in script, (driver, name)
+
+
+class TestDriverVersionWiring:
+    def test_env_pins_flow_resolved_into_the_render(self, lane: Path, monkeypatch):
+        """FORGE_DRIVER_VERSIONS (the same-named repo VARIABLE, passed
+        through by the workflow) resolves into the full pin map: overrides
+        win, defaults fill the rest."""
+        monkeypatch.chdir(lane)
+        seen: dict = {}
+
+        def fake_render(driver, model, brief, **kwargs):
+            seen.update(driver=driver, **kwargs)
+            return "true"
+
+        monkeypatch.setattr("forge.harness_entry.render_driver_script", fake_render)
+        monkeypatch.setenv("FORGE_DRIVER_VERSIONS", '{"grok-build": "1.0.30"}')
+
+        rc = main(["--driver", "grok-build", "--exit-file", ".forge/exit"])
+
+        assert rc == 0
+        assert seen["driver_versions"]["grok-build"] == "1.0.30"
+        assert seen["driver_versions"]["claude-code"] == DEFAULT_DRIVER_VERSIONS["claude-code"]
+
+    def test_broken_env_pins_fail_the_lane_before_any_driver_runs(self, lane: Path, monkeypatch):
+        """Fail-closed (the MCP-parse posture): a typo in the pins must
+        never downgrade the lane to an unpinned install."""
+        monkeypatch.chdir(lane)
+        monkeypatch.setenv("FORGE_DRIVER_VERSIONS", "{not json")
+
+        rc = main(["--driver", "claude-code", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (lane / ".forge" / "exit").read_text().strip() == "failed"
+
+    def test_unset_pins_run_on_the_known_good_defaults(self, lane: Path, monkeypatch):
+        monkeypatch.chdir(lane)
+        seen: dict = {}
+
+        def fake_render(driver, model, brief, **kwargs):
+            seen.update(**kwargs)
+            return "true"
+
+        monkeypatch.setattr("forge.harness_entry.render_driver_script", fake_render)
+        monkeypatch.delenv("FORGE_DRIVER_VERSIONS", raising=False)
+
+        rc = main(["--driver", "opencode", "--exit-file", ".forge/exit"])
+
+        assert rc == 0
+        assert seen["driver_versions"] == DEFAULT_DRIVER_VERSIONS
 
 
 class TestQualityGateAllowlist:

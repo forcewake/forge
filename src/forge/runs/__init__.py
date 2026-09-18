@@ -42,6 +42,8 @@ from forge.runs.candidate import (
     attempt_base_for,
     bundle_from_changeset,
     parse_unified_diff,
+    usage_document,
+    usage_receipt_id,
 )
 from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
 from forge.runs.publisher import FenceCheck, PublishResult, publish_candidate
@@ -99,4 +101,6 @@ __all__ = [
     "revival_backoff_seconds",
     "run_reconciler",
     "short_run_id",
+    "usage_document",
+    "usage_receipt_id",
 ]

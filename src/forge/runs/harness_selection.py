@@ -18,6 +18,7 @@ inputs → identical output, so *same RunSpec → same selection*.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,7 @@ __all__ = [
     "compile_harness_selection",
     "current_driver",
     "implementation_block",
+    "parse_driver_entry",
     "parse_preference",
     "resolve_preference",
     "selection_from_spec_document",
@@ -63,6 +65,10 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "opencode": ("ZAI_API_KEY",),
     "copilot": ("COPILOT_GITHUB_TOKEN",),
 }
+
+#: A version/dist-tag token in a pinned chain entry (``driver@version``):
+#: letters, digits, dot, underscore, dash — never shell metacharacters.
+_ENTRY_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,31 @@ def parse_preference(raw: str | None) -> list[str]:
     return seen
 
 
+def parse_driver_entry(entry: str) -> tuple[str, str | None]:
+    """Split a preference-chain entry into ``(driver, version)`` (R15).
+
+    ``grok-build@1.0.30`` → ``("grok-build", "1.0.30")``; a bare id →
+    ``(id, None)``. A malformed pin — empty driver, or a version with
+    characters outside ``[A-Za-z0-9._-]`` — raises ``ValueError``.
+
+    The version is accepted-and-validated metadata ONLY: the frozen
+    selection and the dispatch contract stay bare-driver, and the pin's
+    enforcement point is the lane's ``FORGE_DRIVER_VERSIONS`` variable
+    (forge.harness_entry pins the actual npm installs). Carrying the pin
+    through the dispatch inputs is deliberately not in this slice.
+    """
+    text = str(entry or "").strip()
+    name, sep, version = text.partition("@")
+    if not sep:
+        return text, None
+    if not name or not _ENTRY_VERSION_RE.match(version):
+        raise ValueError(
+            f"malformed pinned harness entry {text!r} — expected driver@version "
+            "(version: letters, digits, dot, underscore, dash)"
+        )
+    return name, version
+
+
 def resolve_preference(config: ForgeConfig, settings: Settings) -> list[str]:
     """The project's ordered preference list (brief §1).
 
@@ -156,22 +187,25 @@ def resolve_preference(config: ForgeConfig, settings: Settings) -> list[str]:
 def validate_preference(preference: list[str], driver: str | None = None) -> None:
     """Config-validation time checks (brief §1), tighten-only (ADR-0015).
 
-    Ids must be shipped drivers, always. When *driver* names the backend's
-    harness driver (``ci_harness[:<driver>]`` — the builtin backend passes
-    None, it dispatches no harness), the list must include it: the list
-    tightens, never deselects, the configured backend. Raises ``ValueError``
-    — a contradictory configuration is refused, never silently repaired
-    (the same posture as the backend factory's unknown backend). An empty
+    Ids must be shipped drivers, always — a R15 pinned entry
+    (``driver@version``, :func:`parse_driver_entry`) validates by its
+    driver part. When *driver* names the backend's harness driver
+    (``ci_harness[:<driver>]`` — the builtin backend passes None, it
+    dispatches no harness), the list must include it: the list tightens,
+    never deselects, the configured backend. Raises ``ValueError`` — a
+    contradictory configuration is refused, never silently repaired (the
+    same posture as the backend factory's unknown backend). An empty
     preference is always valid (the backend default).
     """
-    unknown = [entry for entry in preference if entry not in SHIPPED_DRIVERS]
+    names = [parse_driver_entry(entry)[0] for entry in preference]
+    unknown = [entry for entry, name in zip(preference, names) if name not in SHIPPED_DRIVERS]
     if unknown:
         shipped = ", ".join(sorted(SHIPPED_DRIVERS))
         raise ValueError(
             f"unknown harness driver(s) in implement.harnesses: {', '.join(unknown)} "
             f"(shipped: {shipped})"
         )
-    if preference and driver is not None and driver not in preference:
+    if preference and driver is not None and driver not in names:
         raise ValueError(
             f"implement.harnesses must include the configured backend driver "
             f"{driver!r} — the list tightens, never deselects, the backend (ADR-0015)"
@@ -196,7 +230,16 @@ def compile_harness_selection(
 
     # Rules 1+3: the lanes cap the chain — a proposal can reorder, never
     # extend, and non-onboarded entries are dropped before anything else.
-    chain = [entry for entry in preference if entry in available_lanes]
+    # R15: a pinned entry (driver@version) enters the chain by its bare
+    # driver id — the frozen selection and the dispatch contract stay
+    # bare-driver; the pin's enforcement point is the lane's
+    # FORGE_DRIVER_VERSIONS variable. Duplicates collapse on the bare id
+    # (first occurrence wins).
+    chain: list[str] = []
+    for entry in preference:
+        name = parse_driver_entry(entry)[0]
+        if name in available_lanes and name not in chain:
+            chain.append(name)
     if not chain:
         # Rule 2 (byte-compat) + the ADR-0015 floor: the configured backend
         # is always runnable — an empty/fully-dropped preference degrades to

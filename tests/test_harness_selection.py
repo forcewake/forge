@@ -16,6 +16,7 @@ from forge.runs.harness_selection import (
     compile_harness_selection,
     current_driver,
     implementation_block,
+    parse_driver_entry,
     parse_preference,
     selection_from_spec_document,
     validate_preference,
@@ -242,6 +243,51 @@ class TestValidatePreference:
 
     def test_shipped_driver_set_is_the_four_templates(self):
         assert SHIPPED_DRIVERS == {"claude-code", "grok-build", "opencode", "copilot"}
+
+
+class TestPinnedChainEntries:
+    """R15: a chain entry may pin its driver's CLI version
+    (``driver@version``) — accepted and validated; the frozen selection
+    stays bare-driver (the pin's enforcement point is the lane's
+    FORGE_DRIVER_VERSIONS variable, not the dispatch)."""
+
+    def test_parse_splits_the_pin_from_the_driver(self):
+        assert parse_driver_entry("grok-build@1.0.30") == ("grok-build", "1.0.30")
+        assert parse_driver_entry(" claude-code ") == ("claude-code", None)
+        assert parse_driver_entry("") == ("", None)
+
+    def test_parse_refuses_a_malformed_pin(self):
+        with pytest.raises(ValueError, match="malformed pinned harness entry"):
+            parse_driver_entry("grok-build@")
+        with pytest.raises(ValueError, match="malformed pinned harness entry"):
+            parse_driver_entry("@1.0.30")
+        with pytest.raises(ValueError, match="malformed pinned harness entry"):
+            parse_driver_entry("grok-build@1.0; rm -rf /")
+
+    def test_validate_accepts_the_pinned_form_by_its_driver_part(self):
+        validate_preference(["claude-code", "grok-build@1.0.30"], "claude-code")
+        validate_preference(["grok-build@1.0.30"], "grok-build")
+
+    def test_validate_still_refuses_unknown_drivers_under_a_pin(self):
+        with pytest.raises(ValueError, match="unknown harness driver"):
+            validate_preference(["warp@1.0"], None)
+
+    def test_compile_strips_the_pin_into_the_bare_frozen_selection(self):
+        selection = compile_harness_selection(
+            ["grok-build@1.0.30", "claude-code"], "ci_harness:grok-build", LANES, None
+        )
+
+        assert selection.harness == "grok-build"  # bare — the dispatch contract
+        assert selection.fallbacks == ("claude-code",)
+        assert selection.as_document()["harness"] == "grok-build"
+
+    def test_compile_collapses_duplicate_driver_entries_on_the_bare_id(self):
+        selection = compile_harness_selection(
+            ["grok-build", "grok-build@1.0.30"], "ci_harness:grok-build", LANES, None
+        )
+
+        assert selection.harness == "grok-build"
+        assert selection.fallbacks == ()
 
 
 class TestSelectionFromSpecDocument:

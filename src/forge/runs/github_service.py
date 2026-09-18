@@ -80,6 +80,7 @@ from forge.durable import (
     consume_approval,
     due_intents,
     find_open_intent,
+    ingest_usage_receipt,
     is_valid,
     mark_dispatched,
     mint_operation_key,
@@ -2399,7 +2400,13 @@ class GitHubRunService:
         feeds a synthetic ``harness_timeout`` outcome without any provider
         call). With FORGE_HARNESS_FALLBACK off — the default — this is a
         straight local transition to ``blocked``.
+
+        R23: a failed/cancelled attempt's partial usage receipt is ingested
+        FIRST, identity-arbitrated exactly once — the lane burned the tokens
+        whether or not the candidate was adopted, and the fallback gate
+        below must see the spend before it re-dispatches anything.
         """
+        await self._record_harness_usage(run_id, outcome)
         kind = outcome.failure_kind or "code"
         # ADR-0023 §6: an opt-in, journaled advance down the frozen
         # chain — only infrastructure, only pre-candidate, OFF by
@@ -2414,6 +2421,44 @@ class GitHubRunService:
         ):
             return
         await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+
+    async def _record_harness_usage(self, run_id: str, outcome: HarnessOutcome) -> None:
+        """R23: ingest the Actions attempt's usage receipt exactly once.
+
+        The receipt (from the candidate bundle on a publish leg, or the
+        partial receipt the executor attached to a failed/cancelled outcome)
+        is identity-arbitrated by ``usage_receipts`` — a repeated poll,
+        crash-retry or re-download of the same artifact replays the same
+        ``(run, attempt, receipt_id)`` and moves nothing; a repair
+        re-dispatch (new attempt) costs again. Unknown receipts are still
+        recorded — the attempt's cost lands in the unknown bucket, never
+        silently as zero.
+        """
+        bundle = outcome.bundle
+        usage = bundle.usage if bundle is not None else outcome.usage
+        if usage is None:
+            return
+        async with self._session_factory() as session:
+            _, created = await ingest_usage_receipt(
+                session,
+                run_id=run_id,
+                usage=usage,
+                model_fallback=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "unknown"),
+            )
+            await session.commit()
+        if created:
+            logger.info(
+                "Run %s ingested harness usage receipt (attempt %s, %s)",
+                run_id[:8],
+                usage.attempt_id or "<unidentified>",
+                usage.completeness,
+            )
+        else:
+            logger.info(
+                "Run %s re-polled harness receipt (attempt %s) — already ingested, no-op",
+                run_id[:8],
+                usage.attempt_id or "<unidentified>",
+            )
 
     async def _current_harness_selection(self, run_id: str) -> tuple[HarnessSelection | None, bool]:
         """The run's current position in the frozen chain (ADR-0023 §6).
@@ -2576,6 +2621,10 @@ class GitHubRunService:
                 reason,
                 bundle.attempt_base_oid[:8],
             )
+            # R23: superseded still spent — the late attempt's receipt is
+            # ingested (once, identity-arbitrated) even though nothing
+            # publishes.
+            await self._record_harness_usage(run_id, outcome)
             return
 
         await self._transition(
@@ -2612,6 +2661,9 @@ class GitHubRunService:
             entries = bundle.materialize(base_contents)
         except Exception as exc:
             reason = getattr(exc, "reason", None) or "materialize_failed"
+            # R23: the rejected attempt's spend still lands on the ledger
+            # before the repair/terminal decision below.
+            await self._record_harness_usage(run_id, outcome)
             # R02/ADR-0008: a broken candidate blames the change — bounded
             # repair re-dispatches the lane in the SAME branch with the
             # failure context (LIVE-found: patch_does_not_apply on a
@@ -2653,6 +2705,7 @@ class GitHubRunService:
             allowed_paths=await self._read_spec_allowed_paths(run_id),
         )
         if violations:
+            await self._record_harness_usage(run_id, outcome)
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "changeset_invalid: " + "; ".join(violations)
             )
@@ -2660,6 +2713,7 @@ class GitHubRunService:
 
         if not await _fence_valid():
             logger.info("Run %s fenced out of the Actions publish — standing down", run_id[:8])
+            await self._record_harness_usage(run_id, outcome)
             return
 
         # R11: resolve the publication intent BEFORE the commit-API call —
@@ -2711,6 +2765,7 @@ class GitHubRunService:
                     hits[0][:8],
                     intent.id[:8],
                 )
+                await self._record_harness_usage(run_id, outcome)
                 await self._finish_harness_publish_leg(
                     run_id, project_id, issue_number, publish_outcome, plan_digest, handle
                 )
@@ -2740,6 +2795,10 @@ class GitHubRunService:
                 return
 
         await self._mark_intent_dispatched(intent)
+        # R23: the receipt records the LANE's spend, not the publish's
+        # outcome — ingest it before the CAS write so a failed/unknown
+        # publish still leaves the attempt's cost on the ledger.
+        await self._record_harness_usage(run_id, outcome)
         publish_outcome = await self._stack.flow.publish_changeset(
             self._owner,
             self._repo,

@@ -465,6 +465,185 @@ class TestPoll:
 
 
 # ----------------------------------------------------------------------
+# partial usage receipts on failed/cancelled attempts (R23)
+# ----------------------------------------------------------------------
+
+
+def cached_usage() -> dict:
+    """The R23 receipt shape with the OpenAI-style cache breakdown."""
+    return {
+        "input_tokens": 120,
+        "cached_input_tokens": 30,
+        "output_tokens": 45,
+        "completeness": "aggregate",
+        "source": "stream-json",
+    }
+
+
+class TestPartialReceipts:
+    def seed_cancelled_attempt(self, fake: FakeGitHub, meta: dict) -> None:
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="cancelled",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=create_diff("src/app.py", "half done\n"),
+            meta=meta,
+        )
+
+    async def test_cancelled_attempt_still_yields_the_partial_receipt(self):
+        """Concurrency supersession is routine: the cancelled lane's
+        ``if: always()`` emit/upload published the meta, so its partial
+        spend travels with the failed outcome (R23)."""
+        fake = FakeGitHub()
+        diff_text = create_diff("src/app.py", "half done\n")
+        self.seed_cancelled_attempt(fake, v2_meta(diff_text, usage=cached_usage()))
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "infrastructure"
+        assert outcome.usage is not None
+        assert outcome.usage.input_tokens == 120
+        assert outcome.usage.cached_input_tokens == 30
+        assert outcome.usage.output_tokens == 45
+        assert outcome.usage.completeness == "aggregate"
+        assert outcome.usage.attempt_id == "501:1"  # the receipt's identity
+
+    async def test_cancelled_without_an_artifact_has_no_receipt(self):
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="cancelled",
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.usage is None  # nothing published — nothing invented
+
+    async def test_cancelled_with_an_unbound_meta_yields_no_receipt(self):
+        """A meta claiming another Actions run's attempt is never billed."""
+        fake = FakeGitHub()
+        self.seed_cancelled_attempt(
+            fake, v2_meta(create_diff("src/app.py", "x\n"), attempt_id="999:2")
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.usage is None
+
+    async def test_timed_out_attempt_still_yields_the_partial_receipt(self):
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="timed_out",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=create_diff("src/app.py", "slow work\n"),
+            meta=v2_meta(create_diff("src/app.py", "slow work\n")),
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.reason == "harness_timeout"
+        assert outcome.usage is not None
+        assert outcome.usage.output_tokens == 45
+
+    async def test_classified_failure_still_yields_the_partial_receipt(self):
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="failure",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=create_diff("src/app.py", "burned tokens\n"),
+            meta=v2_meta(create_diff("src/app.py", "burned tokens\n")),
+        )
+        fake.seed_actions_jobs(501, [{"id": 9, "name": "harness", "conclusion": "failure"}])
+        fake.seed_job_log(9, "claude: the agent exited with code 1\n")
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.failure_kind == "code"
+        assert outcome.usage is not None
+        assert outcome.usage.input_tokens == 120
+
+    async def test_attempt_identity_mismatch_is_rejected(self):
+        """A v2 meta bound to someone else's Actions run is a contract
+        violation — the candidate is rejected (fail closed, R23)."""
+        fake = FakeGitHub()
+        diff_text = create_diff("src/app.py", "print('implemented')\n")
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="success",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=diff_text,
+            meta=v2_meta(diff_text, attempt_id="999:1"),
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.reason.startswith("harness_attempt_identity_mismatch")
+
+    async def test_v2_success_attempt_identity_rides_the_bundle(self):
+        fake = FakeGitHub()
+        diff_text = create_diff("src/app.py", "print('implemented')\n")
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="success",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=diff_text,
+            meta=v2_meta(diff_text),
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "change_candidate"
+        assert outcome.bundle is not None
+        assert outcome.bundle.usage is not None
+        assert outcome.bundle.usage.attempt_id == "501:1"
+
+
+# ----------------------------------------------------------------------
 # cancel: best-effort, tolerant of a finished run (research §4)
 # ----------------------------------------------------------------------
 

@@ -96,7 +96,10 @@ def upgrade() -> None:
     op.create_index(
         "ix_publication_intents_state_probe",
         "publication_intents",
-        ["state", "next_probe_at"],
+        # The lifecycle column is ``status`` (the docstring's "state" is the
+        # state-machine concept, not the column name — the ORM index and the
+        # recovery scanner both read ``status``).
+        ["status", "next_probe_at"],
         unique=False,
     )
 

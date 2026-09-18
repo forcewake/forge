@@ -248,6 +248,19 @@ class Settings(BaseSettings):
     # (``budget_profiles:``) wins when both are set.
     FORGE_BUDGET_PROFILES: str = ""
 
+    # R15: per-driver CLI version pins for the Actions harness lane — JSON
+    # object driver → version (claude-code | grok-build | opencode |
+    # copilot); the literal "latest" keeps the unpinned npm dist-tag
+    # install. The LANE consumes the same-named repo VARIABLE
+    # (FORGE_DRIVER_VERSIONS, passed through by the workflow template) and
+    # falls back to forge's known-good defaults (forge.harness_entry);
+    # this field is the control-plane/lab form of the same map. Shape-only
+    # validation here (parse_driver_versions) — the closed driver-id set
+    # and the per-version charset are the lane's fail-closed concern
+    # (importing them here would close the runs-package import cycle, cf.
+    # the harness_preference accessor).
+    FORGE_DRIVER_VERSIONS: str = ""
+
 
 def _positive_int_or_none(value: object, where: str) -> int | None:
     """A usable positive budget ceiling, or ``None`` (absent/null = unset).
@@ -299,6 +312,37 @@ def parse_budget_profiles(raw: str | None) -> dict[str, dict[str, Any]]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"FORGE_BUDGET_PROFILES is not valid JSON: {exc}") from exc
     return validate_budget_profiles(data)
+
+
+def parse_driver_versions(raw: str | None) -> dict[str, str]:
+    """The FORGE_DRIVER_VERSIONS JSON form (R15) — ``ValueError`` when
+    malformed.
+
+    Shape-only: a JSON object of driver id → non-empty version string (the
+    literal ``latest`` is a legal value = unpinned install). The closed
+    driver-id set and the per-version charset are enforced by the lane
+    (``forge.harness_entry.resolve_driver_versions``), which cannot import
+    this module — the lane runs stdlib-only.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_DRIVER_VERSIONS is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("FORGE_DRIVER_VERSIONS must be a JSON object of driver → version")
+    versions: dict[str, str] = {}
+    for name, version in data.items():
+        key = str(name).strip()
+        pin = str(version).strip()
+        if not key or not pin:
+            raise ValueError(
+                "FORGE_DRIVER_VERSIONS entries must be non-empty driver → version strings"
+            )
+        versions[key] = pin
+    return versions
 
 
 class ForgeConfig:

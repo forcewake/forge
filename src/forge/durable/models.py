@@ -501,6 +501,65 @@ class BudgetReservation(Base):
     released: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
+class UsageReceipt(Base):
+    """The durable identity of ONE ingested harness usage receipt (R23).
+
+    Harness spend arrives as candidate-artifact receipts that the control
+    plane polls at-least-once (a repeated reconciler tick, a crash between
+    ingest and transition, a re-downloaded artifact). This table is the
+    idempotency arbiter: the unique index on ``(run_id, attempt_id,
+    receipt_id)`` — the receipt identity the lane computed over its
+    normalized usage — makes ``INSERT ... ON CONFLICT DO NOTHING``
+    (:func:`forge.durable.budgets.ingest_usage_receipt`) a no-op for every
+    replay of the same receipt while a repair re-dispatch (a new attempt id)
+    legitimately costs again.
+
+    The canonical counters are recorded with the honesty rules of ADR-0013:
+    unknown stays ``NULL`` (never zero), cache counters stay OUT of
+    ``input_tokens`` (Anthropic-shaped counters are disjoint; the spend
+    total is computed at reconciliation, not folded in here), and ``raw``
+    keeps the verbatim usage block so spend stays reconstructable.
+    """
+
+    __tablename__ = "usage_receipts"
+    __table_args__ = (
+        Index("uq_usage_receipt_identity", "run_id", "attempt_id", "receipt_id", unique=True),
+        CheckConstraint(
+            "completeness IN ('exact', 'aggregate', 'unknown')",
+            name="ck_usage_receipts_completeness",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid.uuid4().hex)
+    run_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("flow_runs.id"),
+        nullable=False,
+        index=True,
+    )
+    #: The lane's attempt identity (GitHub's ``<run_id>:<run_attempt>``, or
+    #: the GitLab ``pipeline:<id>`` shape). Empty means the meta carried no
+    #: attempt identity (v1 metas); the identity then rests on the run and
+    #: the usage content alone.
+    attempt_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    #: sha256 over (run id, attempt id, normalized usage JSON) — computed at
+    #: emit time by the lane or recomputed identically at ingest.
+    receipt_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    driver: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completeness: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    #: The verbatim usage block as received — never normalized in place.
+    raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class PublicationIntent(Base):
     """The durable intent to produce ONE remote publication effect (R11).
 

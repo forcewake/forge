@@ -20,6 +20,7 @@ from forge.durable.budgets import (
     budget_for_run,
     budget_limits_from_spec,
     close_budget,
+    ingest_usage_receipt,
     load_budget_guard,
     open_budget,
     open_budget_from_spec,
@@ -93,6 +94,7 @@ from forge.durable.models import (
     RunBudget,
     RunSpec,
     StepRun,
+    UsageReceipt,
 )
 
 __all__ = [
@@ -133,6 +135,7 @@ __all__ = [
     "TRANSITION_EVENT_TYPE",
     "StepRun",
     "StepRunNotFound",
+    "UsageReceipt",
     "as_aware_utc",
     "bind_claim",
     "budget_block_reason",
@@ -149,6 +152,7 @@ __all__ = [
     "factory_branch",
     "find_open_intent",
     "ingest_event",
+    "ingest_usage_receipt",
     "is_valid",
     "load_budget_guard",
     "mark_dispatched",

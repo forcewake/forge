@@ -119,7 +119,10 @@ class HarnessOutcome:
       path).
     - :meth:`running` — keep waiting (durable deadline decides the rest).
     - :meth:`failed` — terminal for the harness leg; *failure_kind* says
-      whether the code or the environment failed.
+      whether the code or the environment failed. A failed attempt that
+      still published a readable usage receipt carries it in *usage* (R23):
+      the lane burned the tokens whether or not the candidate was adopted,
+      and the control plane ingests the partial receipt exactly once.
     """
 
     status: Literal["change_ready", "change_candidate", "running", "failed"]
@@ -128,6 +131,10 @@ class HarnessOutcome:
     summary: str = ""
     failure_kind: HarnessFailureKind | None = None
     reason: str = ""
+    #: The failed attempt's partial usage receipt, when its meta was
+    #: readable and passed validation — ``None`` when nothing trustworthy
+    #: was published (spend stays unknown, never invented).
+    usage: HarnessUsage | None = None
 
     @classmethod
     def change_ready(cls, commit_sha: str, summary: str = "") -> HarnessOutcome:
@@ -142,8 +149,14 @@ class HarnessOutcome:
         return cls(status="running")
 
     @classmethod
-    def failed(cls, kind: HarnessFailureKind, reason: str) -> HarnessOutcome:
-        return cls(status="failed", failure_kind=kind, reason=reason)
+    def failed(
+        cls,
+        kind: HarnessFailureKind,
+        reason: str,
+        *,
+        usage: HarnessUsage | None = None,
+    ) -> HarnessOutcome:
+        return cls(status="failed", failure_kind=kind, reason=reason, usage=usage)
 
     @property
     def ok(self) -> bool:

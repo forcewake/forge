@@ -38,6 +38,7 @@ from forge.runs.backends import (
     CANDIDATE_DIFF_PATH,
     CANDIDATE_META_PATH,
     _HARNESS_INFRASTRUCTURE_PATTERNS,
+    HarnessFailureKind,
     HarnessOutcome,
 )
 from forge.runs.candidate import CandidateError, HarnessUsage, parse_unified_diff
@@ -275,15 +276,27 @@ class GitHubActionsExecutor:
         if conclusion == "success":
             return await self._collect_candidate(handle)
         if conclusion in {"cancelled", "skipped", "stale"}:
-            # External cancellation is not the code's fault (ADR-0015).
+            # External cancellation is not the code's fault (ADR-0015). A
+            # CANCELLED lane still ran — cancel-in-progress supersession is
+            # routine — and its ``if: always()`` emit/upload steps still
+            # published the receipt, so the partial spend travels with the
+            # failed outcome (R23).
+            if conclusion == "cancelled":
+                return await self._failed_with_receipt(
+                    handle, "infrastructure", f"harness run {conclusion}"
+                )
             return HarnessOutcome.failed("infrastructure", f"harness run {conclusion}")
         if conclusion == "timed_out":
-            return HarnessOutcome.failed("infrastructure", "harness_timeout")
+            # The lane burned its whole window before the kill — its partial
+            # receipt (when the emit step got to run) still travels (R23).
+            return await self._failed_with_receipt(handle, "infrastructure", "harness_timeout")
         if conclusion == "startup_failure":
             # The lane never started (workflow file broken, runner image
-            # unavailable) — infrastructure by definition.
+            # unavailable) — infrastructure by definition, and no receipt
+            # can exist.
             return HarnessOutcome.failed("infrastructure", "harness startup_failure")
-        return await self._classify_failure(handle)
+        outcome = await self._classify_failure(handle)
+        return await self._attach_partial_receipt(handle, outcome)
 
     def _deadline_outcome(self, handle: ActionsHandle, now: datetime) -> HarnessOutcome:
         """running before the durable deadline; harness_timeout past it.
@@ -352,12 +365,21 @@ class GitHubActionsExecutor:
                 f"{reported_base[:8] or '<none>'}, expected {handle.attempt_base[:8] or '<none>'}",
             )
 
+        # R23: a v2 meta carries the lane's own attempt identity (GitHub's
+        # ``<run_id>:<run_attempt>``); it must name THE Actions run the
+        # artifact was read from — a receipt bound to someone else's attempt
+        # would poison ingest idempotency. v1 metas carry no identity and
+        # skip the check.
+        attempt_identity = str(meta.get("attempt_id") or "")
+        if not self._attempt_identity_bind_ok(attempt_identity, handle):
+            return HarnessOutcome.failed(
+                "code",
+                "harness_attempt_identity_mismatch: artifact claims attempt "
+                f"{attempt_identity!r}, was read from Actions run {handle.run_id}",
+            )
+
         driver_exit = str(meta.get("exit") or "completed").strip() or "completed"
-        usage = HarnessUsage.from_meta(
-            meta.get("usage"),
-            driver=str(meta.get("driver") or handle.driver),
-            model=str(meta.get("model") or ""),
-        )
+        usage = self._meta_usage(meta, handle)
         try:
             bundle = parse_unified_diff(
                 diff_text,
@@ -366,17 +388,25 @@ class GitHubActionsExecutor:
                 usage=usage,
             )
         except CandidateError as exc:
-            return HarnessOutcome.failed("code", f"harness_candidate_invalid: {exc.reason}: {exc}")
+            return HarnessOutcome.failed(
+                "code",
+                f"harness_candidate_invalid: {exc.reason}: {exc}",
+                # The diff failed validation, but the artifact itself passed
+                # every bind: the attempt's partial spend is real and
+                # travels with the rejection (R23).
+                usage=usage,
+            )
 
         if driver_exit != "completed":
             # The driver itself reported failure: never adopt a possibly
-            # partial working tree, whatever it managed to change.
+            # partial working tree, whatever it managed to change — and
+            # still report what the attempt cost (R23).
             detail = " with no changes" if bundle.is_empty else ""
             return HarnessOutcome.failed(
-                "code", f"harness_driver_failed (exit={driver_exit}{detail})"
+                "code", f"harness_driver_failed (exit={driver_exit}{detail})", usage=usage
             )
         if bundle.is_empty:
-            return HarnessOutcome.failed("code", "harness_no_changes")
+            return HarnessOutcome.failed("code", "harness_no_changes", usage=usage)
         return HarnessOutcome.change_candidate(bundle, summary=str(meta.get("summary") or ""))
 
     async def _download_and_extract(
@@ -387,6 +417,87 @@ class GitHubActionsExecutor:
             handle.owner, handle.repo, int(artifact["id"])
         )
         return _extract_candidate(payload)
+
+    @staticmethod
+    def _meta_usage(meta: dict[str, Any], handle: ActionsHandle) -> HarnessUsage:
+        """The meta's usage receipt with the lane's attempt identity (R23)."""
+        return HarnessUsage.from_meta(
+            meta.get("usage"),
+            driver=str(meta.get("driver") or handle.driver),
+            model=str(meta.get("model") or ""),
+            attempt_id=str(meta.get("attempt_id") or ""),
+        )
+
+    @staticmethod
+    def _attempt_identity_bind_ok(attempt_identity: str, handle: ActionsHandle) -> bool:
+        """Whether the meta's attempt identity names THIS Actions run.
+
+        GitHub injects ``<run_id>:<run_attempt>``; empty (v1 metas, or the
+        emitter running outside Actions) binds to nothing and is accepted.
+        """
+        return not attempt_identity or attempt_identity.startswith(f"{handle.run_id}:")
+
+    async def _failed_with_receipt(
+        self, handle: ActionsHandle, kind: HarnessFailureKind, reason: str
+    ) -> HarnessOutcome:
+        """A failed outcome that first picks up the attempt's partial receipt."""
+        return await self._attach_partial_receipt(handle, HarnessOutcome.failed(kind, reason))
+
+    async def _attach_partial_receipt(
+        self, handle: ActionsHandle, outcome: HarnessOutcome
+    ) -> HarnessOutcome:
+        """Attach a failed/cancelled attempt's partial usage receipt (R23).
+
+        The template's emit + upload steps run ``if: always()``, so a lane
+        that burned tokens and then failed, timed out or was cancelled still
+        published its meta artifact. The receipt is read with the SAME
+        fail-closed archive validation as a success — nothing is weakened
+        for the failure path — and any read/validation failure leaves the
+        outcome without a receipt: the spend stays unknown, never zero, and
+        is never invented.
+        """
+        if outcome.usage is not None:
+            return outcome
+        usage = await self._collect_partial_usage(handle)
+        if usage is None:
+            return outcome
+        return replace(outcome, usage=usage)
+
+    async def _collect_partial_usage(self, handle: ActionsHandle) -> HarnessUsage | None:
+        """Best-effort meta read for a failed/cancelled attempt's receipt.
+
+        Mirrors :meth:`_collect_candidate`'s REST-declared caps and its
+        bounded one-retry download posture, then re-checks the artifact's
+        base and attempt binds before trusting anything. ``None`` whenever
+        any step of that chain fails — there is no receipt to ingest.
+        """
+        try:
+            artifacts = await self._client.list_workflow_run_artifacts(
+                handle.owner, handle.repo, handle.run_id
+            )
+        except GitHubAPIError:
+            return None
+        wanted = artifact_name_for(handle.forge_run_id or str(handle.run_id))
+        artifact = next((a for a in artifacts if str(a.get("name") or "") == wanted), None)
+        if artifact is None or artifact.get("expired") is True:
+            return None
+        declared = artifact.get("size_in_bytes")
+        if isinstance(declared, int) and declared > MAX_ARTIFACT_ZIP_BYTES:
+            return None
+        try:
+            _, meta = await self._download_and_extract(handle, artifact)
+        except CandidateArchiveError:
+            try:
+                _, meta = await self._download_and_extract(handle, artifact)
+            except CandidateArchiveError:
+                return None
+        reported_base = str(meta.get("attempt_base_oid") or meta.get("attempt_base") or "")
+        if reported_base != handle.attempt_base:
+            return None
+        attempt_identity = str(meta.get("attempt_id") or "")
+        if not self._attempt_identity_bind_ok(attempt_identity, handle):
+            return None
+        return self._meta_usage(meta, handle)
 
     async def _classify_failure(self, handle: ActionsHandle) -> HarnessOutcome:
         """Failed workflow → code vs infrastructure, GitLab-lane patterns.

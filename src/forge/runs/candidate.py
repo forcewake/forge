@@ -36,9 +36,10 @@ for the run; nothing here trusts the harness's claims.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 from forge.factory.implementer import FORGE_MATERIALIZE_MAX_FILE_CHARS
 
@@ -278,27 +279,62 @@ class ChangeManifestEntry:
 class HarnessUsage:
     """The F22-lite usage receipt parsed from ``candidate.meta.json``.
 
-    Token fields are ``None`` when unknown — unknown stays unknown, never
-    zero, and cached tokens are never folded into the input count.
+    Normalization honesty (R23, docs/research/actions-artifacts-usage.md
+    § Usage normalization table): token fields are ``None`` when unknown —
+    unknown stays unknown, never zero — and cache counters are never folded
+    into the input count:
+
+    - OpenAI-compatible shapes (grok-build, opencode, copilot) count the
+      cache inside the inclusive input; ``cached_input_tokens`` is a
+      breakdown, never added on top;
+    - Anthropic(-compatible) shapes (the claude-code driver, whether it
+      talks to Anthropic or to ``api.z.ai/api/anthropic``) carry DISJOINT
+      counters — ``input_tokens`` already excludes the cache — so their
+      spend total is ``input + cache_read + cache_write + output``
+      (:attr:`total_known_tokens`).
     """
 
     driver: str = ""
     model: str = ""
     input_tokens: int | None = None
     cached_input_tokens: int | None = None
+    #: Anthropic ``cache_creation_input_tokens`` — a counter the
+    #: OpenAI-compatible shapes never expose. Absent → unknown, never 0.
+    cache_write_tokens: int | None = None
     output_tokens: int | None = None
+    #: Informational only (``reasoning_tokens`` / ``thinking_tokens``): a
+    #: breakdown inside the inclusive output on every shape forge sees —
+    #: never added on top of anything.
+    reasoning_tokens: int | None = None
     completeness: UsageCompleteness = "unknown"
     source: str = ""
+    #: The lane's attempt identity (v2 meta ``attempt_id``, GitHub's own
+    #: ``<run_id>:<run_attempt>``) — the second component of the receipt
+    #: identity: a repair re-dispatch is a legitimately distinct receipt.
+    attempt_id: str = ""
+    #: The receipt's identity, sha256 over (run id, attempt id, normalized
+    #: usage JSON) — :func:`usage_receipt_id`. The lane may embed it as
+    #: ``usage.receipt_id``; the control plane recomputes the SAME value
+    #: when absent (deterministic), so a re-downloaded artifact replays
+    #: byte-identical identity.
+    receipt_id: str = ""
+    #: The verbatim usage block as received (never normalized in place) —
+    #: preserved on the ledger so spend stays reconstructable later.
+    raw: dict[str, Any] | None = None
 
     @classmethod
-    def from_meta(cls, data: object, *, driver: str = "", model: str = "") -> HarnessUsage:
+    def from_meta(
+        cls, data: object, *, driver: str = "", model: str = "", attempt_id: str = ""
+    ) -> HarnessUsage:
         """Build a receipt from the meta JSON's ``usage`` object (defensive).
 
         Anything not a non-negative int stays ``None``; ``completeness``
         degrades to ``unknown`` unless at least one token count survived.
+        ``attempt_id`` comes from the v2 meta's top-level attempt identity
+        (the caller passes it) with an in-block override.
         """
         if not isinstance(data, dict):
-            return cls(driver=driver, model=model)
+            return cls(driver=driver, model=model, attempt_id=attempt_id)
 
         def _token(key: str) -> int | None:
             value = data.get(key)
@@ -308,24 +344,107 @@ class HarnessUsage:
 
         input_tokens = _token("input_tokens")
         cached = _token("cached_input_tokens")
+        cache_write = _token("cache_write_tokens")
         output_tokens = _token("output_tokens")
+        reasoning = _token("reasoning_tokens")
         completeness = data.get("completeness")
         if completeness not in ("exact", "aggregate"):
             # Receipts parsed from the event stream are sums of per-turn
             # counters — the honest default is "aggregate", never fabricated
             # precision.
             completeness = "aggregate"
-        if input_tokens is None and cached is None and output_tokens is None:
+        if all(
+            value is None for value in (input_tokens, cached, cache_write, output_tokens, reasoning)
+        ):
             completeness = "unknown"
         return cls(
             driver=str(data.get("driver") or driver or ""),
             model=str(data.get("model") or model or ""),
             input_tokens=input_tokens,
             cached_input_tokens=cached,
+            cache_write_tokens=cache_write,
             output_tokens=output_tokens,
+            reasoning_tokens=reasoning,
             completeness=completeness,  # type: ignore[arg-type]
             source=str(data.get("source") or ""),
+            attempt_id=str(data.get("attempt_id") or attempt_id or ""),
+            receipt_id=str(data.get("receipt_id") or ""),
+            raw=data,
         )
+
+    @property
+    def anthropic_shaped(self) -> bool:
+        """Whether the counters are DISJOINT (Anthropic-compatible semantics).
+
+        Provider shape is decided by the endpoint, not the hostname, and the
+        meta's canonical field names cannot distinguish "input excludes the
+        cache" from "input includes it" — so shape is detected by the two
+        tells the research table names: the ``cache_write`` counter only an
+        Anthropic-compatible endpoint exposes, and the claude-code driver
+        that always talks to one.
+        """
+        return self.cache_write_tokens is not None or self.driver == "claude-code"
+
+    @property
+    def total_known_tokens(self) -> int | None:
+        """The receipt's KNOWN token total, per the normalization table.
+
+        Anthropic-shaped (disjoint counters): ``input + cache_read +
+        cache_write + output`` — the caching guide's total-input formula.
+        OpenAI-shaped (inclusive counters): ``input + output`` — the cache
+        rides inside the input and is never added on top. Unknown parts
+        contribute nothing (never zero-filled); nothing known → ``None``.
+        """
+        parts: tuple[int | None, ...]
+        if self.anthropic_shaped:
+            parts = (
+                self.input_tokens,
+                self.cached_input_tokens,
+                self.cache_write_tokens,
+                self.output_tokens,
+            )
+        else:
+            parts = (self.input_tokens, self.output_tokens)
+        known = [part for part in parts if isinstance(part, int)]
+        if not known:
+            return None
+        return sum(known)
+
+
+def usage_document(usage: HarnessUsage) -> dict[str, Any]:
+    """The receipt's canonical normalized counters — the identity material.
+
+    Sorted-key JSON of this document is what :func:`usage_receipt_id`
+    hashes; ``raw`` is deliberately excluded (the verbatim provider block is
+    preserved on the ledger but is not part of the identity: two lanes that
+    aggregate the same counters must produce the same receipt id).
+    """
+    return {
+        "driver": usage.driver,
+        "model": usage.model,
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "completeness": usage.completeness,
+        "source": usage.source,
+    }
+
+
+def usage_receipt_id(run_id: str, attempt_id: str, usage: HarnessUsage) -> str:
+    """The receipt's identity: sha256 over (run id, attempt id, usage JSON).
+
+    R23: computed over the NORMALIZED usage document, so it is deterministic
+    across re-downloads of the same artifact (the exact double-count
+    scenario) while a repair re-dispatch — a new attempt id — is a
+    legitimately distinct receipt. The lane may embed the value it computed
+    at emit time as ``usage.receipt_id``; the control plane recomputes this
+    SAME function when the meta does not carry it.
+    """
+    document = json.dumps(usage_document(usage), sort_keys=True, separators=(",", ":"))
+    material = f"{run_id}|{attempt_id}|{document}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

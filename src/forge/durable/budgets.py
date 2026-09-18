@@ -32,8 +32,13 @@ time, so the planner itself reserves) — and passes a :class:`BudgetGuard`
 (built with :func:`load_budget_guard`) to the planner/implementer/reviewer
 ``LLMClient`` as its optional ``budget`` handle. The harness path reconciles
 the candidate meta usage receipt with :func:`reconcile_harness_receipt`
-(keyed by episode so repeated artifact polls cannot double-consume), and its
-episode dispatches are gated by :func:`budget_block_reason` — wall clock and
+(keyed by episode so repeated artifact polls cannot double-consume), and
+R23 adds the identity-arbitrated front door:
+:func:`ingest_usage_receipt` inserts the receipt's ``(run, attempt,
+receipt_id)`` identity into ``usage_receipts`` with ``ON CONFLICT DO
+NOTHING`` first, so the ledger row and the budget move exactly once per
+distinct receipt no matter how often the artifact is re-read. Its episode
+dispatches are gated by :func:`budget_block_reason` — wall clock and
 episode count are the only axes a non-intercepted lane can honestly enforce.
 """
 
@@ -46,11 +51,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from forge.durable.controller import RunNotFound, as_aware_utc
-from forge.durable.models import BudgetReservation, FlowRun, RunBudget
+from forge.durable.models import BudgetReservation, FlowRun, LLMCall, RunBudget, UsageReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +98,25 @@ def _utcnow() -> datetime:
 
 
 def _known_token_total(usage: Any) -> int | None:
-    """Sum the KNOWN token parts of a usage receipt (input + output).
+    """Sum the KNOWN token parts of a usage receipt (R23 normalization).
 
-    ``input_tokens`` is the inclusive figure (cached tokens ride inside it —
-    ADR-0013 normalization), so ``cached_input_tokens`` is never added on top.
-    Nothing known → ``None`` (unknown stays unknown, never zero).
+    Prefers the receipt's own shape-aware total
+    (``HarnessUsage.total_known_tokens``): Anthropic(-compatible) counters
+    are DISJOINT — ``input_tokens`` already excludes the cache — so their
+    spend total is ``input + cache_read + cache_write + output``;
+    OpenAI-compatible counters are INCLUSIVE — the cache rides inside the
+    input and is never added on top (ADR-0013). Objects without the
+    property keep the legacy inclusive reading (input + output). Unknown
+    parts contribute nothing (never zero-filled); nothing known → ``None``.
     """
+    no_total: Any = object()  # sentinel: "the attribute is absent"
+    shape_aware = getattr(usage, "total_known_tokens", no_total)
+    if (
+        shape_aware is not no_total
+        and not isinstance(shape_aware, bool)
+        and (shape_aware is None or isinstance(shape_aware, int))
+    ):
+        return shape_aware
     parts = (
         getattr(usage, "input_tokens", None),
         getattr(usage, "output_tokens", None),
@@ -615,6 +634,108 @@ async def reconcile_harness_receipt(
         # Limits are frozen at open time, so the loaded row's limit is live.
         await _exhaust_open(session, budget.id)
     return await _exhaust_if_over(session, budget.id)
+
+
+async def ingest_usage_receipt(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    usage: Any,
+    attempt_id: str = "",
+    model_fallback: str = "unknown",
+    record_ledger_call: bool = True,
+) -> tuple[RunBudget | None, bool]:
+    """Ingest one harness usage receipt EXACTLY ONCE (R23).
+
+    The control-plane entry point for candidate-artifact spend: the
+    receipt's identity — ``receipt_id`` over (run, attempt, normalized
+    usage JSON), computed by the lane or recomputed identically here — is
+    inserted into ``usage_receipts`` with ``ON CONFLICT DO NOTHING`` against
+    the UNIQUE ``(run_id, attempt_id, receipt_id)`` index, so a repeated
+    reconciler poll, a crash-retry, or a re-downloaded artifact replays the
+    same identity and is a no-op at the DB, while a repair re-dispatch (a
+    new attempt id) legitimately costs again.
+
+    On the FIRST ingest of an identity this also writes the ``llm_calls``
+    ledger row (unknown counters stay NULL — never zero) and reconciles the
+    run budget through :func:`reconcile_harness_receipt` (exactly one call;
+    an unknown receipt stops a hard token-limited budget instead of reading
+    as spendable headroom). A missing/invalid receipt is still recorded —
+    with ``completeness='unknown'`` and NULL counters — so the attempt's
+    cost shows up in the unknown bucket, never silently as zero. The
+    receipt row lands even when the run has no budget or a closed one: the
+    ledger is honest, only the counters stand still.
+
+    ``record_ledger_call=False`` leaves the ``llm_calls`` write to the
+    caller (the GitLab lane records every delivery honestly and dedupes the
+    budget through its own episode claim — the receipt table adds the
+    identity dimension without changing that pinned shape).
+
+    Returns ``(refreshed budget or None, created)`` — ``created=False``
+    means the identity was ingested before and NOTHING moved.
+    """
+    from forge.runs.candidate import usage_receipt_id
+
+    # The deferred import keeps forge.durable → forge.runs.candidate out of
+    # module level: runs.candidate → factory.implementer → factory.llm →
+    # forge.durable.budgets would close a cycle at import time.
+    attempt = str(getattr(usage, "attempt_id", "") or attempt_id or "")[:100]
+    receipt_id = str(getattr(usage, "receipt_id", "") or "") or usage_receipt_id(
+        run_id, attempt, usage
+    )
+
+    def _int(name: str) -> int | None:
+        value = getattr(usage, name, None)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    raw = getattr(usage, "raw", None)
+    inserted = await session.execute(
+        pg_insert(UsageReceipt)
+        .values(
+            run_id=run_id,
+            attempt_id=attempt,
+            receipt_id=receipt_id,
+            driver=str(getattr(usage, "driver", "") or "") or None,
+            model=str(getattr(usage, "model", "") or "") or None,
+            input_tokens=_int("input_tokens"),
+            cached_input_tokens=_int("cached_input_tokens"),
+            cache_write_tokens=_int("cache_write_tokens"),
+            output_tokens=_int("output_tokens"),
+            completeness=str(getattr(usage, "completeness", "") or "unknown"),
+            source=str(getattr(usage, "source", "") or "") or None,
+            raw=raw if isinstance(raw, dict) else None,
+        )
+        # ON CONFLICT DO NOTHING works identically on Postgres and SQLite
+        # (tests) — the same portable arbiter as the webhook inbox.
+        .on_conflict_do_nothing(
+            index_elements=[UsageReceipt.run_id, UsageReceipt.attempt_id, UsageReceipt.receipt_id]
+        )
+    )
+    # rowcount is the INSERT's inserted-row count; SQLAlchemy 2.0 stubs only
+    # type it on CursorResult, so access it via the runtime attr.
+    if inserted.rowcount != 1:  # type: ignore[attr-defined]
+        return await budget_for_run(session, run_id), False
+
+    if record_ledger_call:
+        session.add(
+            LLMCall(
+                flow_run_id=run_id,
+                role="implementer",
+                provider="ci_harness",
+                model=str(getattr(usage, "model", "") or "") or model_fallback,
+                status="ok",
+                input_tokens=_int("input_tokens"),
+                output_tokens=_int("output_tokens"),
+                cached_tokens=_int("cached_input_tokens"),
+                driver=str(getattr(usage, "driver", "") or "") or None,
+                completeness=str(getattr(usage, "completeness", "") or "unknown"),
+            )
+        )
+        await session.flush()
+    budget = await reconcile_harness_receipt(session, run_id, usage)
+    return budget, True
 
 
 class BudgetGuard:
