@@ -103,7 +103,7 @@ jobs:
           # The emit step's staging directory is lane infrastructure too —
           # it must never leak into a git add (belt and braces: the emit
           # step stages it only AFTER its own git add -A).
-          echo ".forge-output/" >> .git/info/exclude 2>/dev/null || true
+          echo "forge-output/" >> .git/info/exclude 2>/dev/null || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -225,15 +225,16 @@ jobs:
           # never a deliverable.
           rm -rf .codegraph .venv
           git add -A
-          # R16: stage the candidate in a clean NON-HIDDEN directory.
-          # upload-artifact@v4 (>= 4.4.0) excludes hidden files by default
-          # and the old .forge/ paths are a dot-directory — uploading them
-          # directly finds zero files and fails the upload. Only the two
-          # contract files are ever staged here; nothing else can ride
+          # R16/A08: stage the candidate in a directory whose name carries
+          # NO leading dot. upload-artifact@v4 (>= 4.4.0) excludes hidden
+          # files by default AND its globber drops dot-directories before
+          # traversal — a leading-dot staging name uploads NOTHING on a
+          # fresh repo (if-no-files-found: error fired every run). Only the
+          # two contract files are ever staged here; nothing else can ride
           # along, so include-hidden-files stays unnecessary.
-          rm -rf .forge-output && mkdir -p .forge-output
+          rm -rf forge-output && mkdir -p forge-output
           git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
-            > .forge-output/candidate.diff || true
+            > forge-output/candidate.diff || true
           # Meta schema v2 (schema_version, run + GitHub attempt identity,
           # sha256 digest binding the meta to the exact diff bytes, usage
           # receipt) is built by the same pinned forge the lane runs — one
@@ -251,10 +252,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: forge-candidate-${{ inputs.run_id }}
-          # The staged non-hidden directory (R16): its two files land in
-          # the zip at the archive root under their basenames (the v4
-          # least-common-ancestor rule) — the exact layout the control
-          # plane's basename matcher consumes.
-          path: .forge-output
+          # The staged non-hidden directory (R16/A08): its two files land
+          # in the zip under their basenames (the v4 least-common-ancestor
+          # rule) — the exact layout the control plane's basename matcher
+          # consumes. The name MUST NOT start with a dot (A08): the v4
+          # globber drops dot-directories before traversal.
+          path: forge-output
           if-no-files-found: error
           retention-days: 7

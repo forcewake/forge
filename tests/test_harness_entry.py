@@ -10,6 +10,8 @@ with a fake driver script, no CLIs and no network.
 import hashlib
 import io
 import json
+import re
+import shlex
 import urllib.error
 from pathlib import Path
 
@@ -18,6 +20,7 @@ import pytest
 from forge.harness_entry import (
     DEFAULT_DRIVER_VERSIONS,
     DRIVERS,
+    _CLAUDE_TOOL_RULES,
     emit_candidate_meta,
     fetch_workitem,
     main,
@@ -114,8 +117,6 @@ class TestRenderCommon:
         """The quality lives in the brief file; the -p prompt only points at
         it (forge.harnesses.prompt.TASK_PROMPT), identically for every
         driver."""
-        import shlex
-
         from forge.harnesses.prompt import TASK_PROMPT
 
         for driver in DRIVERS:
@@ -827,7 +828,7 @@ class TestEmitCandidateMeta:
     def test_writes_schema_v2_with_identity_digest_and_usage(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("GITHUB_RUN_ID", "501")
         monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
-        staged = tmp_path / ".forge-output"
+        staged = tmp_path / "forge-output"
         staged.mkdir()
         diff = staged / "candidate.diff"
         diff.write_text("diff --git a/src/app.py b/src/app.py\n")
@@ -869,7 +870,7 @@ class TestEmitCandidateMeta:
     def test_missing_usage_exit_and_env_degrade_to_unknown(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
         monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
-        staged = tmp_path / ".forge-output"
+        staged = tmp_path / "forge-output"
         staged.mkdir()
         diff = staged / "candidate.diff"
         diff.write_bytes(b"")
@@ -890,7 +891,7 @@ class TestEmitCandidateMeta:
         assert meta["attempt_id"] == ""  # no fabricated identity outside Actions
 
     def test_non_object_usage_json_degrades_to_none(self, tmp_path: Path):
-        staged = tmp_path / ".forge-output"
+        staged = tmp_path / "forge-output"
         staged.mkdir()
         (staged / "candidate.diff").write_bytes(b"x")
         usage_path = tmp_path / ".forge" / "usage.json"
@@ -915,7 +916,7 @@ class TestEmitCandidateMeta:
         dispatched identity → meta v2 on disk, rc 0."""
         monkeypatch.setenv("GITHUB_RUN_ID", "501")
         monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
-        staged = tmp_path / ".forge-output"
+        staged = tmp_path / "forge-output"
         staged.mkdir()
         (staged / "candidate.diff").write_bytes(b"diff --git\n")
         control = tmp_path / ".forge"
@@ -1164,3 +1165,97 @@ class TestQualityGateAllowlist:
         for gate in self._GATES:
             assert f"--allow-tool 'shell({gate}:*)'" in script, gate
         assert "--deny-tool 'shell(git commit)'" in script
+
+
+# ----------------------------------------------------------------------
+# A09: rendered permission lists are TOKENIZED. Adjacent Python string
+# literals without commas concatenate silently — "Bash(python3:*)"
+# "Bash(python:*)" "Bash(.venv/bin/python:*)" once rendered as ONE merged
+# rule the driver could never match. Every list in every rendered script
+# must carry each rule as its own standalone token.
+# ----------------------------------------------------------------------
+
+#: Signatures of GLUED rules (a rule tail meeting the next rule/flag with
+#: no separator between). None may appear in any rendered script.
+_GLUED_SIGNATURES = (
+    "*)Bash(",  # claude comma-list glue: Bash(a:*)Bash(b:*)
+    ")*shell(",  # copilot glue: shell(a)shell(b)
+    "*)'--allow",  # grok flag glue: 'Bash(a:*)'--allow 'Bash(b:*)'
+    "*)'--deny",
+    "*)'--allow-tool",  # copilot flag glue
+    "*)'--deny-tool",
+)
+
+
+def _claude_allowed_tools_tokens(script: str) -> list[str]:
+    """The claude ``--allowedTools`` value, split into its rule tokens."""
+    line = next(line for line in script.splitlines() if "--allowedTools" in line)
+    raw = line.strip().removeprefix("--allowedTools ").removesuffix(" \\").strip()
+    value = shlex.split(raw)[0]
+    return value.split(",")
+
+
+class TestPermissionListsAreTokenized:
+    def test_claude_allowed_tools_is_a_comma_list_of_standalone_rules(self):
+        """The rendered allowTools is EXACTLY the rule tuple, one rule per
+        comma token — the glued python3/python/venv rules exist as separate
+        entries again."""
+        script = render_driver_script("claude-code", "m", BRIEF)
+        tokens = _claude_allowed_tools_tokens(script)
+
+        # Full equality: any glued pair would shorten this list.
+        assert tokens == list(_CLAUDE_TOOL_RULES)
+        # ...and the rules the review called out are standalone members:
+        for rule in (
+            "Bash(python3:*)",
+            "Bash(python:*)",
+            "Bash(.venv/bin/python:*)",
+            "Bash(make:*)",
+            "Bash(uv:*)",
+            "Bash(awk:*)",
+            "Bash(set:*)",
+        ):
+            assert rule in tokens, rule
+        # Every token is ONE rule — never a concatenation.
+        assert all(token.count("Bash(") == 1 for token in tokens)
+
+    def test_claude_mcp_grants_join_as_plain_comma_tokens(self):
+        """MCP grants ride the same explicit-comma serialization as PLAIN
+        names (the GitLab contract). The old per-name shlex.quote shipped
+        literal quote characters INSIDE the value — rules named
+        'mcp__x__*' (with quotes) that could never match."""
+        servers = {"context7": {"type": "http", "url": "https://mcp.example.com/mcp"}}
+        script = render_driver_script("claude-code", "m", BRIEF, mcp_servers=servers)
+        tokens = _claude_allowed_tools_tokens(script)
+
+        assert tokens[: len(_CLAUDE_TOOL_RULES)] == list(_CLAUDE_TOOL_RULES)
+        assert tokens[len(_CLAUDE_TOOL_RULES) :] == ["mcp__context7__*", "mcp__context7"]
+        line = next(line for line in script.splitlines() if "--allowedTools" in line)
+        raw = line.strip().removeprefix("--allowedTools ").removesuffix(" \\").strip()
+        assert "'" not in shlex.split(raw)[0]  # no quote characters inside the value
+
+    def test_no_rendered_script_carries_a_glued_rule(self):
+        """Every driver, with and without MCP servers: no glued artifact
+        anywhere in the rendered script."""
+        for driver in DRIVERS:
+            for servers in ({}, {"context7": {"type": "http", "url": "https://mcp.example.com"}}):
+                script = render_driver_script(driver, "m", BRIEF, mcp_servers=servers)
+                for signature in _GLUED_SIGNATURES:
+                    assert signature not in script, (driver, bool(servers), signature)
+
+    def test_grok_and_copilot_flags_each_carry_exactly_one_rule(self):
+        """The audited flag lists (grok --allow/--deny, copilot
+        --allow-tool/--deny-tool): every flag value is ONE rule — the
+        separator class never regresses there either."""
+        grok = render_driver_script("grok-build", "m", BRIEF)
+        grok_values = re.findall(r"--(?:allow|deny) '([^']*)'", grok)
+        assert grok_values, "grok renders no grants?"
+        assert all(value.count("Bash(") == 1 for value in grok_values)
+
+        copilot = render_driver_script("copilot", "m", BRIEF)
+        copilot_values = re.findall(r"--(?:allow|deny)-tool '([^']*)'", copilot)
+        assert copilot_values, "copilot renders no grants?"
+        # 'read,write' is the documented two-grant comma-list; everything
+        # else is exactly one shell(...) rule.
+        for value in copilot_values:
+            assert value == "read,write" or value.count("shell(") == 1, value

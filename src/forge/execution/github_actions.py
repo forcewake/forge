@@ -561,9 +561,10 @@ def _extract_candidate(payload: bytes) -> tuple[str, dict[str, Any]]:
     ``ZipInfo`` BEFORE any ``read()`` (zip-bomb guard), and the entry
     allowlist is CLOSED — entries match by basename (upload-artifact@v4
     stores the searched paths under their least-common-ancestor prefix, so
-    they appear with or without the ``.forge/`` prefix) but each exactly
-    once, with duplicate basenames and everything else rejected. The meta
-    must then pass the schema gate (:func:`_check_meta_schema`).
+    they appear with or without the ``forge-output/`` staging prefix) but
+    each exactly once, with duplicate basenames and everything else
+    rejected. The meta must then pass the schema gate
+    (:func:`_check_meta_schema`).
     """
     if len(payload) > MAX_ARTIFACT_ZIP_BYTES:
         raise CandidateArchiveError(

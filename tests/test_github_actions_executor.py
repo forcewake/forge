@@ -718,10 +718,11 @@ class TestExtraction:
 
     async def test_zip_entries_match_with_or_without_the_forge_prefix(self):
         """upload-artifact@v4 stores paths under the LCA prefix — both shapes
-        must extract (research §2)."""
+        must extract (research §2), including the shipped template's
+        non-hidden ``forge-output/`` staging prefix (A08)."""
         from forge.execution.github_actions import _extract_candidate
 
-        for prefix in ("", ".forge/", "forge/"):
+        for prefix in ("", ".forge/", "forge/", "forge-output/"):
             diff_text, meta = _extract_candidate(self._zip_bytes_with_prefix(prefix))
             assert meta["exit"] == "completed"
             assert "+x" in diff_text

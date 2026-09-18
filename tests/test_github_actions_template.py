@@ -112,12 +112,14 @@ class TestWorkflowTemplateContract:
 
         assert upload["uses"].startswith("actions/upload-artifact@v4")
         assert upload["with"]["name"] == "forge-candidate-${{ inputs.run_id }}"
-        # R16: the STAGED NON-HIDDEN directory is uploaded — v4.4.0+
-        # upload-artifact excludes hidden files by default and the old
-        # .forge/ paths are a dot-directory, so a direct upload finds zero
-        # files and fails (if-no-files-found: error).
-        assert ".forge-output" in upload["with"]["path"]
+        # R16/A08: the STAGED directory is uploaded and its name carries NO
+        # leading dot — v4.4.0+ upload-artifact excludes hidden files by
+        # default AND its globber drops dot-directories before traversal,
+        # so the old `.forge-output/` name uploaded NOTHING on a fresh repo
+        # (if-no-files-found: error fired every run).
+        assert upload["with"]["path"] == "forge-output"
         assert ".forge/" not in upload["with"]["path"]
+        assert ".forge-output" not in text  # the dot-name is gone everywhere
         assert upload["with"]["if-no-files-found"] == "error"
         assert upload["if"] == "always()"  # the audit trail survives failures
         # The candidate diff is captured against the FROZEN attempt base.
@@ -134,9 +136,11 @@ class TestWorkflowTemplateContract:
 
         assert emit["if"] == "always()"
         run = emit["run"]
-        # Clean, non-hidden staging: nothing else can ride along.
-        assert "rm -rf .forge-output && mkdir -p .forge-output" in run
-        assert ".forge-output/candidate.diff" in run
+        # Clean staging in a directory with NO leading dot (A08): nothing
+        # else can ride along, and the v4 globber actually traverses it.
+        assert "rm -rf forge-output && mkdir -p forge-output" in run
+        assert "forge-output/candidate.diff" in run
+        assert ".forge-output" not in run
         assert ".forge/candidate.diff" not in run
         # The meta is built by forge's entry point with the dispatched
         # identity (attempt identity rides from the runner's GITHUB_* env).
@@ -152,7 +156,18 @@ class TestWorkflowTemplateContract:
         """The staging dir is lane infrastructure: locally excluded so it
         can never leak into a `git add -A`."""
         text = TEMPLATE.read_text()
-        assert '.forge-output/" >> .git/info/exclude' in text
+        assert 'forge-output/" >> .git/info/exclude' in text
+
+    def test_the_dogfood_mirror_uses_the_same_non_hidden_staging(self):
+        """A08 mirror parity: the rename ships in BOTH workflow files — a
+        dot-directory staging name uploads nothing (the v4 globber drops
+        dot-directories before traversal)."""
+        for text in (TEMPLATE.read_text(), MIRROR.read_text()):
+            assert "rm -rf forge-output && mkdir -p forge-output" in text
+            assert "forge-output/candidate.diff" in text
+            assert 'forge-output/" >> .git/info/exclude' in text
+            assert "path: forge-output" in text
+            assert ".forge-output" not in text
 
     def test_driver_step_runs_the_harness_entry_point(self):
         workflow = load_template()

@@ -25,9 +25,10 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
 - it builds the candidate meta artifact (``--emit-meta``, R16/R23): schema
   v2 identity + a sha256 digest binding the meta to the staged diff bytes
   + the usage receipt inlined, so the control plane gets identity,
-  integrity, and spend with the candidate — written into the NON-hidden
-  ``.forge-output/`` staging directory the workflow uploads
-  (upload-artifact@v4 excludes hidden files by default).
+  integrity, and spend with the candidate — written into the non-hidden
+  ``forge-output/`` staging directory the workflow uploads
+  (upload-artifact@v4 excludes hidden files by default and drops
+  dot-directories before traversal — A08).
 
 Brief transport (the dispatch-input size question, decided): the lane
 FETCHES its own brief content from the forge API — the approved plan is
@@ -112,34 +113,65 @@ from forge.harnesses.mcp import (
 # EVERY segment of a compound command to be allowed, and exploration
 # commands (ls|grep|head) otherwise deny the whole pipeline. Writes stay
 # denied: commit/push are --disallowedTools and the push URL is FORBIDDEN.
-# The quality bar demands the agent RUN the tests (ADR-0008). The
-# allowlist carries the commands the lane actually provides: hosted
-# runners expose python3/python (no .venv, no uv — LIVE-found) plus
-# read-only exploration utils (Claude Code requires every segment of a
-# compound command to be allowed). Writes stay denied: commit/push are
-# --disallowedTools and the push URL is FORBIDDEN; the ephemeral lane
-# holds no credentials beyond the model key.
-_CLAUDE_ALLOWED_TOOLS = (
-    "Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git -C * diff:*),"
-    "Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),"
+# A09: ONE rule per literal, serialized by an explicit ",".join. Adjacent
+# string literals inside a parenthesized concatenation silently GLUE when
+# a comma is missing (LIVE-found: "Bash(python3:*)" "Bash(python:*)"
+# "Bash(.venv/bin/python:*)" rendered as ONE merged rule the driver could
+# never match) — never concatenate rule literals again.
+_CLAUDE_TOOL_RULES: tuple[str, ...] = (
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git -C * diff:*)",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(grep:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(which:*)",
     # Read-only text processing (LIVE-found: `... | awk 'length > 100'` and
     # `sed 's/^+//'` in analysis pipelines were DENIED — every pipeline
     # segment must be allowlisted, not just the head command):
-    "Bash(awk:*),Bash(sed:*),Bash(sort:*),Bash(uniq:*),Bash(cut:*),Bash(tr:*),"
-    "Bash(find:*),Bash(diff:*),Bash(basename:*),Bash(dirname:*),Bash(realpath:*),"
-    "Bash(python3:*)"
-    "Bash(python:*)"
-    "Bash(.venv/bin/python:*),Bash(./.venv/bin/python:*),"
-    "Bash(.venv/bin/pytest:*),Bash(.venv/bin/ruff:*),Bash(.venv/bin/mypy:*),"
-    "Bash(./.venv/bin/pytest:*),Bash(./.venv/bin/ruff:*),Bash(./.venv/bin/mypy:*),"
-    "Bash(pip install:*),Bash(pip list),Bash(pip show:*),Bash(pip3 install:*),"
+    "Bash(awk:*)",
+    "Bash(sed:*)",
+    "Bash(sort:*)",
+    "Bash(uniq:*)",
+    "Bash(cut:*)",
+    "Bash(tr:*)",
+    "Bash(find:*)",
+    "Bash(diff:*)",
+    "Bash(basename:*)",
+    "Bash(dirname:*)",
+    "Bash(realpath:*)",
+    "Bash(python3:*)",
+    "Bash(python:*)",
+    "Bash(.venv/bin/python:*)",
+    "Bash(./.venv/bin/python:*)",
+    "Bash(.venv/bin/pytest:*)",
+    "Bash(.venv/bin/ruff:*)",
+    "Bash(.venv/bin/mypy:*)",
+    "Bash(./.venv/bin/pytest:*)",
+    "Bash(./.venv/bin/ruff:*)",
+    "Bash(./.venv/bin/mypy:*)",
+    "Bash(pip install:*)",
+    "Bash(pip list)",
+    "Bash(pip show:*)",
+    "Bash(pip3 install:*)",
     # The repo's own quality gates (AGENTS.md / brief quality bar tell the
     # agent to run them — LIVE-found: `make lint`, `uv run ruff`, bare
     # pytest/ruff/mypy and `set -o pipefail &&` compounds were all DENIED
     # and the agent burned turns flailing against permission prompts):
-    "Bash(pytest:*),Bash(ruff:*),Bash(mypy:*),"
-    "Bash(uv:*),Bash(make:*),Bash(set:*)"
+    "Bash(pytest:*)",
+    "Bash(ruff:*)",
+    "Bash(mypy:*)",
+    "Bash(uv:*)",
+    "Bash(make:*)",
+    "Bash(set:*)",
 )
+# Serialized ONLY at the render site via the explicit
+# ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules)) — never by literal
+# concatenation (A09).
 #: Drivers understood by this entry point (the shipped multi-harness set).
 DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
 
@@ -577,13 +609,20 @@ def render_driver_script(
             f"{for_claude(servers)}\n"
             "FORGE_MCP_EOF\n"
         )
-        mcp_tools = "".join(
-            f",{shlex.quote(f'mcp__{name}__*')},{shlex.quote(f'mcp__{name}')}" for name in servers
-        )
+        # A09: MCP grants ride the SAME explicit-comma serialization as the
+        # shell rules — one plain rule string per grant, per server (the
+        # GitLab contract), never pre-quoted: the whole list is shell-
+        # quoted ONCE below, and an inner quote used to ship rules named
+        # 'mcp__x__*' WITH the quote characters (unmatchable).
+        mcp_rules: list[str] = []
+        for name in servers:
+            mcp_rules.append(f"mcp__{name}__*")
+            mcp_rules.append(f"mcp__{name}")
+        allowed_tools = ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules))
         model_flag = f" --model {shlex.quote(model)}" if model else ""
         invocation = (
             f"claude -p {quoted_prompt}{model_flag} \\\n"
-            f"  --allowedTools {shlex.quote(_CLAUDE_ALLOWED_TOOLS + mcp_tools)} \\\n"
+            f"  --allowedTools {shlex.quote(allowed_tools)} \\\n"
             '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
             "  --permission-prompts none \\\n"
             # bypassPermissions, NOT acceptEdits + allowlist: the allowlist
@@ -890,8 +929,8 @@ def emit_candidate_meta(
     attempt_base_oid: str,
     driver: str,
     model: str,
-    diff_file: str = ".forge-output/candidate.diff",
-    meta_file: str = ".forge-output/candidate.meta.json",
+    diff_file: str = "forge-output/candidate.diff",
+    meta_file: str = "forge-output/candidate.meta.json",
     exit_file: str = ".forge/exit",
     usage_file: str = ".forge/usage.json",
 ) -> dict:
@@ -952,12 +991,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--diff-file",
-        default=".forge-output/candidate.diff",
+        default="forge-output/candidate.diff",
         help="staged candidate diff path for --emit-meta",
     )
     parser.add_argument(
         "--meta-file",
-        default=".forge-output/candidate.meta.json",
+        default="forge-output/candidate.meta.json",
         help="candidate meta output path for --emit-meta",
     )
     parser.add_argument(
