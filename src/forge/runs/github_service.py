@@ -2809,12 +2809,14 @@ async def execute_github_run_command(
                 issue_body=str(metadata.get("issue_body") or ""),
                 author_username=author_username,
             )
-        else:
+        elif command == "unlabeled":
             await service.handle_label_removed(
                 project_id=project_id,
                 issue_number=issue_number,
                 author_username=author_username,
             )
+        else:
+            logger.warning("Unknown GitHub run command %r — ignoring", command)
     finally:
         aclose = getattr(stack.client, "aclose", None)
         if aclose is not None:

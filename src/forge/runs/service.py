@@ -837,6 +837,284 @@ class RunService:
             raise
         await self._complete_action(action_id, "succeeded", {"backend": backend_name})
 
+    # ------------------------------------------------------------------
+    # Issue-edit replan + label-off cancel (operator busywork, event-driven)
+    # ------------------------------------------------------------------
+
+    async def handle_issue_edited(
+        self,
+        *,
+        project_id: int,
+        issue_iid: int | None,
+        issue_title: str,
+        issue_body: str,
+        author_username: str,
+    ) -> str | None:
+        """``issues`` update (title/description): keep the gate honest.
+
+        The #29 GitLab mirror of ``GitHubRunService.handle_issue_edited``
+        — the same three cases, decided against the issue-text snapshot
+        frozen at plan time (the RunSpec's ``task_digest``):
+
+        - the run is still ``waiting_approval`` and its gate is unconsumed:
+          the waiting plan is stale. The stale run is cancelled durably
+          (cancel-as-revoke, F13), a fresh run plans from the new text and
+          a note says the plan was regenerated.
+        - the run is beyond the gate: the agent executes the APPROVED
+          snapshot — never yanked mid-flight. One informational note says
+          the edit is not in the current plan.
+        - the text matches the snapshot: a redelivered edit (or an edit
+          back to the planned text) — nothing went stale, nothing happens.
+
+        Returns the id of the run that owns the issue afterwards (None when
+        the edit was ignored).
+        """
+        if issue_iid is None:
+            logger.info("GitLab issue edit without an issue iid — ignoring")
+            return None
+        admission = check_admission(self._settings, self._config, project_id, author_username)
+        if not admission.allowed:
+            # ADR-0009: forge reacts to an edit only for an actor it would
+            # let start a run — anyone else's edit never yanks or replans.
+            logger.info(
+                "GitLab issue edit by @%s on project %d !%s ignored — not admitted (%s)",
+                author_username,
+                project_id,
+                issue_iid,
+                admission.reason,
+            )
+            return None
+
+        run = await self._find_active_run(project_id, issue_iid)
+        stale_run_id: str | None = None
+        if run is not None:
+            edited_digest = task_digest_of(issue_title, issue_body)
+            if await self._frozen_task_digest(run.id) == edited_digest:
+                logger.info(
+                    "GitLab issue edit on !%s matches run %s's snapshot — ignoring",
+                    issue_iid,
+                    run.id[:8],
+                )
+                return run.id
+
+            if run.status == FlowStatus.WAITING_APPROVAL.value and not await self._gate_consumed(
+                run.id
+            ):
+                stale_run_id = run.id
+                await self._revoke_publication_grant(stale_run_id)
+                await self._transition(
+                    stale_run_id,
+                    FlowStatus.CANCELLED,
+                    reason=f"superseded by issue edit by @{author_username}",
+                )
+                logger.info(
+                    "GitLab run %s superseded by an issue edit — replanning !%s",
+                    stale_run_id[:8],
+                    issue_iid,
+                )
+            else:
+                # Approved / in flight: the change is NOT pulled into the
+                # approved plan.
+                await self._post_journaled_note(
+                    project_id,
+                    issue_iid,
+                    f"Issue edited while run `{run.id[:8]}` is in flight — the change is "
+                    "**not** in the approved plan. The run keeps executing its approved "
+                    "snapshot; run `@forge /cancel` and `@forge /implement` if it should "
+                    "pick the change up.\n\n*This is an automated message.*",
+                    run.id,
+                    "issue_edited_note",
+                )
+                return run.id
+        elif not await self._replan_interrupted(project_id, issue_iid):
+            logger.info("GitLab issue edit on !%s — no active run", issue_iid)
+            return None
+
+        new_run_id = await self.start_run(
+            project_id, issue_iid, issue_title, issue_body, author_username
+        )
+        # A retried replan (the first attempt died mid-step) has no stale run
+        # of its own to name — the note then just says where the plan came from.
+        if stale_run_id is not None:
+            origin = (
+                f"The plan of run `{stale_run_id[:8]}` was **stale** — the issue was edited "
+                "while its plan waited for approval. It was cancelled and the plan "
+            )
+        else:
+            origin = (
+                "The issue was edited while its plan waited for approval — that plan was "
+                "stale, so the plan "
+            )
+        await self._post_journaled_note(
+            project_id,
+            issue_iid,
+            f"{origin}"
+            f"regenerated from the current issue body as run `{new_run_id[:8]}`. "
+            f"Approve with `@forge /go {new_run_id}`.\n\n*This is an automated message.*",
+            new_run_id,
+            "replan_note",
+        )
+        return new_run_id
+
+    async def handle_label_removed(
+        self, *, project_id: int, issue_iid: int | None, author_username: str
+    ) -> int:
+        """Trigger-label removal: label-off = cancel at the gate (#29).
+
+        The GitLab mirror of ``GitHubRunService.handle_label_removed`` —
+        symmetry with label-on = plan (ADR-0020 §4): removing the trigger
+        label cancels runs still parked in ``waiting_approval`` — the plan
+        was never approved, so nothing executed is lost. Runs past the gate
+        are untouched: the approval consumed that plan, the label no longer
+        owns it. Returns the number of cancelled runs.
+        """
+        if issue_iid is None:
+            return 0
+        if author_username not in self._approvers():
+            logger.info(
+                "GitLab label removal by @%s on !%s ignored — not an approver",
+                author_username,
+                issue_iid,
+            )
+            return 0
+        async with self._session_factory() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_iid,
+                            FlowRun.status == FlowStatus.WAITING_APPROVAL.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            run_ids = [run.id for run in runs]
+        for run_id in run_ids:
+            await self._revoke_publication_grant(run_id)
+            await self._transition(
+                run_id,
+                FlowStatus.CANCELLED,
+                reason=f"trigger label removed by @{author_username}",
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                f"Run `{run_id[:8]}` **cancelled** — the `{self._trigger_label()}` label was "
+                f"removed by @{author_username} while its plan waited for approval. Re-add "
+                "the label (or run `@forge /implement`) to plan again."
+                "\n\n*This is an automated message.*",
+                run_id,
+                "cancel_note",
+            )
+            logger.info(
+                "GitLab run %s cancelled — trigger label removed by @%s",
+                run_id[:8],
+                author_username,
+            )
+        return len(run_ids)
+
+    def _trigger_label(self) -> str:
+        """The configured plan-trigger label (ADR-0020 §4)."""
+        return str(getattr(self._settings, "FORGE_TRIGGER_LABEL", "forge") or "forge")
+
+    async def _frozen_task_digest(self, run_id: str) -> str | None:
+        """The issue-text snapshot digest frozen into the RunSpec at plan time."""
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if spec is None:
+            return None
+        document = spec.document if isinstance(spec.document, dict) else {}
+        digest = document.get("task_digest")
+        return str(digest) if digest else None
+
+    async def _gate_consumed(self, run_id: str) -> bool:
+        """Whether the run's latest gate decision is already consumed.
+
+        Status alone is not proof: between ``consume_approval`` and the
+        PROPOSING transition commit the run still reads ``waiting_approval`` —
+        an issue edit in exactly that window must not cancel an approved run
+        (the "gate already consumed" guard).
+        """
+        async with self._session_factory() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval)
+                        .where(GateApproval.flow_run_id == run_id)
+                        .order_by(GateApproval.id.desc())
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return gate is not None and gate.consumed_at is not None
+
+    async def _revoke_publication_grant(self, run_id: str) -> None:
+        """Cancel-as-revoke's durable core (F13, ADR-0018 §4).
+
+        Sets ``cancel_requested`` — the flag an in-flight publication leg
+        re-reads before writing — and withdraws the run's scheduled steps so
+        no worker picks them up later. The terminal transition stays the
+        caller's.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.cancel_requested = True
+            await session.execute(
+                update(StepRun)
+                .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
+                .values(status="cancelled")
+            )
+            await session.commit()
+
+    async def _replan_interrupted(self, project_id: int, issue_iid: int) -> bool:
+        """Whether an edit-triggered replan on this issue died mid-step.
+
+        The command step retries with backoff, and the retry must be able to
+        finish what the ``202`` promised: the stale run is already cancelled,
+        so a plain ``no active run`` would leave the issue run-less. Two
+        shapes are retried — the superseded cancellation itself (``start_run``
+        never created the fresh run), and a ``planning_failed`` run it did
+        create (the fresh attempt plans again, exactly like a retried
+        ``/implement``).
+        """
+        async with self._session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(FlowRun)
+                        .where(
+                            FlowRun.provider == "gitlab",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_iid,
+                        )
+                        .order_by(FlowRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if run is None:
+            return False
+        if run.status == FlowStatus.CANCELLED.value:
+            return (run.status_reason or "").startswith("superseded by issue edit")
+        if run.status == FlowStatus.FAILED.value:
+            return (run.status_reason or "").startswith("planning_failed")
+        return False
+
     async def handle_command_note(
         self,
         project_id: int,
@@ -988,6 +1266,22 @@ class RunService:
                 metadata.get("note_text", ""),
                 metadata.get("author_username", ""),
                 metadata.get("issue_iid"),
+            )
+        elif command == "issue_edited":
+            # The edited text travels in the command metadata (the webhook
+            # payload's issue object) — no extra API read on the hot path.
+            await self.handle_issue_edited(
+                project_id=metadata["project_id"],
+                issue_iid=metadata.get("issue_iid"),
+                issue_title=str(metadata.get("issue_title") or ""),
+                issue_body=str(metadata.get("issue_body") or ""),
+                author_username=str(metadata.get("author_username") or ""),
+            )
+        elif command == "unlabeled":
+            await self.handle_label_removed(
+                project_id=metadata["project_id"],
+                issue_iid=metadata.get("issue_iid"),
+                author_username=str(metadata.get("author_username") or ""),
             )
         else:
             logger.warning("Unknown run command %r — ignoring", command)
@@ -1624,11 +1918,27 @@ class RunService:
             plan_digest = run.plan_digest or ""
             base_sha = run.base_sha or ""
             backend_name = str((run.evidence or {}).get("backend") or "").strip()
+            cancel_requested = bool(run.cancel_requested)
             deadline = await self._waiting_ci_deadline(session, run_id)
 
         candidate_sha = candidate_shas[-1] if candidate_shas else None
         if not candidate_sha:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "waiting_ci without candidate sha")
+            return
+
+        # F13: the grant was revoked mid-wait — no provider call, no publish.
+        if cancel_requested:
+            logger.info("Run %s cancelled — late verification pass ignored", run_id[:8])
+            return
+
+        # R17 (deadline-before-I/O): the durable CI deadline is a LOCAL check —
+        # whatever CI reports (silence, an API failure, a pipeline stuck
+        # forever in an active state), a run past its deadline parks
+        # blocked(ci_timeout) without a single provider call, so a
+        # permanently erroring GitLab API can never hold a run past its
+        # FORGE_CI_WAIT_SECONDS budget.
+        if deadline is not None and as_aware_utc(now) > as_aware_utc(deadline):
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
             return
 
         branch = factory_branch(issue_iid, run_id)
@@ -1643,13 +1953,6 @@ class RunService:
             return
         if head != candidate_sha:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, "external_change")
-            return
-
-        # Durable CI deadline (ADR-0005): whatever CI reports — silence, an
-        # API failure, or a pipeline stuck forever in an active state — a run
-        # past its deadline is parked as blocked(ci_timeout).
-        if deadline is not None and as_aware_utc(now) > as_aware_utc(deadline):
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, "ci_timeout")
             return
 
         try:
@@ -2070,11 +2373,21 @@ class RunService:
                 logger.exception("Harness reconcile pass failed for run %s", run_id[:8])
 
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
-        """Poll one waiting_harness run through its journaled backend handle."""
+        """Poll one waiting_harness run through its journaled backend handle.
+
+        R17 (deadline-before-I/O): the FIRST operations of every evaluation
+        are local deadline/cancel checks over the journaled handle — no
+        provider call is made once the harness budget is spent, so a
+        permanently erroring GitLab API can never hold a run past its
+        ``harness_timeout``. A poll failure therefore cannot extend the
+        deadline either: the deadline derives only from the journaled
+        ``started_at``, never from poll outcomes.
+        """
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             evidence = dict(run.evidence or {})
             project_id = run.project_id
+            cancel_requested = bool(run.cancel_requested)
 
         backend_name = str(evidence.get("backend") or "").strip()
         if backend_name and not is_harness_backend(backend_name):
@@ -2098,6 +2411,38 @@ class RunService:
         ):
             return
 
+        # --- R17: local deadline / grant check BEFORE any provider I/O ----
+        try:
+            handle_data = json.loads(handle)
+        except (TypeError, ValueError):
+            handle_data = {}
+        if cancel_requested:
+            # F13: the publication grant is revoked — stand down without
+            # touching the provider. The late candidate is recorded as
+            # superseded either way.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled",
+                        "attempt_base": str(handle_data.get("attempt_base") or ""),
+                    }
+                },
+            )
+            logger.info("Run %s cancelled — harness evaluation stood down pre-poll", run_id[:8])
+            return
+        timeout = int(getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800)
+        started = _parse_journaled_time(handle_data.get("started_at"))
+        if started is not None and as_aware_utc(now) > as_aware_utc(started) + timedelta(
+            seconds=timeout
+        ):
+            await self._handle_harness_failure(
+                run_id,
+                project_id,
+                HarnessOutcome.failed("infrastructure", "harness_timeout"),
+            )
+            return
+
         try:
             backend = self._harness_backend(project_id)
         except ValueError as exc:
@@ -2114,19 +2459,31 @@ class RunService:
             return  # keep waiting — the durable deadline decides the rest
 
         if outcome.status == "failed":
-            kind = outcome.failure_kind or "code"
-            # ADR-0023 §6: an opt-in, journaled advance down the frozen
-            # chain — only infrastructure, only pre-candidate, OFF by
-            # default. Everything else keeps the ADR-0015 semantics:
-            # harness failures never enter the LLM repair loop.
-            if await self._advance_harness_fallback(
-                run_id, project_id, failure_kind=kind, failure_reason=outcome.reason
-            ):
-                return
-            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
+            await self._handle_harness_failure(run_id, project_id, outcome)
             return
 
         await self._adopt_harness_change(run_id, project_id, outcome)
+
+    async def _handle_harness_failure(
+        self, run_id: str, project_id: int, outcome: HarnessOutcome
+    ) -> None:
+        """One terminal harness failure → optional fallback advance, else blocked.
+
+        Shared by the poll outcome and the R17 local deadline path (which
+        feeds a synthetic ``harness_timeout`` outcome without any provider
+        call). With FORGE_HARNESS_FALLBACK off — the default — this is a
+        straight local transition to ``blocked``.
+        """
+        kind = outcome.failure_kind or "code"
+        # ADR-0023 §6: an opt-in, journaled advance down the frozen
+        # chain — only infrastructure, only pre-candidate, OFF by
+        # default. Everything else keeps the ADR-0015 semantics:
+        # harness failures never enter the LLM repair loop.
+        if await self._advance_harness_fallback(
+            run_id, project_id, failure_kind=kind, failure_reason=outcome.reason
+        ):
+            return
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, f"harness_{kind}: {outcome.reason}")
 
     async def _current_harness_selection(self, run_id: str) -> tuple[HarnessSelection | None, bool]:
         """The run's current position in the frozen chain (ADR-0023 §6).
@@ -2921,6 +3278,14 @@ def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
     merged = dict(evidence or {})
     merged.update(patch)
     return merged
+
+
+def _parse_journaled_time(raw: Any) -> datetime | None:
+    """Parse a journaled ISO timestamp (handle ``started_at``); None if broken."""
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _failed_job_names(jobs) -> str:

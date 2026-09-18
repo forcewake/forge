@@ -1235,15 +1235,11 @@ def test_provider_command_sets_stay_in_parity():
     github_cmds &= lifecycle_only
     azure_cmds &= lifecycle_only
 
-    # TODO(parity): issue_edited/unlabeled (#29) are GitHub-only until the
-    # GitLab/Azure propagation issue lands. Whitelisted EXPLICITLY, with an
-    # issue pointer — remove entries as propagation lands.
-    known_gaps = {
-        ("gitlab", "issue_edited"),
-        ("gitlab", "unlabeled"),
-        ("azure", "issue_edited"),
-        ("azure", "unlabeled"),
-    }
+    # #29 propagation landed: every lifecycle command is dispatched by all
+    # three provider services — the whitelist stays empty, and a deviation
+    # must carry a reason HERE (a new known_gaps entry with an issue pointer)
+    # rather than shipping silent.
+    known_gaps: set[tuple[str, str]] = set()
     all_sets = {"gitlab": gitlab_cmds, "github": github_cmds, "azure": azure_cmds}
     union = set().union(*all_sets.values())
     for provider, cmds in all_sets.items():

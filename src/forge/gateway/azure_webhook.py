@@ -27,6 +27,12 @@ Event routing (brief §3 normalization table; route on ``eventType`` ONLY —
   ``fields["System.ChangedBy"]``; delivery key ``workitem:{id}:comment:{rev}``
   (the rev bumps per change). Commands parse via the SAME mention/first-token
   parser as GitHub/GitLab (``/implement`` ``/go`` ``/cancel`` ``/security``).
+- ``workitem.updated`` → the #29 lifecycle commands: an edit of the issue
+  text normalizes to ``issue_edited`` (new title/body travel in the
+  metadata; the executor's frozen-snapshot digest compare filters no-op
+  updates), and the trigger label no longer among ``fields["System.Tags"]``
+  normalizes to ``unlabeled`` (the detection's exact reach and its honest
+  limits are documented on :func:`normalize_workitem_updated`).
 - ``git.pullrequest.commented-on`` (eventType
   ``ms.vss-code.git-pullrequest-comment-event`` — both spellings route) →
   the same command set on PRs; bot-loop + ``forge/*`` head-branch guards.
@@ -265,6 +271,112 @@ def normalize_workitem_comment(
         "author_username": identity_name(fields.get("System.ChangedBy")),
         "note_text": text,
         "note_id": delivery_key,
+    }
+
+
+def _split_tags(raw: Any) -> list[str]:
+    """``System.Tags`` travels as a semicolon-separated string (``"a; b"``)."""
+    return [tag.strip() for tag in str(raw or "").split(";") if tag.strip()]
+
+
+def normalize_workitem_updated(
+    payload: dict[str, Any],
+    trigger_label: str = "forge",
+) -> dict[str, Any] | None:
+    """Normalize a ``workitem.updated`` payload into a #29 lifecycle command.
+
+    TWO commands come off this one event, decided in this order:
+
+    - ``unlabeled`` — ``fields["System.Tags"]`` is present and the trigger
+      label is NOT among the (semicolon-separated) tags. EXACT DETECTION,
+      with its honest limits: the documented ``workitem.updated`` payload
+      carries ``resource.fields`` as the work item's CURRENT field values —
+      flat strings, no ``oldValue``/``newValue`` pairs — so a tag REMOVAL
+      cannot be proven from one delivery. The consequence is bounded by
+      construction: the executor cancels only runs parked in
+      ``waiting_approval`` (a regenerable plan), never a run past the gate,
+      and only for an admitted actor. The ambiguity disappears entirely
+      when the Azure subscription is created with the ``changedFields:
+      System.Tags`` filter — deliveries then fire only on tag changes,
+      which is the recommended onboarding config.
+    - ``issue_edited`` — otherwise: the new title/body travel in the
+      metadata. ``System.Description`` is HTML and travels raw here; the
+      executor strips it before digesting, the same way ``start_run``
+      freezes the snapshot (research §5.1). The payload carries no
+      changed-field marker, so an update of ANY field normalizes to
+      ``issue_edited`` — the executor's frozen-snapshot digest compare is
+      what filters no-op updates (state/iteration churn matches the
+      snapshot and is ignored). When the delivery is sparse
+      (``System.Title``/``System.Description`` absent — a "changed fields
+      only" subscription), the presence flags tell the executor to restore
+      the authoritative text with ONE API read instead of digesting
+      empty strings as if the fields had been blanked.
+
+    Delivery keys are content-stable per change: ``edit:{id}:{digest}:{rev}``
+    and ``unlabel:{id}:{rev}`` (the rev bumps per change), so a redelivered
+    update collapses onto one inbox identity while genuinely different
+    updates never do.
+    """
+    resource = payload.get("resource") or {}
+    fields = resource.get("fields") or {}
+    project = str(fields.get("System.TeamProject") or "")
+    work_item_id = int(resource.get("id") or 0)
+    if not work_item_id:
+        return None
+
+    org = org_from_payload(payload)
+    rev = resource.get("rev")
+    title = str(fields.get("System.Title") or "")
+    body = str(fields.get("System.Description") or "")
+
+    tags = _split_tags(fields.get("System.Tags"))
+    if tags and str(trigger_label or "").strip().lower() not in {tag.lower() for tag in tags}:
+        delivery_key = f"unlabel:{work_item_id}:{rev}"
+        return {
+            "command": "unlabeled",
+            "provider": "azure_devops",
+            "connection_id": azure_connection_id(org, project),
+            "project_id": azure_project_key(
+                str((payload.get("resourceContainers") or {}).get("project", {}).get("id") or "")
+            ),
+            "project": project,
+            # No repository exists on a work-item payload — the run service
+            # resolves the target repo lazily (azure_service._resolve_repo).
+            "repo_full_name": "",
+            "issue_number": work_item_id,
+            "issue_is_pr": False,
+            "work_item_rev": rev,
+            "tags": tags,
+            "author_username": identity_name(fields.get("System.ChangedBy")),
+            "note_text": "",
+            "note_id": delivery_key,
+            "delivery_key": delivery_key,
+        }
+
+    digest = hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()
+    delivery_key = f"edit:{work_item_id}:{digest}:{rev}"
+    return {
+        "command": "issue_edited",
+        "provider": "azure_devops",
+        "connection_id": azure_connection_id(org, project),
+        "project_id": azure_project_key(
+            str((payload.get("resourceContainers") or {}).get("project", {}).get("id") or "")
+        ),
+        "project": project,
+        "repo_full_name": "",
+        "issue_number": work_item_id,
+        "issue_is_pr": False,
+        "work_item_rev": rev,
+        "issue_title": title,
+        "issue_body": body,
+        # Sparse-delivery flags: a "changed fields only" subscription omits
+        # untouched fields — absent means unknown, never empty.
+        "issue_title_present": "System.Title" in fields,
+        "issue_description_present": "System.Description" in fields,
+        "author_username": identity_name(fields.get("System.ChangedBy")),
+        "note_text": "",
+        "note_id": delivery_key,
+        "delivery_key": delivery_key,
     }
 
 
@@ -536,6 +648,29 @@ async def _ingest_azure_event(
             request, background_tasks, run_command, source_event_id, event=event
         )
 
+    if event == "workitem.updated":
+        author = identity_name(
+            ((payload.get("resource") or {}).get("fields") or {}).get("System.ChangedBy")
+        )
+        if author and is_bot_identity(author, bot_name):
+            # Forge's own field touches re-trigger this event — they never
+            # act as triggers (bot-loop guard, research §5.1).
+            logger.info(
+                "Skipping bot-authored Azure DevOps work-item update", extra={"event": event}
+            )
+            return {"status": "skipped", "reason": "bot-loop"}
+        lifecycle_command = normalize_workitem_updated(
+            payload, trigger_label=str(getattr(settings, "FORGE_TRIGGER_LABEL", "forge") or "forge")
+        )
+        if lifecycle_command is None:
+            return _record_inbox_only(request, background_tasks, event, payload)
+        source_event_id = azure_source_event_id(
+            lifecycle_command["connection_id"], event, lifecycle_command["delivery_key"]
+        )
+        return await _ingest_azure_run_command(
+            request, background_tasks, lifecycle_command, source_event_id, event=event
+        )
+
     if event in _PR_COMMENT_EVENTS:
         comment_author = identity_name(
             ((payload.get("resource") or {}).get("comment") or {}).get("author")
@@ -648,7 +783,7 @@ def _record_inbox_only(
 def _payload_project_name(event: str, payload: dict[str, Any]) -> str:
     """The delivery's project name, best-effort per event shape (inbox rows)."""
     resource = payload.get("resource") or {}
-    if event == "workitem.commented":
+    if event in ("workitem.commented", "workitem.updated"):
         return str((resource.get("fields") or {}).get("System.TeamProject") or "")
     pull_request = resource.get("pullRequest") or {}
     if pull_request:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import secrets
@@ -20,7 +21,7 @@ from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
 from forge.gateway.parser import parse_webhook
 from forge.gateway.validator import is_bot_event, validate_webhook_token
-from forge.gitlab.events import GitLabEvent, NoteEvent, PipelineEvent
+from forge.gitlab.events import GitLabEvent, IssueEvent, NoteEvent, PipelineEvent
 from forge.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,89 @@ def _match_pipeline_debug(event: GitLabEvent, settings) -> dict[str, Any] | None
     }
 
 
+def _label_title(label: Any) -> str:
+    """The label's title across GitLab payload generations.
+
+    ``changes.labels`` entries are label objects today but older GitLab sent
+    bare title strings — normalize both, unknown shapes to "".
+    """
+    if isinstance(label, dict):
+        return str(label.get("title") or "").strip()
+    return str(label or "").strip()
+
+
+def _match_issue_lifecycle(event: GitLabEvent, settings) -> dict[str, Any] | None:
+    """Detect issue-update events that belong to the #29 lifecycle commands.
+
+    - ``issue`` hook, ``action == "update"``, ``changes`` carrying a
+      title/description change → ``issue_edited``: the new text travels in
+      the metadata and the executor's frozen-snapshot digest compare filters
+      no-op edits.
+    - ``issue`` hook, ``action == "update"``, ``changes.labels`` where the
+      trigger label is in the ``previous`` set but not the ``current`` one →
+      ``unlabeled``. This one is RELIABLE on GitLab: the update payload
+      carries both label sets, so a removal is proven (unlike Azure's
+      old-value-less tags, see azure_webhook.normalize_workitem_updated).
+
+    Everything else (state changes, label additions, reopen) takes the
+    legacy path. The delivery keys are content-stable per change —
+    ``edit:{issue_id}:{digest}:{updated_at}`` and
+    ``unlabel:{issue_id}:{updated_at}`` — so a redelivered update collapses
+    onto one inbox identity while two genuinely different updates never do
+    (the digest alone is not enough identity: an edit landing BACK on a
+    previously-seen text would collide with the first edit's inbox row).
+    """
+    if not isinstance(event, IssueEvent):
+        return None
+    attrs = event.object_attributes
+    if (attrs.action or "") != "update":
+        return None
+
+    project_id = event.project.id if event.project else 0
+    author = event.user.username if event.user else ""
+    updated_at = str(attrs.updated_at or "")
+    trigger_label = (
+        str(getattr(settings, "FORGE_TRIGGER_LABEL", "forge") or "forge").strip().lower()
+    )
+
+    labels_change = (event.changes or {}).get("labels")
+    if isinstance(labels_change, dict):
+        previous = {_label_title(label).lower() for label in (labels_change.get("previous") or [])}
+        current = {_label_title(label).lower() for label in (labels_change.get("current") or [])}
+        if previous and trigger_label in previous and trigger_label not in current:
+            delivery_key = f"unlabel:{attrs.id}:{updated_at}"
+            return {
+                "command": "unlabeled",
+                "provider": "gitlab",
+                "project_id": project_id,
+                "issue_iid": attrs.iid,
+                "author_username": author,
+                "note_text": "",
+                "note_id": delivery_key,
+                "delivery_key": delivery_key,
+            }
+
+    changes = event.changes or {}
+    if "title" in changes or "description" in changes:
+        title = str(attrs.title or "")
+        body = str(attrs.description or "")
+        digest = hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()
+        delivery_key = f"edit:{attrs.id}:{digest}:{updated_at}"
+        return {
+            "command": "issue_edited",
+            "provider": "gitlab",
+            "project_id": project_id,
+            "issue_iid": attrs.iid,
+            "issue_title": title,
+            "issue_body": body,
+            "author_username": author,
+            "note_text": "",
+            "note_id": delivery_key,
+            "delivery_key": delivery_key,
+        }
+    return None
+
+
 def _capture_webhook_payload(
     settings: Any,
     event_header: str,
@@ -197,9 +281,14 @@ async def _ingest_run_command(
     # (run commands) and pipeline events (the CI debug lane), the two
     # GitLabEvent models that carry ``object_attributes.id``.
     if isinstance(event, (NoteEvent, PipelineEvent)):
-        note_id = event.object_attributes.id
+        note_id: int | str = event.object_attributes.id
     else:  # pragma: no cover — the dispatchers guarantee the attribute
         note_id = 0
+    # Lifecycle commands (issue_edited/unlabeled) carry a per-delivery
+    # content key (digest + updated_at): two distinct edits of ONE issue
+    # must not collapse onto one inbox identity, while a redelivered edit
+    # still does. Note/pipeline commands keep the object id as identity.
+    note_id = str(run_command.get("delivery_key") or note_id)
     source_event_id = command_source_event_id(
         run_command["command"], run_command["project_id"], note_id
     )
@@ -543,6 +632,12 @@ async def webhook(
     run_command = _match_run_command(event, settings)
     if run_command is not None:
         return await _ingest_run_command(request, background_tasks, event, run_command)
+
+    # #29 lifecycle commands: issue updates (edit → replan, trigger-label
+    # removal → cancel at the gate) route through the SAME durable step path.
+    lifecycle_command = _match_issue_lifecycle(event, settings)
+    if lifecycle_command is not None:
+        return await _ingest_run_command(request, background_tasks, event, lifecycle_command)
 
     # v0.7 durable CI debug lane: failed pipelines bypass the legacy
     # orchestrator the same way (the durable step IS the replacement).

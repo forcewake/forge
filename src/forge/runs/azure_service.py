@@ -629,7 +629,12 @@ class AzureRunService:
             raise
 
         digest = plan_digest_of(plan)
-        task_digest = task_digest_of(issue_title, issue_description)
+        # The task snapshot digest freezes the STRIPPED description:
+        # System.Description is HTML, and the #29 edit handler
+        # (``handle_issue_edited``) digests the stripped text — a caller
+        # passing raw HTML must freeze the comparable snapshot, not a
+        # tag-encoding-sensitive one.
+        task_digest = task_digest_of(issue_title, _strip_html(issue_description))
         now = datetime.now(timezone.utc)
         base_sha = await self._read_base_sha()
         # ADR-0023 §2: the harness decision is compiled at plan time and
@@ -1072,6 +1077,295 @@ class AzureRunService:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             raise
         await self._complete_action(action_id, "succeeded", {"backend": "ci_harness"})
+
+    # ------------------------------------------------------------------
+    # Issue-edit replan + tag-off cancel (operator busywork, event-driven)
+    # ------------------------------------------------------------------
+
+    async def handle_issue_edited(
+        self,
+        *,
+        project_id: int,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+        author_username: str,
+    ) -> str | None:
+        """``workitem.updated``: keep the waiting plan honest (#29).
+
+        The AzDO mirror of ``GitHubRunService.handle_issue_edited`` — the
+        same three cases against the issue-text snapshot frozen at plan
+        time (the RunSpec's ``task_digest``): replan a stale gate-waiting
+        run, note once past the gate, ignore a no-op edit.
+
+        AzDO deltas, both deliberate: ``System.Description`` is HTML, so
+        the comparison text is stripped exactly like ``start_run`` freezes
+        it; and a ``workitem.updated`` delivery can travel sparse (a
+        "changed fields only" subscription omits untouched fields), so a
+        missing title/body is repaired with ONE API read instead of
+        digesting empty strings as if the fields had been blanked.
+        """
+        admission = check_admission(
+            self._settings, self._config, project_id, author_username, provider="azure_devops"
+        )
+        if not admission.allowed:
+            # ADR-0009: forge reacts to an edit only for an actor it would
+            # let start a run — anyone else's edit never yanks or replans.
+            logger.info(
+                "Azure DevOps work-item edit by @%s on %s#%s ignored — not admitted (%s)",
+                author_username,
+                self._repo_full_name,
+                issue_number,
+                admission.reason,
+            )
+            return None
+
+        title, body = issue_title, issue_body
+        if not title or not body:
+            try:
+                fields = (await self._stack.client.get_work_item(self._project, issue_number)).get(
+                    "fields"
+                ) or {}
+                title = title or str(fields.get("System.Title") or "")
+                body = body or str(fields.get("System.Description") or "")
+            except Exception:
+                logger.warning(
+                    "Work item %s text read failed — comparing the delivery text only",
+                    issue_number,
+                    exc_info=True,
+                )
+        edited_digest = task_digest_of(title, _strip_html(body))
+
+        run = await self._find_active_run(project_id, issue_number)
+        stale_run_id: str | None = None
+        if run is not None:
+            if await self._frozen_task_digest(run.id) == edited_digest:
+                logger.info(
+                    "Azure DevOps work-item edit on #%s matches run %s's snapshot — ignoring",
+                    issue_number,
+                    run.id[:8],
+                )
+                return run.id
+
+            if run.status == FlowStatus.WAITING_APPROVAL.value and not await self._gate_consumed(
+                run.id
+            ):
+                stale_run_id = run.id
+                await self._revoke_publication_grant(stale_run_id)
+                await self._transition(
+                    stale_run_id,
+                    FlowStatus.CANCELLED,
+                    reason=f"superseded by issue edit by @{author_username}",
+                )
+                logger.info(
+                    "Azure DevOps run %s superseded by a work-item edit — replanning #%s",
+                    stale_run_id[:8],
+                    issue_number,
+                )
+            else:
+                # Approved / in flight: the change is NOT pulled into the
+                # approved plan.
+                await self._post_journaled_comment(
+                    project_id,
+                    issue_number,
+                    f"Work item edited while run `{run.id[:8]}` is in flight — the change is "
+                    "**not** in the approved plan. The run keeps executing its approved "
+                    "snapshot; run `/cancel` and `/implement` if it should pick the change "
+                    "up.\n\n*This is an automated message.*",
+                    run.id,
+                    "issue_edited_note",
+                )
+                return run.id
+        elif not await self._replan_interrupted(project_id, issue_number):
+            logger.info("Azure DevOps work-item edit on #%s — no active run", issue_number)
+            return None
+
+        new_run_id = await self.start_run(
+            project_id=project_id,
+            issue_number=issue_number,
+            issue_title=title,
+            issue_description=_strip_html(body),
+            author_username=author_username,
+        )
+        # A retried replan (the first attempt died mid-step) has no stale run
+        # of its own to name — the note then just says where the plan came from.
+        if stale_run_id is not None:
+            origin = (
+                f"The plan of run `{stale_run_id[:8]}` was **stale** — the work item was edited "
+                "while its plan waited for approval. It was cancelled and the plan "
+            )
+        else:
+            origin = (
+                "The work item was edited while its plan waited for approval — that plan was "
+                "stale, so the plan "
+            )
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            f"{origin}"
+            f"regenerated from the current work item as run `{new_run_id[:8]}`. "
+            f"Approve with `/go {new_run_id}`.\n\n*This is an automated message.*",
+            new_run_id,
+            "replan_note",
+        )
+        return new_run_id
+
+    async def handle_label_removed(
+        self, *, project_id: int, issue_number: int, author_username: str
+    ) -> int:
+        """Trigger-tag removal: label-off = cancel at the gate (#29).
+
+        The AzDO mirror of ``GitHubRunService.handle_label_removed`` —
+        symmetry with label-on = plan (ADR-0020 §4): runs still parked in
+        ``waiting_approval`` are cancelled (the plan was never approved, so
+        nothing executed is lost); runs past the gate are untouched — the
+        approval consumed that plan, the tag no longer owns it. Returns the
+        number of cancelled runs.
+
+        The ingress detection that routes here keys on the trigger tag
+        being absent from a ``workitem.updated`` delivery's
+        ``System.Tags`` — its exact reach is documented on
+        ``azure_webhook.normalize_workitem_updated``.
+        """
+        if author_username not in self._approvers():
+            logger.info(
+                "Azure DevOps tag removal by @%s on #%s ignored — not an approver",
+                author_username,
+                issue_number,
+            )
+            return 0
+        async with self._session_factory() as session:
+            runs = (
+                (
+                    await session.execute(
+                        select(FlowRun).where(
+                            FlowRun.provider == "azure_devops",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_number,
+                            FlowRun.status == FlowStatus.WAITING_APPROVAL.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            run_ids = [run.id for run in runs]
+        for run_id in run_ids:
+            await self._revoke_publication_grant(run_id)
+            await self._transition(
+                run_id,
+                FlowStatus.CANCELLED,
+                reason=f"trigger label removed by @{author_username}",
+            )
+            await self._post_journaled_comment(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` **cancelled** — the `forge` tag was removed by "
+                f"@{author_username} while its plan waited for approval. Re-add the tag "
+                "(or run `/implement`) to plan again.\n\n*This is an automated message.*",
+                run_id,
+                "cancel_note",
+            )
+            logger.info(
+                "Azure DevOps run %s cancelled — trigger tag removed by @%s",
+                run_id[:8],
+                author_username,
+            )
+        return len(run_ids)
+
+    async def _frozen_task_digest(self, run_id: str) -> str | None:
+        """The issue-text snapshot digest frozen into the RunSpec at plan time."""
+        async with self._session_factory() as session:
+            spec = (
+                (
+                    await session.execute(
+                        select(RunSpec).where(RunSpec.run_id == run_id).order_by(RunSpec.id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if spec is None:
+            return None
+        document = spec.document if isinstance(spec.document, dict) else {}
+        digest = document.get("task_digest")
+        return str(digest) if digest else None
+
+    async def _gate_consumed(self, run_id: str) -> bool:
+        """Whether the run's latest gate decision is already consumed.
+
+        Status alone is not proof: between ``consume_approval`` and the
+        PROPOSING transition commit the run still reads ``waiting_approval`` —
+        an edit in exactly that window must not cancel an approved run
+        (the "gate already consumed" guard).
+        """
+        async with self._session_factory() as session:
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval)
+                        .where(GateApproval.flow_run_id == run_id)
+                        .order_by(GateApproval.id.desc())
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return gate is not None and gate.consumed_at is not None
+
+    async def _revoke_publication_grant(self, run_id: str) -> None:
+        """Cancel-as-revoke's durable core (F13, ADR-0018 §4).
+
+        Sets ``cancel_requested`` — the flag an in-flight publication leg
+        re-reads before writing — and withdraws the run's scheduled steps so
+        no worker picks them up later. The terminal transition stays the
+        caller's.
+        """
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.cancel_requested = True
+            await session.execute(
+                update(StepRun)
+                .where(StepRun.flow_run_id == run_id, StepRun.status == "scheduled")
+                .values(status="cancelled")
+            )
+            await session.commit()
+
+    async def _replan_interrupted(self, project_id: int, issue_number: int) -> bool:
+        """Whether an edit-triggered replan on this work item died mid-step.
+
+        The command step retries with backoff, and the retry must be able to
+        finish what the ``202`` promised: the stale run is already cancelled,
+        so a plain ``no active run`` would leave the work item run-less. Two
+        shapes are retried — the superseded cancellation itself (``start_run``
+        never created the fresh run), and a ``planning_failed`` run it did
+        create (the fresh attempt plans again, exactly like a retried
+        ``/implement``).
+        """
+        async with self._session_factory() as session:
+            run = (
+                (
+                    await session.execute(
+                        select(FlowRun)
+                        .where(
+                            FlowRun.provider == "azure_devops",
+                            FlowRun.project_id == project_id,
+                            FlowRun.issue_iid == issue_number,
+                        )
+                        .order_by(FlowRun.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if run is None:
+            return False
+        if run.status == FlowStatus.CANCELLED.value:
+            return (run.status_reason or "").startswith("superseded by issue edit")
+        if run.status == FlowStatus.FAILED.value:
+            return (run.status_reason or "").startswith("planning_failed")
+        return False
 
     async def _redispatch_revival(self, run_id: str) -> None:
         """Re-dispatch a revived run — same branch, attempt base = last candidate."""
@@ -1624,6 +1918,15 @@ class AzureRunService:
         frozen-chain fallback is a follow-up on this provider), and a
         succeeded lane hands its candidate bundle to the SAME trusted
         publication tail the builtin path uses.
+
+        R17 (deadline-before-I/O): the FIRST operations of every evaluation
+        are local deadline/cancel checks over the journaled handle — no
+        provider call is made once the harness budget is spent, so a
+        permanently erroring Pipelines API can never hold a run past its
+        ``harness_timeout``. Discovery is bounded the same way (R17): a
+        dispatch that never surfaces retries only up to
+        ``FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS`` before the run parks
+        blocked with the precise reason.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -1633,6 +1936,7 @@ class AzureRunService:
             evidence = dict(run.evidence or {})
             project_id = run.project_id
             issue_number = run.issue_iid or 0
+            cancel_requested = bool(run.cancel_requested)
 
         if evidence.get("backend") and not is_harness_backend(str(evidence["backend"])):
             await self._to_terminal(
@@ -1646,6 +1950,33 @@ class AzureRunService:
             )
             return
         journaled = AzurePipelinesHandle.from_json(raw_handle)
+
+        # --- R17: local deadline / grant check BEFORE any provider I/O ----
+        if cancel_requested:
+            # F13: the publication grant is revoked — stand down without
+            # touching the provider. The late candidate is recorded as
+            # superseded either way.
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "superseded": {
+                        "reason": "cancelled",
+                        "attempt_base": journaled.attempt_base,
+                    }
+                },
+            )
+            logger.info("Run %s cancelled — harness evaluation stood down pre-poll", run_id[:8])
+            return
+        timeout = int(getattr(self._settings, "FORGE_HARNESS_TIMEOUT_SECONDS", 1800) or 1800)
+        started = _parse_journaled_time(journaled.started_at)
+        if started is not None and as_aware_utc(now) > as_aware_utc(started) + timedelta(
+            seconds=timeout
+        ):
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "harness_infrastructure: harness_timeout"
+            )
+            return
+
         executor = AzurePipelinesExecutor(self._stack.client, self._settings)
 
         # The journal speaks the service-handle dialect (AZ-2); the executor
@@ -1681,11 +2012,33 @@ class AzureRunService:
                                 **(evidence.get("harness") or {}),
                                 "handle": journaled.to_json(),
                                 "run_id": journaled.run_id,
+                                "discovery_attempts": 0,
                             }
                         },
                     )
                 else:
-                    return  # discovery retries next tick; the deadline decides
+                    # R17 (bounded discovery): a dispatch that never surfaces
+                    # must not retry forever — after the configured number of
+                    # fruitless discovery ticks the run parks blocked with the
+                    # precise reason instead of polling until heat death.
+                    attempts = (
+                        int((evidence.get("harness") or {}).get("discovery_attempts") or 0) + 1
+                    )
+                    cap = int(
+                        getattr(self._settings, "FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS", 20) or 20
+                    )
+                    if attempts >= cap:
+                        await self._to_terminal(
+                            run_id,
+                            FlowStatus.BLOCKED,
+                            "harness_infrastructure: dispatch never observed — "
+                            f"discovery found no pipeline run after {attempts} attempts",
+                        )
+                        return
+                    harness_fragment = dict(evidence.get("harness") or {})
+                    harness_fragment["discovery_attempts"] = attempts
+                    await self._merge_run_evidence(run_id, {"harness": harness_fragment})
+                    return  # remaining discovery attempts retry next tick
             outcome = await executor.poll(_to_executor(journaled), now=now)
         except Exception:
             logger.exception(
@@ -1880,6 +2233,11 @@ class AzureRunService:
         green → review; NO builds at all after the grace window → review as
         honestly **unverified** (evidence records it; the ready reason says
         so — never presented as verified).
+
+        R17 (deadline-before-I/O): the verification budget and the cancel
+        grant are evaluated LOCALLY before the provider is touched — a
+        permanently erroring Builds API can keep the run waiting only up to
+        ``FORGE_VERIFICATION_TIMEOUT_SECONDS``, never past it.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -1892,11 +2250,27 @@ class AzureRunService:
             candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
             issue_number = run.issue_iid or 0
             project_id = run.project_id
-            waiting_since = run.updated_at
+            waiting_since = run.updated_at  # the WAITING_CI transition moment
+            cancel_requested = bool(run.cancel_requested)
 
         if not candidate_sha:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
+            )
+            return
+
+        # F13: the grant was revoked mid-wait — no provider call, no publish.
+        if cancel_requested:
+            logger.info("Run %s cancelled — late verification pass ignored", run_id[:8])
+            return
+
+        # R17: the local deadline fires even when the Builds API keeps
+        # erroring (the stalled-provider stall this bound exists for).
+        deadline = int(getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800)
+        started = as_aware_utc(waiting_since) if waiting_since is not None else None
+        if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, "verification_timeout: builds did not conclude"
             )
             return
 
@@ -1946,15 +2320,8 @@ class AzureRunService:
 
         pending = [b for b in builds if str(b.get("status") or "") in _ACTIVE_BUILD_STATUSES]
         if pending:
-            # Deadline: verification must converge (R17 — bounded waiting).
-            deadline = int(
-                getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800
-            )
-            started = as_aware_utc(waiting_since) if waiting_since is not None else None
-            if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
-                await self._to_terminal(
-                    run_id, FlowStatus.BLOCKED, "verification_timeout: builds did not conclude"
-                )
+            # Bounded (R17): the deadline itself is enforced pre-I/O above —
+            # a Builds API that never answers cannot hold the run forever.
             return
 
         red = [b for b in builds if str(b.get("result") or "") in _RED_BUILD_RESULTS]
@@ -2527,7 +2894,7 @@ async def execute_azure_run_command(
 
         await execute_azure_debug_ci_command(settings, forge_config, session_factory, metadata)
         return
-    if command not in {"start_run", "go", "cancel", "retry"}:
+    if command not in {"start_run", "go", "cancel", "retry", "issue_edited", "unlabeled"}:
         logger.warning("Unknown Azure DevOps run command %r — ignoring", command)
         return
     project = str(metadata.get("project") or "")
@@ -2583,6 +2950,23 @@ async def execute_azure_run_command(
                 project_id=project_id,
                 issue_number=issue_number,
                 note_text=note_text,
+                author_username=author_username,
+            )
+        elif command == "issue_edited":
+            # The edited text travels in the command metadata (the webhook
+            # payload's fields); a sparse delivery is repaired by ONE API
+            # read inside the handler.
+            await service.handle_issue_edited(
+                project_id=project_id,
+                issue_number=issue_number,
+                issue_title=str(metadata.get("issue_title") or ""),
+                issue_body=str(metadata.get("issue_body") or ""),
+                author_username=author_username,
+            )
+        elif command == "unlabeled":
+            await service.handle_label_removed(
+                project_id=project_id,
+                issue_number=issue_number,
                 author_username=author_username,
             )
         else:
@@ -2794,6 +3178,14 @@ def _merge_evidence(evidence: dict | None, patch: dict) -> dict:
     merged = dict(evidence or {})
     merged.update(patch)
     return merged
+
+
+def _parse_journaled_time(raw: str) -> datetime | None:
+    """Parse a journaled ISO timestamp (handle ``started_at``); None if broken."""
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _plan_evidence(run: FlowRun) -> tuple[str, list[str]]:
