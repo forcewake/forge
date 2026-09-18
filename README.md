@@ -15,6 +15,8 @@ All three providers are **live-verified end-to-end**: `/implement` → plan →
 human gate → coding agent in ephemeral CI → trusted publisher → Draft MR/PR →
 review → `ready_for_human` — on real GitLab CE, real GitHub (App + Actions),
 and a real Azure DevOps organization (work items, service hooks, Pipelines).
+Per-capability verification depth varies — see the
+[guarantee matrix](#guarantee-levels).
 
 ## The iron principle: the bot never merges
 
@@ -36,16 +38,18 @@ issue comment /implement  →  durable plan (LLM)  →  HUMAN /go GATE
 ```
 
 - **Durable by design** ([ADR-0017](docs/adr/0017-durable-step-runtime.md)):
-  commands and steps live in Postgres; a crash at any transition or after
-  any external effect converges — proven by a failure-injection suite (two
-  workers, real Postgres, kill at six checkpoints).
+  commands and steps live in Postgres; a worker crash at the six
+  failure-injection checkpoints (ingress, claim, gate, publish, draft,
+  evidence) converges — proven by a failure-injection suite (two workers,
+  real Postgres, kill at each checkpoint).
 - **Proposal-only execution lane**
   ([ADR-0016](docs/adr/0016-candidate-bundle-trusted-publisher.md)): coding
   agents run in ephemeral CI with **no write credentials and no forge
   secrets**; their output is a candidate artifact that a trusted publisher
   validates and applies.
-- **One trusted publisher** for every backend — builtin LLM ChangeSets and
-  CLI agents share the same validation, policy, and journal.
+- **Shared publisher contract** — builtin LLM ChangeSets and CLI agents
+  share the same validation, policy, and journal; how strongly each backend
+  enforces it differs — see the [guarantee matrix](#guarantee-levels).
 - **Human gate** ([ADR-0018](docs/adr/0018-immutable-run-spec.md)): the plan
   is frozen into an immutable RunSpec; the decision has a deadline; cancel
   revokes the publication grant before it stops the runner. The plan comment
@@ -81,6 +85,27 @@ Setup guides: [GitLab CE](docs/getting-started/gitlab.md) ·
 Architecture: four orthogonal adapters — source, execution, harness driver,
 model route ([ADR-0019](docs/adr/0019-source-execution-adapters.md)).
 Adding a provider is an adapter, not a second factory.
+
+## Guarantee levels
+
+What each capability is verified at today: **implemented** (code + unit
+tests) · **contract-tested** (CI contract suite, faked platform) ·
+**live** (exercised against the real platform in the dogfooding loop).
+
+| Capability | GitLab CE | GitHub | Azure DevOps |
+|---|---|---|---|
+| Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) | contract-tested |
+| Publication policy — harness lane | live | contract-tested (shared publisher validation) | contract-tested |
+| CI verification gate (`waiting_ci`) | contract-tested · required-jobs profile | live · `waiting_ci` + checks | contract-tested · parity in progress |
+| Repair-in-place | implemented · contract-tested | implemented · contract-tested | implemented · contract-tested |
+| Operator `/retry` + auto-revive | live | live | live |
+
+"Enforced" means the platform itself cannot apply a candidate that failed
+publisher validation. GitHub's CAS check (`expectedHeadOid`) happens at
+publish time, inside forge — platform-side enforcement is a known gap.
+GitLab CI verification keys on the required-jobs profile
+([ADR-0008](docs/adr/0008-quality-contract-instead-of-pipeline-status.md));
+the Azure checks gate is GitHub parity, in progress.
 
 ## Four harness drivers, one contract
 
