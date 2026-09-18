@@ -11,7 +11,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from forge.gitlab.client import GitLabClient
 from forge.mcp_server.auth import (
     McpPrincipal,
+    _token_label,
+    apply_repo_allowlist,
+    guard_fn,
     parse_scoped_tokens,
+    parse_token_repos,
     resolve_principal,
     stash_principal,
     stash_session_factory,
@@ -133,10 +137,59 @@ def create_mcp_server(settings: Settings, redis_manager: RedisManager | None = N
     register_resources(mcp)
     register_prompts(mcp)
 
+    # R19: the GitLab read surfaces (resources/prompts) go behind the same
+    # default-deny guard as tools — they resolve a caller-supplied project
+    # through the shared platform token, so scope + repo-target checks
+    # apply here too.
+    _guard_gitlab_read_surfaces(mcp)
+
     return mcp
 
 
+def _guard_gitlab_read_surfaces(mcp: FastMCP) -> None:
+    """Wrap resource templates and prompts with the ``forge:read`` guard.
+
+    The fn swap is invisible to the SDK — name, description and parameter
+    schema were captured at registration; only the call path changes. These
+    are reads, so the guard audits allowed calls like every other surface.
+    """
+    for template in mcp._resource_manager._templates.values():  # type: ignore[attr-defined]
+        template.fn = guard_fn(
+            template.fn,
+            name=f"resource:{template.name}",
+            scope_needed="forge:read",
+            repo_arg="project_path",
+        )
+    for prompt in mcp._prompt_manager._prompts.values():  # type: ignore[attr-defined]
+        prompt.fn = guard_fn(
+            prompt.fn,
+            name=f"prompt:{prompt.name}",
+            scope_needed="forge:read",
+            repo_arg="project_path",
+        )
+
+
 def scoped_principals_from_settings(settings: Settings) -> dict[str, McpPrincipal]:
-    """Parse the scoped-token config (fail closed on a malformed config)."""
+    """Parse the scoped-token config (fail closed on a malformed config).
+
+    R19: the optional ``FORGE_MCP_TOKEN_REPOS`` allowlist (token or its
+    audit label → repo globs) is merged onto the resolved principals.
+    Tokens it does not mention stay unrestricted — existing configs keep
+    working. Keys matching no scoped token are logged and ignored: the
+    FORGE_MCP_KEY master is unrestricted by design.
+    """
     raw = settings.FORGE_MCP_SCOPED_TOKENS
-    return parse_scoped_tokens(raw.get_secret_value() if raw is not None else None)
+    principals = parse_scoped_tokens(raw.get_secret_value() if raw is not None else None)
+    repos_raw = settings.FORGE_MCP_TOKEN_REPOS
+    token_repos = parse_token_repos(repos_raw.get_secret_value() if repos_raw is not None else None)
+    if token_repos:
+        known = set(principals) | {_token_label(token) for token in principals}
+        orphans = sorted(set(token_repos) - known)
+        if orphans:
+            logger.warning(
+                "FORGE_MCP_TOKEN_REPOS entries match no scoped token and are ignored: %s "
+                "(FORGE_MCP_KEY master stays unrestricted by design)",
+                ", ".join(orphans),
+            )
+        principals = apply_repo_allowlist(principals, token_repos)
+    return principals

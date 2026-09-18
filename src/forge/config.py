@@ -124,6 +124,13 @@ class Settings(BaseSettings):
     # forge:admin; "*" grants the full set). FORGE_MCP_KEY remains the
     # all-scope master. Malformed JSON or unknown scopes fail startup.
     FORGE_MCP_SCOPED_TOKENS: SecretStr | None = None
+    # R19: optional repository-target allowlist for scoped MCP principals —
+    # JSON object token (or its audit label "tok-<hash>") → list of fnmatch
+    # patterns matched against the caller-supplied project path
+    # ({"tok-abc...": ["group/app-*"]}; an empty list denies every target).
+    # Unset (default) leaves scoped tokens unrestricted, so existing configs
+    # keep working. FORGE_MCP_KEY master is unrestricted by design.
+    FORGE_MCP_TOKEN_REPOS: SecretStr | None = None
     # Host headers the MCP endpoint accepts when mounted behind a proxy
     # (comma-separated; e.g. "forge.example.com"). Empty keeps the SDK's
     # localhost-only DNS-rebinding protection — a deployment MUST list its

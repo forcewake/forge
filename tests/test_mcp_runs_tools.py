@@ -21,11 +21,27 @@ from forge.main import create_app
 MASTER_KEY = "forge-master-key"
 READ_TOKEN = "forge-read-token"
 NARROW_TOKEN = "forge-narrow-token"
+READONLY_TOKEN = "forge-readonly-token"  # classic surface: read, never write
+WRITE_TOKEN = "forge-write-token"  # classic surface: may write GitLab
 
-SCOPED_JSON = json.dumps({READ_TOKEN: ["forge:read", "forge:runs:write"]})
+SCOPED_JSON = json.dumps(
+    {
+        READ_TOKEN: ["forge:read", "forge:runs:write"],
+        READONLY_TOKEN: ["forge:read"],
+        WRITE_TOKEN: ["forge:runs:write"],
+    }
+)
+
+REPOS_JSON = json.dumps({READONLY_TOKEN: ["allowed/*"]})
+
+GL_BASE = "https://gitlab.test/api/v4"
 
 
-def mcp_settings(tmp_path, scoped: str | None = SCOPED_JSON) -> Settings:
+def mcp_settings(
+    tmp_path,
+    scoped: str | None = SCOPED_JSON,
+    repos: str | None = None,
+) -> Settings:
     return Settings(
         GITLAB_URL="https://gitlab.test",
         GITLAB_TOKEN=SecretStr("glpat-test"),
@@ -39,6 +55,7 @@ def mcp_settings(tmp_path, scoped: str | None = SCOPED_JSON) -> Settings:
         FORGE_MCP_ENABLED=True,
         FORGE_MCP_KEY=SecretStr(MASTER_KEY),
         FORGE_MCP_SCOPED_TOKENS=SecretStr(scoped) if scoped else None,
+        FORGE_MCP_TOKEN_REPOS=SecretStr(repos) if repos else None,
         FORGE_MCP_ALLOWED_HOSTS="testserver",
     )
 
@@ -113,6 +130,24 @@ async def app(tmp_path):
 @pytest.fixture()
 async def client(app) -> AsyncClient:
     transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+
+
+@pytest.fixture()
+async def repos_app(tmp_path):
+    """Same app with a repo-target allowlist on READONLY_TOKEN (R19)."""
+    reset_engine()
+    application = create_app(settings=mcp_settings(tmp_path, repos=REPOS_JSON))
+    async with application.router.lifespan_context(application):
+        application.state.task_queue = AsyncMock()
+        yield application
+    reset_engine()
+
+
+@pytest.fixture()
+async def repos_client(repos_app) -> AsyncClient:
+    transport = ASGITransport(app=repos_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
 
@@ -196,6 +231,200 @@ class TestAudit:
             "tool=run_get" in record.message and "principal=tok-" in record.message
             for record in caplog.records
         )
+
+
+class TestClassicSurface:
+    """R19: the classic GitLab family enforces scopes + repo targets.
+
+    Before this finding, a read-only principal could drive the shared
+    platform token to write (comments, issue creation) — the tools now go
+    through the same default-deny guard as the run surface.
+    """
+
+    async def test_readonly_token_classic_read_ok(self, app, client: AsyncClient, httpx_mock):
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/42/merge_requests?state=opened&per_page=10",
+            json=[
+                {
+                    "id": 100,
+                    "iid": 1,
+                    "title": "Test MR",
+                    "state": "opened",
+                    "source_branch": "feat",
+                    "target_branch": "main",
+                },
+            ],
+        )
+        response = await call_tool(client, "list_merge_requests", {"project": "42"}, READONLY_TOKEN)
+        assert response.status_code == 200
+        assert "Test MR" in result_text(response)
+
+    async def test_readonly_token_classic_write_forbidden(self, app, client: AsyncClient):
+        # No GitLab response registered: reaching the API would fail the test.
+        response = await call_tool(
+            client,
+            "post_merge_request_comment",
+            {"project": "42", "mr_iid": 1, "body": "hi"},
+            READONLY_TOKEN,
+        )
+        assert response.status_code == 200
+        assert "FORBIDDEN" in result_text(response)
+        assert "forge:runs:write" in result_text(response)
+
+    async def test_write_scope_token_can_comment(self, app, client: AsyncClient, httpx_mock):
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/42/merge_requests/1/notes",
+            method="POST",
+            json={"id": 9, "body": "hi"},
+        )
+        response = await call_tool(
+            client,
+            "post_merge_request_comment",
+            {"project": "42", "mr_iid": 1, "body": "hi"},
+            WRITE_TOKEN,
+        )
+        assert response.status_code == 200
+        assert "Comment posted" in result_text(response)
+
+    async def test_write_scope_token_cannot_read(self, app, client: AsyncClient):
+        response = await call_tool(
+            client,
+            "list_merge_requests",
+            {"project": "42"},
+            WRITE_TOKEN,
+        )
+        assert "FORBIDDEN" in result_text(response)
+
+    async def test_denied_classic_write_is_audited(self, app, client: AsyncClient, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="forge.mcp_server.audit"):
+            await call_tool(
+                client,
+                "create_issue",
+                {"project": "42", "title": "sneaky"},
+                READONLY_TOKEN,
+            )
+        assert any(
+            "outcome=denied" in record.message
+            and "tool=create_issue" in record.message
+            and "principal=tok-" in record.message
+            and "required_scope=forge:runs:write" in record.message
+            for record in caplog.records
+        )
+
+    async def test_allowed_classic_write_audits_actor(
+        self, app, client: AsyncClient, httpx_mock, caplog
+    ):
+        import logging
+
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/42/issues",
+            method="POST",
+            json={"id": 300, "iid": 10, "title": "New issue", "state": "opened"},
+        )
+        with caplog.at_level(logging.INFO, logger="forge.mcp_server.audit"):
+            response = await call_tool(
+                client,
+                "create_issue",
+                {"project": "42", "title": "New issue"},
+                WRITE_TOKEN,
+            )
+        assert "Issue created" in result_text(response)
+        assert any(
+            "outcome=ok" in record.message
+            and "tool=create_issue" in record.message
+            and "principal=tok-" in record.message
+            for record in caplog.records
+        )
+
+    async def test_readonly_token_still_reads_runs(self, app, client: AsyncClient):
+        # No regression: the run surface keeps its forge:read contract.
+        await seed_db(app, [seeded_run()])
+        response = await call_tool(client, "run_get", {"run_id": "run-1"}, READONLY_TOKEN)
+        assert response.status_code == 200
+        assert "ready_for_human" in result_text(response)
+
+
+class TestRepoTargetAuthz:
+    """R19: FORGE_MCP_TOKEN_REPOS constrains the caller-supplied project."""
+
+    async def test_wrong_repo_target_forbidden(self, repos_app, repos_client: AsyncClient):
+        response = await call_tool(
+            repos_client,
+            "list_merge_requests",
+            {"project": "other/repo"},
+            READONLY_TOKEN,
+        )
+        assert response.status_code == 200
+        assert "FORBIDDEN" in result_text(response)
+
+    async def test_numeric_id_escapes_no_allowlist(self, repos_app, repos_client: AsyncClient):
+        # Allowlisted by path -> a numeric ID does not match any pattern.
+        response = await call_tool(
+            repos_client,
+            "list_merge_requests",
+            {"project": "42"},
+            READONLY_TOKEN,
+        )
+        assert "FORBIDDEN" in result_text(response)
+
+    async def test_matching_repo_target_allowed(
+        self, repos_app, repos_client: AsyncClient, httpx_mock
+    ):
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/allowed%2Frepo",
+            json={"id": 42, "name": "repo", "path_with_namespace": "allowed/repo"},
+        )
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/42/merge_requests?state=opened&per_page=10",
+            json=[],
+        )
+        response = await call_tool(
+            repos_client,
+            "list_merge_requests",
+            {"project": "allowed/repo"},
+            READONLY_TOKEN,
+        )
+        assert response.status_code == 200
+        assert "No merge requests found." in result_text(response)
+
+    async def test_master_key_bypasses_repo_allowlist(
+        self, repos_app, repos_client: AsyncClient, httpx_mock
+    ):
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/anything%2Felse",
+            json={"id": 7, "name": "else", "path_with_namespace": "anything/else"},
+        )
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/7/issues/1",
+            json={"id": 1, "iid": 1, "title": "T", "state": "opened"},
+        )
+        response = await call_tool(
+            repos_client,
+            "get_issue",
+            {"project": "anything/else", "issue_iid": 1},
+            MASTER_KEY,
+        )
+        assert response.status_code == 200
+        assert "#1" in result_text(response)
+
+    async def test_unrestricted_token_keeps_legacy_behavior(
+        self, repos_app, repos_client: AsyncClient, httpx_mock
+    ):
+        # Tokens absent from FORGE_MCP_TOKEN_REPOS stay unrestricted.
+        httpx_mock.add_response(
+            url=f"{GL_BASE}/projects/42/merge_requests?state=opened&per_page=10",
+            json=[],
+        )
+        response = await call_tool(
+            repos_client,
+            "list_merge_requests",
+            {"project": "42"},
+            READ_TOKEN,
+        )
+        assert response.status_code == 200
+        assert "No merge requests found." in result_text(response)
 
 
 class TestDeliveryLadder:

@@ -20,16 +20,30 @@ model:
 
 Scopes are a closed set; unknown scopes in the config are rejected at parse
 time (fail closed).
+
+R19 closes the classic-tools gap in the same model: every registered
+surface (classic tools, resources, prompts) goes through one guard that
+resolves the caller's principal and enforces a required scope BEFORE the
+body runs — default deny. The classic family previously shipped with no
+per-call check, so a read-only principal could drive the shared GitLab
+token to write (comments, issue creation). Repository-target authorization
+rides the same guard: a principal may carry an explicit repo allowlist
+(``FORGE_MCP_TOKEN_REPOS``) checked against the caller-supplied project.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import functools
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
+from mcp.server.fastmcp import FastMCP
+from mcp.server.lowlevel.server import request_ctx
 from starlette.datastructures import MutableMapping
 from starlette.requests import Request
 
@@ -66,10 +80,17 @@ class McpAuthzError(Exception):
 
 @dataclass(frozen=True)
 class McpPrincipal:
-    """An authenticated MCP caller: a name and an explicit scope set."""
+    """An authenticated MCP caller: a name, a scope set, and repo targets.
+
+    ``repo_patterns`` is the principal's repository-target allowlist (R19):
+    ``None`` means unrestricted — the default, so existing scoped-token
+    configs keep working unchanged — while an empty tuple denies every
+    repo target (an explicit-but-empty allowlist fails closed).
+    """
 
     name: str
     scopes: frozenset[str]
+    repo_patterns: tuple[str, ...] | None = None
 
     def has(self, scope: str) -> bool:
         return scope in self.scopes
@@ -114,6 +135,75 @@ def parse_scoped_tokens(raw: str | None) -> dict[str, McpPrincipal]:
             )
         principals[token] = McpPrincipal(name=_token_label(token), scopes=frozenset(scopes))
     return principals
+
+
+def parse_token_repos(raw: str | None) -> dict[str, tuple[str, ...]]:
+    """Parse ``FORGE_MCP_TOKEN_REPOS`` (JSON: token-or-label → repo globs).
+
+    Keys are the same token strings as in ``FORGE_MCP_SCOPED_TOKENS`` or the
+    stable ``tok-<hash>`` label the audit logs show (no secret duplication is
+    required — either form resolves). Values are fnmatch patterns matched
+    against the caller-supplied project string (``group/app-*``); an EMPTY
+    list denies every target. Malformed config raises at parse time — a typo
+    must not silently widen access.
+    """
+    if not raw or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"FORGE_MCP_TOKEN_REPOS is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("FORGE_MCP_TOKEN_REPOS must be a JSON object token → repo patterns")
+    repos: dict[str, tuple[str, ...]] = {}
+    for token, patterns in data.items():
+        if not isinstance(token, str) or not token:
+            raise ValueError("FORGE_MCP_TOKEN_REPOS: token keys must be non-empty strings")
+        if not isinstance(patterns, list) or not all(
+            isinstance(p, str) and p.strip() for p in patterns
+        ):
+            raise ValueError(
+                "FORGE_MCP_TOKEN_REPOS: repo patterns for a token must be a list "
+                "of non-empty strings"
+            )
+        repos[token] = tuple(patterns)
+    return repos
+
+
+def apply_repo_allowlist(
+    principals: dict[str, McpPrincipal],
+    token_repos: dict[str, tuple[str, ...]],
+) -> dict[str, McpPrincipal]:
+    """Return *principals* with their per-token repo allowlist attached.
+
+    A token (or its ``tok-<hash>`` label) absent from *token_repos* stays
+    unrestricted — the back-compat contract: only tokens the operator lists
+    get narrowed.
+    """
+    if not token_repos:
+        return principals
+    resolved: dict[str, McpPrincipal] = {}
+    for token, principal in principals.items():
+        if token in token_repos:
+            patterns: tuple[str, ...] | None = token_repos[token]
+        else:
+            patterns = token_repos.get(_token_label(token))
+        resolved[token] = replace(principal, repo_patterns=patterns)
+    return resolved
+
+
+def repo_target_allowed(principal: McpPrincipal, project_ref: str) -> bool:
+    """May *principal* target the caller-supplied project string?
+
+    Patterns match the string AS SUPPLIED (case-sensitive fnmatch), so a
+    restricted principal should address projects by path (``group/app``).
+    Numeric IDs only pass against an explicitly digit pattern — a restricted
+    principal cannot escape its allowlist by resolving through IDs.
+    """
+    if principal.repo_patterns is None:
+        return True
+    ref = project_ref.strip()
+    return any(fnmatch.fnmatchcase(ref, pattern) for pattern in principal.repo_patterns)
 
 
 def resolve_principal(
@@ -168,6 +258,25 @@ def require_scope(request: Request, scope_needed: str) -> McpPrincipal:
     return principal
 
 
+def principal_from_context() -> McpPrincipal | None:
+    """The principal for the in-flight MCP request, any protocol surface.
+
+    The SDK binds the starlette request into a request-scoped contextvar
+    for EVERY handler — tools, resources and prompts alike — so the guard
+    needs no ``Context`` parameter (and tool signatures stay untouched).
+    Outside a request, or without a middleware-stashed principal, this is
+    None: callers must deny.
+    """
+    try:
+        context = request_ctx.get()
+    except LookupError:
+        return None
+    request = context.request if context is not None else None
+    if request is None:
+        return None
+    return principal_from_request(request)
+
+
 def audit(principal: McpPrincipal, tool: str, target: str, outcome: str) -> None:
     """One structured line per authorized call — the attribution layer."""
     audit_logger.info(
@@ -177,3 +286,86 @@ def audit(principal: McpPrincipal, tool: str, target: str, outcome: str) -> None
         target,
         outcome,
     )
+
+
+def audit_denied(
+    principal: McpPrincipal | None,
+    tool: str,
+    target: str,
+    required_scope: str,
+) -> None:
+    """WARNING line per denied call: who tried what, and what they lacked."""
+    audit_logger.warning(
+        "principal=%s tool=%s target=%s outcome=denied required_scope=%s",
+        principal.name if principal is not None else "anonymous",
+        tool,
+        target,
+        required_scope,
+    )
+
+
+def _deny_text(scope_needed: str, principal_name: str) -> str:
+    """The model-actionable denial (same channel as the run surface)."""
+    return f"FORBIDDEN: {McpAuthzError(scope_needed, principal_name)}"
+
+
+def guard_fn(
+    fn: Callable[..., Any],
+    *,
+    name: str,
+    scope_needed: str,
+    repo_arg: str | None = None,
+) -> Callable[..., Awaitable[str]]:
+    """Wrap an async MCP surface function with default-deny enforcement.
+
+    BEFORE the wrapped body runs, the helper resolves the caller's principal
+    (from the in-flight request) and requires *scope_needed*; when *repo_arg*
+    names a project parameter, the supplied value is checked against the
+    principal's repo allowlist. Every denial logs a WARNING audit line with
+    principal, tool and required scope; every allowed call logs the standard
+    INFO line. ``functools.wraps`` keeps the wrapped signature, so FastMCP
+    schemas, tool names and descriptions are unchanged. The wrapped callable
+    is typed loosely (the SDK's resource/prompt fns carry wide unions);
+    every real call site is async and returns str.
+    """
+
+    @functools.wraps(fn)
+    async def guarded(**kwargs: Any) -> str:
+        principal = principal_from_context()
+        target = str(kwargs.get(repo_arg, "")) if repo_arg else ""
+        if principal is None or not principal.has(scope_needed):
+            audit_denied(principal, name, target, scope_needed)
+            return _deny_text(scope_needed, principal.name if principal else "anonymous")
+        if repo_arg and not repo_target_allowed(principal, str(kwargs.get(repo_arg, ""))):
+            audit_denied(principal, name, target, f"{scope_needed} (repo allowlist)")
+            return f"FORBIDDEN: principal {principal.name!r} may not target {target!r}"
+        result = await fn(**kwargs)
+        audit(principal, name, target, "ok")
+        return str(result)
+
+    return guarded
+
+
+def guarded_tool(
+    mcp: FastMCP,
+    scope_needed: str,
+    *,
+    repo_arg: str | None = None,
+    name: str | None = None,
+) -> Callable[[Callable[..., Awaitable[str]]], Callable[..., Awaitable[str]]]:
+    """Register an async tool on *mcp* behind scope + repo-target enforcement.
+
+    The registration half of :func:`guard_fn` — the ONE door every classic
+    tool goes through. Scope mapping (closed set): list/get/read tools need
+    ``forge:read``; anything mutating GitLab needs ``forge:runs:write``;
+    approve/cancel actions would need ``forge:approvals:write`` (none exist
+    on the classic surface yet); the master key holds all scopes.
+    """
+
+    def decorate(fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+        tool_name = name or fn.__name__
+        return mcp.tool()(
+            guard_fn(fn, name=tool_name, scope_needed=scope_needed, repo_arg=repo_arg)
+        )
+
+    return decorate

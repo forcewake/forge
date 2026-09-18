@@ -2,15 +2,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-
 from forge.gitlab.client import GitLabAPIError
+from forge.mcp_server.auth import guarded_tool
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
+#: Classic-surface scope mapping (R19; closed set in auth.MCP_SCOPES).
+#: Read-only helpers (list/get/search/tree) need ``forge:read``; anything
+#: that mutates GitLab — comments, issue creation — needs the write scope.
+#: Approve/cancel actions would map to ``forge:approvals:write``; none
+#: exist on the classic surface yet.
+READ_SCOPE = "forge:read"
+WRITE_SCOPE = "forge:runs:write"
+
 
 def register_tools(mcp: FastMCP) -> None:
-    """Register all GitLab tools on *mcp*."""
+    """Register all GitLab tools on *mcp* (each behind its required scope)."""
 
     # Import here to avoid circular refs; helpers close over the mcp instance.
     from forge.mcp_server.server import (
@@ -23,7 +31,7 @@ def register_tools(mcp: FastMCP) -> None:
     def _redis():  # type: ignore[no-untyped-def]
         return mcp._forge_redis  # type: ignore[attr-defined]
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def list_merge_requests(
         project: str,
         state: str = "opened",
@@ -50,7 +58,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_merge_request(project: str, mr_iid: int) -> str:
         """Get details of a specific merge request.
 
@@ -77,7 +85,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_merge_request_diff(project: str, mr_iid: int) -> str:
         """Get the unified diff for a merge request.
 
@@ -93,7 +101,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, WRITE_SCOPE, repo_arg="project")
     async def post_merge_request_comment(project: str, mr_iid: int, body: str) -> str:
         """Post a comment on a merge request.
 
@@ -114,7 +122,7 @@ def register_tools(mcp: FastMCP) -> None:
     # Issues
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def list_issues(
         project: str,
         state: str = "opened",
@@ -146,7 +154,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_issue(project: str, issue_iid: int) -> str:
         """Get details of a specific issue.
 
@@ -172,7 +180,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, WRITE_SCOPE, repo_arg="project")
     async def create_issue(
         project: str,
         title: str,
@@ -198,7 +206,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_file_content(project: str, file_path: str, ref: str = "HEAD") -> str:
         """Get the content of a file from the repository.
 
@@ -219,7 +227,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_repository_tree(
         project: str,
         path: str = "",
@@ -244,7 +252,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def search_code(project: str, query: str) -> str:
         """Search for code in a repository using GitLab's search API.
 
@@ -270,7 +278,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_pipeline_status(project: str, ref: str = "main") -> str:
         """Get the latest pipeline status for a branch.
 
@@ -295,7 +303,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def get_failed_pipeline_logs(project: str, pipeline_id: int) -> str:
         """Get logs from failed jobs in a pipeline.
 
@@ -324,7 +332,7 @@ def register_tools(mcp: FastMCP) -> None:
         except GitLabAPIError as exc:
             return f"Error: {exc.message}"
 
-    @mcp.tool()
+    @guarded_tool(mcp, READ_SCOPE, repo_arg="project")
     async def list_project_labels(project: str) -> str:
         """List all labels for a project.
 
