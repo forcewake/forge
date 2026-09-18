@@ -174,9 +174,11 @@ any target project's onboarding — read-only, exit code 0 means done.
 
 ## Status
 
-**v0.9.0** — three providers live-verified end-to-end, four harness
+**v0.11.0** — three providers live-verified end-to-end, four harness
 drivers, task-aware selection, scoped MCP run surface, delivery-ladder
-metrics, images on GHCR (`ghcr.io/forcewake/forge:0.9.0`). 1727 tests;
+metrics, provider-neutral operator commands (`/retry`, `/status`,
+`/why-blocked`, `/reconcile`) with bounded auto-revive, images on GHCR
+(`ghcr.io/forcewake/forge:0.11.0`). 2601 tests;
 failure-injection-proven durable core; mypy-clean over the typed core.
 **Pre-production**: expect breaking changes before 1.0. The
 [CHANGELOG](CHANGELOG.md) has the full history.
@@ -187,7 +189,7 @@ failure-injection-proven durable core; mypy-clean over the typed core.
 
 ```bash
 docker run -d --name forge -p 8420:8420 \
-  --env-file .env ghcr.io/forcewake/forge:0.9.0
+  --env-file .env ghcr.io/forcewake/forge:0.11.0
 # or from source:
 git clone https://github.com/forcewake/forge && cd forge
 uv sync && set -o pipefail && .venv/bin/python -m pytest -q
@@ -268,8 +270,9 @@ The full index lives at **[docs/README.md](docs/README.md)**. Highlights:
 | [docs/getting-started/gitlab.md](docs/getting-started/gitlab.md) | GitLab CE project onboarding |
 | [docs/getting-started/github.md](docs/getting-started/github.md) | GitHub App + project setup |
 | [docs/getting-started/azure-devops.md](docs/getting-started/azure-devops.md) | Azure DevOps setup + the live-verification checklist |
+| [docs/operations/operator-commands.md](docs/operations/operator-commands.md) | the operator surface: `/implement` `/go` `/cancel` `/retry` `/status` `/why-blocked` `/reconcile` `/security`, the `forge` label, auto-revive |
 | [docs/faq.md](docs/reference/faq.md) | frequently asked questions (all providers) |
-| [docs/adr/](docs/adr/) | architecture decisions (0000–0025) |
+| [docs/adr/](docs/adr/) | architecture decisions (0000–0027) |
 | [demo/](demo/) | sales demo script + regeneration skill |
 
 ## License

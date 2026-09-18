@@ -33,6 +33,7 @@ Start at the [main README](../README.md); this index maps the docs tree.
 | [Operations index](operations/README.md) | runbooks overview |
 | [Backup & restore](operations/backup-restore.md) | Postgres durability, restore drills |
 | [Upgrade](operations/upgrade.md) | migration ordering, rollback |
+| [Operator commands](operations/operator-commands.md) | `/implement` `/go` `/cancel` `/retry` `/status` `/why-blocked` `/reconcile` `/security` — effects, authorization, provider parity; the `forge` label, auto-revive, issue-edit replan |
 | [Token rotation](operations/token-rotation.md) | every credential forge and the lanes touch |
 | [Audit retention](operations/audit-retention.md) | evidence, action log, captures |
 
@@ -45,8 +46,8 @@ is wired on this repo, and the ground rules.
 
 | Tree | Covers |
 |---|---|
-| [ADR](adr/) | architecture decisions 0000–0025 (the "why") |
-| [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md) |
+| [ADR](adr/) | architecture decisions 0000–0027 (the "why") |
+| [Research](research/) | live-verified API studies: [GitHub API](research/github-api.md), [Actions executor](research/github-actions-executor.md), [Azure DevOps payloads](research/azure-devops.md), [MCP ecosystem](research/mcp-surface.md), [harness interfaces](research/harness-interfaces.md), [harness config best practices](research/harness-config-best-practices.md), [harness selection prior art](research/harness-selection.md), [reactive reviews](research/github-reactive.md), [durable execution](research/durable-execution.md), [CI security surface](research/ci-security-surface.md), [complex projects](research/complex-projects.md), [MCP lane live evidence](research/mcp-lane-live-evidence.md), [patch application vs git apply](research/patch-application.md), [remote effect reconciliation](research/remote-effect-reconciliation.md), [Actions artifacts & usage receipts](research/actions-artifacts-usage.md), [schema upgrade gates](research/schema-upgrade-gates.md) |
 | [Specs](specs/) | stage briefs and contracts the milestones were built from |
 | [Security](security/threat-model.md) | the threat model |
 | [Reviews](reviews/) | external review passes and their dispositions |
@@ -74,3 +75,7 @@ is wired on this repo, and the ground rules.
 - MCP into lanes ([ADR-0022](adr/0022-harness-mcp-integration.md)) and
   task-aware harness selection
   ([ADR-0023](adr/0023-dynamic-harness-selection.md)).
+- One publication boundary for every provider × backend
+  ([ADR-0026](adr/0026-publication-boundary.md)).
+- One lifecycle owned by core, consolidated incrementally — no three
+  hand-maintained copies ([ADR-0027](adr/0027-lifecycle-consolidation.md)).

@@ -18,6 +18,39 @@ pipeline, and a Draft MR/PR — **the bot never merges**. Enforced by
 capabilities and platform permissions, never by prompts
 ([ADR-0003](docs/adr/0003-no-merge-is-enforceable.md)).
 
+## Operator surface (v0.11)
+
+The provider-neutral operator commands are `/implement` `/go` `/cancel`
+`/retry` `/status` `/why-blocked` `/reconcile` `/security` — one table of
+effect × authorization × provider parity, the `forge` label semantics
+(on = plan, off = cancel-at-gate), auto-revive, and the honest gaps:
+[docs/operations/operator-commands.md](docs/operations/operator-commands.md).
+
+Config knobs added since the early milestones (all in `src/forge/config.py`,
+annotated in `.env.example`):
+
+- `FORGE_RUN_AUTO_REVIVE_LIMIT` / `FORGE_RUN_REVIVE_BACKOFF_SECONDS` —
+  Tier-1 auto-revive budget (default 2) and backoff-ladder base (60s).
+- `FORGE_HARNESS_DISCOVERY_MAX_ATTEMPTS` — bounds lost-dispatch discovery
+  before the run parks blocked.
+- `FORGE_DRIVER_VERSIONS` — JSON driver→CLI version pins; the lane falls
+  back to forge's baked-in known-good defaults when unset.
+- `FORGE_AVAILABLE_DRIVERS` — JSON manifest of onboarded drivers; caps the
+  selection chain, never extends it.
+- `FORGE_BUDGET_PROFILES` — JSON named numeric budget ceilings, resolved at
+  RunSpec freeze.
+- `FORGE_WRITE_PROFILES` / `FORGE_PIPELINE_ENTRYPOINTS` — custom write
+  profiles and per-project pipeline entrypoints (denied under every
+  profile).
+- `FORGE_MCP_TOKEN_REPOS` — per-token repository-target allowlist for
+  scoped MCP principals.
+- `FORGE_SECURITY_TRIAGERS` / `FORGE_SECURITY_AUTO_ACCEPT` — who may
+  confirm AI triage verdicts; machine auto-accept is off by default.
+- `FORGE_VERIFICATION_GRACE_SECONDS` — grace before a fresh PR's missing
+  checks conclude "no CI configured".
+- `FORGE_MAX_THINKING_TOKENS` — lane-side: caps Claude thinking on repair
+  re-dispatches (consumed inside the harness job).
+
 ## Non-negotiable rules for agents
 
 1. **Run the tests before committing**: `set -o pipefail && .venv/bin/python -m pytest -q`,
@@ -47,8 +80,8 @@ src/forge/
   orchestrator/ legacy reactive flows (review, pipeline debug, chat)
   doctor.py    environment verification (this is your setup oracle)
 ci/templates/  harness CI jobs (claude-code, opencode, grok) + event filters
-tests/         800+ tests; fixtures/fake_gitlab.py is the GitLab fake
-docs/adr/      architecture decisions (read 0001-0015 before redesigning)
+tests/         2600+ tests; fixtures/fake_gitlab.py is the GitLab fake
+docs/adr/      architecture decisions (read 0001-0027 before redesigning)
 ```
 
 ## Environment setup (dev)
@@ -112,8 +145,9 @@ podman build -t localhost/forge:dev -f /tmp/f.Containerfile .
 
 ## Where work stands
 
-`FACTORY_PLAN.md` is the plan of record. Milestones M0–M3 are complete
-(durable run loop, real LLM agents, ci_harness backends, harness repair,
-failure-injection drills); M4 is release engineering. The live lab
-(`/implement` → branch → green CI → Draft MR → `ready_for_human`) is the
-definition of done for any lifecycle change.
+Milestones M0–M4 are complete (durable run loop, real LLM agents,
+ci_harness backends, harness repair, failure-injection drills, release
+engineering); the current state of the factory and its history live in the
+[CHANGELOG](CHANGELOG.md) and [docs/README.md](docs/README.md). The live
+lab (`/implement` → branch → green CI → Draft MR → `ready_for_human`) is
+the definition of done for any lifecycle change.

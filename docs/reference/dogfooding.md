@@ -40,7 +40,7 @@ forge sells, executed on this repo ([ADR-0020](../adr/0020-github-actions-execut
 ## Ground rules while dogfooding
 
 - **Never weaken the verification** to make a run pass: the review, CI and
-  the 1727-test suite gate merges, not the harness's confidence.
+  the full test suite gate merges, not the harness's confidence.
 - **The lane cannot push** — every candidate arrives as a Draft PR built by
   the trusted publisher; direct pushes to `main` by humans remain allowed
   (the dogfood loop is additive, not mandatory, until the team decides
