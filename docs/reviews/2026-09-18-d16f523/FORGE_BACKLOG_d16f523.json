@@ -1,0 +1,979 @@
+{
+  "schema_version": 1,
+  "repository": "forcewake/forge",
+  "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+  "baseline_sha": "e8bf381843894654b24de73c5ea97270043c3c85",
+  "date": "2026-09-18",
+  "version_observed": "0.11.0",
+  "priority_definition": {
+    "P1": "Исправить до расширения доверенного multi-repository/multi-worker production использования затронутого пути. Не CVSS и не утверждение об unconditional exploit.",
+    "P2": "Выполнить после локализации P1; улучшение надёжности, evidence и продуктового результата."
+  },
+  "scope": "Read-only source review + remote CI observations + seven reduced local probes. No full local Forge checkout/test suite or user deployment execution.",
+  "counts": {
+    "P1": 11,
+    "P2": 7
+  },
+  "items": [
+    {
+      "id": "A01",
+      "priority": "P1",
+      "title": "Сделать verification положительным доказательством выполнения обязательных checks",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R02",
+        "R21"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/github_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/github_service.py"
+        },
+        {
+          "path": "src/forge/runs/azure_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/azure_service.py"
+        },
+        {
+          "path": "src/forge/runs/verification.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/verification.py"
+        }
+      ],
+      "symbols": [
+        "GitHubRunService.evaluate_waiting_ci_one",
+        "AzureRunService.evaluate_waiting_ci_one",
+        "_review_and_ready"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "GitHub ждёт независимые workflow runs, но verified=True вычисляется как отсутствие pending и четырёх failure conclusions. Required jobs в этом решении не проверяются; имя workflow сравнивается с конфигурируемым filename. В surface записываются name/conclusion, а не полная identity проверки. Отсутствие CI теперь честно unverified — это исправлено.",
+      "trigger_scenario": "Единственный completed/skipped workflow или успешный documentation workflow при отсутствующем обязательном tests получает verified. Cancelled/timed_out направляются в code repair. Human push во время review требует отдельной проверки актуальности.",
+      "impact_scope": "GitHub verification path; аналогичные negative contract tests обязательны для остальных providers.",
+      "proposed_fix": [
+        "Ввести общий VerificationResult с required check identities, producer, native run/attempt, subject_head_oid, tested_oid, target_base_oid и completeness.",
+        "Разрешать success только по явному контракту; skipped/neutral — только с явной policy waiver, неизвестное — unknown. Проверять обязательные, а не все произвольные jobs.",
+        "Исключать execution workflow по workflow_id/path + attempt, не по display name. Не классифицировать cancel/timeout автоматически как ошибку кода.",
+        "Перед verified-ready перечитывать actual head и cancellation generation; не назначать tested_oid автоматически равным candidate без свидетельства провайдера."
+      ],
+      "acceptance_criteria": [
+        "Required tests отсутствует: verified=False даже при зелёном docs.",
+        "completed/skipped, neutral, None/неизвестный conclusion не становятся verified без policy waiver.",
+        "Cancel, timeout, unreadable logs не вызывают code repair без evidence ошибки кода.",
+        "Human push во время LLM review инвалидирует candidate-specific результат.",
+        "Synthetic-merge и source-head evidence не смешиваются; producer и attempt сохраняются."
+      ],
+      "depends_on": [],
+      "local_probe": "P03",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A02",
+      "priority": "P1",
+      "title": "Подключить executable RunSpec, budgets и capability routing к GitHub и Azure",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R04",
+        "R13",
+        "R31"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/spec.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/spec.py"
+        },
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        },
+        {
+          "path": "src/forge/runs/github_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/github_service.py"
+        },
+        {
+          "path": "src/forge/runs/azure_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/azure_service.py"
+        }
+      ],
+      "symbols": [
+        "RUN_SPEC_SCHEMA_VERSION",
+        "_build_run_spec_document",
+        "_compile_harness_selection",
+        "load_verified_spec"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "GitLab потребляет executable schema v3; комментарий RUN_SPEC_SCHEMA_VERSION прямо оставляет GitHub/Azure на v2. Их builder хранит digests и часть backend config, но не полный approved input и enforceable numeric budgets. GitHub compiler всё ещё получает SHIPPED_DRIVERS и planner_proposal=None.",
+      "trigger_scenario": "Одинаковая настройка бюджета/разрешённых драйверов и последующая смена model/target/workflow дают неодинаковые гарантии в зависимости от provider.",
+      "impact_scope": "GitHub/Azure parity; не обесценивает уже работающий GitLab v3 path.",
+      "proposed_fix": [
+        "Потреблять один typed verified spec во всех start/go/retry/reconcile/review legs.",
+        "Создавать бюджет до первого оплачиваемого вызова каждого provider; CLI обозначать partial enforcement, не обещать hard token cap без interception.",
+        "Перенести capability manifest и structured planner selection в общий PlanRun; post-gate live settings не должны менять approved execution profile.",
+        "Для legacy v2 установить явную migration/reapproval policy вместо молчаливого исполнения как v3."
+      ],
+      "acceptance_criteria": [
+        "Созданные на трёх providers runs содержат полный v3 документ и numeric limits из одного profile.",
+        "После /go изменение Settings не меняет approved model/target/required jobs/budget.",
+        "Budget exhausted: ни один adapter не делает model/episode dispatch.",
+        "Available-drivers manifest из одного разрешённого драйвера не может породить другой harness.",
+        "Legacy replay не выдаёт себя за исполнение verified v3 spec."
+      ],
+      "depends_on": [],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A03",
+      "priority": "P1",
+      "title": "Передавать immutable approved BriefEnvelope, а не текущий текст issue/comment",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R05",
+        "R04"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/harness_entry.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/harness_entry.py"
+        },
+        {
+          "path": "ci/templates/forge-harness.github.yml",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/ci/templates/forge-harness.github.yml"
+        },
+        {
+          "path": "src/forge/runs/spec.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/spec.py"
+        }
+      ],
+      "symbols": [
+        "validate_plan_comment",
+        "fetch_issue_context",
+        "fetch_workitem"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "GitHub exact plan_note_id и нормализация [bot] исправлены. Но validation проверяет author/header/run substring, не digest текста; issue body читается заново. Azure fetch_workitem всё ещё сканирует latest bot comment с plan.",
+      "trigger_scenario": "После approval меняется body того же comment или issue, либо Azure получает другой подходящий plan comment. Execution input уже не тот, который был одобрен.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Создать versioned BriefEnvelope с task/plan bytes, run_id, attempt_id, spec_digest и content digest.",
+        "Поставлять его через scoped read-only artifact/reference; проверять digest в lane до запуска.",
+        "Комментарии оставить человекочитаемым представлением; exact comment transport допустим только с content hash и immutable task snapshot.",
+        "Legacy heuristic включать только в явно ослабленном профиле, не default production."
+      ],
+      "acceptance_criteria": [
+        "Изменённый approved comment с теми же author/header/run_id отклоняется.",
+        "Изменение issue после approval не меняет brief текущего attempt.",
+        "Другой run/attempt/digest отклоняется на всех providers; новые issue changes требуют нового approval."
+      ],
+      "depends_on": [
+        "A02"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A04",
+      "priority": "P1",
+      "title": "Довести ExecutionClaim до каждого transition и права отправить side effect",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R10"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/durable/controller.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/durable/controller.py"
+        },
+        {
+          "path": "src/forge/runs/publisher.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/publisher.py"
+        },
+        {
+          "path": "src/forge/worker/steps.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/worker/steps.py"
+        },
+        {
+          "path": "src/forge/repository/writer.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/repository/writer.py"
+        },
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        },
+        {
+          "path": "src/forge/runs/github_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/github_service.py"
+        }
+      ],
+      "symbols": [
+        "Controller.transition",
+        "Controller.transition_guarded",
+        "Controller.revive_transition",
+        "publication_grant_valid",
+        "publish_validated_candidate"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "ExecutionClaim и guarded mutation добавлены, но просмотренные services продолжают вызывать обычный Controller.transition; он не делегирует guarded CAS. Publisher использует ambient cancellation generation, но не валидирует step lease owner/fence перед native call. Отдельная publication_grant_valid запрещает cancelled, но не все terminal outcomes.",
+      "trigger_scenario": "Worker потерял lease или другой обработчик изменил run, но прежний callback до ближайшего heartbeat продолжает side effects. Stale ORM update может перезаписать terminal status.",
+      "impact_scope": "Особенно важно при нескольких workers/reconcilers; reduced SQLAlchemy probe не является production race test.",
+      "proposed_fix": [
+        "Один обязательный guarded mutation API с version/attempt/fence/cancel generation; legacy transition исключить из production routes.",
+        "Связать StepRun с run при execution binding и валидировать владение перед первым и каждым последующим effect.",
+        "Persist/арбитрировать publication authorization до native call; после dispatch честно учитывать in-flight/unknown, а не обещать ретроактивную отмену remote commit.",
+        "Применить ту же дисциплину к retry, auto-revive, reconciler и finalization; late effects — superseded evidence."
+      ],
+      "acceptance_criteria": [
+        "Два конкурирующих transition с одной version: один applied и один StaleClaim.",
+        "Старый lease/fence не делает новый native write даже до heartbeat tick.",
+        "Blocked/failed/cancelled/ready run не публикуется поздним callback без нового разрешённого attempt.",
+        "Cancel до dispatch запрещает отправку; cancel после dispatch сохраняет однозначно описанный uncertain/superseded outcome."
+      ],
+      "depends_on": [],
+      "local_probe": "P07",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A05",
+      "priority": "P1",
+      "title": "Не держать batch незапущенных задач на истекающих leases; исправить heartbeat failure",
+      "kind": "new_defect",
+      "previous_findings": [],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/worker/steps.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/worker/steps.py"
+        }
+      ],
+      "symbols": [
+        "STEP_CLAIM_BATCH",
+        "run_due_steps",
+        "execute_claimed_step._heartbeat"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "По умолчанию claim выдаёт пять leases на 120 секунд, а run_due_steps исполняет их последовательно. Heartbeat появляется только у уже исполняемой задачи. Exception при renew завершает heartbeat task, не основной handler.",
+      "trigger_scenario": "Первая задача дольше lease; остальные уже reaped и выданы другому worker, но первый worker затем начинает их со старым claim. При сбое DB handler продолжает без живого lease renewal.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Claim только под фактически свободные execution slots; простой корректный вариант для sequential worker — limit=1.",
+        "Для параллельного исполнения использовать bounded tasks и heartbeat на каждую принятую задачу; проверять claim до handler.",
+        "DB/renewal error должен останавливать дальнейшие side effects; heartbeat task supervisor и awaited teardown.",
+        "Отличать shutdown cancellation от lease-loss, не проглатывать CancelledError всей очереди."
+      ],
+      "acceptance_criteria": [
+        "Batch=5, первый handler дольше120s, два workers: каждый последующий handler входит один раз с актуальным owner.",
+        "Renewal exception исключает любые последующие writes и оставляет recoverable step.",
+        "SIGTERM не начинает следующую заранее claimed задачу."
+      ],
+      "depends_on": [
+        "A04"
+      ],
+      "local_probe": "P05",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A06",
+      "priority": "P1",
+      "title": "Ограничить durable MCP run tools теми же repository scopes",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R19"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/mcp_server/auth.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/mcp_server/auth.py"
+        },
+        {
+          "path": "src/forge/mcp_server/server.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/mcp_server/server.py"
+        },
+        {
+          "path": "src/forge/mcp_server/tools_runs.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/mcp_server/tools_runs.py"
+        }
+      ],
+      "symbols": [
+        "run_list",
+        "run_get",
+        "plan_get",
+        "run_evidence_get",
+        "repo_target_allowed"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Classic tools/resources/prompts получили scope + repo guards. Durable run tools проверяют forge:read, но не repo_patterns: run_list выбирает общий набор, остальные читают произвольный run_id.",
+      "trigger_scenario": "Токен с allowlist только repo A читает сохранённые runs/планы/evidence repo B. Угадать ID не обязательно: run_list выдаёт их.",
+      "impact_scope": "Authenticated scoped deployment с несколькими repos; не утверждение об anonymous access.",
+      "proposed_fix": [
+        "Разрешать доступ по canonical subject самого run, а не caller-supplied provider filter.",
+        "Фильтровать run_list на уровне query/policy с корректной пагинацией; get/plan/evidence проверять owner subject до сериализации.",
+        "Общая object-level authorization для всех read models; unauthorized/not-found не должны раскрывать лишние метаданные."
+      ],
+      "acceptance_criteria": [
+        "Token(A) не получает B через каждый из четырёх tools, включая явный ID.",
+        "Попытка provider/status фильтром расширить область не работает.",
+        "Тест использует реальный MCP request context и зарегистрированные tools, не только helper."
+      ],
+      "depends_on": [],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A07",
+      "priority": "P1",
+      "title": "Применять полный subject scope и для 32-символьного run ID",
+      "kind": "new_defect",
+      "previous_findings": [
+        "R03",
+        "R29"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/revival.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/revival.py"
+        },
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        }
+      ],
+      "symbols": [
+        "resolve_retry_target",
+        "resolve_status_target",
+        "handle_retry_note",
+        "handle_status_note"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Ветвь полного ID проверяет provider и issue_iid, но не project_id; query для bare/prefix IDs фильтрует project_id. GitLab handler передаёт project_id текущего комментария дальше, не повторяя проверку matched run.",
+      "trigger_scenario": "Run из project202 issue7 упомянут полным ID в project101 issue7: resolver принимает его. Status может вывести чужое состояние; authorized retry смешивает run identity и target project.",
+      "impact_scope": "Нужен доступ к команде и known ID; права retry отдельно ограничены approvers.",
+      "proposed_fix": [
+        "Всегда выполнять один scoped query с provider/connection/project/repo/subject, добавляя equality/prefix condition для requested ID.",
+        "После resolution downstream target получать из проверенного subject, не сочетать run от одного контекста с project другого.",
+        "Те же проверки для status, why-blocked, retry, reconcile и approval."
+      ],
+      "acceptance_criteria": [
+        "Два projects с issue_iid=7: bare/prefix/full-ID resolution одинаково отказывает cross-project запросу.",
+        "Rejected command: ноль model calls, commits и чужих metadata в ответе.",
+        "Legitimate authorized retry в своём project остаётся работоспособным."
+      ],
+      "depends_on": [],
+      "local_probe": "P04",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A08",
+      "priority": "P1",
+      "title": "Исправить staging path GitHub artifact: убрать ведущую точку",
+      "kind": "failed_fix",
+      "previous_findings": [
+        "R16"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "ci/templates/forge-harness.github.yml",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/ci/templates/forge-harness.github.yml"
+        },
+        {
+          "path": "src/forge/harness_entry.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/harness_entry.py"
+        }
+      ],
+      "symbols": [
+        "Emit candidate artifact",
+        "Upload candidate",
+        "--emit-meta"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Шаблон называет .forge-output non-hidden и передаёт path: .forge-output без include-hidden-files. Это по-прежнему hidden directory. upload-artifact v4 включает excludeHiddenFiles по умолчанию; glob отбрасывает dot-directory до обхода.",
+      "trigger_scenario": "Fresh repo, использующий shipped template как написано: candidate files созданы, upload не находит их. Доказательство на уровне template/library contract, не live запуска user deployment.",
+      "impact_scope": "Shipped GitHub harness recipe; отдельно применённый исправленный workflow мог отличаться.",
+      "proposed_fix": [
+        "Использовать forge-output/ без точки и обновить все producer/consumer/exclude refs; либо явно include-hidden-files:true только для clean allowlisted staging.",
+        "Добавить runtime artifact canary на точный template revision, не лишь assert текста YAML.",
+        "Сохранить новые meta schema/diff digest/usage поля — эта часть улучшения полезна."
+      ],
+      "acceptance_criteria": [
+        "Реальный upload/download минимального candidate в отдельном тестовом workflow проходит.",
+        "В ZIP ровно contract files, нет auth.json, .env, .venv или control directory.",
+        "Fixture потребляется тем же CandidateArchive parser."
+      ],
+      "depends_on": [],
+      "local_probe": "P01",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A09",
+      "priority": "P2",
+      "title": "Собирать Claude allowed-tools из списка, а не конкатенацией строк",
+      "kind": "new_defect",
+      "previous_findings": [],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/harness_entry.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/harness_entry.py"
+        }
+      ],
+      "symbols": [
+        "_CLAUDE_ALLOWED_TOOLS",
+        "render_driver_script"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Между литералами Bash(python3:*), Bash(python:*) и следующим Bash(.venv/bin/python:*) нет запятых. Python склеивает их в одно значение.",
+      "trigger_scenario": "В сгенерированном списке отсутствуют отдельные python3/python правила; агент может получать отказы именно на test commands, ради которых allowlist расширили.",
+      "impact_scope": "Строковая ошибка воспроизведена; конкретный verdict CLI локально не тестировался.",
+      "proposed_fix": [
+        "Хранить rules как tuple/list отдельных строк и сериализовать через join.",
+        "Проверять rendered argv/config и минимальные allowed/denied command cases на pinned CLI.",
+        "Не считать разрешение python безопасной песочницей: security boundary — отсутствие write creds и execution isolation."
+      ],
+      "acceptance_criteria": [
+        "Три ожидаемых правила присутствуют отдельно в parsed rendered config.",
+        "Pinned CLI допускает test command; deny git push сохраняется.",
+        "Malformed/unknown permission profiles не молча исполняются."
+      ],
+      "depends_on": [],
+      "local_probe": "P02",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A10",
+      "priority": "P2",
+      "title": "Исправить SAVEPOINT-порядок при конкурентном создании RunBudget",
+      "kind": "new_defect",
+      "previous_findings": [],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/durable/budgets.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/durable/budgets.py"
+        }
+      ],
+      "symbols": [
+        "open_budget"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "session.add(budget) выполняется до begin_nested. SQLAlchemy flushes pending state ДО SAVEPOINT; при duplicate insert outer session оказывается inactive, а except пытается читать winner без rollback.",
+      "trigger_scenario": "Два callers одновременно открывают бюджет одного run: проигравший получает IntegrityError затем PendingRollbackError вместо idempotent adoption.",
+      "impact_scope": "Reduced test выполнен на SQLAlchemy2.0.50 sync/SQLite; repo pin2.0.48 async/Postgres проверять в regression suite.",
+      "proposed_fix": [
+        "Предпочесть INSERT ON CONFLICT с read-back либо перенести add внутрь begin_nested при чистом outer session.",
+        "Проверить аналогичные SAVEPOINT patterns в проекте; не гасить IntegrityError глобальным except.",
+        "Сохранить исправленную формулу consumed+reserved+unresolved: это другой слой проблемы."
+      ],
+      "acceptance_criteria": [
+        "Два actual AsyncSessions/Postgres открывают один run budget; оба получают одну row identity, outer transaction остаётся usable.",
+        "Контрольный duplicate с add-before-savepoint воспроизводит прежний дефект.",
+        "Соседние audit/state writes не теряются из-за rollback."
+      ],
+      "depends_on": [],
+      "local_probe": "P06",
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A11",
+      "priority": "P1",
+      "title": "Сделать retry/auto-revive durable и однократными переходами",
+      "kind": "new_risk",
+      "previous_findings": [
+        "R29",
+        "R10",
+        "R07"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/revival.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/revival.py"
+        },
+        {
+          "path": "src/forge/durable/controller.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/durable/controller.py"
+        },
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        }
+      ],
+      "symbols": [
+        "evaluate_revivals",
+        "_begin_auto_revive",
+        "Controller.revive_transition",
+        "handle_retry_note"
+      ],
+      "confidence": "source-confirmed gap; production interleavings not executed",
+      "observed": "Revival — новый переход из terminal в proposing. revive_transition остаётся ORM read/check/write. Возобновление и redispatch разделены; handler пишет acknowledgement и вызывает backend после commit перехода. Explicit retry увеличивает cycle; источник retryability часто текстовая причина.",
+      "trigger_scenario": "Два reconcilers revive один run или процесс умирает после persisted proposing до dispatch. Неизвестный remote effect ошибочно классифицирован как простой transient и запускается повторно.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Записывать RevivalIntent/Attempt и scheduled step в одной CAS-транзакции; command delivery ID делает повтор /retry идемпотентным.",
+        "Типизировать retryability отдельно от effect certainty; неизвестную publication сначала reconcile, не перевыполнять.",
+        "Новый retry не сбрасывает spent/unresolved budget; превышение approved cycles требует нового budget/approval decision.",
+        "Сохранять previous attempt evidence и постоянный target identity."
+      ],
+      "acceptance_criteria": [
+        "Два workers и одно recovery window: один new attempt, один dispatch.",
+        "SIGKILL после revive commit до backend call автоматически восстанавливается scheduled step.",
+        "Повтор того же /retry event не увеличивает cycles второй раз.",
+        "Cancel всегда запрещает auto-revive; unknown effect не делает blind redispatch."
+      ],
+      "depends_on": [
+        "A04",
+        "A07",
+        "A12"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A12",
+      "priority": "P1",
+      "title": "Не приравнивать negative probe к доказанному отсутствию pending remote effect",
+      "kind": "reliability_risk",
+      "previous_findings": [
+        "R11"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/repository/writer.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/repository/writer.py"
+        },
+        {
+          "path": "src/forge/durable/intents.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/durable/intents.py"
+        },
+        {
+          "path": "tests/test_failure_injection_os.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/tests/test_failure_injection_os.py"
+        }
+      ],
+      "symbols": [
+        "_recover_open_intent",
+        "ProbeVerdict.REDISPATCH",
+        "_dispatch"
+      ],
+      "confidence": "source + distributed-systems inference; delayed-apply case not live-reproduced",
+      "observed": "Persisted intent/stable key/marker+parent adoption реально добавлены. Но zero hits + unchanged head разрешают redispatch; GitLab writer не передаёт branch-wide CAS, а marker сам по себе не является provider dedupe. Negative read не исключает ещё исполняющуюся первую запись.",
+      "trigger_scenario": "Provider принял A, применяет её медленно. Worker потерял ответ; probe пока видит old head. B отправлена; затем A и B завершаются. Это отличный от apply-then-drop сценарий текущего OS fixture.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Добавить effect-certainty state; отдельно описать гарантию каждого native adapter.",
+        "Для неопределённого in-flight GitLab effect не называть повтор safe только по одному read; использовать подтверждённые native preconditions/детерминированную операцию либо консервативно парковать unknown.",
+        "Арбитрировать dispatch intent ownership; marker и manifest digest сохранять для reconciliation, а не представлять как upstream idempotency key."
+      ],
+      "acceptance_criteria": [
+        "Fake provider умеет принять запрос, задержать САМО применение до negative probe и завершить после повторной попытки.",
+        "Не появляется второй logical candidate/несогласованная история; невозможность доказать отсутствие эффекта остаётся visible unknown.",
+        "Apply-then-drop test продолжает проходить, но не считается достаточным для всех unknown windows."
+      ],
+      "depends_on": [
+        "A04"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A13",
+      "priority": "P1",
+      "title": "Не расширять project scope при ошибке чтения конфигурации",
+      "kind": "incomplete_fix",
+      "previous_findings": [
+        "R14"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        },
+        {
+          "path": "src/forge/runs/github_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/github_service.py"
+        },
+        {
+          "path": "src/forge/runs/azure_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/azure_service.py"
+        },
+        {
+          "path": "src/forge/orchestrator/project_config.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/orchestrator/project_config.py"
+        }
+      ],
+      "symbols": [
+        "start_run",
+        "load_project_config"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "В просмотренных start paths ошибка config load обрабатывается ProjectConfig() с пустым allowed_paths. Typed authoritative file reads улучшены, но конфигурационная authority ещё может перейти в whole-repo defaults при неизвестном результате чтения.",
+      "trigger_scenario": "Transient401/403/5xx или malformed restricted config приводит не к отказу, а к run без path restriction.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Различать confirmed_absent, valid config, unreadable, invalid; только confirmed_absent допускает явно утверждённый default profile.",
+        "Разрешения могут сужаться, но не расширяться из-за transport/parser error.",
+        "Заморозить config provenance/ref/digest в executable spec."
+      ],
+      "acceptance_criteria": [
+        "Restricted config + read timeout/403/invalidYAML: ноль paid calls и ноль commits до разрешения состояния.",
+        "Подтверждённый404 обрабатывается документированным default policy, не маскируется общим except.",
+        "Перезапуск использует approved config snapshot."
+      ],
+      "depends_on": [
+        "A02"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A14",
+      "priority": "P2",
+      "title": "Проверять комбинации invariant failures в реальных service legs",
+      "kind": "test_expansion",
+      "previous_findings": [
+        "R21",
+        "R20",
+        "R30"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "tests/test_conformance.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/tests/test_conformance.py"
+        },
+        {
+          "path": "tests/test_failure_injection_os.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/tests/test_failure_injection_os.py"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/.github/workflows/ci.yml"
+        },
+        {
+          "path": ".github/workflows/release.yml",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/.github/workflows/release.yml"
+        }
+      ],
+      "symbols": [
+        "ProviderConformanceKit",
+        "integration-os",
+        "release-canary"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Conformance kit теперь вызывает реальные transport/service legs над fakes, а OS suite использует subprocess — это исправлено. Но текущие найденные combined cases отсутствуют: scoped token→run mirror, required job absent+green optional, leased batch, pending remote application, comment same-ID edit.",
+      "trigger_scenario": "Helper-level тест зелёный, но composed runtime использует v2 или другое policy path. Release canary boot/migrate не выполняет target harness upload.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Параметризовать negative contracts по provider × backend × direct/worker/recovery path.",
+        "Держать быстрые deterministic cases на PR; OS/target-harness canary nightly или release-gate по затронутым областям.",
+        "Release evidence связывать с тем же SHA/digest; skipped или старый successful OS run не считать новой аттестацией.",
+        "Проверять реальные effects и actual command execution, а не только строки комментариев/docstrings."
+      ],
+      "acceptance_criteria": [
+        "Каждый A01–A13 имеет failing-before/passing-after regression на production entry point.",
+        "Capability contract не может стать attested, если хотя бы один mandatory path не тестировался.",
+        "Публикуется machine-readable manifest tests/sha/digest/skips/profile."
+      ],
+      "depends_on": [
+        "A01",
+        "A04",
+        "A06",
+        "A08"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A15",
+      "priority": "P2",
+      "title": "Продолжить ADR-0027: общий semantic core без big-bang rewrite",
+      "kind": "architectural_followthrough",
+      "previous_findings": [
+        "R27"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "docs/adr/0027-lifecycle-consolidation.md",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/docs/adr/0027-lifecycle-consolidation.md"
+        },
+        {
+          "path": "src/forge/runs/consistency.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/consistency.py"
+        },
+        {
+          "path": "src/forge/runs/service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/service.py"
+        },
+        {
+          "path": "src/forge/runs/github_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/github_service.py"
+        },
+        {
+          "path": "src/forge/runs/azure_service.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/azure_service.py"
+        }
+      ],
+      "symbols": [
+        "FinalizeEvidence",
+        "ObserveVerification",
+        "ApproveDecision",
+        "PublishCandidate"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Фактически общим стал FinalizeEvidence/formatting; ADR сам перечисляет оставшиеся slices. Три services ещё владеют существенной lifecycle логикой, и найденная parity drift это подтверждает.",
+      "trigger_scenario": "Следующий feature fix снова меняется в трёх местах и закрепляется несовместимыми tests.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Извлекать UseCase по одному: VerifiedSpec/Approval → Attempt/Claim → ObserveVerification → Retry/Revival.",
+        "Providers оставить native transport/auth/identity/CI evidence adapters; не стирать различия CAS.",
+        "Ввести typed contracts/import boundary tests внутри существующего src/forge, потом при необходимости workspace packages.",
+        "Сохранить monorepo и общий release train; CLI deps изолировать runner images, не плодить сервисы."
+      ],
+      "acceptance_criteria": [
+        "Добавление очередного provider не требует копирования approval/budget/verification state machine.",
+        "Все три adapters проходят тот же application-service suite.",
+        "Persistence/migrations backward compatibility проверены перед удалением legacy methods."
+      ],
+      "depends_on": [
+        "A02",
+        "A04",
+        "A14"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A16",
+      "priority": "P2",
+      "title": "Генерировать capability/status claims из проверяемого release manifest",
+      "kind": "documentation_contract",
+      "previous_findings": [
+        "R28"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "CHANGELOG.md",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/CHANGELOG.md"
+        },
+        {
+          "path": "README.md",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/README.md"
+        },
+        {
+          "path": "docs/adr/0027-lifecycle-consolidation.md",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/docs/adr/0027-lifecycle-consolidation.md"
+        },
+        {
+          "path": "src/forge/runs/conformance.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/conformance.py"
+        }
+      ],
+      "symbols": [
+        "Phase B/C/D complete",
+        "every finding closed",
+        "Status"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "CHANGELOG заявляет every finding closed, хотя source явно оставляет GitHub/Azure v2 и later wave; README status/version/test count отстают от0.11.0/2601.",
+      "trigger_scenario": "Новый пользователь переносит guarantee с GitLab на GitHub по общей галочке либо принимает release packaging evidence за весь SDLC e2e.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Матрица не только supported, но implemented/runtime-wired/tested-on/guarantee/profile limitations.",
+        "Автоматически сверять версии pyproject/__init__/tag/docs и counts не хранить вручную как постоянную истину.",
+        "Closure старых findings отмечать по пути provider/backend и уровню evidence, а не existence нового файла."
+      ],
+      "acceptance_criteria": [
+        "Нельзя заявить v3 spec на adapter, который создаёт schema2.",
+        "Release manifest отделяет boot canary, subprocess FI и real-provider LLM e2e.",
+        "Unknown/not_run остаётся явным, не конвертируется в pass."
+      ],
+      "depends_on": [
+        "A14"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A17",
+      "priority": "P2",
+      "title": "Добавить bounded delivery evaluation cohort, а не ещё один общий agent benchmark",
+      "kind": "next_feature",
+      "previous_findings": [
+        "R24",
+        "R23"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/runs/consistency.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/consistency.py"
+        },
+        {
+          "path": "src/forge/durable/budgets.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/durable/budgets.py"
+        },
+        {
+          "path": "docs/adr/0027-lifecycle-consolidation.md",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/docs/adr/0027-lifecycle-consolidation.md"
+        }
+      ],
+      "symbols": [
+        "accepted work package",
+        "usage receipts",
+        "verification evidence"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Предложение следующего этапа, не утверждение о дефекте конкретного счётчика: текущая ценность требует оценки качества принятой работы при одинаковых safety contracts.",
+      "trigger_scenario": "Более быстрый harness создаёт больше Draft PR, но требует больше human fixes; tokens/s и READY count скрывают снижение accepted throughput.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Набор12–20 ограниченных задач: create/update/repair/large file/monorepo scope/tests/infra failure/cancel; это предлагаемый cohort, не измеренная калибровка.",
+        "Связать all-attempt usage, TTFT/latency, CI wait, active execution, review time и explicit human acceptance.",
+        "Измерять cost/time per accepted unit; failed/cancelled/superseded расходы сохранять."
+      ],
+      "acceptance_criteria": [
+        "Одинаковые tasks и verification contract для сравнения harnesses.",
+        "Зафиксированы unique unit IDs и independent acceptance, не self-reported agent success.",
+        "Отдельно input/cache/output и latency, без деления total logical traffic на decode tokens/s."
+      ],
+      "depends_on": [
+        "A01",
+        "A02",
+        "A14"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    },
+    {
+      "id": "A18",
+      "priority": "P2",
+      "title": "Стабилизировать один полный execution profile на стек и затем расширять Lego",
+      "kind": "next_feature",
+      "previous_findings": [
+        "R15",
+        "R18",
+        "R31",
+        "R32"
+      ],
+      "reviewed_sha": "d16f5233c641c490384438d9d0df6b4976b33d64",
+      "evidence": [
+        {
+          "path": "src/forge/harness_entry.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/harness_entry.py"
+        },
+        {
+          "path": "ci/templates/forge-harness.github.yml",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/ci/templates/forge-harness.github.yml"
+        },
+        {
+          "path": "src/forge/runs/spec.py",
+          "url": "https://github.com/forcewake/forge/blob/d16f5233c641c490384438d9d0df6b4976b33d64/src/forge/runs/spec.py"
+        }
+      ],
+      "symbols": [
+        "driver profiles",
+        "toolchain bootstrap",
+        "codegraph integration"
+      ],
+      "confidence": "source-confirmed",
+      "observed": "Пины CLI, selected-driver credential gating и codegraph-aware brief добавлены. Это полезная основа; но общий template ещё содержит Python/uv-specific provisioning, live variables и best-effort fallbacks.",
+      "trigger_scenario": "Номинально поддерживаемая комбинация provider×driver не имеет доступных test tools либо запускает отличную от CI версию, расходуя repair budget на окружение.",
+      "impact_scope": "",
+      "proposed_fix": [
+        "Versioned execution profile: image/toolchain/test commands/network/MCP refs/credential capabilities/usage semantics.",
+        "Сначала end-to-end Python/uv; отдельный .NET profile как расширение после parity. Примеры стеков — рекомендация, не claim текущей поддержки.",
+        "Codegraph optional: измерять качество на cohort, отсутствие индекса не должно расширять authority или скрывать incomplete evidence.",
+        "Установка зависимостей deterministic; failed environment bootstrap — infra/config, не code repair."
+      ],
+      "acceptance_criteria": [
+        "Fresh lane запускает тот же build/test contract, что target CI.",
+        "Не выбранные driver credentials отсутствуют; protected publisher credentials не попадают в runner.",
+        "Profile digest сохраняется в approved spec и в execution artifact.",
+        "Новому driver требуется conformance suite, а не новый lifecycle controller."
+      ],
+      "depends_on": [
+        "A02",
+        "A09",
+        "A14",
+        "A17"
+      ],
+      "local_probe": null,
+      "status": "open",
+      "remote_issue_created": false
+    }
+  ],
+  "delivery_order": [
+    {
+      "wave": "W0 surgical fixes",
+      "items": [
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "A10"
+      ],
+      "goal": "Закрыть локализованные scope/template/transaction defects без большого refactor."
+    },
+    {
+      "wave": "W1 approved-to-verified parity",
+      "items": [
+        "A01",
+        "A02",
+        "A03",
+        "A13"
+      ],
+      "goal": "Один смысл approval/budget/verification независимо от provider."
+    },
+    {
+      "wave": "W2 ownership and recovery",
+      "items": [
+        "A04",
+        "A05",
+        "A11",
+        "A12"
+      ],
+      "goal": "Не допускать новых effects у stale owner; наблюдаемые retry/unknown outcomes."
+    },
+    {
+      "wave": "W3 evidence and consolidation",
+      "items": [
+        "A14",
+        "A15",
+        "A16"
+      ],
+      "goal": "Composed conformance и incremental common core."
+    },
+    {
+      "wave": "W4 measured product expansion",
+      "items": [
+        "A17",
+        "A18"
+      ],
+      "goal": "Accepted-unit evidence и поддерживаемые execution profiles."
+    }
+  ],
+  "no_remote_writes": true
+}
