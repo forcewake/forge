@@ -8,7 +8,9 @@ with a fake driver script, no CLIs and no network.
 """
 
 import hashlib
+import io
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -189,8 +191,12 @@ class TestRenderBrief:
         async def _noop_async():
             return None
 
-        def fake_fetch(repo: str, issue_number: int, token: str):
+        def fake_fetch(
+            repo: str, issue_number: int, token: str, *, plan_note_id: int = 0, run_id: str = ""
+        ):
             assert (repo, issue_number, token) == ("acme/acme-widget", 42, "ghs_runner")
+            # No dispatch inputs here: the legacy scan runs, unbound (R05).
+            assert plan_note_id == 0 and run_id == ""
             return ("Users cannot reset their password.", "## Forge plan — run `abcd`\n...")
 
         monkeypatch.setattr("forge.harness_entry.fetch_issue_context", fake_fetch)
@@ -213,6 +219,215 @@ class TestRenderBrief:
 
         assert rc == 1
         assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+
+
+# ----------------------------------------------------------------------
+# The bound plan transport (R05): FORGE_PLAN_NOTE_ID addresses the EXACT
+# approved plan comment — no scan, no identity heuristic, fail-closed.
+# ----------------------------------------------------------------------
+
+
+GH_REPO = "acme/acme-widget"
+GH_ISSUE = 42
+GH_NOTE_ID = 1234
+GH_RUN_ID = "d" * 32
+GH_PLAN = (
+    f"## Forge plan — run `{GH_RUN_ID[:8]}`\n\n1. Add the endpoint.\n\n"
+    f"Approve this exact plan by commenting `/go {GH_RUN_ID}`.\n"
+)
+
+
+def install_ghFake(monkeypatch, responses: dict[str, object], requests: list) -> None:
+    """Serve *responses* (url-prefix → payload | Exception) to harness_entry's
+    urllib calls, recording every request (stdlib-mock style: the lane is
+    deliberately urllib-only, so pytest-httpx's httpx transport cannot
+    intercept it — the EXACT-URL assertions below are the same contract)."""
+
+    def fake_urlopen(request, timeout=30):
+        url = request.full_url
+        requests.append(request)
+        # Longest prefix first: the issue URL is a prefix of its comments
+        # URL, so specificity decides who serves a request.
+        for prefix, payload in sorted(responses.items(), key=lambda item: -len(item[0])):
+            if url.startswith(prefix):
+                if isinstance(payload, Exception):
+                    raise payload
+                return _FakeResponse(payload)
+        raise AssertionError(f"unexpected URL fetched: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+
+def gh_issue_payload() -> dict:
+    return {"number": GH_ISSUE, "body": "Users cannot reset their password."}
+
+
+def gh_plan_comment(
+    *, login: str = "forcewake-forge[bot]", body: str = GH_PLAN, note_id: int = GH_NOTE_ID
+) -> dict:
+    return {"id": note_id, "body": body, "user": {"login": login}}
+
+
+class TestBoundPlanBrief:
+    """--render-brief with FORGE_PLAN_NOTE_ID: the lane fetches exactly
+    GET /repos/{owner}/{repo}/issues/comments/{id} — binding by id, with
+    author + header + run-id checks as tamper guards only — and fails
+    closed (rc 1, exit file ``failed``) on any violation."""
+
+    def _env(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GITHUB_REPOSITORY", GH_REPO)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghs_runner")  # noqa: S105 — fake
+        monkeypatch.setenv("FORGE_ISSUE_NUMBER", str(GH_ISSUE))
+        monkeypatch.setenv("FORGE_PLAN_NOTE_ID", str(GH_NOTE_ID))
+        monkeypatch.setenv("FORGE_RUN_ID", GH_RUN_ID)
+
+    def _responses(self, comment: dict) -> dict[str, object]:
+        return {
+            f"https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}": gh_issue_payload(),
+            f"https://api.github.com/repos/{GH_REPO}/issues/comments/{GH_NOTE_ID}": comment,
+        }
+
+    def test_binds_to_the_exact_comment_without_scanning(self, tmp_path: Path, monkeypatch):
+        self._env(monkeypatch, tmp_path)
+        requests: list = []
+        scan_url = f"https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/comments"
+        install_ghFake(
+            monkeypatch,
+            {
+                **self._responses(gh_plan_comment()),
+                # A scan would hit this and find NOTHING plan-shaped —
+                # the bound path must never even request it.
+                scan_url: [],
+            },
+            requests,
+        )
+
+        rc = main(["--render-brief"])
+
+        assert rc == 0
+        fetched = [request.full_url for request in requests]
+        assert f"https://api.github.com/repos/{GH_REPO}/issues/comments/{GH_NOTE_ID}" in fetched
+        assert not any(url.startswith(scan_url) for url in fetched)  # no heuristic scan
+        brief = (tmp_path / ".forge" / "brief.md").read_text()
+        assert "## Forge plan — run `dddddddd`" in brief  # the plan, verbatim
+        assert "Users cannot reset their password." in brief
+
+    def test_missing_comment_fails_closed(self, tmp_path: Path, monkeypatch):
+        self._env(monkeypatch, tmp_path)
+        install_ghFake(
+            monkeypatch,
+            {
+                **self._responses(
+                    urllib.error.HTTPError("not-found", 404, "Not Found", None, io.BytesIO(b""))
+                ),
+            },
+            [],
+        )
+
+        rc = main(["--render-brief", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+
+    def test_comment_without_the_plan_header_fails_closed(self, tmp_path: Path, monkeypatch):
+        self._env(monkeypatch, tmp_path)
+        install_ghFake(
+            monkeypatch,
+            self._responses(gh_plan_comment(body="just chatter mentioning plans")),
+            [],
+        )
+
+        rc = main(["--render-brief", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+
+    def test_comment_from_another_author_fails_closed(self, tmp_path: Path, monkeypatch):
+        """The tamper guard: with FORGE_GITHUB_BOT_LOGIN configured, a
+        comment posted by anyone else is refused even at the exact id."""
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setenv("FORGE_GITHUB_BOT_LOGIN", "acme-forge")
+        install_ghFake(
+            monkeypatch,
+            self._responses(gh_plan_comment(login="mallory")),
+            [],
+        )
+
+        rc = main(["--render-brief", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+
+    def test_another_runs_plan_fails_closed(self, tmp_path: Path, monkeypatch):
+        """The run-id cross-check: a plan comment for a DIFFERENT run can
+        never ride this lane's brief (the review's core finding)."""
+        self._env(monkeypatch, tmp_path)
+        other_run = "e" * 32
+        install_ghFake(
+            monkeypatch,
+            self._responses(gh_plan_comment(body=GH_PLAN.replace(GH_RUN_ID, other_run))),
+            [],
+        )
+
+        rc = main(["--render-brief", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+
+    def test_configured_bot_login_with_app_suffix_is_accepted(self, tmp_path: Path, monkeypatch):
+        """FORGE_GITHUB_BOT_LOGIN names the App slug; the actual comment
+        author login carries GitHub's ``[bot]`` suffix — comparison is
+        suffix- and case-tolerant."""
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setenv("FORGE_GITHUB_BOT_LOGIN", "Acme-Forge")
+        install_ghFake(
+            monkeypatch,
+            self._responses(gh_plan_comment(login="acme-forge[bot]")),
+            [],
+        )
+
+        rc = main(["--render-brief"])
+
+        assert rc == 0
+        assert "## Forge plan" in (tmp_path / ".forge" / "brief.md").read_text()
+
+    def test_input_absent_falls_back_to_the_loud_unenforced_scan(
+        self, tmp_path: Path, monkeypatch, capsys
+    ):
+        """Legacy replay (empty plan_note_id input): the old scan runs and
+        the lane SAYS binding is not enforced — on stderr, loud."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GITHUB_REPOSITORY", GH_REPO)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghs_runner")  # noqa: S105 — fake
+        monkeypatch.setenv("FORGE_ISSUE_NUMBER", str(GH_ISSUE))
+        monkeypatch.delenv("FORGE_PLAN_NOTE_ID", raising=False)
+        monkeypatch.delenv("FORGE_RUN_ID", raising=False)
+        requests: list = []
+        install_ghFake(
+            monkeypatch,
+            {
+                f"https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}": gh_issue_payload(),
+                f"https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/comments": [
+                    gh_plan_comment()
+                ],
+            },
+            requests,
+        )
+
+        rc = main(["--render-brief"])
+
+        assert rc == 0
+        # The scan URL WAS fetched (the fallback is the old heuristic).
+        assert any(
+            request.full_url.startswith(
+                f"https://api.github.com/repos/{GH_REPO}/issues/{GH_ISSUE}/comments"
+            )
+            for request in requests
+        )
+        captured = capsys.readouterr()
+        assert "binding NOT enforced" in captured.err
+        assert "## Forge plan" in (tmp_path / ".forge" / "brief.md").read_text()
 
 
 # ----------------------------------------------------------------------

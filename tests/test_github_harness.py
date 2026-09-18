@@ -208,6 +208,14 @@ class TestGoDispatchesHarness:
         (dispatch,) = fake.dispatch_inputs
         assert dispatch["workflow"] == WORKFLOW
         assert dispatch["ref"] == branch
+        # R05: the plan comment's id was journaled when start_run posted the
+        # approved plan — the dispatch must carry EXACTLY that comment's id
+        # so the lane binds its brief by id (no heuristic scan).
+        plan_comment = next(
+            comment
+            for comment in fake.issue_comments[REPO][ISSUE]
+            if comment["body"].startswith("## Forge plan")
+        )
         assert dispatch["inputs"] == {
             "run_id": run_id,
             "attempt_base_oid": BASE_HEAD,
@@ -216,6 +224,8 @@ class TestGoDispatchesHarness:
             # The brief TEXT never travels in dispatch inputs — the lane
             # fetches the forge plan comment read-only; it needs the number.
             "issue_number": str(ISSUE),
+            # The journaled plan comment id, as a string (wire typing).
+            "plan_note_id": str(plan_comment["id"]),
         }
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []

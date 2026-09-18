@@ -38,6 +38,12 @@ runner's read-only ``GITHUB_TOKEN`` (:func:`fetch_issue_context`), and
 comment with a repo-owner-provisioned read-only token
 (:func:`fetch_workitem`, FORGE_AZDO_READ_TOKEN — never forge's PAT). No
 dispatch input ever carries plan text, so no input size limit binds.
+R05 interim: the control plane journals the plan comment's id when it
+posts it and dispatches it as the ``plan_note_id`` input — the lane then
+fetches EXACTLY that comment (:envvar:`FORGE_PLAN_NOTE_ID`, validated
+fail-closed) instead of heuristically scanning the thread. Only when the
+id is absent (legacy replay / other repos) does the old scan run, loudly
+unenforced.
 Alternatives kept for parity: a pre-provisioned ``.forge/brief.md``
 works as-is (the workflow owner may ship it however they like).
 
@@ -145,38 +151,150 @@ def render_brief(issue_text: str, plan_text: str) -> str:
     )
 
 
-def fetch_issue_context(repo: str, issue_number: int, token: str) -> tuple[str, str]:
+#: The forge App bot logins a plan comment may carry (GitHub App bot logins
+#: render with a ``[bot]`` suffix; comparison strips it, case-insensitively).
+#: Used by the legacy scan and as the tamper-guard default when
+#: ``FORGE_GITHUB_BOT_LOGIN`` is not configured.
+_FORGE_BOT_LOGINS = ("forge", "forcewake-forge")
+
+#: The plan header every forge plan comment carries
+#: (``GitHubRunService._plan_comment`` / ``ForgeRunService`` equivalent).
+_PLAN_HEADER = "## Forge plan"
+
+
+class PlanBindingError(Exception):
+    """A bound plan comment failed validation — the lane refuses the brief.
+
+    Fail-closed (R05): when the lane addresses the EXACT plan comment by id,
+    anything unexpected about that comment (missing, wrong author, wrong
+    run) aborts the brief render with a non-zero exit instead of silently
+    binding some other comment's text.
+    """
+
+
+def _normalize_login(login: str) -> str:
+    """Lower-cased login with GitHub's ``[bot]`` App suffix stripped."""
+    return (login or "").strip().lower().removesuffix("[bot]")
+
+
+def _author_is_forge(author: str, expected_login: str = "") -> bool:
+    """Whether *author* is an acceptable forge bot identity.
+
+    With *expected_login* set (``FORGE_GITHUB_BOT_LOGIN``) only that login
+    passes; without it, the shipped App logins (:data:`_FORGE_BOT_LOGINS`)
+    pass. Tamper-guard use only — see :func:`validate_plan_comment`.
+    """
+    left = _normalize_login(author)
+    if not left:
+        return False
+    if expected_login:
+        return left == _normalize_login(expected_login)
+    return left in _FORGE_BOT_LOGINS
+
+
+def validate_plan_comment(comment: dict, *, run_id: str = "", expected_login: str = "") -> str:
+    """Validate a BOUND plan comment and return its body (fail-closed).
+
+    R05 interim transport: the control plane journals the plan comment's id
+    when it posts the approved plan and dispatches it as ``plan_note_id``;
+    the lane fetches EXACTLY that comment, so the BINDING comes from the
+    addressed id — never from identity or substring discovery. The checks
+    here are tamper guards on top of that binding:
+
+    - the author login must be the forge bot (``FORGE_GITHUB_BOT_LOGIN``
+      when configured, else the shipped App logins) — a substituted comment
+      id must not silently bind content another author posted;
+    - the body must carry the ``## Forge plan`` header;
+    - when the lane knows its forge run id (the ``run_id`` dispatch input,
+      ``FORGE_RUN_ID``), the body must contain that exact id — another
+      run's plan can never ride this lane's brief.
+
+    Any violation raises :class:`PlanBindingError` (the caller exits
+    non-zero); the validated body is returned verbatim.
+    """
+    body = str(comment.get("body") or "")
+    author = str((comment.get("user") or {}).get("login") or "")
+    if not _author_is_forge(author, expected_login):
+        expected = expected_login or " | ".join(_FORGE_BOT_LOGINS)
+        raise PlanBindingError(
+            f"plan comment {comment.get('id')} author @{author or '<none>'} is not the "
+            f"forge bot identity (@{expected}) — refusing to bind the brief"
+        )
+    if _PLAN_HEADER not in body:
+        raise PlanBindingError(
+            f"plan comment {comment.get('id')} carries no {_PLAN_HEADER!r} header — "
+            "refusing to bind the brief"
+        )
+    if run_id and run_id not in body:
+        raise PlanBindingError(
+            f"plan comment {comment.get('id')} does not mention run {run_id[:8]} — "
+            "refusing to bind another run's plan"
+        )
+    return body
+
+
+def _github_get_json(url: str, token: str) -> Any:
+    """One authenticated GET against the GitHub REST API (stdlib only)."""
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "forge-harness-entry",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read())
+
+
+def fetch_plan_comment(repo: str, note_id: int, token: str) -> dict:
+    """Fetch the EXACT comment ``/repos/{owner}/{repo}/issues/comments/{id}``.
+
+    The bound transport's only plan source: no thread listing, no scanning,
+    no identity heuristic — GitHub returns the one comment the control
+    plane journaled. Network/API failures raise (urllib ``OSError``
+    family) and fail the lane closed.
+    """
+    return _github_get_json(f"https://api.github.com/repos/{repo}/issues/comments/{note_id}", token)
+
+
+def fetch_issue_context(
+    repo: str, issue_number: int, token: str, *, plan_note_id: int = 0, run_id: str = ""
+) -> tuple[str, str]:
     """Fetch (issue body, forge plan comment) via the GitHub REST API.
 
     Uses only the stdlib: the lane runs forge's code without forge's
-    dependencies. The plan comment is the latest comment by the forge app
-    author that contains the plan heading.
+    dependencies.
+
+    With *plan_note_id* (the journaled id of the approved plan comment,
+    dispatched as ``plan_note_id``) the plan is EXACTLY that comment —
+    fetched by id and validated fail-closed (:func:`validate_plan_comment`,
+    *run_id* cross-check) — no scanning, no identity heuristic. Only when
+    the id is absent (legacy replay / repos without the input) does the
+    old heuristic run: the latest comment by a forge bot login containing
+    a plan substring — the caller logs that binding is NOT enforced.
     """
-    import json
-    import urllib.request
-
-    def _get(url: str) -> Any:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "forge-harness-entry",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
-
-    issue = _get(f"https://api.github.com/repos/{repo}/issues/{issue_number}")
+    issue = _github_get_json(f"https://api.github.com/repos/{repo}/issues/{issue_number}", token)
     body = str(issue.get("body") or "")
-    comments = _get(
-        f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments?per_page=100"
+    if plan_note_id:
+        return body, validate_plan_comment(
+            fetch_plan_comment(repo, plan_note_id, token),
+            run_id=run_id,
+            # The tamper-guard identity: the repo's configured forge App
+            # login (the shipped App logins apply when unset).
+            expected_login=os.environ.get("FORGE_GITHUB_BOT_LOGIN", "").strip(),
+        )
+    comments = _github_get_json(
+        f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments?per_page=100",
+        token,
     )
     plan_text = ""
     for comment in reversed(comments if isinstance(comments, list) else []):
         author = (comment.get("user") or {}).get("login", "")
         text = str(comment.get("body") or "")
-        if author in ("forge", "forcewake-forge") and "plan" in text.lower():
+        if _author_is_forge(author) and "plan" in text.lower():
             plan_text = text
             break
     return body, plan_text
@@ -712,6 +830,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issue", type=int, default=None, help="issue number for --render-brief")
     parser.add_argument("--github-token", default=None, help="token for --render-brief")
     parser.add_argument(
+        "--plan-note-id",
+        default=None,
+        help=(
+            "issue comment id of the approved forge plan for --render-brief "
+            "(defaults to $FORGE_PLAN_NOTE_ID; exact-comment binding, fail-closed)"
+        ),
+    )
+    parser.add_argument(
         "--render-brief-azure",
         action="store_true",
         help="fetch work item + forge plan from Azure DevOps and render the quality brief",
@@ -755,7 +881,38 @@ def main(argv: list[str] | None = None) -> int:
                 "failed",
                 "harness_entry: --render-brief needs --repo/--issue/GITHUB_TOKEN",
             )
-        body, plan = fetch_issue_context(repo, issue_number, token)
+        # R05 interim transport: bind the brief to the EXACT approved plan
+        # comment. The control plane journals the plan comment's id when it
+        # posts the approved plan and dispatches it as plan_note_id; the
+        # lane then fetches that one comment (validated, fail-closed) — no
+        # scan, no identity heuristic. Empty on a legacy replay: the scan
+        # below is the loud, UNENFORCED fallback.
+        plan_note_raw = str(
+            args.plan_note_id
+            if args.plan_note_id is not None
+            else os.environ.get("FORGE_PLAN_NOTE_ID") or ""
+        ).strip()
+        run_id = (os.environ.get("FORGE_RUN_ID") or "").strip()
+        try:
+            plan_note_id = int(plan_note_raw) if plan_note_raw else 0
+        except ValueError:
+            return _finish("failed", f"harness_entry: bad plan note id {plan_note_raw!r}")
+        if not plan_note_id:
+            print(
+                "harness_entry: FORGE_PLAN_NOTE_ID absent — plan-comment binding NOT "
+                "enforced; falling back to the legacy plan-comment scan",
+                file=sys.stderr,
+            )
+        try:
+            body, plan = fetch_issue_context(
+                repo, issue_number, token, plan_note_id=plan_note_id, run_id=run_id
+            )
+        except PlanBindingError as exc:
+            return _finish("failed", f"harness_entry: {exc}")
+        except OSError as exc:
+            # HTTPError/URLError included: a missing/unreadable bound comment
+            # must fail the lane, never render a brief without its plan.
+            return _finish("failed", f"harness_entry: plan comment fetch failed: {exc}")
         brief_text = render_brief(body, plan)
         repair_context = os.environ.get("FORGE_REPAIR_CONTEXT", "")
         if repair_context.strip():

@@ -164,6 +164,11 @@ class GitHubActionsExecutor:
             "driver": handle.driver,
             "model": "",
             "issue_number": "",
+            # R05 interim: the journaled id of the approved plan comment —
+            # the lane binds its brief to EXACTLY that comment (fetched by
+            # id, validated, fail-closed). Empty on a legacy replay with no
+            # journaled plan note: the lane then scans, unenforced.
+            "plan_note_id": "",
             **(inputs or {}),
         }
         response = await self._client.dispatch_workflow(

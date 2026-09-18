@@ -59,6 +59,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from forge.config import ForgeConfig, Settings
 from forge.durable import (
+    ActionLog,
     Controller,
     FlowRun,
     FlowStatus,
@@ -1318,6 +1319,7 @@ class GitHubRunService:
 
         try:
             await self._ensure_harness_branch(branch, attempt_base)
+            plan_note_id = await self._journaled_plan_note_id(run_id)
             correlated = await executor.launch(
                 handle,
                 inputs={
@@ -1327,6 +1329,12 @@ class GitHubRunService:
                     # comment (fetched read-only) — it needs the issue
                     # number, never the plan TEXT (no input size limits).
                     "issue_number": str(issue_number),
+                    # R05 interim: the lane binds its brief to the EXACT
+                    # approved plan comment, addressed by the id journaled
+                    # when this run's plan was posted (no heuristic scan).
+                    # Empty when the journal has no note (legacy replay) —
+                    # the lane then falls back to the scan, unenforced.
+                    "plan_note_id": str(plan_note_id) if plan_note_id else "",
                     # Bounded verification-failure context (check names +
                     # reason) on a repair re-dispatch; cycle 1 dispatches
                     # the same shape as always.
@@ -1455,6 +1463,44 @@ class GitHubRunService:
             )
         selection = selection_from_spec_document(spec.document if spec is not None else None)
         return selection.harness if selection is not None else None
+
+    async def _journaled_plan_note_id(self, run_id: str) -> int | None:
+        """The approved plan comment's note id, journaled at post time (R05).
+
+        The plan comment is posted via :meth:`_post_journaled_note` with kind
+        ``post_plan_note``; the created note id lands in that action's
+        ``remote_result`` (ADR-0005 journal — the run's evidence of exactly
+        which comment carries the approved plan). The lane binds its brief to
+        EXACTLY that comment: dispatching the id here ends the heuristic
+        plan-comment discovery in the harness lane. None (dispatch the input
+        empty → the lane's loud unenforced scan) when the journal has no
+        succeeded ``post_plan_note`` row for the run — a legacy replay, or a
+        plan-posting whose outcome was never journaled.
+        """
+        async with self._session_factory() as session:
+            action = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "post_plan_note",
+                            ActionLog.status == "succeeded",
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if action is None:
+            return None
+        raw = (action.remote_result or {}).get("note_id")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
 
     async def _ensure_harness_branch(self, branch: str, attempt_base: str) -> None:
         """Cut the factory branch at the frozen attempt base; 422 = already cut."""

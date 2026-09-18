@@ -118,7 +118,27 @@ class TestLaunch:
             "driver": "claude-code",
             "model": "",
             "issue_number": "",
+            # Empty default: legacy replay without a journaled plan note —
+            # the lane then scans for the plan comment, unenforced (R05).
+            "plan_note_id": "",
         }
+
+    async def test_plan_note_id_rides_the_dispatch_inputs(self):
+        """R05: the journaled id of the approved plan comment travels as the
+        ``plan_note_id`` input — the lane binds its brief to EXACTLY that
+        comment instead of heuristically scanning the thread."""
+        fake = FakeGitHub()
+        fake.dispatch_mode = "run_id"
+        executor = make_executor(fake)
+
+        handle = await executor.launch(
+            make_handle(),
+            inputs={"run_id": FORGE_RUN_ID, "plan_note_id": "1234"},
+        )
+
+        assert handle.run_id == 501
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["plan_note_id"] == "1234"
 
     async def test_legacy_empty_response_falls_back_to_discovery(self):
         fake = FakeGitHub()

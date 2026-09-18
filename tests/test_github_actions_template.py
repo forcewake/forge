@@ -41,11 +41,17 @@ class TestWorkflowTemplateContract:
             # Repair re-dispatches only — an undeclared dispatch input is a
             # dispatch-wide 422 (LIVE-found on db5408f4).
             "repair_context",
+            # R05 interim: the journaled id of the approved plan comment —
+            # the lane binds its brief to EXACTLY that comment (empty on a
+            # legacy replay = heuristic scan, unenforced).
+            "plan_note_id",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
         for required in ("run_id", "attempt_base_oid", "driver", "issue_number"):
             assert inputs[required]["required"] is True
+        assert inputs["plan_note_id"]["required"] is False
+        assert inputs["plan_note_id"]["default"] == ""
 
     def test_brief_is_rendered_from_the_issue_before_the_driver_runs(self):
         """The approved plan lives as the forge plan comment on the issue —
@@ -62,6 +68,11 @@ class TestWorkflowTemplateContract:
         assert "python -m forge.harness_entry --render-brief" in brief_step["run"]
         assert brief_step["env"]["GITHUB_TOKEN"] == "${{ github.token }}"  # read-only
         assert brief_step["env"]["FORGE_ISSUE_NUMBER"] == "${{ inputs.issue_number }}"
+        # R05: the EXACT approved plan comment is addressed by id (empty =
+        # legacy scan), cross-checked against this run's id — both ride as
+        # env from the dispatch inputs.
+        assert brief_step["env"]["FORGE_PLAN_NOTE_ID"] == "${{ inputs.plan_note_id }}"
+        assert brief_step["env"]["FORGE_RUN_ID"] == "${{ inputs.run_id }}"
         # The driver step runs AFTER the brief step and only runs the driver.
         names = [step.get("name") for step in steps]
         assert names.index("Render the implementation brief") < names.index("Run harness driver")

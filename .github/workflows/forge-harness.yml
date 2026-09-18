@@ -16,9 +16,10 @@
 # publishes (create_commit_on_branch + Draft PR).
 #
 # Dispatched by forge via workflow_dispatch with inputs:
-#   run_id, attempt_base_oid, driver, model, issue_number
+#   run_id, attempt_base_oid, driver, model, issue_number, plan_note_id
 #   (see forge.execution.github_actions; the plan/issue TEXT is fetched by
-#   the lane from the issue + forge plan comment — no input size limits)
+#   the lane from the issue + the plan comment addressed by plan_note_id —
+#   no input size limits; empty plan_note_id = legacy scan, unenforced)
 #
 # The driver step is rendered by forge's HarnessDriver.build_script()
 # (Stage D) — the template only provisions the lane.
@@ -48,6 +49,11 @@ on:
       issue_number:
         description: "issue whose forge plan comment carries the approved plan"
         required: true
+        type: string
+      plan_note_id:
+        description: "issue comment id of the approved forge plan (empty = legacy scan)"
+        required: false
+        default: ""
         type: string
       repair_context:
         description: "bounded verification-failure context (repair re-dispatch)"
@@ -115,6 +121,15 @@ jobs:
           # shared prompt builder. Nothing is written to the repository.
           GITHUB_TOKEN: ${{ github.token }}
           FORGE_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          # R05: bind the brief to the EXACT approved plan comment — the
+          # journaled id of the comment forge posted with the plan, fetched
+          # by id and validated (author + "Forge plan" header + this run's
+          # id) fail-closed. Empty on a legacy replay: the lane then falls
+          # back to the heuristic scan, loudly unenforced.
+          FORGE_PLAN_NOTE_ID: ${{ inputs.plan_note_id }}
+          # The run id the plan comment must mention (tamper guard: another
+          # run's plan can never ride this lane's brief).
+          FORGE_RUN_ID: ${{ inputs.run_id }}
           # Bounded verification-failure context on a repair re-dispatch
           # (empty on cycle 1).
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
