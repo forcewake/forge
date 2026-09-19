@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -265,6 +266,9 @@ def attach_export(
 # ---------------------------------------------------------------------------
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 def _seed_branch(task: CohortTask, repo: str) -> None:
     """Force-push the unit's fixture seed onto the lab repo's default branch.
 
@@ -280,6 +284,15 @@ def _seed_branch(task: CohortTask, repo: str) -> None:
             _git(seed_dir, *argv)
 
         git("init", "-b", "main")  # -b: git >= 2.28; --branch is not a git init option
+        # The lane workflow MUST ship with the seed: without
+        # .github/workflows/forge-harness.yml the dispatch 422s
+        # ("workflow does not have 'workflow_dispatch' trigger") and the
+        # unit dies before its agent starts (LIVE-found twice).
+        workflows_src = _REPO_ROOT / ".github" / "workflows"
+        workflows_dst = seed_dir / ".github" / "workflows"
+        workflows_dst.mkdir(parents=True, exist_ok=True)
+        for name in ("forge-harness.yml", "ci.yml"):
+            shutil.copy2(workflows_src / name, workflows_dst / name)
         git("add", ".")
         git(
             "-c",
