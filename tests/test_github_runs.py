@@ -8,13 +8,18 @@ cancel-as-revoke) exercised on the GitHub surface, no network, no model.
 
 import hashlib
 import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings
@@ -30,6 +35,8 @@ from forge.durable import (
 )
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.reviewer import ReviewVerdict
+from forge.harness_entry import PlanBindingError, fetch_issue_context
+from forge.harnesses.brief_envelope import build_brief_envelope
 from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
@@ -1968,3 +1975,568 @@ def test_provider_command_sets_stay_in_parity():
     for provider, cmds in all_sets.items():
         missing = union - cmds - {cmd for p, cmd in known_gaps if p == provider}
         assert not missing, f"{provider} is missing lifecycle commands: {sorted(missing)}"
+
+
+# ----------------------------------------------------------------------
+# A14 (docs/reviews/2026-09-18-d16f523): COMPOSED invariant-failure
+# scenarios on REAL service legs. Each driver below composes two landed
+# fixes (Axx + Ayy) over the production entry points — never a helper —
+# and asserts the ACTUAL effect (zero writes / adopted / blocked with
+# reason). Failing-before for every scenario is documented by the review
+# probes (P01-P07 in reproduce_review_findings.py); the drivers are the
+# passing-after regression proof the review's acceptance asks for.
+# ----------------------------------------------------------------------
+
+HARNESS_WORKFLOW = "forge-harness.github.yml"
+HARNESS_MODEL = "glm-5.3-flash[1m]"
+
+#: MCP mount identities for the A06 composed scenario: one token scoped to
+#: THIS repo's namespace (acme/*) and one scoped to a foreign namespace —
+#: the same run, the same mount, opposite object-level verdicts.
+MIRROR_ALLOWED_TOKEN = "forge-mirror-allowed"
+MIRROR_FOREIGN_TOKEN = "forge-mirror-foreign"
+
+
+def _engine(db_path: Path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    return engine
+
+
+async def _go_resumes(service: GitHubRunService, run_id: str) -> None:
+    """The re-claimed ``/go`` command step: the real recovery driver.
+
+    ``handle_go`` finds the consumed gate and the run parked mid-publish
+    (``_RESUMABLE_PUBLISH_STATUSES``) and resumes the publish leg.
+    """
+    await service.handle_go(
+        project_id=PROJECT_ID,
+        issue_number=ISSUE,
+        note_text=f"/go {run_id}",
+        author_username="alice",
+    )
+
+
+async def composed_a06_run_mirror_scoped_token() -> None:
+    """A06 composed: scoped token → run mirror over a REAL service leg.
+
+    The run is produced by the production ``start_run`` → ``/go`` leg (its
+    durable subject is the real ``github_repo_full_name`` the service
+    stamps), then read through the REAL streamable-HTTP MCP mount with a
+    scoped, repo-allowlisted token. A token allowlisted for ``acme/*``
+    reads the run, its frozen plan and its evidence; a token scoped to a
+    foreign namespace gets the byte-exact NOT FOUND a missing run produces
+    on every tool and cannot even discover the run via ``run_list``. The
+    mirror never writes: zero provider calls before/after the denied reads.
+    """
+    from forge.database import reset_engine
+    from forge.main import create_app
+
+    with tempfile.TemporaryDirectory(prefix="forge-a06-") as tmp:
+        db_path = Path(tmp) / "a06.db"
+        # The MCP app boots FIRST: its lifespan bootstraps the fresh sqlite
+        # schema (alembic-stamped); the service leg then runs on the same
+        # file through its own engine.
+        reset_engine()
+        try:
+            application = create_app(
+                settings=Settings(
+                    GITLAB_URL="https://gitlab.test",
+                    GITLAB_TOKEN=SecretStr("glpat-test"),
+                    GITLAB_WEBHOOK_SECRET=SecretStr("whsec"),
+                    DATABASE_URL=f"sqlite+aiosqlite:///{db_path}",
+                    FORGE_MCP_ENABLED=True,
+                    FORGE_MCP_KEY=SecretStr("forge-a06-master"),
+                    FORGE_MCP_SCOPED_TOKENS=SecretStr(
+                        json.dumps(
+                            {
+                                MIRROR_ALLOWED_TOKEN: ["forge:read"],
+                                MIRROR_FOREIGN_TOKEN: ["forge:read"],
+                            }
+                        )
+                    ),
+                    FORGE_MCP_TOKEN_REPOS=SecretStr(
+                        json.dumps(
+                            {
+                                MIRROR_ALLOWED_TOKEN: ["acme/*"],
+                                MIRROR_FOREIGN_TOKEN: ["other/*"],
+                            }
+                        )
+                    ),
+                    FORGE_MCP_ALLOWED_HOSTS="testserver",
+                )
+            )
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                session_factory = async_sessionmaker(_engine(db_path), expire_on_commit=False)
+                fake = FakeGitHub()
+                fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+                fake.heads[REPO]["main"] = BASE_HEAD
+                fake.seed_issue(REPO, ISSUE, ISSUE_TITLE, ISSUE_DESC)
+                service = make_service(db=session_factory, fake=fake)
+
+                run_id = await start(service)
+                await go(service, run_id)
+                run = await get_run(session_factory, run_id)
+                assert run.status == FlowStatus.WAITING_CI.value
+                assert run.github_repo_full_name == REPO
+                provider_calls_before = len(fake.calls)
+
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+
+                    async def call(name: str, arguments: dict[str, Any], token: str):
+                        return await ac.post(
+                            "/mcp/mcp",
+                            json={
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "tools/call",
+                                "params": {"name": name, "arguments": arguments},
+                            },
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Accept": "application/json, text/event-stream",
+                            },
+                        )
+
+                    async def result_text(response) -> str:
+                        ctype = response.headers.get("content-type", "")
+                        if ctype.startswith("text/event-stream"):
+                            for line in response.text.splitlines():
+                                if line.startswith("data:"):
+                                    payload = json.loads(line[5:].strip())
+                                    return str(payload["result"]["content"][0]["text"])
+                            raise AssertionError(f"no SSE data line: {response.text[:200]}")
+                        payload = response.json()
+                        return str(payload["result"]["content"][0]["text"])
+
+                    # The foreign-scoped token: every read tool answers with
+                    # the MISSING-run text — forbidden is indistinguishable
+                    # from absent — and run_list does not even discover it.
+                    not_found = f"NOT FOUND: no run '{run_id}'"
+                    for tool, args in (
+                        ("run_get", {"run_id": run_id}),
+                        ("plan_get", {"run_id": run_id}),
+                        ("run_evidence_get", {"run_id": run_id}),
+                    ):
+                        text = await result_text(await call(tool, args, MIRROR_FOREIGN_TOKEN))
+                        assert text == not_found, tool
+                    listed = await result_text(await call("run_list", {}, MIRROR_FOREIGN_TOKEN))
+                    assert run_id not in listed
+                    assert REPO not in listed
+
+                    # The acme-scoped token: the same run mirror is fully
+                    # readable — status, subject, frozen spec document.
+                    mirrored = await result_text(
+                        await call("run_get", {"run_id": run_id}, MIRROR_ALLOWED_TOKEN)
+                    )
+                    assert f"acme/acme-widget#{ISSUE}" in mirrored
+                    assert FlowStatus.WAITING_CI.value in mirrored
+                    plan = await result_text(
+                        await call("plan_get", {"run_id": run_id}, MIRROR_ALLOWED_TOKEN)
+                    )
+                    assert run.spec_digest in plan
+
+                    # Zero provider calls: the denied reads never probed the
+                    # fake (the object-level check ran on durable state).
+                    assert len(fake.calls) == provider_calls_before
+        finally:
+            reset_engine()
+
+
+async def composed_a01_required_absent_green_optional() -> None:
+    """A01 composed: full ``evaluate_waiting_ci_one`` — the required check
+    is ABSENT while an OPTIONAL workflow is green.
+
+    Failing-before (probe P03): the old verdict treated any completed
+    non-failing run — skipped, neutral, unknown-conclusion, a green docs
+    workflow — as verified. The positive-proof contract must keep the run
+    WAITING (an honestly unknown verdict; a late required check may still
+    register), and when the required check finally succeeds the same
+    production entry must drive the run to a VERIFIED ready. Zero writes
+    while unproven: the wait publishes nothing.
+    """
+    db, fake = await _composed_db()
+    service = make_service(
+        db,
+        fake,
+        settings=make_settings(FORGE_REQUIRED_JOBS="tests"),
+    )
+    run_id = await start(service)
+    await go(service, run_id)
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.WAITING_CI.value
+    candidate = (run.candidate_shas or [])[-1]
+
+    # A green OPTIONAL workflow; the required ``tests`` workflow never ran
+    # for this sha.
+    fake.seed_workflow_runs(
+        [
+            {
+                "head_sha": candidate,
+                "name": "docs",
+                "status": "completed",
+                "conclusion": "success",
+            }
+        ]
+    )
+    writes_before = _mutation_calls(fake)
+
+    await service.evaluate_waiting_ci_one(run_id)
+
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.WAITING_CI.value, (
+        "a green optional workflow must never substitute the required check"
+    )
+    verification = (run.evidence or {}).get("verification") or {}
+    assert verification.get("status") == "unknown"
+    assert verification.get("summary") == "required checks not run: tests"
+    surface = verification.get("surface") or []
+    assert [entry.get("name") for entry in surface] == ["docs"]
+    assert _mutation_calls(fake) == writes_before, "an unproven wait publishes nothing"
+
+    # The required check registers late — the same entry point now proves
+    # the run and drives it to a VERIFIED ready.
+    fake.seed_workflow_runs(
+        [
+            {
+                "head_sha": candidate,
+                "name": "tests",
+                "status": "completed",
+                "conclusion": "success",
+            }
+        ]
+    )
+    await service.evaluate_waiting_ci_one(run_id)
+
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.READY_FOR_HUMAN.value
+    verification = (run.evidence or {}).get("verification") or {}
+    assert verification.get("status") == "passed"
+    assert verification.get("tested_oid") == candidate
+    assert [entry.get("name") for entry in verification.get("surface") or []] == [
+        "docs",
+        "tests",
+    ]
+    assert "checks passed" in (run.status_reason or "")
+
+
+#: The provider mutations an honest wait must never add to.
+_MUTATION_CALL_NAMES = (
+    "create_commit_on_branch",
+    "create_draft_pr",
+    "create_issue_comment",
+    "update_issue_comment",
+    "dispatch_workflow",
+)
+
+
+def _mutation_calls(fake: FakeGitHub) -> list[tuple]:
+    return [call for call in fake.calls if call[0] in _MUTATION_CALL_NAMES]
+
+
+async def _composed_db() -> tuple[async_sessionmaker, FakeGitHub]:
+    """A pristine in-memory database + seeded fake for one driver."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _composed_db_engines.append(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    fake = FakeGitHub()
+    fake.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+    fake.heads[REPO]["main"] = BASE_HEAD
+    fake.seed_issue(REPO, ISSUE, ISSUE_TITLE, ISSUE_DESC)
+    return async_sessionmaker(engine, expire_on_commit=False), fake
+
+
+#: Engines opened by :func:`_composed_db`; disposed by the autouse fixture
+#: below (drivers own no fixture, so the suite reaps their engines).
+_composed_db_engines: list[AsyncEngine] = []
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_composed_engines():
+    yield
+    while _composed_db_engines:
+        await _composed_db_engines.pop().dispose()
+
+
+def _arm_mid_publish_crash(fake: FakeGitHub) -> None:
+    """The A12 crash point: the publication write was ACCEPTED (the
+    provider is applying it slowly) and the WORKER DIES at the next
+    provider call — before the outcome is journaled. The hard failure
+    propagates (a process-death stand-in: the leg gets no outcome at all),
+    unlike a GitHubAPIError which the flow's PR leg deliberately absorbs."""
+    original = fake.create_draft_pr
+    attempts = {"n": 0}
+
+    async def worker_died(*args: Any, **kwargs: Any):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("worker died mid-publish (the A12 crash point)")
+        return await original(*args, **kwargs)
+
+    fake.create_draft_pr = worker_died  # type: ignore[method-assign]
+
+
+async def composed_a12_pending_remote_application() -> None:
+    """A12 composed: the delayed-apply stub against the REAL recovery paths.
+
+    The provider ACCEPTS the publication write but its application is
+    delayed past the crash (the negative-probe view: old head, zero marker
+    hits). Two production recoveries then race the pending effect:
+
+    1. the resumed ``/go`` leg redrives its probe-first publish — the
+       branch-wide CAS makes the redispatch duplicate-safe, and the slow
+       first write is REFUSED when it finally applies (exactly one
+       logical candidate on the branch, the run's candidate);
+    2. the recovery scanner's negative probe must NOT dispatch: the intent
+       parks in the effect-certainty window (``probing``) with the write
+       count still at one, and the late-landing commit is ADOPTED at the
+       window-end re-probe (the run advances on the FOUND sha).
+
+    Failing-before: the R11 shortcut read "zero hits + unchanged head" as
+    safe-to-redispatch — variant 2 would POST a duplicate and BOTH would
+    land.
+    """
+    # --- variant 1: the resumed leg — the CAS refuses the late first write
+    db, fake = await _composed_db()
+    service = make_service(db, fake)
+    fake.delayed_apply = True
+    _arm_mid_publish_crash(fake)
+    run_id = await start(service)
+
+    with pytest.raises(RuntimeError, match="worker died mid-publish"):
+        await go(service, run_id)
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.PROPOSING.value, "the crash left the run mid-publish"
+    assert list(run.candidate_shas or []) == []
+    branch = f"forge/{ISSUE}/{run_id[:8]}"
+    assert fake.heads[REPO][branch] == BASE_HEAD, "accepted, NOT applied (the negative view)"
+    assert len(fake.pending_delayed_commits[branch]) == 1
+    commit_posts = len(fake.calls_of("create_commit_on_branch"))
+    assert commit_posts == 1
+
+    # The re-claimed command step resumes the leg. The provider's slow
+    # window is over for NEW writes (the first is still in flight); the
+    # redispatch's CAS pins the unchanged head.
+    fake.delayed_apply = False
+    await _go_resumes(service, run_id)
+
+    run = await get_run(db, run_id)
+    assert run.status == FlowStatus.WAITING_CI.value
+    candidate = (run.candidate_shas or [])[-1]
+    assert fake.heads[REPO][branch] == candidate
+    # The slow first write finally applies — its CAS (expected BASE, actual
+    # the redrive's commit) REFUSES it. One logical candidate survives.
+    fake.flush_delayed_apply(branch)
+    assert fake.delayed_refused == 1
+    assert len(fake.commits[REPO][branch]) == 1
+    assert fake.commits[REPO][branch][0]["sha"] == candidate
+    assert len(fake.calls_of("create_commit_on_branch")) == commit_posts + 1
+    assert len(fake.pull_requests[REPO]) == 1
+
+    # --- variant 2: the recovery scanner — settle, then ADOPT
+    db2, fake2 = await _composed_db()
+    service2 = make_service(db2, fake2)
+    fake2.delayed_apply = True
+    _arm_mid_publish_crash(fake2)
+    run_id2 = await start(service2)
+
+    with pytest.raises(RuntimeError, match="worker died mid-publish"):
+        await go(service2, run_id2)
+    branch2 = f"forge/{ISSUE}/{run_id2[:8]}"
+    assert fake2.heads[REPO][branch2] == BASE_HEAD
+
+    # The scanner's FIRST probe is negative (the accepted write is still in
+    # flight): the intent must park in the certainty window — never a
+    # dispatch off one negative read.
+    now = datetime.now(timezone.utc)
+    await service2.resolve_publication_intents(now=now)
+    async with db2() as session:
+        from forge.durable.models import PublicationIntent
+
+        intent = (
+            (
+                await session.execute(
+                    select(PublicationIntent).where(PublicationIntent.run_id == run_id2)
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert intent.status == "probing", intent.status
+    assert len(fake2.calls_of("create_commit_on_branch")) == 1, (
+        "a negative probe must not redispatch while an effect may be in flight"
+    )
+    run2 = await get_run(db2, run_id2)
+    assert run2.status == FlowStatus.PROPOSING.value
+
+    # The provider's slow application completes — the marker+parent commit
+    # lands — and the window-end re-probe ADOPTS it: the run advances on
+    # the FOUND sha with zero further writes.
+    fake2.flush_delayed_apply(branch2)
+    landed = fake2.heads[REPO][branch2]
+    assert landed != BASE_HEAD
+    await service2.resolve_publication_intents(now=now + timedelta(seconds=61))
+
+    async with db2() as session:
+        intent = (
+            (
+                await session.execute(
+                    select(PublicationIntent).where(PublicationIntent.run_id == run_id2)
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert intent.status == "adopted"
+    assert intent.provider_object_id == landed
+    run2 = await get_run(db2, run_id2)
+    assert run2.status == FlowStatus.WAITING_CI.value
+    assert list(run2.candidate_shas or []) == [landed]
+    assert len(fake2.calls_of("create_commit_on_branch")) == 1, "adoption never re-POSTs"
+    assert len(fake2.pull_requests[REPO]) == 1
+
+
+async def composed_a03_comment_same_id_edited_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A03 composed: full dispatch → lane render with the SAME comment id
+    but an edited approved byte.
+
+    The service leg freezes the BriefEnvelope at plan acceptance and the
+    ``/go`` dispatch carries ``plan_note_id`` + ``envelope_digest`` +
+    ``spec_digest``; the lane then fetches EXACTLY that comment. An edit
+    after approval — same id, same author, same header, same run id, ONE
+    approved byte changed — must fail the lane's envelope re-verification
+    closed ("re-approval required"), and the intact comment must render
+    the frozen bytes. The live issue is never fetched on the enforced
+    path. Failing-before: the R05 interim guard validated only
+    author/header/run-id — all unchanged by the edit — and waved it through.
+    """
+    from urllib.request import Request
+
+    db, fake = await _composed_db()
+    fake.reviewer_login = "forcewake-forge[bot]"  # a shipped forge App login
+    service = make_service(
+        db,
+        fake,
+        settings=make_settings(
+            FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW,
+            FORGE_HARNESS_MODEL=HARNESS_MODEL,
+        ),
+    )
+    run_id = await start(service)
+    plan_comment = next(
+        comment
+        for comment in fake.issue_comments[REPO][ISSUE]
+        if comment["body"].startswith("## Forge plan")
+    )
+    envelope = (await get_run(db, run_id)).evidence["brief_envelope"]
+
+    await go(service, run_id)
+
+    # The REAL dispatch carried the binding inputs (id, envelope digest,
+    # frozen spec digest) — the lane render below consumes exactly them.
+    (dispatch,) = fake.dispatch_inputs
+    inputs = dispatch["inputs"]
+    assert inputs["run_id"] == run_id
+    assert inputs["plan_note_id"] == str(plan_comment["id"])
+    assert inputs["envelope_digest"] == envelope["envelope_digest"]
+    assert inputs["spec_digest"] == (await get_run(db, run_id)).spec_digest
+
+    requests: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int = 30):  # noqa: ARG001
+        url = request.full_url
+        requests.append(url)
+        prefix = f"https://api.github.com/repos/{REPO}/issues/comments/"
+        if url.startswith(prefix):
+            note_id = int(url.rsplit("/", 1)[-1])
+            for comments in fake.issue_comments[REPO].values():
+                for comment in comments:
+                    if comment["id"] == note_id:
+                        return _FakeUrllibResponse(json.dumps(comment))
+        raise AssertionError(f"unexpected lane fetch: {url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    dispatched = dict(
+        plan_note_id=int(inputs["plan_note_id"]),
+        run_id=run_id,
+        envelope_digest=inputs["envelope_digest"],
+        spec_digest=inputs["spec_digest"],
+    )
+
+    # Positive control: the intact comment renders the FROZEN bytes.
+    task_text, plan_text = fetch_issue_context(REPO, ISSUE, "ghs_runner", **dispatched)
+    assert task_text == f"{ISSUE_TITLE}\n{ISSUE_DESC}"
+    assert plan_text == envelope["plan_text"]
+    assert not any("/issues/" in url and "/comments/" not in url for url in requests), (
+        "the enforced path never reads the live issue"
+    )
+
+    # The A03 core: SAME id, SAME author/header/run-id — ONE approved byte
+    # edited after /go.
+    plan_comment["body"] = plan_comment["body"].replace(
+        ISSUE_TITLE, f"{ISSUE_TITLE} (edited after approval)"
+    )
+
+    with pytest.raises(PlanBindingError, match="re-approval required"):
+        fetch_issue_context(REPO, ISSUE, "ghs_runner", **dispatched)
+
+    # The envelope itself is untouched: the frozen bytes (and the digest
+    # the dispatch carried) still verify — the refusal is about the COMMENT
+    # drifting from the approval, never about re-freezing in place.
+    assert (
+        build_brief_envelope(
+            run_id=run_id,
+            task_title=envelope["task_title"],
+            task_description=envelope["task_description"],
+            plan_text=envelope["plan_text"],
+            spec_digest=envelope["spec_digest"],
+        )["envelope_digest"]
+        == envelope["envelope_digest"]
+    )
+
+
+class _FakeUrllibResponse:
+    """Minimal stdlib-mock response for the lane's urllib reads."""
+
+    def __init__(self, payload: str) -> None:
+        self._payload = payload.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+class TestA14ComposedServiceLegs:
+    """The review's combined invariant-failure scenarios, each over the
+    production entry points. The conformance kit drives the same drivers
+    and records their outcomes into the attestation ledger (A14:
+    registration integrity)."""
+
+    async def test_a06_scoped_token_over_the_real_run_mirror(self):
+        await composed_a06_run_mirror_scoped_token()
+
+    async def test_a01_required_absent_with_green_optional_stays_waiting(self):
+        await composed_a01_required_absent_green_optional()
+
+    async def test_a12_pending_remote_application_never_duplicates(self):
+        await composed_a12_pending_remote_application()
+
+    async def test_a03_edited_plan_comment_fails_the_lane_render_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        await composed_a03_comment_same_id_edited_body(monkeypatch)

@@ -32,6 +32,16 @@ Clearing every scenario attests the lane (:func:`attest_conformance`) —
 the registration rule ``verified_ready_capable`` demands both the record's
 claim and this attestation, so future CI can assert registration off the
 same suite.
+
+A14 (docs/reviews/2026-09-18-d16f523): the attestation is SCENARIO-ACCOUNTED.
+Beyond the battery, every mandatory COMPOSED service-leg scenario
+(:data:`forge.runs.conformance.COMPOSED_SCENARIOS` — scoped token over the
+run mirror, required-absent verification, the two-worker claim loop, the
+delayed-apply recovery, the edited-plan-comment lane render) is driven here
+through the same production drivers its owning suite uses and recorded via
+:func:`record_scenario`; a failed, skipped, or never-run mandatory scenario
+makes :func:`attest_conformance` raise instead of registering the lane, and
+:func:`conformance_manifest` publishes the machine-readable record.
 """
 
 from __future__ import annotations
@@ -55,21 +65,31 @@ from forge.repository.changeset import Change, ChangeSet, Operation
 from forge.runs.azure_service import AzurePipelinesHandle, azure_factory_branch
 from forge.runs.candidate import bundle_from_changeset
 from forge.runs.conformance import (
+    AttestationBlockedError,
     CAS_FORGE_WRITER_GUARD,
     CAS_GRAPHQL_EXPECTED_HEAD_OID,
     CAS_PUSH_OLD_OBJECT_ID,
     ARTIFACT_TRANSPORT_CI,
+    COMPOSED_SCENARIOS,
     PROVIDER_CAPABILITIES,
     ProviderCapability,
     READONLY_IDENTITY_MERGE_REQUEST_IID,
     READONLY_IDENTITY_PULL_REQUEST_ID,
     READONLY_IDENTITY_PULL_REQUEST_NUMBER,
+    SCENARIO_FAILED,
+    SCENARIO_NOT_RUN,
+    SCENARIO_PASSED,
+    SCENARIO_SKIPPED,
     UnknownProviderError,
     attest_conformance,
     capability_of,
     conformance_attested,
+    conformance_manifest,
+    mandatory_scenarios,
+    record_scenario,
     registration_allowed,
     reset_conformance_attestations,
+    scenario_outcomes,
     verified_ready_capable,
 )
 from forge.runs.publisher import publish_candidate, publication_grant_valid
@@ -85,12 +105,17 @@ from tests.test_azure_runs import (
     start as azure_start,
 )
 from tests.test_github_runs import (
+    composed_a01_required_absent_green_optional,
+    composed_a03_comment_same_id_edited_body,
+    composed_a06_run_mirror_scoped_token,
+    composed_a12_pending_remote_application,
     go as github_go,
     make_service as make_github_service,
     make_settings as make_github_settings,
     make_stack as make_github_stack,
     start as github_start,
 )
+from tests.test_review_regressions import composed_a05_leased_batch_expiry_two_workers
 from tests.test_runs_service import FakeWriter
 from tests.test_runs_verification import (
     make_service as make_gitlab_service,
@@ -742,28 +767,72 @@ async def scenario_unverified_honest(lane) -> None:
     assert verification.get("producer"), "the verdict must name WHO claimed it"
 
 
-async def run_forbidden_scenarios(lane_cls, db) -> None:
+#: The A14 composed invariant-failure drivers (each lives next to the
+#: service-leg suite it composes) — ledger name → driver. Every driver
+#: takes the pytest MonkeyPatch instance so the kit can run it standalone.
+_COMPOSED_DRIVERS: dict[str, Any] = {
+    "a05_leased_batch_expiry_two_workers": lambda monkeypatch: (
+        composed_a05_leased_batch_expiry_two_workers(monkeypatch)
+    ),
+    "a06_run_mirror_scoped_token_http": lambda _monkeypatch: composed_a06_run_mirror_scoped_token(),
+    "a01_required_absent_green_optional": lambda _monkeypatch: (
+        composed_a01_required_absent_green_optional()
+    ),
+    "a12_pending_remote_application": lambda _monkeypatch: (
+        composed_a12_pending_remote_application()
+    ),
+    "a03_comment_same_id_edited_body": lambda monkeypatch: composed_a03_comment_same_id_edited_body(
+        monkeypatch
+    ),
+}
+
+
+async def run_forbidden_scenarios(lane_cls) -> None:
     """The kit battery one lane must clear to earn its attestation.
 
     Every scenario gets its own pristine fake AND database — the
     one-active-run invariant must never arbitrate between scenarios (a
     scenario that parks a live run on the subject would otherwise be
-    adopted by the next one).
+    adopted by the next one). Each scenario's outcome is RECORDED into the
+    attestation ledger as it passes (A14): the ledger, not the test's
+    return, is what :func:`attest_conformance` audits.
     """
+    provider = lane_cls.provider
     for candidate in bad_candidates():
         async with _fresh_db() as scenario_db:
             await scenario_bad_candidate(await lane_cls.build(scenario_db), candidate)
+    record_scenario(provider, "bad_candidate_refused_with_zero_writes")
     scenarios = (
-        scenario_out_of_scope,
-        scenario_stale_head,
-        scenario_missing_spec,
-        scenario_cancelled_generation,
-        scenario_failed_ci_never_ready,
-        scenario_unverified_honest,
+        ("out_of_scope_candidate_refused", scenario_out_of_scope),
+        ("stale_head_drifts_with_zero_writes", scenario_stale_head),
+        ("missing_spec_refused", scenario_missing_spec),
+        ("cancelled_generation_never_publishes", scenario_cancelled_generation),
+        ("failed_ci_never_verified_ready", scenario_failed_ci_never_ready),
+        ("unverified_run_honestly_labeled", scenario_unverified_honest),
     )
-    for scenario in scenarios:
+    for name, scenario in scenarios:
         async with _fresh_db() as scenario_db:
             await scenario(await lane_cls.build(scenario_db))
+        record_scenario(provider, name)
+    async with _fresh_db() as scenario_db:
+        await scenario_positive_control(await lane_cls.build(scenario_db))
+    record_scenario(provider, "positive_control_publishes_exactly_the_validated_manifest")
+
+
+async def run_composed_scenarios(provider: str, monkeypatch) -> None:
+    """Drive *provider*'s A14 composed service-leg scenarios (A14).
+
+    The combined invariant-failure cases live beside the suites that own
+    their production entry points; the kit drives them HERE — same
+    functions, no re-implementation — and records each outcome. A driver
+    that fails (or a name with no driver wired) propagates: the ledger
+    stays unproven and the attestation refuses.
+    """
+    for name in COMPOSED_SCENARIOS.get(provider, ()):
+        driver = _COMPOSED_DRIVERS.get(name)
+        assert driver is not None, f"no composed driver wired for {provider}/{name}"
+        await driver(monkeypatch)
+        record_scenario(provider, name)
 
 
 # ----------------------------------------------------------------------
@@ -884,6 +953,8 @@ class TestRegistrationRule:
 
     def test_conformance_pass_is_per_process_state(self):
         assert verified_ready_capable("github") is False  # claimed, not attested
+        for name in mandatory_scenarios("github"):
+            record_scenario("github", name)
         attest_conformance("github")
         assert conformance_attested("github") is True
         assert verified_ready_capable("github") is True
@@ -891,15 +962,89 @@ class TestRegistrationRule:
         assert verified_ready_capable("github") is False
 
     @pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
-    async def test_kit_pass_registers_verified_ready(self, lane_cls):
-        """The live hook: a lane clearing its scenarios attests — and only
-        then does the registration rule open. This is what future CI
-        asserts after running the kit."""
-        await run_forbidden_scenarios(lane_cls, db)
+    async def test_kit_pass_registers_verified_ready(self, lane_cls, monkeypatch):
+        """The live hook: a lane clearing EVERY mandatory scenario — the
+        forbidden battery AND the A14 composed service-leg drivers —
+        attests, and only then does the registration rule open. This is
+        what future CI asserts after running the kit."""
+        await run_forbidden_scenarios(lane_cls)
+        await run_composed_scenarios(lane_cls.provider, monkeypatch)
 
         assert verified_ready_capable(lane_cls.provider) is False
         attest_conformance(lane_cls.provider)
         assert verified_ready_capable(lane_cls.provider) is True
+
+
+class TestAttestationIntegrity:
+    """A14 acceptance: the capability contract cannot go attested while a
+    mandatory path is untested. The attestation audits the scenario
+    ledger — a battery that never drove a composed scenario, a failed
+    scenario, or an explicit skip all leave the lane unregistered."""
+
+    @pytest.mark.parametrize("lane_cls", LANES, ids=lambda lane_cls: lane_cls.provider)
+    async def test_battery_alone_cannot_attest_when_composed_scenarios_exist(self, lane_cls):
+        await run_forbidden_scenarios(lane_cls)
+        composed = COMPOSED_SCENARIOS.get(lane_cls.provider, ())
+        if composed:
+            with pytest.raises(AttestationBlockedError, match=composed[0]):
+                attest_conformance(lane_cls.provider)
+            assert verified_ready_capable(lane_cls.provider) is False, (
+                "the kit battery alone must never register the lane"
+            )
+        else:
+            # No composed scenarios wired for this lane yet: the battery
+            # alone is the complete mandatory set.
+            attest_conformance(lane_cls.provider)
+            assert verified_ready_capable(lane_cls.provider) is True
+
+    async def test_a_failed_scenario_blocks_the_attestation_with_its_name(self):
+        record_scenario("github", "a01_required_absent_green_optional", outcome=SCENARIO_FAILED)
+        for name in mandatory_scenarios("github"):
+            if name != "a01_required_absent_green_optional":
+                record_scenario("github", name)
+        with pytest.raises(AttestationBlockedError, match="a01_required_absent_green_optional"):
+            attest_conformance("github")
+        assert verified_ready_capable("github") is False
+
+    async def test_a_skipped_scenario_blocks_the_attestation_and_is_manifested(self):
+        for name in mandatory_scenarios("github"):
+            record_scenario("github", name)
+        record_scenario(
+            "github",
+            "a03_comment_same_id_edited_body",
+            outcome=SCENARIO_SKIPPED,
+            note="ci: composed lane skipped in this profile",
+        )
+        with pytest.raises(AttestationBlockedError, match="skipped"):
+            attest_conformance("github")
+
+        manifest = conformance_manifest()
+        github = manifest["providers"]["github"]
+        assert "a03_comment_same_id_edited_body" in github["skipped"]
+        assert github["attested"] is False
+
+    async def test_never_run_scenarios_block_the_attestation(self):
+        # No record_scenario call at all: the whole mandatory set reads
+        # ``not_run`` — a silently-shrunk suite cannot attest either.
+        with pytest.raises(AttestationBlockedError, match="not_run"):
+            attest_conformance("github")
+        outcomes = scenario_outcomes("github")
+        assert set(outcomes.values()) == {SCENARIO_NOT_RUN}
+
+    def test_manifest_is_machine_readable_and_complete(self):
+        record_scenario("gitlab", "a05_leased_batch_expiry_two_workers")
+        manifest = conformance_manifest()
+        assert manifest["schema_version"] == 1
+        providers = manifest["providers"]
+        assert set(providers) == set(PROVIDER_CAPABILITIES), (
+            "the manifest covers exactly the capability table"
+        )
+        gitlab = providers["gitlab"]
+        assert gitlab["scenarios"]["a05_leased_batch_expiry_two_workers"] == SCENARIO_PASSED
+        assert gitlab["attested"] is False  # recorded, not attested
+        for provider, entry in providers.items():
+            assert set(entry["scenarios"]) == set(mandatory_scenarios(provider))
+            assert isinstance(entry["skipped"], list)
 
 
 # ----------------------------------------------------------------------
