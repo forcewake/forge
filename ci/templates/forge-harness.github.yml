@@ -104,6 +104,8 @@ jobs:
           # codegraph's SQLite graph DB must never reach the candidate diff
           # (same fail-closed publisher posture as .forge/).
           echo ".codegraph/" >> .git/info/exclude 2>/dev/null || true
+          echo "__pycache__/" >> .git/info/exclude 2>/dev/null || true
+          echo "*.pyc" >> .git/info/exclude 2>/dev/null || true
           # uv sync creates the workspace venv - lane infrastructure, never
           # a deliverable.
           echo ".venv/" >> .git/info/exclude 2>/dev/null || true
@@ -263,6 +265,8 @@ jobs:
           # Belt and braces for the local exclude: the graph DB (and its
           # watcher state) is lane infrastructure, never a deliverable.
           rm -rf .codegraph .venv
+          rm -rf __pycache__ .pytest_cache
+          find . -name '*.pyc' -delete 2>/dev/null || true
           git add -A
           # R16/A08: stage the candidate in a directory whose name carries
           # NO leading dot. upload-artifact@v4 (>= 4.4.0) excludes hidden
