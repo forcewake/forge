@@ -132,6 +132,7 @@ from forge.runs.consistency import (
     ready_reason,
     verified_verdict,
 )
+from forge.runs.execution_profile import derive_from_reader
 from forge.runs.harness_selection import (
     BudgetCeilings,
     resolve_available_drivers,
@@ -521,6 +522,19 @@ class GitHubRunService:
         base_sha = await self._read_base_sha()
         plan_summary = self._plan_summary(plan)
         plan_files_hint = self._plan_files_hint()
+        # A18: derive the execution profile from the TARGET repo at freeze
+        # time — toolchain pins from its own lock, install strategy, honest
+        # ci_contract — and freeze its digest into the spec, so the gate
+        # approves the exact build/test contract the lane must run. The
+        # derivation is typed-best-effort (never raises, never parks the
+        # run): an unreadable lock freezes the unknown-honest record.
+        profile_digest = (
+            await derive_from_reader(
+                self._stack.reader,
+                project_id=project_id,
+                ref=base_sha or self._target_branch(),
+            )
+        ).profile_digest
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -580,6 +594,7 @@ class GitHubRunService:
                 allowed_paths=path_scope,
                 harness_selection=harness_selection,
                 config_read=config_read,
+                profile_digest=profile_digest,
             )
             spec_digest = canonical_json_digest(spec_document)
             session.add(
@@ -4368,6 +4383,7 @@ class GitHubRunService:
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
         config_read: ConfigReadResult | None = None,
+        profile_digest: str = "",
     ) -> dict:
         """The immutable, EXECUTABLE RunSpec document (F14, R04, A02).
 
@@ -4384,7 +4400,11 @@ class GitHubRunService:
         :meth:`_load_executable_spec` (digest-verified on every read), never
         live Settings. A13: ``config_read`` freezes the path scope's
         provenance (status, ref, content digest) so a restart validates
-        against the approved snapshot instead of the live file.
+        against the approved snapshot instead of the live file. A18:
+        ``profile_digest`` freezes the execution profile — the toolchain
+        pins, install strategy and honest ci_contract derived from the
+        target repo (forge.runs.execution_profile) — so the gate approves
+        the exact build/test contract the lane must run.
         """
         selection = harness_selection or self._compile_harness_selection()
         workflow = self._harness_workflow()
@@ -4428,6 +4448,7 @@ class GitHubRunService:
             config_status=str(config_read.provenance_status) if config_read else "",
             config_ref=config_read.ref if config_read else "",
             config_sha256=config_read.content_sha256 if config_read else "",
+            profile_digest=profile_digest,
         )
         return spec.to_document()
 

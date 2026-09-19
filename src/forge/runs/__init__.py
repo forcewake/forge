@@ -48,7 +48,14 @@ from forge.runs.candidate import (
 from forge.runs.ci_contract import classify_failure, evaluate_quality_contract
 from forge.runs.publisher import FenceCheck, PublishResult, publish_candidate
 from forge.runs.reconciler import run_reconciler
-from forge.runs.revival import classify_terminal_failure, revival_backoff_seconds
+from forge.runs.revival import (
+    Retryability,
+    begin_revival_attempt,
+    claim_attempt_dispatch,
+    classify_terminal_failure,
+    evaluate_attempt_recovery,
+    revival_backoff_seconds,
+)
 from forge.runs.service import GATE_TTL_SECONDS, RunService, execute_run_command
 from forge.runs.spec import EXECUTABLE_SPEC_SCHEMA_VERSION, ExecutableRunSpec, SpecInvalid
 from forge.runs.stubs import (
@@ -77,6 +84,7 @@ __all__ = [
     "HarnessUsage",
     "ImplementerBackend",
     "PublishResult",
+    "Retryability",
     "RunService",
     "SpecInvalid",
     "StubImplementer",
@@ -85,12 +93,15 @@ __all__ = [
     "VerificationProfile",
     "attempt_base_for",
     "approvers_for",
+    "begin_revival_attempt",
     "build_backend",
     "bundle_from_changeset",
     "check_admission",
+    "claim_attempt_dispatch",
     "classify_failure",
     "classify_terminal_failure",
     "execute_run_command",
+    "evaluate_attempt_recovery",
     "evaluate_quality_contract",
     "evaluate_verification",
     "factory_branch",

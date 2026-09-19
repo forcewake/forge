@@ -33,6 +33,10 @@ async def run_reconciler(
             # Tier-1 auto-revive: re-dispatch runs whose transient-failure
             # backoff has elapsed (forge.runs.revival).
             service.evaluate_revival,
+            # A11 revival-attempt recovery: re-drive the dispatch of revival
+            # attempts whose worker died between the revive commit and the
+            # backend call — exactly once per stranded attempt.
+            service.evaluate_revival_recovery,
             # A13 config-gate recovery: retry the `.forge.yml` read of runs
             # parked blocked(config_…) and re-enter planning on recovery.
             service.evaluate_config_recovery,

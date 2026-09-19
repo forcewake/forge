@@ -493,6 +493,36 @@ class TestPoll:
         assert outcome.failure_kind == "code"
         assert outcome.reason.startswith("harness_driver_failed")
 
+    async def test_failed_bootstrap_classifies_infrastructure_never_code(self):
+        """A18: a FAILED environment bootstrap recorded in the meta's
+        additive ``bootstrap`` field is infrastructure/config — the
+        environment never matched the approved execution profile — never
+        a code-repair candidate, on the AzDO lane too."""
+        fake = FakeAzureDevOps()
+        fake.seed_run(RUN_ID, state="completed", result="succeeded")
+        meta = json.dumps(
+            {
+                "attempt_base": ATTEMPT_BASE,
+                "exit": "failed",
+                "bootstrap": "failed",
+            }
+        ).encode("utf-8")
+        fake.seed_artifact(
+            RUN_ID,
+            artifact_name_for(FORGE_RUN_ID),
+            {
+                "candidate.diff": create_diff("src/app.py", "half done\n").encode("utf-8"),
+                "candidate.meta.json": meta,
+            },
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=RUN_ID))
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "infrastructure"
+        assert outcome.reason.startswith("harness_bootstrap_failed")
+
     async def test_empty_diff_is_no_changes(self):
         fake = FakeAzureDevOps()
         fake.seed_run(RUN_ID, state="completed", result="succeeded")

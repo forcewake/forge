@@ -339,6 +339,61 @@ class TestPoll:
         assert outcome.failure_kind == "code"
         assert outcome.reason.startswith("harness_driver_failed")
 
+    async def test_failed_bootstrap_classifies_infrastructure_never_code(self):
+        """A18: the meta's additive ``bootstrap`` field carries the lane's
+        own environment classification — a FAILED bootstrap is the
+        environment (infra/config), never the code, so it must never
+        become a repair candidate even though the driver exited failed."""
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="success",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=create_diff("src/app.py", "half done\n"),
+            meta={
+                "attempt_base": ATTEMPT_BASE,
+                "exit": "failed",
+                "bootstrap": "failed",
+            },
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "infrastructure"
+        assert outcome.reason.startswith("harness_bootstrap_failed")
+
+    async def test_a_healthy_bootstrap_keeps_the_code_classification(self):
+        """Only a FAILED bootstrap overrides the verdict — ``ok`` (or a
+        pre-A18 meta without the field) classifies exactly as before."""
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="success",
+        )
+        fake.seed_candidate_artifact(
+            501,
+            name=artifact_name_for(FORGE_RUN_ID),
+            diff_text=create_diff("src/app.py", "half done\n"),
+            meta={"attempt_base": ATTEMPT_BASE, "exit": "failed", "bootstrap": "ok"},
+        )
+        executor = make_executor(fake)
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
+        assert outcome.status == "failed"
+        assert outcome.failure_kind == "code"
+
     async def test_empty_diff_is_no_changes(self):
         fake = FakeGitHub()
         fake.seed_actions_run(

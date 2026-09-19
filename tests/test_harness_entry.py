@@ -1204,12 +1204,84 @@ class TestEmitCandidateMeta:
             driver="claude-code",
             model="",
             diff_file=str(staged / "candidate.diff"),
-            meta_file=str(staged / "candidate.meta.json"),
+            meta_file=str(tmp_path / "nope"),
             exit_file=str(tmp_path / "nope"),
             usage_file=str(usage_path),
         )
 
         assert meta["usage"] is None
+
+    def test_bootstrap_classification_and_profile_digest_ride_the_meta(self, tmp_path: Path):
+        """A18: the meta records the lane's environment-bootstrap
+        classification (ok|failed) and the digest of the execution profile
+        derived from THIS checkout — the executed twin of the digest the
+        gate froze into the approved spec."""
+        staged = tmp_path / "forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"diff --git\n")
+        control = tmp_path / ".forge"
+        control.mkdir()
+        (control / "bootstrap").write_text("failed\n")
+
+        meta = emit_candidate_meta(
+            run_id="d" * 32,
+            attempt_base_oid="1" * 40,
+            driver="claude-code",
+            model="",
+            diff_file=str(staged / "candidate.diff"),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(control / "exit"),
+            usage_file=str(control / "usage.json"),
+            bootstrap_file=str(control / "bootstrap"),
+            profile_digest="e" * 64,
+        )
+
+        assert meta["bootstrap"] == "failed"
+        assert meta["profile_digest"] == "e" * 64
+
+    def test_bootstrap_and_profile_degrade_to_unknown_honestly(self, tmp_path: Path):
+        """No marker file / no derivable profile: unknown stays unknown —
+        the meta still carries the (empty) fields, never a fabrication."""
+        staged = tmp_path / "forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"diff --git\n")
+
+        meta = emit_candidate_meta(
+            run_id="d" * 32,
+            attempt_base_oid="1" * 40,
+            driver="opencode",
+            model="",
+            diff_file=str(staged / "candidate.diff"),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(tmp_path / ".forge" / "exit"),
+            usage_file=str(tmp_path / ".forge" / "usage.json"),
+            bootstrap_file=str(tmp_path / ".forge" / "missing-bootstrap"),
+        )
+
+        assert meta["bootstrap"] == ""  # pre-A18 lane, no marker
+        assert meta["profile_digest"] == ""
+
+    def test_a_garbage_bootstrap_status_is_not_a_classification(self, tmp_path: Path):
+        staged = tmp_path / "forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"diff --git\n")
+        control = tmp_path / ".forge"
+        control.mkdir()
+        (control / "bootstrap").write_text("sort-of-fine\n")
+
+        meta = emit_candidate_meta(
+            run_id="r",
+            attempt_base_oid="b",
+            driver="claude-code",
+            model="",
+            diff_file=str(staged / "candidate.diff"),
+            meta_file=str(staged / "candidate.meta.json"),
+            exit_file=str(control / "exit"),
+            usage_file=str(control / "usage.json"),
+            bootstrap_file=str(control / "bootstrap"),
+        )
+
+        assert meta["bootstrap"] == ""
 
     def test_cli_emit_meta_writes_the_meta_and_exits_zero(self, tmp_path: Path, monkeypatch):
         """The workflow's emit step: staged diff + ``--emit-meta`` with the
@@ -1248,6 +1320,27 @@ class TestEmitCandidateMeta:
         assert meta["exit"] == "completed"
         assert meta["usage"]["input_tokens"] == 42
         assert meta["usage"]["completeness"] == "aggregate"
+
+    def test_cli_emit_meta_derives_the_profile_from_the_checkout(self, tmp_path: Path, monkeypatch):
+        """The emit step runs in the bare checkout: the meta's
+        profile_digest is derived from the cwd's own lock (A18) and the
+        bootstrap marker file is read from its default .forge/ path."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "uv.lock").write_text('[[package]]\nname = "ruff"\nversion = "0.15.7"\n')
+        staged = tmp_path / "forge-output"
+        staged.mkdir()
+        (staged / "candidate.diff").write_bytes(b"diff --git\n")
+        control = tmp_path / ".forge"
+        control.mkdir()
+        (control / "exit").write_text("completed\n")
+        (control / "bootstrap").write_text("ok\n")
+
+        rc = main(["--emit-meta", "--forge-run-id", "d" * 32])
+
+        assert rc == 0
+        meta = json.loads((staged / "candidate.meta.json").read_text())
+        assert meta["bootstrap"] == "ok"
+        assert re.fullmatch(r"[0-9a-f]{64}", meta["profile_digest"])
 
     def test_cli_emit_meta_fails_loud_on_a_missing_diff(self, tmp_path: Path, monkeypatch):
         """No staged diff → rc 1: the upload's if-no-files-found then turns

@@ -124,6 +124,7 @@ from forge.runs.consistency import (
 )
 from forge.runs.candidate import AttemptContext
 from forge.runs.ci_contract import classify_failure
+from forge.runs.execution_profile import derive_from_reader
 from forge.runs.harness_selection import (
     BudgetCeilings,
     HarnessSelection,
@@ -771,6 +772,20 @@ class RunService:
                 # policy, verification contract and budgets; the gate binds
                 # its digest, so /go approves exactly the bytes the run will
                 # execute.
+                # A18: derive the execution profile from the TARGET repo at
+                # freeze time — toolchain pins from its own lock, install
+                # strategy, honest ci_contract — and freeze its digest into
+                # the spec, so the gate approves the exact build/test
+                # contract the lane must run. Typed-best-effort: an
+                # unreadable lock freezes the unknown-honest record, never
+                # parks the run.
+                profile_digest = (
+                    await derive_from_reader(
+                        self._gitlab,
+                        project_id=project_id,
+                        ref=base_sha or self._target_branch(),
+                    )
+                ).profile_digest
                 spec_document = self._build_run_spec_document(
                     project_id=project_id,
                     issue_iid=issue_iid,
@@ -784,6 +799,7 @@ class RunService:
                     allowed_paths=path_scope,
                     harness_selection=harness_selection,
                     config_read=config_read,
+                    profile_digest=profile_digest,
                 )
                 spec_digest = canonical_json_digest(spec_document)
                 session.add(
@@ -4403,6 +4419,7 @@ class RunService:
         allowed_paths: list[str] | None = None,
         harness_selection: HarnessSelection | None = None,
         config_read: ConfigReadResult | None = None,
+        profile_digest: str = "",
     ) -> dict:
         """The immutable, EXECUTABLE RunSpec document (R04, ADR-0018 §1).
 
@@ -4420,6 +4437,10 @@ class RunService:
         A13: ``config_read`` freezes the path scope's provenance — the
         config read status, its ref and the content digest — so a restart
         validates against the approved snapshot instead of the live file.
+        A18: ``profile_digest`` freezes the execution profile — the
+        toolchain pins, install strategy and honest ci_contract derived
+        from the target repo (forge.runs.execution_profile) — so the gate
+        approves the exact build/test contract the lane must run.
         """
         selection = harness_selection or self._compile_harness_selection()
         backend = self._backend_name()
@@ -4461,6 +4482,7 @@ class RunService:
             config_status=str(config_read.provenance_status) if config_read else "",
             config_ref=config_read.ref if config_read else "",
             config_sha256=config_read.content_sha256 if config_read else "",
+            profile_digest=profile_digest,
         )
         return spec.to_document()
 

@@ -28,7 +28,12 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   integrity, and spend with the candidate — written into the non-hidden
   ``forge-output/`` staging directory the workflow uploads
   (upload-artifact@v4 excludes hidden files by default and drops
-  dot-directories before traversal — A08).
+  dot-directories before traversal — A08). A18 adds two additive audit
+  fields: ``bootstrap`` (the lane's environment-bootstrap classification
+  from ``.forge/bootstrap`` — a FAILED bootstrap is infrastructure/config,
+  never code repair) and ``profile_digest`` (the execution profile derived
+  from THIS checkout — :mod:`forge.runs.execution_profile` — the executed
+  twin of the digest frozen into the approved spec).
 
 Brief transport (the dispatch-input size question, decided): the lane
 FETCHES its own brief content from the forge API — the approved plan is
@@ -949,7 +954,9 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
 #: Candidate meta schema version emitted by :func:`emit_candidate_meta` and
 #: accepted by the control plane
 #: (:mod:`forge.execution.github_actions` — v1 is the historical schemaless
-#: shape, v2 adds attempt identity + a diff digest + the usage receipt).
+#: shape, v2 adds attempt identity + a diff digest + the usage receipt;
+#: A18 adds the additive ``bootstrap`` classification and the executed
+#: ``profile_digest`` audit fields without bumping the schema).
 META_SCHEMA_VERSION = 2
 
 
@@ -990,6 +997,8 @@ def emit_candidate_meta(
     meta_file: str = "forge-output/candidate.meta.json",
     exit_file: str = ".forge/exit",
     usage_file: str = ".forge/usage.json",
+    bootstrap_file: str = ".forge/bootstrap",
+    profile_digest: str = "",
 ) -> dict:
     """Build and write the v2 ``candidate.meta.json`` beside the staged diff.
 
@@ -999,12 +1008,29 @@ def emit_candidate_meta(
     digest BINDING the meta to the exact candidate.diff bytes (the control
     plane re-checks it after download), and the aggregated usage receipt
     from ``.forge/usage.json`` inlined as ``usage`` so spend reaches the
-    control plane with the candidate. Returns the written meta dict.
+    control plane with the candidate. A18 adds two additive audit fields:
+    ``bootstrap`` — the lane's environment-bootstrap classification the
+    template wrote to ``.forge/bootstrap`` (``ok`` | ``failed``; a FAILED
+    bootstrap is infrastructure/config, never code repair) — and
+    ``profile_digest`` — the sha256 of the execution profile derived from
+    THIS checkout (forge.runs.execution_profile), the executed twin of the
+    digest frozen into the approved spec. Returns the written meta dict.
     """
+    # Imported lazily: the profile module is pure stdlib, but importing it
+    # initializes the forge.runs package — never worth paying on the
+    # driver-run path, only here, in the emit step.
+    from forge.runs.execution_profile import BOOTSTRAP_STATUS_FAILED, BOOTSTRAP_STATUS_OK
+
     exit_path = Path(exit_file)
     exit_status = (
         exit_path.read_text(errors="replace").strip() if exit_path.is_file() else "unknown"
     )
+    bootstrap_path = Path(bootstrap_file)
+    bootstrap_status = (
+        bootstrap_path.read_text(errors="replace").strip() if bootstrap_path.is_file() else ""
+    )
+    if bootstrap_status not in (BOOTSTRAP_STATUS_OK, BOOTSTRAP_STATUS_FAILED):
+        bootstrap_status = ""  # unknown stays unknown — pre-A18 lanes carry no marker
     diff_bytes = Path(diff_file).read_bytes()
     meta = {
         "schema_version": META_SCHEMA_VERSION,
@@ -1014,8 +1040,10 @@ def emit_candidate_meta(
         "driver": driver,
         "model": model,
         "exit": exit_status,
+        "bootstrap": bootstrap_status,
         "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
         "usage": _load_json_object(Path(usage_file)),
+        "profile_digest": str(profile_digest or "").strip().lower(),
     }
     output = Path(meta_file)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1055,6 +1083,11 @@ def main(argv: list[str] | None = None) -> int:
         "--meta-file",
         default="forge-output/candidate.meta.json",
         help="candidate meta output path for --emit-meta",
+    )
+    parser.add_argument(
+        "--bootstrap-file",
+        default=".forge/bootstrap",
+        help="lane environment-bootstrap status file for --emit-meta (ok|failed)",
     )
     parser.add_argument(
         "--render-brief",
@@ -1240,6 +1273,23 @@ def main(argv: list[str] | None = None) -> int:
         # not a driver invocation); a missing diff fails LOUD (rc 1) so the
         # upload's if-no-files-found turns it into an infrastructure-class
         # lane failure instead of a silent partial artifact.
+        # A18: the executed execution profile is derived from THIS checkout
+        # and its digest rides the meta — the honest twin of the digest the
+        # gate froze into the approved spec. Best-effort: a derivation
+        # failure degrades to an empty digest, never fails the emit step.
+        profile_digest = ""
+        try:
+            from forge.runs.execution_profile import (
+                LocalRepoSource,
+                derive_from_repo as _derive_profile,
+            )
+
+            profile_digest = _derive_profile(LocalRepoSource(Path.cwd())).profile_digest
+        except Exception as exc:  # noqa: BLE001 — audit metadata, never lane-fatal
+            print(
+                f"harness_entry: execution profile unavailable ({exc}) — meta carries no digest",
+                file=sys.stderr,
+            )
         try:
             emit_candidate_meta(
                 run_id=args.forge_run_id or "",
@@ -1250,6 +1300,8 @@ def main(argv: list[str] | None = None) -> int:
                 meta_file=args.meta_file,
                 exit_file=str(exit_file),
                 usage_file=args.usage_file,
+                bootstrap_file=args.bootstrap_file,
+                profile_digest=profile_digest,
             )
         except OSError as exc:
             print(f"harness_entry: emit-meta failed ({exc})", file=sys.stderr)

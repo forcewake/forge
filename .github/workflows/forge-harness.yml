@@ -167,7 +167,19 @@ jobs:
           # repo for it (pinned; telemetry off; local exclude above).
           FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
         run: |
-          pip install "forge @ git+https://github.com/forcewake/forge@main"
+          # A18 environment classification: a FAILED environment bootstrap
+          # is lane INFRASTRUCTURE/CONFIG — the environment never matched
+          # the approved execution profile — and is classified
+          # infrastructure (blocked), never a code-repair candidate. The
+          # classification is mechanical: this step writes
+          # .forge/bootstrap (ok|failed) for the candidate meta and echoes
+          # the FORGE_BOOTSTRAP_FAILED marker into the job log (the
+          # control plane's log classifier carries it).
+          pip install "forge @ git+https://github.com/forcewake/forge@main" || {
+            echo "failed" > .forge/bootstrap
+            echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
+            exit 1
+          }
           # The brief's quality bar tells the agent to run the tests — the
           # lane must carry the tooling for that (LIVE-found: bare hosted
           # python has no pytest, and the agent burned turns on denied
@@ -185,8 +197,20 @@ jobs:
           # lock-less repos: minimal pip toolchain.
           if [ -f uv.lock ]; then
             pip install uv || true
-            uv sync --frozen || pip install ${RUFF_VER:+ruff==${RUFF_VER}} ${PYTEST_VER:+pytest==${PYTEST_VER}} || true
+            # Deterministic install (A18): --frozen materializes EXACTLY the
+            # repo's lock — the same build/test contract target CI runs,
+            # never a lane-time re-resolution. On failure the pinned minimal
+            # toolchain still installs so the lane can finish and report the
+            # bootstrap failure honestly (classification above).
+            if uv sync --frozen; then
+              echo "ok" > .forge/bootstrap
+            else
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: uv sync --frozen could not materialize the locked environment (infrastructure/config, never code repair)"
+              pip install ${RUFF_VER:+ruff==${RUFF_VER}} ${PYTEST_VER:+pytest==${PYTEST_VER}} || true
+            fi
           else
+            echo "ok" > .forge/bootstrap
             pip install ${RUFF_VER:+ruff==${RUFF_VER}} || pip install "ruff>=0.4" || true
             pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
           fi
@@ -262,10 +286,13 @@ jobs:
             > forge-output/candidate.diff || true
           # Meta schema v2 (schema_version, run + GitHub attempt identity,
           # sha256 digest binding the meta to the exact diff bytes, usage
-          # receipt) is built by the same pinned forge the lane runs — one
-          # schema, one test suite, never a heredoc copy of it. The
-          # .forge/usage.json receipt rides INSIDE the meta so usage
-          # reaches the control plane with the candidate (R23).
+          # receipt; A18 adds the additive `bootstrap` classification and
+          # the executed execution-profile `profile_digest` fields) is
+          # built by the same pinned
+          # forge the lane runs — one schema, one test suite, never a
+          # heredoc copy of it. The .forge/usage.json receipt rides INSIDE
+          # the meta so usage reaches the control plane with the candidate
+          # (R23).
           python -m forge.harness_entry --emit-meta \
             --forge-run-id "${{ inputs.run_id }}" \
             --attempt-base-oid "${{ inputs.attempt_base_oid }}" \

@@ -83,7 +83,11 @@ _ACTIVE_JOB_STATUSES = frozenset(
 )
 
 #: Trace substrings meaning the harness could not run at all (auth, quota,
-#: connectivity): infrastructure, never code (ADR-0015).
+#: connectivity): infrastructure, never code (ADR-0015). A18 adds the
+#: lane's environment-bootstrap failure marker (forge.runs.execution_profile.
+#: FORGE_BOOTSTRAP_FAILED_MARKER, lowercased in job logs): a bootstrap that
+#: cannot materialize the approved execution profile is infrastructure/
+#: config — never a code-repair candidate.
 _HARNESS_INFRASTRUCTURE_PATTERNS: tuple[str, ...] = (
     "unauthorized",
     "invalid api key",
@@ -96,6 +100,7 @@ _HARNESS_INFRASTRUCTURE_PATTERNS: tuple[str, ...] = (
     "permission denied",
     "could not resolve host",
     "connection refused",
+    "forge_bootstrap_failed",
 )
 
 

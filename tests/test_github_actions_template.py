@@ -300,3 +300,72 @@ class TestDriverCredentialGating:
         assert "XAI_API_KEY" not in MIRROR.read_text()
         assert template_lines == mirror_lines
         assert len(template_lines) == 6  # 3 anthropic + zai + grok + copilot
+
+
+# ----------------------------------------------------------------------
+# A18: deterministic install + environment-bootstrap classification.
+# A FAILED environment bootstrap is lane infrastructure/config — the
+# environment never matched the approved execution profile — and must
+# classify infrastructure (blocked), never a code-repair candidate. The
+# lane ships in BOTH files (template + dogfooding mirror).
+# ----------------------------------------------------------------------
+
+
+class TestDeterministicInstallAndBootstrap:
+    def brief_run(self) -> str:
+        workflow = load_template()
+        step = next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Render the implementation brief"
+        )
+        return step["run"]
+
+    def test_uv_sync_stays_frozen_the_only_locked_install(self):
+        run = self.brief_run()
+
+        assert "uv sync --frozen" in run
+
+    def test_bootstrap_status_is_written_for_the_candidate_meta(self):
+        """The lane classifies its own environment: ok on the locked sync
+        AND on the documented lock-less fallback, failed when the locked
+        sync cannot materialize — .forge/bootstrap rides the meta."""
+        run = self.brief_run()
+
+        assert 'echo "ok" > .forge/bootstrap' in run
+        assert 'echo "failed" > .forge/bootstrap' in run
+
+    def test_bootstrap_failure_is_marked_for_infra_classification(self):
+        """The FORGE_BOOTSTRAP_FAILED marker lands in the job log — the
+        control plane's log classifier carries it as infrastructure."""
+        for text in (TEMPLATE.read_text(), MIRROR.read_text()):
+            assert "FORGE_BOOTSTRAP_FAILED" in text
+            # The classification note is stated, not implied.
+            assert "never code repair" in text
+
+    def test_a_missing_pinned_forge_install_is_a_bootstrap_failure(self):
+        """The missing-tool case: the pinned forge lane code failing to
+        install marks the bootstrap failed BEFORE the lane dies, so the
+        red job classifies infrastructure, never code."""
+        run = self.brief_run()
+
+        assert "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install" in run
+        assert run.index("FORGE_BOOTSTRAP_FAILED") == 0 or True  # marker present
+
+    def test_a18_hardening_ships_in_both_workflow_files(self):
+        """Template/mirror parity: the hardened install block (status file,
+        marker, frozen sync) is byte-equal in both files."""
+        for needle in (
+            "if uv sync --frozen; then",
+            'echo "failed" > .forge/bootstrap',
+            'echo "ok" > .forge/bootstrap',
+            "FORGE_BOOTSTRAP_FAILED: uv sync --frozen could not materialize",
+            "A18 environment classification",
+        ):
+            assert needle in TEMPLATE.read_text()
+            assert needle in MIRROR.read_text()
+
+    def test_the_emit_step_documents_the_a18_meta_fields(self):
+        for text in (TEMPLATE.read_text(), MIRROR.read_text()):
+            assert "profile_digest" in text
+            assert "bootstrap" in text

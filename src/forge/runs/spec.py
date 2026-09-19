@@ -179,6 +179,16 @@ class ExecutableRunSpec:
     config_status: str = ""
     config_ref: str = ""
     config_sha256: str = ""
+    # A18: the frozen execution profile digest — sha256 over the canonical
+    # record :class:`forge.runs.execution_profile.ExecutionProfile` derived
+    # from the TARGET repo at freeze time (toolchain pins from its lock, the
+    # install strategy, the honest ci_contract, the lane capability axes).
+    # The gate approves exactly this execution contract; the lane echoes the
+    # digest of the profile it ACTUALLY ran into the candidate meta, so a
+    # drift between approved and executed is a comparable pair. Additive
+    # (defaulted, like the R13 ceilings): pre-A18 documents carry no key and
+    # parse unchanged.
+    profile_digest: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.schema_version, int) or (
@@ -241,6 +251,10 @@ class ExecutableRunSpec:
                 raise SpecInvalid("a valid config provenance must carry its read ref")
         if self.config_status == "confirmed_absent" and self.config_sha256:
             raise SpecInvalid("a confirmed-absent config has no content digest")
+        # A18: the profile digest is optional (pre-A18 documents) but never
+        # partially-formed — present, it must be the sha256 it claims.
+        if self.profile_digest:
+            _digest_or_invalid(self.profile_digest, "profile_digest")
 
     # -- construction ------------------------------------------------------
 
@@ -279,6 +293,7 @@ class ExecutableRunSpec:
         config_status: str = "",
         config_ref: str = "",
         config_sha256: str = "",
+        profile_digest: str = "",
     ) -> ExecutableRunSpec:
         """Freeze the executable spec from plan-time values (F14, R04).
 
@@ -323,6 +338,7 @@ class ExecutableRunSpec:
             config_status=str(config_status or "").strip(),
             config_ref=str(config_ref or "").strip(),
             config_sha256=str(config_sha256 or "").strip().lower(),
+            profile_digest=str(profile_digest or "").strip().lower(),
         )
 
     @classmethod
@@ -383,6 +399,11 @@ class ExecutableRunSpec:
                 config_status=str(_config_provenance(document).get("status") or "").strip(),
                 config_ref=str(_config_provenance(document).get("ref") or "").strip(),
                 config_sha256=str(_config_provenance(document).get("sha256") or "").strip().lower(),
+                # A18: same additive convention — the frozen execution
+                # profile digest (absent on pre-A18 documents).
+                profile_digest=str(_execution_profile(document).get("digest") or "")
+                .strip()
+                .lower(),
             )
         except (ValueError, TypeError) as exc:
             # Numeric fields with non-numeric garbage etc. — still a corrupt
@@ -466,6 +487,11 @@ class ExecutableRunSpec:
                 "ref": self.config_ref,
                 **({"sha256": self.config_sha256} if self.config_sha256 else {}),
             }
+        # A18: the frozen execution profile digest rides its own additive
+        # section (absent on pre-A18 documents — the record itself lives in
+        # forge.runs.execution_profile; the spec pins its digest).
+        if self.profile_digest:
+            document["execution_profile"] = {"digest": self.profile_digest}
         return document
 
     @property
@@ -492,6 +518,20 @@ def _config_provenance(document: dict) -> dict:
         return {}
     if not isinstance(section, dict):
         raise SpecInvalid("spec project_config section is malformed")
+    return section
+
+
+def _execution_profile(document: dict) -> dict:
+    """The optional A18 ``execution_profile`` section (the digest wrapper).
+
+    Absent → ``{}`` (pre-A18 documents parse unchanged); present but not
+    an object → a corrupt spec (``SpecInvalid``), never a silent drop.
+    """
+    section = document.get("execution_profile")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise SpecInvalid("spec execution_profile section is malformed")
     return section
 
 

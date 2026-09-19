@@ -42,6 +42,7 @@ from forge.runs.backends import (
     HarnessOutcome,
 )
 from forge.runs.candidate import CandidateError, HarnessUsage, parse_unified_diff
+from forge.runs.execution_profile import bootstrap_failed
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +399,18 @@ class GitHubActionsExecutor:
             )
 
         if driver_exit != "completed":
+            # A18: a FAILED environment bootstrap is lane infrastructure/
+            # config — the environment never matched the approved execution
+            # profile, which is never the code's fault and never a repair
+            # candidate. The meta's additive ``bootstrap`` field carries the
+            # lane's own classification; it overrides the code verdict.
+            if bootstrap_failed(meta):
+                detail = " with no changes" if bundle.is_empty else ""
+                return HarnessOutcome.failed(
+                    "infrastructure",
+                    f"harness_bootstrap_failed (driver exit={driver_exit}{detail})",
+                    usage=usage,
+                )
             # The driver itself reported failure: never adopt a possibly
             # partial working tree, whatever it managed to change — and
             # still report what the attempt cost (R23).
