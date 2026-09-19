@@ -80,6 +80,18 @@ _META_SCHEMA_VERSIONS = frozenset({1, 2})
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "in_progress", "pending", "requested", "waiting"})
 
 
+#: GitHub's artifact API indexes an artifact a few seconds AFTER the run
+#: completes (LIVE-found: a poll in the same second as workflow completion
+#: saw an empty list and the run was blocked harness_artifact_missing even
+#: though the artifact landed moments later). Bounded grace before giving
+#: up, checked against the run's updated_at.
+ARTIFACT_APPEAR_GRACE_SECONDS = 300
+
+#: How often (seconds) an un-indexed artifact may be re-polled inside the
+#: grace window - the reconciler cadence governs the wall clock.
+ARTIFACT_REPOLL_INTERVAL_SECONDS = 20
+
+
 def artifact_name_for(run_id: str) -> str:
     """The candidate artifact name for *run_id* (template contract)."""
     return f"{ARTIFACT_NAME_PREFIX}{run_id}"
@@ -269,13 +281,14 @@ class GitHubActionsExecutor:
             )
             return HarnessOutcome.running()
 
+        self._last_updated_at = str(run.get("updated_at") or "")
         status = str(run.get("status") or "").lower()
         if status in _ACTIVE_RUN_STATUSES or status == "":
             return self._deadline_outcome(handle, now)
 
         conclusion = str(run.get("conclusion") or "").lower()
         if conclusion == "success":
-            return await self._collect_candidate(handle)
+            return await self._collect_candidate(handle, now=now)
         if conclusion in {"cancelled", "skipped", "stale"}:
             # External cancellation is not the code's fault (ADR-0015). A
             # CANCELLED lane still ran — cancel-in-progress supersession is
@@ -312,7 +325,9 @@ class GitHubActionsExecutor:
             return HarnessOutcome.failed("infrastructure", "harness_timeout")
         return HarnessOutcome.running()
 
-    async def _collect_candidate(self, handle: ActionsHandle) -> HarnessOutcome:
+    async def _collect_candidate(
+        self, handle: ActionsHandle, *, now: datetime
+    ) -> HarnessOutcome:
         """Artifact → CandidateBundle (ADR-0016 parse path) → change_candidate.
 
         The attempt base compared against the artifact's meta comes from the
@@ -331,9 +346,21 @@ class GitHubActionsExecutor:
             None,
         )
         if artifact is None:
-            # Retention expired before collection, or the upload never ran —
-            # both mean the candidate is gone (research §2).
-            return HarnessOutcome.failed("code", "harness_artifact_missing")
+            # Not indexed YET vs gone forever: inside a grace window after
+            # workflow completion keep the run waiting (the reconciler
+            # re-polls); past it, the artifact is genuinely missing -
+            # delivery infrastructure, not the code's fault (LIVE-found:
+            # a poll in the same second as workflow completion saw an
+            # empty list and blocked the run).
+            completed_at = _parse_started_at(str(self._last_updated_at or ""))
+            if completed_at is None or _aware(now) - completed_at < timedelta(
+                seconds=ARTIFACT_APPEAR_GRACE_SECONDS
+            ):
+                return HarnessOutcome.running()
+            return HarnessOutcome.failed(
+                "infrastructure",
+                "harness_artifact_missing: not indexed within the grace window",
+            )
         if artifact.get("expired") is True:
             return HarnessOutcome.failed("infrastructure", "harness_candidate_expired")
         declared = artifact.get("size_in_bytes")

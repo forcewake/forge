@@ -300,7 +300,7 @@ class TestPoll:
         assert outcome.status == "failed"
         assert outcome.reason.startswith("harness_attempt_base_mismatch")
 
-    async def test_missing_artifact_is_reported(self):
+    async def test_missing_artifact_inside_grace_keeps_waiting(self):
         fake = FakeGitHub()
         fake.seed_actions_run(
             run_id=501,
@@ -313,8 +313,32 @@ class TestPoll:
 
         outcome = await executor.poll(make_handle(run_id=501))
 
+        # A16/A01 race: the artifact API indexes an artifact a few seconds
+        # after workflow completion - a poll in the same second sees an
+        # empty list and must KEEP WAITING, not block the run.
+        assert outcome.status == "running"
+
+    async def test_missing_artifact_after_grace_is_infra(self):
+        fake = FakeGitHub()
+        fake.seed_actions_run(
+            run_id=501,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="completed",
+            conclusion="success",
+        )
+        executor = make_executor(fake)
+        # Age the run's updated_at past the grace window: the executor
+        # reads it from the run payload, so the fake's stored run is aged.
+        old_stamp = (
+            datetime.now(timezone.utc) - timedelta(seconds=301)
+        ).isoformat()
+        fake.actions_runs[-1]["updated_at"] = old_stamp
+
+        outcome = await executor.poll(make_handle(run_id=501))
+
         assert outcome.status == "failed"
-        assert outcome.reason == "harness_artifact_missing"
+        assert "harness_artifact_missing" in outcome.reason
 
     async def test_driver_failure_exit_is_never_adopted(self):
         fake = FakeGitHub()

@@ -279,7 +279,7 @@ def _seed_branch(task: CohortTask, repo: str) -> None:
         def git(*argv: str) -> None:
             _git(seed_dir, *argv)
 
-        git("init", "--branch", "main")
+        git("init", "-b", "main")  # -b: git >= 2.28; --branch is not a git init option
         git("add", ".")
         git(
             "-c",

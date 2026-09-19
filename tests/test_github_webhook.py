@@ -682,3 +682,116 @@ class TestPayloadCapture:
         response = await client.post("/webhook/github", content=body, headers=headers)
         assert response.status_code == 200
         assert list(app.state.capture_dir.glob("*ping*.json"))
+
+
+class TestGitHubBotLoginLoopGuard:
+    """The bot-loop drop must match FORGE_GITHUB_BOT_LOGIN, not only
+    FORGE_BOT_USERNAME (LIVE regression, #67).
+
+    GitHub App comments are authored by e.g. ``forcewake-forge[bot]`` —
+    a login that never equals the GitLab-era ``FORGE_BOT_USERNAME`` — so
+    the bot's own note containing ``/implement`` was parsed as a command
+    and created a phantom run. Both the comment path and the labeled path
+    now drop when the author matches EITHER setting. The task queue stays
+    an AsyncMock: this pins the gateway drop, not the executor.
+    """
+
+    BOT_LOGIN = "forcewake-forge[bot]"
+
+    async def test_bot_login_comment_does_not_create_a_run(self, tmp_path):
+        """An issue_comment authored by the GitHub App bot login carrying a
+        bare ``/implement`` command is dropped BEFORE any run is created."""
+        reset_engine()
+        application = create_app(
+            settings=github_settings(tmp_path, FORGE_GITHUB_BOT_LOGIN=self.BOT_LOGIN)
+        )
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    payload = json.loads(load_payload("issue_comment_created.json"))
+                    payload["comment"]["body"] = "/implement Add a thing"
+                    payload["comment"]["user"]["login"] = self.BOT_LOGIN
+                    payload["sender"]["login"] = self.BOT_LOGIN
+                    body = json.dumps(payload).encode()
+                    response = await ac.post(
+                        "/webhook/github", content=body, headers=signed_headers(body)
+                    )
+
+                assert response.status_code == 200
+                assert response.json() == {"status": "skipped", "reason": "bot-loop"}
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert inbox == []
+                assert steps == []
+                application.state.task_queue.submit.assert_not_awaited()
+        finally:
+            reset_engine()
+
+    async def test_app_bot_login_label_event_does_not_create_a_run(self, tmp_path):
+        """An issues.labeled delivery whose SENDER is the GitHub App bot
+        login is dropped before the trigger label is normalized."""
+        reset_engine()
+        application = create_app(
+            settings=github_settings(tmp_path, FORGE_GITHUB_BOT_LOGIN=self.BOT_LOGIN)
+        )
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    payload = json.loads(load_payload("issues_labeled.json"))
+                    payload["label"]["name"] = "Forge"
+                    payload["sender"]["login"] = self.BOT_LOGIN
+                    body = json.dumps(payload).encode()
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    response = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert response.status_code == 200
+                assert response.json() == {"status": "skipped", "reason": "bot-loop"}
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert inbox == []
+                assert steps == []
+                application.state.task_queue.submit.assert_not_awaited()
+        finally:
+            reset_engine()
+
+    async def test_human_actor_label_event_still_creates_a_run(self, tmp_path):
+        """The guard is not over-broad: with the same FORGE_GITHUB_BOT_LOGIN
+        configured, a human labeler still takes the durable run path."""
+        reset_engine()
+        application = create_app(
+            settings=github_settings(tmp_path, FORGE_GITHUB_BOT_LOGIN=self.BOT_LOGIN)
+        )
+        try:
+            async with application.router.lifespan_context(application):
+                application.state.task_queue = AsyncMock()
+                application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+                transport = ASGITransport(app=application)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    payload = json.loads(load_payload("issues_labeled.json"))
+                    payload["label"]["name"] = "Forge"
+                    payload["sender"]["login"] = "alice"
+                    body = json.dumps(payload).encode()
+                    headers = signed_headers(body)
+                    headers["X-GitHub-Event"] = "issues"
+                    response = await ac.post("/webhook/github", content=body, headers=headers)
+
+                assert response.status_code == 202
+                assert response.json()["run_command"] is True
+                async with application.state.session_factory() as session:
+                    inbox = (await session.execute(select(EventInbox))).scalars().all()
+                    steps = (await session.execute(select(StepRun))).scalars().all()
+                assert len(inbox) == 1
+                assert len(steps) == 1
+                assert steps[0].status == "scheduled"
+                assert inbox[0].payload["author_username"] == "alice"
+        finally:
+            reset_engine()

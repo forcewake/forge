@@ -598,6 +598,7 @@ class FakeGitHub:
         conclusion: str | None = None,
         event: str = "workflow_dispatch",
         created_at: datetime | None = None,
+        updated_at: datetime | None = None,
         workflow_name: str = "forge-harness",
     ) -> dict:
         run = {
@@ -609,6 +610,7 @@ class FakeGitHub:
             "head_branch": head_branch,
             "head_sha": head_sha,
             "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
+            "updated_at": (updated_at or datetime.now(timezone.utc)).isoformat(),
         }
         self.actions_runs.append(run)
         return dict(run)
