@@ -2796,6 +2796,15 @@ class RunService:
             await self._to_terminal(run_id, FlowStatus.BLOCKED, f"spec_invalid: {exc}")
             return
         profile = VerificationProfile(required_jobs=spec.required_jobs)
+        # ADR-0027 slice 2: this lane deliberately does NOT call the shared
+        # ObserveVerification use case (forge.runs.usecases) — a finished
+        # pipeline with a missing required job blocks here (quality
+        # contract), while the A01 lanes keep waiting on unproven checks;
+        # and an empty profile is honestly unverified here, whereas the A01
+        # empty-contract rule makes every observed check required. The
+        # structural reasons live in the forge.runs.usecases docstring; the
+        # shared verdict vocabulary (VerificationResult / ready_evidence /
+        # ready_reason) is what this lane joins at.
 
         candidate_sha = candidate_shas[-1] if candidate_shas else None
         if not candidate_sha:

@@ -186,8 +186,13 @@ from forge.runs.verification import (
     GITHUB_SUCCESS_CONCLUSIONS,
     PRODUCER_GITHUB_CHECKS,
     VERIFICATION_INFRA_REASON,
-    evaluate_positive_proof,
     waived_conclusions_from_settings,
+)
+from forge.runs.usecases import (
+    OUTCOME_BLOCK,
+    OUTCOME_REPAIR,
+    OUTCOME_WAIT,
+    observe_verification,
 )
 from forge.runs.service import (
     _CANCEL_RE,
@@ -3620,6 +3625,12 @@ class GitHubRunService:
         contract this gate enforces. A missing/tampered spec blocks the run
         (``spec_invalid``); a legacy v2 spec parks
         ``spec_legacy: re-approval required``.
+
+        ADR-0027 slice 2: the verdict semantics are the ONE shared
+        ObserveVerification use case (:mod:`forge.runs.usecases`); this
+        adapter fetches the native evidence, normalizes it (lane exclusion,
+        newest-attempt ordering, conclusion vocabulary) and applies the
+        decision with GitHub's situational wording.
         """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
@@ -3670,6 +3681,11 @@ class GitHubRunService:
         # the run's `path`), never by the mutable display name.
         harness_workflow = spec.harness_workflow
         checks = [r for r in runs if not _harness_lane_run(r, harness_workflow)]
+        has_pending = any((c.get("status") or "") != "completed" for c in checks)
+        # The adapter-normalized input (empty observations = the no-CI form).
+        observations: dict[str, str | None]
+        surface: tuple[dict, ...]
+        subject_head_oid: str
 
         if not checks:
             # RACE GUARD: a just-opened PR's checks take a few seconds to
@@ -3682,104 +3698,92 @@ class GitHubRunService:
             grace = 120 if _raw is None else int(_raw)
 
             started = as_aware_utc(started) if started is not None else None
-            now = as_aware_utc(now)
-            if started is not None and (now - started).total_seconds() < grace:
+            now_aware = as_aware_utc(now)
+            if started is not None and (now_aware - started).total_seconds() < grace:
                 return  # keep waiting — checks may still register
-            # No independent CI configured on this repo — proceed to review
-            # as honestly unverified (R02: never presented as verified).
-            verification_fragment = ready_evidence(
-                False,
-                candidate_sha,
-                PRODUCER_GITHUB_CHECKS,
-                summary="no CI checks configured for the candidate commit",
-                status="not_configured",
-            )
-            await self._merge_run_evidence(
-                run_id,
-                {"verification": verification_fragment},
-            )
+            # No independent CI configured on this repo — fall through with
+            # empty observations: the use case records the honest
+            # not_configured verdict (R02) and walks the run to review.
             logger.info("No CI checks configured for %s — review as unverified", run_id[:8])
-            async with self._session_factory() as session:
-                controller = Controller(session)
-                await controller.transition(
-                    run_id,
-                    FlowStatus.EVALUATING_CI,
-                    reason="no CI configured — unverified",
+            observations = {}
+            surface = ()
+            subject_head_oid = ""
+        else:
+            if has_pending:
+                # Bounded (R17): the deadline itself is enforced pre-I/O above —
+                # a checks API that never answers cannot hold the run forever.
+                return
+
+            # A01 positive-proof normalization: the newest attempt of each
+            # check is the authoritative observation, and the tested oid is
+            # the head sha the PROVIDER verified (every listed run carries
+            # head_sha == candidate).
+            ordered = sorted(checks, key=_run_order_key, reverse=True)
+            observations = {}
+            for workflow_run in ordered:
+                observations.setdefault(
+                    str(workflow_run.get("name") or "check"),
+                    str(workflow_run.get("conclusion") or "") or None,
                 )
-                await session.commit()
-            await self._review_and_ready(
-                run_id,
-                project_id=run.project_id,
-                issue_number=issue_number,
-                pr_number=run.mr_iid or 0,
-                candidate_sha=candidate_sha,
-                base_sha=run.base_sha or "",
-                verified=False,
-                verification_evidence=verification_fragment,
+            surface = tuple(
+                {
+                    "name": str(workflow_run.get("name") or "check"),
+                    "conclusion": str(workflow_run.get("conclusion") or "") or None,
+                    # A01: the FULL check identity rides the surface — the native
+                    # run id and the attempt that produced this conclusion (the
+                    # verified sha itself is the fragment-level ``tested_oid``).
+                    **({"run_id": _run_int(workflow_run, "id")} if workflow_run.get("id") else {}),
+                    **(
+                        {"attempt": _run_int(workflow_run, "run_attempt")}
+                        if workflow_run.get("run_attempt")
+                        else {}
+                    ),
+                }
+                for workflow_run in ordered
             )
-            return
+            subject_head_oid = str(ordered[0].get("head_sha") or "")
 
-        pending = [c for c in checks if (c.get("status") or "") != "completed"]
-        if pending:
-            # Bounded (R17): the deadline itself is enforced pre-I/O above —
-            # a checks API that never answers cannot hold the run forever.
-            return
-
-        # A01 positive proof: the newest attempt of each check is the
-        # authoritative observation; the required list comes from the FROZEN
-        # spec (never live settings), and the tested oid is the head sha the
-        # PROVIDER verified (every listed run carries head_sha == candidate).
-        ordered = sorted(checks, key=_run_order_key, reverse=True)
-        observations: dict[str, str | None] = {}
-        for workflow_run in ordered:
-            observations.setdefault(
-                str(workflow_run.get("name") or "check"),
-                str(workflow_run.get("conclusion") or "") or None,
-            )
-        tested_oid = str(ordered[0].get("head_sha") or "") or candidate_sha
-        proof = evaluate_positive_proof(
-            spec.required_jobs,
-            observations,
+        # ADR-0027 slice 2: the verdict semantics are the ONE shared
+        # ObserveVerification use case (forge.runs.usecases) — the adapter
+        # supplied the normalized observations/surface and GitHub's
+        # conclusion vocabulary; the required-checks contract rides frozen
+        # in the spec.
+        decision = observe_verification(
+            spec=spec,
+            provider=PRODUCER_GITHUB_CHECKS,
+            observations=observations,
+            candidate_sha=candidate_sha,
+            subject_head_oid=subject_head_oid,
+            surface=surface,
+            pending=has_pending,
             success_conclusions=GITHUB_SUCCESS_CONCLUSIONS,
             code_failure_conclusions=GITHUB_CODE_FAILURE_CONCLUSIONS,
             infra_conclusions=GITHUB_INFRA_CONCLUSIONS,
             waived_conclusions=waived_conclusions_from_settings(self._settings),
-        )
-        surface = tuple(
-            {
-                "name": str(workflow_run.get("name") or "check"),
-                "conclusion": str(workflow_run.get("conclusion") or "") or None,
-                # A01: the FULL check identity rides the surface — the native
-                # run id and the attempt that produced this conclusion (the
-                # verified sha itself is the fragment-level ``tested_oid``).
-                **({"run_id": _run_int(workflow_run, "id")} if workflow_run.get("id") else {}),
-                **(
-                    {"attempt": _run_int(workflow_run, "run_attempt")}
-                    if workflow_run.get("run_attempt")
-                    else {}
-                ),
-            }
-            for workflow_run in ordered
+            now=now,
         )
 
-        if proof.infra_failures:
+        if decision.verdict is not None:
+            # ADR-0027: the unified R02 evidence shape (one key set on every
+            # provider — ``tested_oid`` is the sha the provider verified).
+            await self._merge_run_evidence(run_id, {"verification": decision.evidence()})
+
+        if decision.outcome == OUTCOME_WAIT:
+            if decision.verdict is not None:
+                logger.info(
+                    "Run %s required checks unproven (%s) — keeping it waiting",
+                    run_id[:8],
+                    decision.verdict.summary,
+                )
+            # A pending/unproven run keeps waiting (the R17 deadline is the
+            # bound); the recorded unknown verdict is never a green check.
+            return
+
+        if decision.outcome == OUTCOME_BLOCK:
             # A cancelled/timed_out workflow run is evidence the EXECUTION
             # died — infrastructure, never a code failure. The repair budget
             # is for code failures only; the run blocks visibly instead.
-            names = ", ".join(proof.infra_failures)
-            await self._merge_run_evidence(
-                run_id,
-                {
-                    "verification": ready_evidence(
-                        False,
-                        tested_oid,
-                        PRODUCER_GITHUB_CHECKS,
-                        summary=f"checks cancelled or timed out: {names}",
-                        status="unknown",
-                        surface=surface,
-                    )
-                },
-            )
+            names = ", ".join(decision.failing)
             await self._to_terminal(
                 run_id,
                 FlowStatus.BLOCKED,
@@ -3788,11 +3792,11 @@ class GitHubRunService:
             )
             return
 
-        if proof.code_failures:
+        if decision.outcome == OUTCOME_REPAIR:
             # ADR-0008: only a conclusion that blames the change drives the
             # bounded repair loop (required checks prove, optional ones
             # neither block nor substitute — A01).
-            names = ", ".join(proof.code_failures)
+            names = ", ".join(decision.failing)
             await self._begin_repair(
                 run_id,
                 project_id=run.project_id,
@@ -3802,50 +3806,14 @@ class GitHubRunService:
             )
             return
 
-        if proof.unproven:
-            # Required checks absent/skipped/neutral (unwaived): NO proof —
-            # a green optional workflow never substitutes. The verdict is
-            # honestly unknown and the run keeps waiting (a late check may
-            # still register); the R17 deadline is the bound.
-            await self._merge_run_evidence(
-                run_id,
-                {
-                    "verification": ready_evidence(
-                        False,
-                        tested_oid,
-                        PRODUCER_GITHUB_CHECKS,
-                        summary=proof.summary(),
-                        status="unknown",
-                        surface=surface,
-                    )
-                },
-            )
-            logger.info(
-                "Run %s required checks unproven (%s) — keeping it waiting",
-                run_id[:8],
-                proof.summary(),
-            )
-            return
-
-        # ADR-0027: the unified R02 evidence shape (one key set on every
-        # provider — ``tested_oid`` is the sha the provider verified).
-        verification_fragment = ready_evidence(
-            True,
-            tested_oid,
-            PRODUCER_GITHUB_CHECKS,
-            summary="required checks succeeded for the tested sha",
-            surface=surface,
-        )
-        await self._merge_run_evidence(
-            run_id,
-            {"verification": verification_fragment},
-        )
+        # OUTCOME_REVIEW: the gate concluded — evaluating_ci, then the review
+        # leg (verified, or honestly unverified when no CI is configured).
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(
                 run_id,
                 FlowStatus.EVALUATING_CI,
-                reason="required checks passed",
+                reason=decision.reason,
             )
             await session.commit()
         await self._review_and_ready(
@@ -3855,8 +3823,8 @@ class GitHubRunService:
             pr_number=run.mr_iid or 0,
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
-            verified=True,
-            verification_evidence=verification_fragment,
+            verified=decision.verified,
+            verification_evidence=decision.evidence(),
         )
 
     async def resume_verification(self, run_id: str) -> None:

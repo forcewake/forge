@@ -199,8 +199,13 @@ from forge.runs.verification import (
     AZURE_SUCCESS_RESULTS,
     PRODUCER_AZURE_BUILD,
     VERIFICATION_INFRA_REASON,
-    evaluate_positive_proof,
     waived_conclusions_from_settings,
+)
+from forge.runs.usecases import (
+    OUTCOME_BLOCK,
+    OUTCOME_REPAIR,
+    OUTCOME_WAIT,
+    observe_verification,
 )
 from forge.runs.service import (
     _CANCEL_RE,
@@ -3543,6 +3548,12 @@ class AzureRunService:
         this gate enforces. A missing/tampered spec blocks the run
         (``spec_invalid``); a legacy v2 spec parks
         ``spec_legacy: re-approval required``.
+
+        ADR-0027 slice 2: the verdict semantics are the ONE shared
+        ObserveVerification use case (:mod:`forge.runs.usecases`); this
+        adapter fetches the native builds, normalizes them (lane exclusion,
+        newest-build ordering, result vocabulary) and applies the decision
+        with Azure DevOps's situational wording.
         """
         now = now or datetime.now(timezone.utc)
         spec = await self._spec_or_block(run_id)
@@ -3590,6 +3601,12 @@ class AzureRunService:
             logger.exception("Builds read failed for %s — keeping it waiting", run_id[:8])
             return
 
+        has_pending = any(str(b.get("status") or "") in _ACTIVE_BUILD_STATUSES for b in builds)
+        # The adapter-normalized input (empty observations = the no-CI form).
+        observations: dict[str, str | None]
+        surface: tuple[dict, ...]
+        subject_head_oid: str
+
         if not builds:
             # RACE GUARD: a just-pushed branch's CI build takes a few seconds
             # to queue (branch policies create the validation build on PR
@@ -3601,91 +3618,82 @@ class AzureRunService:
             now_aware = as_aware_utc(now)
             if started is not None and (now_aware - started).total_seconds() < grace:
                 return  # keep waiting — builds may still queue
-            # No CI build ran for this candidate — proceed to review as
-            # honestly unverified (R02: never presented as verified).
-            verification_fragment = ready_evidence(
-                False,
-                candidate_sha,
-                PRODUCER_AZURE_BUILD,
-                summary="no CI build ran for the candidate commit",
-                status="not_configured",
-            )
-            await self._merge_run_evidence(
-                run_id,
-                {"verification": verification_fragment},
-            )
+            # No CI build ran for this candidate — fall through with empty
+            # observations: the use case records the honest not_configured
+            # verdict (R02) and walks the run to review.
             logger.info("No CI builds configured for %s — review as unverified", run_id[:8])
-            await self._transition(
-                run_id, FlowStatus.EVALUATING_CI, reason="no CI configured — unverified"
-            )
-            await self._review_and_ready(
-                run_id,
-                project_id=project_id,
-                issue_number=issue_number,
-                pr_id=run.mr_iid,
-                candidate_sha=candidate_sha,
-                base_sha=run.base_sha or "",
-                verified=False,
-                verification_evidence=verification_fragment,
-            )
-            return
+            observations = {}
+            surface = ()
+            subject_head_oid = ""
+        else:
+            if has_pending:
+                # Bounded (R17): the deadline itself is enforced pre-I/O above —
+                # a Builds API that never answers cannot hold the run forever.
+                return
 
-        pending = [b for b in builds if str(b.get("status") or "") in _ACTIVE_BUILD_STATUSES]
-        if pending:
-            # Bounded (R17): the deadline itself is enforced pre-I/O above —
-            # a Builds API that never answers cannot hold the run forever.
-            return
+            # A01 positive-proof normalization (the GitHub contract,
+            # mirrored): the newest build of each definition is the
+            # authoritative observation, and the tested oid is the
+            # sourceVersion the PROVIDER verified — not a self-asserted one.
+            ordered = sorted(builds, key=_build_order_key, reverse=True)
+            observations = {}
+            for build in ordered:
+                observations.setdefault(_build_name(build), str(build.get("result") or "") or None)
+            surface = tuple(
+                {
+                    "name": _build_name(build),
+                    "result": str(build.get("result") or "") or None,
+                    **({"build_id": int(build["id"])} if build.get("id") else {}),
+                    **(
+                        {"source_version": str(build.get("sourceVersion") or "")}
+                        if build.get("sourceVersion")
+                        else {}
+                    ),
+                }
+                for build in ordered
+            )
+            subject_head_oid = str(ordered[0].get("sourceVersion") or "")
 
-        # A01 positive proof (the GitHub contract, mirrored): the newest
-        # build of each definition is the authoritative observation; the
-        # required list comes from the FROZEN spec (the lane contract's
-        # required check names, never live settings), and the tested oid is
-        # the sourceVersion the PROVIDER verified — not a self-asserted one.
-        ordered = sorted(builds, key=_build_order_key, reverse=True)
-        observations: dict[str, str | None] = {}
-        for build in ordered:
-            observations.setdefault(_build_name(build), str(build.get("result") or "") or None)
-        tested_oid = str(ordered[0].get("sourceVersion") or "") or candidate_sha
-        proof = evaluate_positive_proof(
-            spec.required_jobs,
-            observations,
+        # ADR-0027 slice 2: the verdict semantics are the ONE shared
+        # ObserveVerification use case (forge.runs.usecases) — the adapter
+        # supplied the normalized observations/surface and Azure's result
+        # vocabulary; the required-checks contract rides frozen in the spec.
+        decision = observe_verification(
+            spec=spec,
+            provider=PRODUCER_AZURE_BUILD,
+            observations=observations,
+            candidate_sha=candidate_sha,
+            subject_head_oid=subject_head_oid,
+            surface=surface,
+            pending=has_pending,
             success_conclusions=AZURE_SUCCESS_RESULTS,
             code_failure_conclusions=AZURE_CODE_FAILURE_RESULTS,
             infra_conclusions=AZURE_INFRA_RESULTS,
             waived_conclusions=waived_conclusions_from_settings(self._settings),
-        )
-        surface = tuple(
-            {
-                "name": _build_name(build),
-                "result": str(build.get("result") or "") or None,
-                **({"build_id": int(build["id"])} if build.get("id") else {}),
-                **(
-                    {"source_version": str(build.get("sourceVersion") or "")}
-                    if build.get("sourceVersion")
-                    else {}
-                ),
-            }
-            for build in ordered
+            now=now,
         )
 
-        if proof.infra_failures:
+        if decision.verdict is not None:
+            # ADR-0027: the unified R02 evidence shape (one key set on every
+            # provider — ``tested_oid`` is the sha the provider verified).
+            await self._merge_run_evidence(run_id, {"verification": decision.evidence()})
+
+        if decision.outcome == OUTCOME_WAIT:
+            if decision.verdict is not None:
+                logger.info(
+                    "Run %s required checks unproven (%s) — keeping it waiting",
+                    run_id[:8],
+                    decision.verdict.summary,
+                )
+            # A pending/unproven run keeps waiting (the R17 deadline is the
+            # bound); the recorded unknown verdict is never a green check.
+            return
+
+        if decision.outcome == OUTCOME_BLOCK:
             # A canceled/abandoned build is evidence the EXECUTION died —
             # infrastructure, never a code failure. The repair budget is for
             # code failures only; the run blocks visibly instead.
-            names = ", ".join(proof.infra_failures)
-            await self._merge_run_evidence(
-                run_id,
-                {
-                    "verification": ready_evidence(
-                        False,
-                        tested_oid,
-                        PRODUCER_AZURE_BUILD,
-                        summary=f"builds canceled or abandoned: {names}",
-                        status="unknown",
-                        surface=surface,
-                    )
-                },
-            )
+            names = ", ".join(decision.failing)
             await self._to_terminal(
                 run_id,
                 FlowStatus.BLOCKED,
@@ -3694,11 +3702,11 @@ class AzureRunService:
             )
             return
 
-        if proof.code_failures:
+        if decision.outcome == OUTCOME_REPAIR:
             # ADR-0008: only a result that blames the change drives the
             # bounded repair loop (required checks prove, optional ones
             # neither block nor substitute — A01).
-            names = ", ".join(proof.code_failures)
+            names = ", ".join(decision.failing)
             await self._begin_repair(
                 run_id,
                 project_id=project_id,
@@ -3708,45 +3716,9 @@ class AzureRunService:
             )
             return
 
-        if proof.unproven:
-            # Required checks absent (or waived-ineligible inconclusive): NO
-            # proof — a green optional pipeline never substitutes. The
-            # verdict is honestly unknown and the run keeps waiting; the
-            # R17 deadline is the bound.
-            await self._merge_run_evidence(
-                run_id,
-                {
-                    "verification": ready_evidence(
-                        False,
-                        tested_oid,
-                        PRODUCER_AZURE_BUILD,
-                        summary=proof.summary(),
-                        status="unknown",
-                        surface=surface,
-                    )
-                },
-            )
-            logger.info(
-                "Run %s required checks unproven (%s) — keeping it waiting",
-                run_id[:8],
-                proof.summary(),
-            )
-            return
-
-        # ADR-0027: the unified R02 evidence shape via forge.runs.consistency,
-        # bound to the sourceVersion the provider verified.
-        verification_fragment = ready_evidence(
-            True,
-            tested_oid,
-            PRODUCER_AZURE_BUILD,
-            summary="required checks succeeded for the tested sha",
-            surface=surface,
-        )
-        await self._merge_run_evidence(
-            run_id,
-            {"verification": verification_fragment},
-        )
-        await self._transition(run_id, FlowStatus.EVALUATING_CI, reason="required checks passed")
+        # OUTCOME_REVIEW: the gate concluded — evaluating_ci, then the review
+        # leg (verified, or honestly unverified when no CI is configured).
+        await self._transition(run_id, FlowStatus.EVALUATING_CI, reason=decision.reason)
         await self._review_and_ready(
             run_id,
             project_id=project_id,
@@ -3754,8 +3726,8 @@ class AzureRunService:
             pr_id=run.mr_iid,
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
-            verified=True,
-            verification_evidence=verification_fragment,
+            verified=decision.verified,
+            verification_evidence=decision.evidence(),
         )
 
     async def _candidate_builds(
