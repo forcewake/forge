@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — guarantee parity (second external review d16f523: all 18 findings closed — evidence in `python -m forge.release_manifest`)
+
+- **A01/A02 — same spec, same verification everywhere**: GitHub and Azure freeze and consume
+  the same executable RunSpec v3 as GitLab; verification is positive proof that the REQUIRED
+  checks from the frozen contract ran (skipped/neutral/unknown need a waiver; cancel/timeout
+  are infrastructure, not code repair; the actual head is re-read before verified-ready).
+- **A03 — the lane executes the approved bytes**: BriefEnvelope digests bind task/plan;
+  any post-approval edit fails the lane closed (re-approval required).
+- **A04/A05 — ownership through the whole step**: guarded CAS is the only write path;
+  the publisher validates claim ownership before the native call; the sequential worker
+  claims one step at a time; heartbeat loss fails the handler closed.
+- **A06/A07 — object-level authorization**: MCP run tools honor repository allowlists;
+  full-ID operator commands carry the same subject scope as every other form.
+- **A08/A09 — shipped-recipe fixes**: non-hidden artifact staging; tokenized permission
+  rules (the glued-string bug that defeated the allowlist expansion).
+- **A10/A11 — durable concurrency**: concurrent budget creation via ON CONFLICT arbiter;
+  retry/auto-revive as durable single transitions with idempotency by delivery id.
+- **A12 — effect certainty**: negative probes open a bounded settle window (never treated
+  as proof of absence); GitLab parks unknown, GitHub/Azure lean on native CAS.
+- **A13 — config scope**: read failures park the run; only confirmed absence earns the
+  default profile; provenance frozen in the spec.
+- **A14/A16 — conformance and evidence**: composed scenarios on real legs; a verifiable
+  release-evidence manifest (28 entries, honest levels, fail-closed guards) as the source
+  of truth for capability claims.
+- **A15 — ADR-0027 slice 2**: ObserveVerification extracted as one provider-neutral use case.
+- **A17/A18 — measurement and profiles**: a 14-task delivery evaluation cohort harness and
+  a versioned execution profile (target-contract lanes, bootstrap classification).
+
 ### Added — Phase B/C/D complete (external review e8bf381: every finding closed — evidence-scoped)
 
 "Closed" above means the fix and its landed test evidence are in this tree
