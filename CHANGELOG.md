@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — Phase B/C/D complete (external review e8bf381: every finding closed)
+### Added — Phase B/C/D complete (external review e8bf381: every finding closed — evidence-scoped)
+
+"Closed" above means the fix and its landed test evidence are in this tree
+(per-finding evidence levels: `python -m forge.release_manifest`); it does
+NOT mean every capability is exercised at every runtime depth — nightly OS
+failure injection and the real-provider dogfood loop stay on their own
+evidence classes and gates.
+
+- **A16** release-evidence manifest: capability/status claims are generated
+  from a verifiable registry (`python -m forge.release_manifest`), not
+  hand-written absolutes — per capability, provider/backend, level
+  (implemented / contract_tested / live_canary_tested / not_run) with the
+  evidence pointer, CI job and gate; boot canary, subprocess FI, coroutine FI
+  and real-provider e2e stay separate evidence classes; unknown stays
+  explicit (`not_run`), never converted to pass; pyproject/`__version__`
+  consistency is asserted at manifest build time (the R30 discipline, now
+  failing in tests, not only in the release workflow).
+- **A02/A13** verified in-tree and recorded as the first d16f523-review
+  closures: GitHub and Azure freeze the same executable spec v3
+  (`EXECUTABLE_SPEC_SCHEMA_VERSION`), and project-config reads are typed —
+  only a confirmed absence earns the default profile. A01, A04-A12 remain
+  unclaimed by the manifest until their fixes verify in-tree.
 
 - **R04** ExecutableRunSpec v3: the gate approves bytes that execute — task/plan/model/
   policy/budgets frozen content-addressed, digest-verified on every read.

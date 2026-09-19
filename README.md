@@ -96,6 +96,30 @@ What each capability is verified at today: **implemented** (code + unit
 tests) · **contract-tested** (CI contract suite, faked platform) ·
 **live** (exercised against the real platform in the dogfooding loop).
 
+The machine-readable source of truth for these claims is the release-evidence
+manifest — regenerate it with `python -m forge.release_manifest`. It records
+per capability, provider/backend: level, the evidence class, the exact test
+files / CI jobs, and per-finding closure evidence. Its levels are stricter
+than the prose rows above, which are the broad-stroke summary:
+
+- **implemented** — code + unit tests; no CI contract suite yet.
+- **contract-tested** — CI suite over fakes/stubs (PR gate), or a real-runtime
+  failure-injection suite (`coroutine_fi` on the `CI / integration` job;
+  `subprocess_fi` nightly on `CI / integration-os`). The platform/agent is
+  not real in the loop.
+- **live-canary-tested** — exercised against the real runtime: the built
+  release artifact (boot/migrate canary, `scripts/canary_smoke.py`) or the
+  real provider in the dogfood loop. Maintainer-run live exercises are
+  recorded at this level only when their artifacts live in this tree;
+  otherwise they are **not-run**.
+- **not-run** — no CI-reproducible evidence exists; recorded explicitly and
+  never converted to pass.
+
+Evidence classes stay separate: a green boot canary is not an SDLC e2e claim,
+and boot canary, subprocess failure injection, coroutine failure injection,
+and real-provider e2e are never merged into one check. Where the manifest
+says `not_run`, the row above is the prose claim, not CI-verifiable evidence.
+
 | Capability | GitLab CE | GitHub | Azure DevOps |
 |---|---|---|---|
 | Publication policy — builtin lane | live · enforced | contract-tested · validated at publish, not platform-enforced (known gap) | contract-tested |
