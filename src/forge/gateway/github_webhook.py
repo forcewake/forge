@@ -548,8 +548,14 @@ async def _ingest_github_event(
         comment_user = (payload.get("comment") or {}).get("user") or {}
         sender = payload.get("sender") or {}
         author = str(comment_user.get("login") or sender.get("login") or "")
-        if author and author == settings.FORGE_BOT_USERNAME:
+        bot_login = str(getattr(settings, "FORGE_GITHUB_BOT_LOGIN", "") or "")
+        if author and author in (settings.FORGE_BOT_USERNAME, bot_login):
             # Forge's own comments never act as triggers (bot-loop guard).
+            # FORGE_GITHUB_BOT_LOGIN is the one that matters here: GitHub App
+            # comments are authored by e.g. forcewake-forge[bot] (LIVE-found:
+            # the retry-rejection note suggested "/implement", the gateway
+            # parsed the bot's own note as a command and created a phantom
+            # run). Same check for the issues.labeled/issues.edited paths.
             logger.info("Skipping bot-authored GitHub comment", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         run_command = normalize_issue_comment(
@@ -569,10 +575,11 @@ async def _ingest_github_event(
     if event == "issues" and action in ("labeled", "edited", "unlabeled"):
         sender = payload.get("sender") or {}
         author = str(sender.get("login") or "")
-        if author and author == settings.FORGE_BOT_USERNAME:
+        if author and author in (settings.FORGE_BOT_USERNAME, settings.FORGE_GITHUB_BOT_LOGIN):
             # Forge never labels or edits issues, but the guard stays
             # symmetric with the comment path (bot-loop safety by
-            # construction).
+            # construction; the GitHub App bot login is the identity that
+            # matters here).
             logger.info("Skipping bot-authored GitHub issue event", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         if action == "labeled":
