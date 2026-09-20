@@ -195,6 +195,8 @@ from forge.runs.spec import (
     load_verified_spec,
 )
 from forge.runs.verification import (
+    epoch_started_at,
+    verification_epoch,
     AZURE_CODE_FAILURE_RESULTS,
     AZURE_INFRA_RESULTS,
     AZURE_SUCCESS_RESULTS,
@@ -3601,8 +3603,15 @@ class AzureRunService:
             candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
             issue_number = run.issue_iid or 0
             project_id = run.project_id
-            waiting_since = run.updated_at  # the WAITING_CI transition moment
+            evidence = dict(run.evidence or {})
             cancel_requested = bool(run.cancel_requested)
+
+        # B01: the deadline anchors to the verification EPOCH for THIS
+        # candidate, never to ``updated_at`` (evidence merges slide it).
+        epoch, epoch_changed = verification_epoch(evidence, candidate_sha, now)
+        if epoch_changed:
+            await self._merge_run_evidence(run_id, {"verification_epoch": epoch})
+        waiting_since = epoch_started_at(epoch)
 
         if not candidate_sha:
             await self._to_terminal(
@@ -3618,7 +3627,7 @@ class AzureRunService:
         # R17: the local deadline fires even when the Builds API keeps
         # erroring (the stalled-provider stall this bound exists for).
         deadline = int(getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800)
-        started = as_aware_utc(waiting_since) if waiting_since is not None else None
+        started = waiting_since
         if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "verification_timeout: builds did not conclude"

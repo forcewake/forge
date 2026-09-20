@@ -250,7 +250,13 @@ class TestVerificationDeadlineBeforeIO:
         run_id = await self._waiting_ci_run(db, fake, settings)
         async with db() as session:
             run = await session.get(FlowRun, run_id)
-            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=1801)
+            # B01: the deadline reads the verification EPOCH — backdate it
+            # (updated_at slid with every observation; that was the bug).
+            candidate = (run.candidate_shas or [""])[-1]
+            started = (datetime.now(timezone.utc) - timedelta(seconds=1801)).isoformat()
+            run.evidence = dict(run.evidence or {}) | {
+                "verification_epoch": {"candidate_sha": candidate, "started_at": started}
+            }
             await session.commit()
 
         checks_calls: list[str] = []

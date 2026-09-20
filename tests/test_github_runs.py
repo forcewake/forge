@@ -141,13 +141,14 @@ def make_service(
     *,
     settings: Settings | None = None,
     stack: GitHubAgents | None = None,
+    repo: str = REPO,
 ) -> GitHubRunService:
     return GitHubRunService(
         db,
         settings or make_settings(),
         ForgeConfig(),
         stack=stack or make_stack(fake),
-        repo_full_name=REPO,
+        repo_full_name=repo,
     )
 
 
@@ -1227,7 +1228,7 @@ class TestConfigGateA13:
         yield
         clear_cache()
 
-    def arm_403(self, fake: FakeGitHub):
+    def arm_403(self, fake: FakeGitHub, *, restore: bool = False):
         """403 every `.forge.yml` read until disarmed — routed through the
         fake's typed ``read_blob`` like a real GitHub 403. Returns the
         original bound method for disarming."""
@@ -1238,6 +1239,9 @@ class TestConfigGateA13:
                 raise GitHubAPIError(403, "read forbidden")
             return await original(project_id, file_path, ref)
 
+        if restore:
+            fake.get_file = original
+            return original
         fake.get_file = flaky
         return original
 
@@ -1323,6 +1327,49 @@ class TestConfigGateA13:
         assert run.status == FlowStatus.WAITING_APPROVAL.value
         assert planner.calls == 1
         assert planner.path_scopes == [["services/**"]]
+
+    async def test_a_repo_bound_recovery_never_touches_another_repository(self, db, fake):
+        """B08: the service's adapters are bound to ONE repo. A
+        config-blocked run of repo B must not be recovered (read, re-planned,
+        commented) through repo A's service — two SEPARATE fakes, one per
+        repository, prove the routing."""
+        fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
+        other_repo = "acme/other-repo"
+        fake_b = FakeGitHub()
+        fake_b.seed_repo(other_repo, {".forge.yml": self.RESTRICTED})
+        fake_b.seed_issue(other_repo, ISSUE, ISSUE_TITLE, ISSUE_DESC)
+        fake_b.heads[other_repo]["main"] = BASE_HEAD
+
+        planner_a = CountingStackPlanner()
+        planner_b = CountingStackPlanner()
+        service_a = make_service(db, fake, stack=make_stack(fake, planner=planner_a))
+
+        # Drive repo B's run into config-block THROUGH ITS OWN service.
+        original_b = self.arm_403(fake_b)
+        service_b = make_service(
+            db,
+            fake_b,
+            stack=make_stack(fake_b, planner=planner_b),
+            repo=other_repo,
+        )
+        run_b = await start(service_b)
+        assert (await get_run(db, run_b)).status == FlowStatus.BLOCKED.value
+
+        # The 403 recovers on B's client only.
+        fake_b.get_file = original_b
+
+        # A's recovery pass must not touch B's run: separate adapters.
+        await service_a.evaluate_config_recovery()
+        run = await get_run(db, run_b)
+        assert run.status == FlowStatus.BLOCKED.value  # untouched
+        assert planner_a.calls == 0
+        assert planner_b.calls == 0
+
+        # B's own recovery pass resumes it.
+        await service_b.evaluate_config_recovery()
+        run = await get_run(db, run_b)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner_b.calls == 1
 
     async def test_still_failing_read_leaves_the_run_parked(self, db, fake):
         fake.seed_repo(REPO, {".forge.yml": self.RESTRICTED})
@@ -1581,8 +1628,155 @@ class TestPositiveVerification:
         assert verification["status"] == "unknown"
         assert verification["tested_oid"] == candidate
         assert "tests" in verification["summary"]
-        assert verification["surface"] == [{"name": "documentation", "conclusion": "success"}]
+        assert verification["surface"][0]["name"] == "documentation"
+        assert verification["surface"][0]["conclusion"] == "success"
+        assert verification["surface"][0]["workflow"]  # B02: identity rides the surface
         assert reviewer.calls == []  # the gate never let it reach review
+
+    async def test_repeated_unknown_observations_never_extend_the_deadline(self, db, fake):
+        """B01: every observation merges evidence and bumps updated_at —
+        the deadline must anchor to the verification EPOCH, not updated_at
+        (the review's probe: 480 polls / 7200s never timed out)."""
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        # The required check exists but never concludes successfully.
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+
+        # Many observation passes — each merges fresh evidence (and slides
+        # updated_at). Simulate by evaluating with a fixed now, twice.
+        for _ in range(3):
+            await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        epoch = (run.evidence or {})["verification_epoch"]
+
+        # Well past the epoch deadline — must block regardless of how many
+        # observations happened since (epoch.started_at never moved).
+        far = datetime.now(timezone.utc) + timedelta(seconds=601)
+        await service.evaluate_waiting_ci_one(run_id, now=far)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "verification_timeout" in (run.status_reason or "")
+        # and the epoch survived the observations untouched
+        assert (run.evidence or {})["verification_epoch"] == epoch
+
+    async def test_an_old_rerun_success_never_masks_a_newer_failure(self, db, fake):
+        """B02: run_attempt counts attempts WITHIN one run — it must never
+        order ACROSS runs. Old run #10 re-executed to attempt 3 (success)
+        vs newer run #11 attempt 1 (failure): the newer run is the
+        authoritative occurrence; verified must not happen."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=10,
+                    attempt=3,
+                ),
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "failure",
+                    path=".github/workflows/tests.yml",
+                    run_id=11,
+                    attempt=1,
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        # the newer FAILURE is code-failure evidence — the repair loop (or
+        # its exhaustion) fires on `tests`; NEVER verified-ready.
+        assert run.status != FlowStatus.READY_FOR_HUMAN.value
+        assert "tests" in (run.status_reason or "") or run.status == FlowStatus.PROPOSING.value
+
+    @pytest.mark.parametrize("order", ["new-first", "old-first"])
+    async def test_the_api_response_order_never_decides_the_outcome(self, db, fake, order):
+        """B02: reversed API order must not change which run is
+        authoritative — same seeding, both orders, same verdict."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        if True:
+            fake2 = FakeGitHub()
+            fake2.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+            fake2.heads[REPO]["main"] = BASE_HEAD
+            fake2.seed_issue(REPO, ISSUE, ISSUE_TITLE, ISSUE_DESC)
+            service = make_service(db, fake2, settings=settings)
+            run_id, candidate = await drive_to_waiting_ci(db, service, fake2)
+            runs = [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=10,
+                    attempt=2,
+                ),
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=11,
+                    attempt=1,
+                ),
+            ]
+            if order == "old-first":
+                runs.reverse()
+            fake2.seed_workflow_runs(runs)
+
+            await service.evaluate_waiting_ci_one(run_id)
+
+            run = await get_run(db, run_id)
+            assert run.status == FlowStatus.READY_FOR_HUMAN.value, order
+            verification = (run.evidence or {})["verification"]
+            assert verification["surface"][0]["run_id"] == 11, order
+
+    async def test_two_workflows_sharing_a_name_do_not_overwrite_each_other(self, db, fake):
+        """B02: display names collide — observations merge by workflow
+        IDENTITY. A same-named decoy workflow's conclusion must not replace
+        the required workflow's (the newer RUN wins the display key, and
+        both identities ride the surface)."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "failure",
+                    path=".github/workflows/tests.yml",
+                    run_id=30,
+                    attempt=1,
+                ),
+                # same DISPLAY name, different workflow (decoy), older run
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/decoy.yml",
+                    run_id=29,
+                    attempt=1,
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        # the required workflow's failure drives repair — never READY
+        assert run.status != FlowStatus.READY_FOR_HUMAN.value
 
     async def test_unproven_required_still_blocks_on_the_verification_deadline(self, db, fake):
         """Unknown is a WAITING verdict — the R17 deadline is the bound: a
@@ -1595,7 +1789,12 @@ class TestPositiveVerification:
         fake.seed_workflow_runs([workflow_run("d" * 40, "documentation", "success")])
         async with db() as session:
             run = await session.get(FlowRun, run_id)
-            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            # B01: the deadline reads the verification EPOCH, not updated_at
+            # (evidence merges slide updated_at — the bug this pins).
+            started = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
+            run.evidence = dict(run.evidence or {}) | {
+                "verification_epoch": {"candidate_sha": _candidate, "started_at": started}
+            }
             await session.commit()
 
         await service.evaluate_waiting_ci_one(run_id)
@@ -1615,7 +1814,9 @@ class TestPositiveVerification:
         assert run.status == FlowStatus.WAITING_CI.value
         verification = (run.evidence or {})["verification"]
         assert verification["status"] == "unknown"
-        assert verification["surface"] == [{"name": "tests", "conclusion": "skipped"}]
+        assert verification["surface"][0]["name"] == "tests"
+        assert verification["surface"][0]["conclusion"] == "skipped"
+        assert verification["surface"][0]["workflow"]
 
     async def test_neutral_required_check_is_unknown(self, db, fake):
         service = make_service(db, fake, settings=make_settings(FORGE_REQUIRED_JOBS="tests"))
@@ -1764,7 +1965,13 @@ class TestPositiveVerification:
         assert run.status == FlowStatus.READY_FOR_HUMAN.value
         verification = (run.evidence or {})["verification"]
         assert verification["surface"] == [
-            {"name": "tests", "conclusion": "success", "run_id": 777, "attempt": 2}
+            {
+                "name": "tests",
+                "conclusion": "success",
+                "workflow": "path:.github/workflows/tests.yml",
+                "run_id": 777,
+                "attempt": 2,
+            }
         ]
 
     async def test_harness_lane_is_excluded_by_path_not_display_name(self, db, fake):
@@ -1809,7 +2016,9 @@ class TestPositiveVerification:
         verification = (run.evidence or {})["verification"]
         assert verification["status"] == "passed"
         # Only the independent check is on the surface — the harness is gone.
-        assert verification["surface"] == [{"name": "tests", "conclusion": "success"}]
+        assert verification["surface"][0]["name"] == "tests"
+        assert verification["surface"][0]["conclusion"] == "success"
+        assert verification["surface"][0]["workflow"] == "path:.github/workflows/tests.yml"
 
     async def test_a_display_name_decoy_is_never_treated_as_the_harness(self, db, fake):
         """The OLD name-based exclusion dropped any run whose display name
@@ -1855,7 +2064,9 @@ class TestPositiveVerification:
         assert run.status == FlowStatus.WAITING_CI.value
         verification = (run.evidence or {})["verification"]
         assert verification["status"] == "unknown"
-        assert verification["surface"] == [{"name": WORKFLOW, "conclusion": "success"}]
+        assert verification["surface"][0]["name"] == WORKFLOW
+        assert verification["surface"][0]["conclusion"] == "success"
+        assert verification["surface"][0]["workflow"] == "path:.github/workflows/docs.yml"
 
     async def test_code_failure_on_a_required_check_still_enters_repair(self, db, fake):
         """The proof contract keeps ADR-0008: a conclusion that blames the

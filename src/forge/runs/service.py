@@ -62,6 +62,7 @@ from forge.durable import (
     GateApproval,
     GateAlreadyConsumed,
     LLMCall,
+    MRReservation,
     Outbox,
     PublicationIntent,
     RunNotFound,
@@ -2522,60 +2523,26 @@ class RunService:
             driver=driver,
         )
 
-    async def _open_or_adopt_mr_action(
-        self, session: AsyncSession, run_id: str, branch: str
-    ) -> int:
-        """The ONE create_merge_request action row for run+branch.
+    async def _reserve_mr(self, run_id: str, branch: str) -> None:
+        """Durable MR reservation for run+branch, BEFORE any provider I/O.
 
-        A crashed attempt leaves its row uncompleted; a concurrent leg or
-        the recovery scanner must adopt that row (and complete it with the
-        outcome) instead of journaling a second one — the row count is part
-        of the audit contract. ``uq_create_mr_per_branch`` (migration 018)
-        is the arbiter: the INSERT collapses onto the winner's row and the
-        ``FOR UPDATE`` here serializes the loser behind the winner's
-        create. MUST run inside the caller's locked transaction.
+        B03 (migration 019): the logical ONE-MR intent commits first — a
+        concurrent creator (or a crash observer) sees the reservation in
+        its own connection while the winner is still mid-I/O; ``FOR
+        UPDATE`` on the row then serializes the create/adopt decisions.
         """
-        dialect_insert = (
-            postgresql.insert
-            if session.bind.dialect.name == "postgresql"
-            else sqlite_dialect_insert
-        )
-        await session.execute(
-            dialect_insert(ActionLog)
-            .values(
-                flow_run_id=run_id,
-                action_kind="create_merge_request",
-                correlation_id=branch,
-                status="requested",
+        async with self._session_factory() as session:
+            dialect_insert = (
+                postgresql.insert
+                if session.bind.dialect.name == "postgresql"
+                else sqlite_dialect_insert
             )
-            .on_conflict_do_nothing()
-        )
-        existing = (
-            (
-                await session.execute(
-                    select(ActionLog.id)
-                    .where(
-                        ActionLog.flow_run_id == run_id,
-                        ActionLog.action_kind == "create_merge_request",
-                        ActionLog.correlation_id == branch,
-                    )
-                    .order_by(ActionLog.id.asc())
-                    .limit(1)
-                )
+            await session.execute(
+                dialect_insert(MRReservation)
+                .values(flow_run_id=run_id, branch=branch, status="open")
+                .on_conflict_do_nothing()
             )
-            .scalars()
-            .first()
-        )
-        if existing is None:
-            # ON CONFLICT covers concurrent creators; a row can only be
-            # missing when nobody ever created one for this branch.
-            controller = Controller(session)
-            return await controller.record_action(
-                run_id, "create_merge_request", correlation_id=branch
-            )
-        row_id = int(existing)
-        await session.execute(select(ActionLog).where(ActionLog.id == row_id).with_for_update())
-        return row_id
+            await session.commit()
 
     async def _create_draft_mr(
         self,
@@ -2584,72 +2551,94 @@ class RunService:
         branch: str,
         commit_sha: str | None,
     ) -> int:
-        """Create the Draft MR for the run branch, journaling intent/outcome.
+        """Create the Draft MR for the run branch — ONE per run+branch, ever.
 
-        ONE ``create_merge_request`` per run+branch, ever — one provider
-        call AND one action row. Two executors can reach this leg
-        concurrently (a lease-expiry re-drive and the publication-intent
-        scanner; LIVE-found via the FI suite 2026-09-20 — a check-then-
-        create race produced a second MR), and a crashed attempt leaves its
-        action row uncompleted. So: adopt any existing row for this
-        run+branch (complete it when its creator died), then adopt any MR
-        the provider already has for the branch, and only a verified miss
-        on both surfaces creates — under the SAME row.
+        B03 separates the logical intent from the immutable attempt
+        history (ADR-0005's journal contract):
+
+        1. **Reserve** (own committed transaction, before any I/O): the
+           ``mr_reservations`` row is the durable one-MR intent — visible
+           to every other connection immediately.
+        2. **Serialize** under the reservation row lock (``FOR UPDATE``):
+           a concurrent leg or the recovery scanner blocks behind the
+           winner, then sees ``confirmed``.
+        3. **Adopt before create**: a journaled succeeded row, then the
+           provider's own MR list (a lost response leaves the MR on the
+           provider with a terminal ``unknown_outcome`` row in the
+           journal — reconciliation journals its OWN observation row, it
+           never rewrites the terminal one).
+        4. **Fail closed on provider read errors**: a 5xx/403 on the MR
+           list proves nothing about the MR's existence — no create.
         """
-        # ONE creator at a time per run+branch: the action-row lock
-        # serializes the check-and-create across the concurrent leg /
-        # recovery scanner (the FI suite's check-then-create race).
+        await self._reserve_mr(run_id, branch)
         async with self._session_factory() as session:
-            action_id = await self._open_or_adopt_mr_action(session, run_id, branch)
-            await session.execute(
-                select(ActionLog).where(ActionLog.id == action_id).with_for_update()
-            )
-            controller = Controller(session)
-
-            # A previous attempt may have journaled the MR already.
-            row = (
+            reservation = (
                 (
                     await session.execute(
-                        select(ActionLog)
+                        select(MRReservation)
                         .where(
-                            ActionLog.flow_run_id == run_id,
-                            ActionLog.action_kind == "create_merge_request",
-                            ActionLog.correlation_id == branch,
-                            ActionLog.status == "succeeded",
+                            MRReservation.flow_run_id == run_id,
+                            MRReservation.branch == branch,
                         )
-                        .order_by(ActionLog.id.desc())
-                        .limit(1)
+                        .with_for_update()
                     )
                 )
                 .scalars()
-                .first()
+                .one()
             )
-            raw = (row.remote_result or {}).get("mr_iid") if row is not None else None
-            if raw is not None:
+            if reservation.status == "confirmed" and reservation.mr_iid is not None:
                 try:
-                    await self._gitlab.get_merge_request(project_id, int(raw))
-                    return int(raw)
+                    await self._gitlab.get_merge_request(project_id, int(reservation.mr_iid))
+                    return int(reservation.mr_iid)
                 except GitLabAPIError:
-                    pass  # the journaled MR is gone — create a fresh one
+                    # the confirmed MR is gone (closed/merged) — reopen the
+                    # reservation and create a fresh Draft MR.
+                    reservation.status = "open"
+                    reservation.mr_iid = None
 
-            # The journal lags the effect: a crashed attempt may have
-            # created the MR without journaling it. The PROVIDER is the
-            # second arbiter.
+            controller = Controller(session)
+
+            # 3a. adopt the journal first — a previous attempt succeeded.
+            journal_iid = await self._journaled_draft_mr(run_id, project_id, branch)
+            if journal_iid is not None:
+                reservation.status = "confirmed"
+                reservation.mr_iid = journal_iid
+                await session.commit()
+                return journal_iid
+
+            # 3b. the provider is the arbiter a lost response needs: the MR
+            # exists upstream with no succeeded journal row. Adoption
+            # journals its OWN observation row (the prior unknown/failed
+            # rows stay immutable history).
             try:
-                for existing_mr in await self._gitlab.list_merge_requests(
+                provider_mrs = await self._gitlab.list_merge_requests(
                     project_id, state="opened", per_page=50
-                ):
-                    if existing_mr.source_branch == branch:
-                        await controller.complete_action(
-                            action_id,
-                            "succeeded",
-                            {"mr_iid": int(existing_mr.iid), "adopted": True},
-                        )
-                        await session.commit()
-                        return int(existing_mr.iid)
+                )
             except GitLabAPIError:
-                pass  # provider read failed — fall through to create
+                # 4. fail CLOSED: an unreadable list proves nothing — do
+                # not create on top of an unknown surface.
+                await session.rollback()
+                raise
+            for existing_mr in provider_mrs:
+                if existing_mr.source_branch == branch:
+                    action_id = await controller.record_action(
+                        run_id, "create_merge_request", correlation_id=branch
+                    )
+                    await controller.complete_action(
+                        action_id,
+                        "succeeded",
+                        {"mr_iid": int(existing_mr.iid), "adopted": True},
+                    )
+                    reservation.status = "confirmed"
+                    reservation.mr_iid = int(existing_mr.iid)
+                    await session.commit()
+                    return int(existing_mr.iid)
 
+            # 5. verified miss on both surfaces — create, under the same
+            # locked transaction (the reservation is the serializer).
+            action_id = await controller.record_action(
+                run_id, "create_merge_request", correlation_id=branch
+            )
             run = await self._get_run(session, run_id)
             plan_digest = run.plan_digest or ""
             issue_iid = run.issue_iid
@@ -2676,35 +2665,10 @@ class RunService:
                 "succeeded",
                 {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
             )
+            reservation.status = "confirmed"
+            reservation.mr_iid = int(mr["iid"])
             await session.commit()
             return int(mr["iid"])
-
-            run = await self._get_run(session, run_id)
-            plan_digest = run.plan_digest or ""
-            issue_iid = run.issue_iid
-        issue_title = await self._read_issue_title(project_id, issue_iid)
-        description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha)
-        try:
-            mr = await self._gitlab.create_merge_request(
-                project_id,
-                branch,
-                self._target_branch(),
-                f"Draft: {issue_title}",  # Draft: prefix marks it draft (GitLab convention)
-                description,
-            )
-        except httpx.HTTPError:
-            await self._complete_action(action_id, "unknown_outcome")
-            raise
-        except GitLabAPIError as exc:
-            await self._complete_action(action_id, "failed", {"error": str(exc)})
-            raise
-
-        await self._complete_action(
-            action_id,
-            "succeeded",
-            {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
-        )
-        return int(mr["iid"])
 
     async def _committed_candidate(self, run_id: str, project_id: int, branch: str) -> str | None:
         """The candidate a crashed attempt already committed on *branch* (ADR-0017 §3).

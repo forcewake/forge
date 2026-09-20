@@ -20,6 +20,7 @@ Two concerns live here:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Any
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -232,6 +233,47 @@ PROOF_INFRA_FAILURE = "infra_failure"
 #: surface — infrastructure evidence, never a code-repair trigger (the
 #: ``verification_timeout``-family of honest parked reasons).
 VERIFICATION_INFRA_REASON = "verification_infrastructure"
+
+
+def verification_epoch(
+    evidence: Mapping[str, Any] | None, candidate_sha: str, now: datetime
+) -> tuple[dict[str, str], bool]:
+    """The verification epoch for *candidate_sha* — a B01 fix.
+
+    The wait deadline must anchor to WHEN WAITING BEGAN for THIS candidate,
+    never to ``FlowRun.updated_at``: every observation merges new evidence
+    and ``updated_at`` has ``onupdate`` — a poll every 15s slid the 1800s
+    deadline forever (review e53ffd2 B01; probe: 480 observations, 7200
+    simulated seconds, no timeout).
+
+    The epoch lives in the run's evidence (``verification_epoch``):
+    ``{"candidate_sha": ..., "started_at": iso}``. It is written ONCE per
+    candidate — a new candidate starts a new epoch (a genuinely new wait);
+    repeated observations of the same candidate, restarts and ``/status``
+    never touch it. Pure: returns ``(epoch, changed)`` — the caller
+    persists via its evidence-merge when *changed*.
+    """
+    stored = (evidence or {}).get("verification_epoch")
+    if isinstance(stored, Mapping):
+        if str(stored.get("candidate_sha") or "") == candidate_sha and stored.get("started_at"):
+            return dict(stored), False
+    return {"candidate_sha": candidate_sha, "started_at": now.isoformat()}, True
+
+
+def epoch_started_at(epoch: Mapping[str, Any]) -> datetime | None:
+    """Parse the epoch's ``started_at`` (ISO) into an aware datetime.
+
+    None when unparseable — the caller treats an unknown start as "no
+    deadline yet" and the next pass re-writes the epoch.
+    """
+    raw = str((epoch or {}).get("started_at") or "")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def waived_conclusions_from_settings(settings: Settings) -> frozenset[str]:

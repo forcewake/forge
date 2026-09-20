@@ -334,6 +334,29 @@ class FakeGitLab:
         self.merge_requests[iid] = mr
         return dict(mr)
 
+    def seed_merge_request(
+        self,
+        project_id: int,
+        source_branch: str,
+        title: str,
+        *,
+        target: str = "main",
+        iid: int = 9001,
+    ) -> dict:
+        """Pre-place an MR (the lost-response / adoption fixtures)."""
+        mr = {
+            "id": iid,
+            "iid": iid,
+            "title": title,
+            "description": "",
+            "state": "opened",
+            "source_branch": source_branch,
+            "target_branch": target,
+            "web_url": f"https://gitlab.test/g/p/-/merge_requests/{iid}",
+        }
+        self.merge_requests[iid] = mr
+        return dict(mr)
+
     async def update_merge_request(
         self,
         project_id: int,

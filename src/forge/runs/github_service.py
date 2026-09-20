@@ -187,6 +187,8 @@ from forge.runs.verification import (
     GITHUB_SUCCESS_CONCLUSIONS,
     PRODUCER_GITHUB_CHECKS,
     VERIFICATION_INFRA_REASON,
+    epoch_started_at,
+    verification_epoch,
     waived_conclusions_from_settings,
 )
 from forge.runs.usecases import (
@@ -246,9 +248,35 @@ def _run_int(run: Mapping[str, Any], key: str) -> int:
         return 0
 
 
-def _run_order_key(run: Mapping[str, Any]) -> tuple[int, int, int]:
-    """Newest-attempt-first ordering key (attempt, run number, run id)."""
-    return (_run_int(run, "run_attempt"), _run_int(run, "run_number"), _run_int(run, "id"))
+def _run_order_key(run: Mapping[str, Any]) -> tuple[int, int]:
+    """Newest-RUN-first ordering key (run number, run id).
+
+    B02: ``run_attempt`` must NOT lead the key — an attempt number counts
+    attempts WITHIN one workflow run and is incomparable across runs: an
+    old run re-executed to attempt 3 outranked a NEWER run's attempt 1 and
+    a stale success masked a fresh failure. The authoritative occurrence is
+    the newest RUN; each listed run already carries its own latest
+    attempt's conclusion (the attempt rides the evidence surface only).
+    """
+    return (_run_int(run, "run_number"), _run_int(run, "id"))
+
+
+def _workflow_identity(run: Mapping[str, Any]) -> str:
+    """The stable identity of a run's workflow — B02.
+
+    Display names are mutable and COLLIDE (two workflows may share a name);
+    merging observations by name let one workflow's conclusion overwrite
+    another's. The identity is the workflow id (present on every Actions
+    run payload), falling back to the path, then the name only as the
+    legacy last resort (GHES payloads without ids).
+    """
+    wid = str(run.get("workflow_id") or "").strip()
+    if wid:
+        return f"id:{wid}"
+    path = str(run.get("path") or "").strip()
+    if path:
+        return f"path:{path}"
+    return f"name:{run.get('name') or ''}"
 
 
 #: Backoff the publication-intent scanner applies to an open intent whose
@@ -1146,6 +1174,9 @@ class GitHubRunService:
             redispatch=self._redispatch_revival,
             now=now,
             log=logger,
+            # B08: this service's adapters are bound to ONE repo — never
+            # touch another repository's runs with them.
+            repo_full_name=self._repo_full_name,
         )
 
     # ------------------------------------------------------------------
@@ -1341,6 +1372,7 @@ class GitHubRunService:
             redispatch=self._redispatch_revival,
             now=now,
             log=logger,
+            repo_full_name=self._repo_full_name,  # B08: bound adapters, one repo
         )
 
     async def _redispatch_revival(self, run_id: str) -> None:
@@ -1438,6 +1470,10 @@ class GitHubRunService:
             reread=self._read_start_config,
             replan=self._resume_config_blocked,
             log=logger,
+            # B08: recover only THIS repo's runs — a provider-wide scan would
+            # drive another repository's run through this repo's bound
+            # reader/client (wrong config, wrong task text).
+            repo_full_name=self._repo_full_name,
         )
 
     async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
@@ -3657,12 +3693,21 @@ class GitHubRunService:
             candidate_shas = list(run.candidate_shas or [])
             candidate_sha = candidate_shas[-1] if candidate_shas else (run.base_sha or "")
             issue_number = run.issue_iid or 0
-            updated_at = run.updated_at  # the WAITING_CI transition moment
+            evidence = dict(run.evidence or {})
             cancel_requested = bool(run.cancel_requested)
 
         spec = await self._spec_or_block(run_id)
         if spec is None:
             return
+
+        # B01: the deadline anchors to the verification EPOCH — the moment
+        # waiting began for THIS candidate — never to ``updated_at`` (every
+        # observation merges evidence and slides ``updated_at``; a poll
+        # every 15s extended the 1800s deadline forever). A new candidate
+        # starts a new epoch; repeated observations never touch it.
+        epoch, epoch_changed = verification_epoch(evidence, candidate_sha, now)
+        if epoch_changed:
+            await self._merge_run_evidence(run_id, {"verification_epoch": epoch})
         if not candidate_sha:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "verification without a candidate sha"
@@ -3677,7 +3722,7 @@ class GitHubRunService:
         # R17: the local deadline fires even when the checks API keeps
         # erroring (the stalled-provider stall this bound exists for).
         deadline = int(getattr(self._settings, "FORGE_VERIFICATION_TIMEOUT_SECONDS", 1800) or 1800)
-        started = as_aware_utc(updated_at) if updated_at is not None else None
+        started = epoch_started_at(epoch)
         if started is not None and (as_aware_utc(now) - started).total_seconds() > deadline:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "verification_timeout: checks did not conclude"
@@ -3707,12 +3752,11 @@ class GitHubRunService:
             # register (LIVE-found on the dogfood cycle: the verifier polled
             # before ci.yml had started and wrongly concluded no-CI). Hold
             # the run for a grace window before declaring not_configured.
-            started = run.updated_at
             # `or 120` would turn a deliberate 0 into the default — check None only.
             _raw = getattr(self._settings, "FORGE_VERIFICATION_GRACE_SECONDS", None)
             grace = 120 if _raw is None else int(_raw)
 
-            started = as_aware_utc(started) if started is not None else None
+            started = epoch_started_at(epoch)  # B01: epoch, not updated_at
             now_aware = as_aware_utc(now)
             if started is not None and (now_aware - started).total_seconds() < grace:
                 return  # keep waiting — checks may still register
@@ -3729,12 +3773,23 @@ class GitHubRunService:
                 # a checks API that never answers cannot hold the run forever.
                 return
 
-            # A01 positive-proof normalization: the newest attempt of each
-            # check is the authoritative observation, and the tested oid is
-            # the head sha the PROVIDER verified (every listed run carries
-            # head_sha == candidate).
-            ordered = sorted(checks, key=_run_order_key, reverse=True)
-            observations = {}
+            # A01 positive-proof normalization, B02 authority rules: the
+            # authoritative occurrence of each check is its NEWEST RUN
+            # (never its newest ATTEMPT across runs), and checks are keyed
+            # by workflow IDENTITY — display names collide, and a
+            # setdefault-by-name merge let one workflow's conclusion
+            # overwrite another's. The tested oid is the head sha the
+            # PROVIDER verified (every listed run carries head_sha ==
+            # candidate).
+            by_identity: dict[str, Mapping[str, Any]] = {}
+            for workflow_run in sorted(checks, key=_run_order_key, reverse=True):
+                by_identity.setdefault(_workflow_identity(workflow_run), workflow_run)
+            # identities ordered newest-first by their authoritative run —
+            # API response order never decides (B02).
+            ordered = sorted(
+                (dict(run) for run in by_identity.values()), key=_run_order_key, reverse=True
+            )
+            observations = {}  # typed at the branch head above
             for workflow_run in ordered:
                 observations.setdefault(
                     str(workflow_run.get("name") or "check"),
@@ -3744,9 +3799,11 @@ class GitHubRunService:
                 {
                     "name": str(workflow_run.get("name") or "check"),
                     "conclusion": str(workflow_run.get("conclusion") or "") or None,
-                    # A01: the FULL check identity rides the surface — the native
-                    # run id and the attempt that produced this conclusion (the
-                    # verified sha itself is the fragment-level ``tested_oid``).
+                    # A01/B02: the FULL check identity rides the surface — the
+                    # native run id, the workflow identity and the attempt that
+                    # produced this conclusion (the verified sha itself is the
+                    # fragment-level ``tested_oid``).
+                    "workflow": _workflow_identity(workflow_run),
                     **({"run_id": _run_int(workflow_run, "id")} if workflow_run.get("id") else {}),
                     **(
                         {"attempt": _run_int(workflow_run, "run_attempt")}

@@ -9,7 +9,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.config import Settings
-from forge.durable import FlowRun, FlowStatus, GateApproval, Outbox, RunSpec
+from forge.durable import (
+    ActionLog,
+    FlowRun,
+    FlowStatus,
+    GateApproval,
+    MRReservation,
+    Outbox,
+    RunSpec,
+)
+from forge.durable.controller import Controller
 from forge.gitlab.client import GitLabAPIError
 from forge.models.base import Base
 from forge.repository import WriteOutcome, WriteResult
@@ -814,3 +823,122 @@ class TestCiDeadlineBeforeIO:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.WAITING_CI.value
         assert len(fake_gitlab.calls_of("get_branch_head")) > provider_calls
+
+
+# ----------------------------------------------------------------------
+# B03: the MR reservation — logical intent vs immutable attempt history
+# ----------------------------------------------------------------------
+
+
+class TestMRReservations:
+    """Migration 019 split the one-MR intent (mr_reservations, committed
+    BEFORE provider I/O, FOR UPDATE-serialized) from the immutable action
+    journal. The lost-response window — provider created the MR, the
+    response died, the action row recorded unknown_outcome — used to
+    deadlock adoption on InvalidActionTransition (review e53ffd2 B03)."""
+
+    async def test_lost_response_adoption_never_rewrites_the_terminal_row(self, db, service):
+        run_id = await start_issue_run(service)
+        # The lost-response state: an unknown_outcome attempt row + the MR
+        # already exists on the provider.
+        async with db() as session:
+            controller = Controller(session)
+            action_id = await controller.record_action(
+                run_id, "create_merge_request", correlation_id="factory/1/abc"
+            )
+            await controller.complete_action(action_id, "unknown_outcome")
+            await session.commit()
+        service._gitlab.seed_merge_request(
+            PROJECT_ID, "factory/1/abc", "Draft: work", target="main", iid=444
+        )
+
+        mr_iid = await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/abc", "sha-1")
+
+        assert mr_iid == 444
+        async with db() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "create_merge_request",
+                        )
+                        .order_by(ActionLog.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            statuses = [row.status for row in rows]
+            # the unknown history is IMMUTABLE — adoption journaled its own row
+            assert statuses[0] == "unknown_outcome"
+            assert statuses[-1] == "succeeded"
+            assert (rows[-1].remote_result or {}).get("adopted") is True
+            reservation = (
+                (
+                    await session.execute(
+                        select(MRReservation).where(MRReservation.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert reservation.status == "confirmed"
+            assert reservation.mr_iid == 444
+
+    async def test_a_failed_list_read_never_falls_through_to_create(self, db, service):
+        """B03: 503/403 on the MR list proves nothing — fail closed."""
+        run_id = await start_issue_run(service)
+
+        async def exploding_list(*args, **kwargs):
+            raise GitLabAPIError(503, "upstream unavailable")
+
+        service._gitlab.list_merge_requests = exploding_list  # type: ignore[method-assign]
+
+        with pytest.raises(GitLabAPIError):
+            await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/xyz", "sha-1")
+
+        assert service._gitlab.calls_of("create_merge_request") == []
+        async with db() as session:
+            reservation = (
+                (
+                    await session.execute(
+                        select(MRReservation).where(MRReservation.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert reservation.status == "open"  # durable intent, unconfirmed
+
+    async def test_the_reservation_is_durable_before_any_provider_io(self, db, service):
+        """B03 criterion: the intent row is committed BEFORE any provider
+        I/O — a separate session reads it back before create is called."""
+        run_id = await start_issue_run(service)
+
+        await service._reserve_mr(run_id, "factory/1/dur")  # its own commit
+        assert service._gitlab.calls_of("create_merge_request") == []
+
+        async with db() as other:  # a SECOND session sees the committed intent
+            row = (
+                (
+                    await other.execute(
+                        select(MRReservation).where(MRReservation.flow_run_id == run_id)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert row.status == "open"
+
+        mr_iid = await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/dur", "sha-1")
+        assert mr_iid > 0
+
+    async def test_a_confirmed_reservation_short_circuits_without_a_second_mr(self, db, service):
+        run_id = await start_issue_run(service)
+        first = await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/one", "sha-1")
+        second = await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/one", "sha-1")
+
+        assert first == second
+        assert len(service._gitlab.calls_of("create_merge_request")) == 1

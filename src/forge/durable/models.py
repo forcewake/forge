@@ -25,6 +25,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -451,6 +453,33 @@ class ActionLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class MRReservation(Base):
+    """The ONE logical Draft-MR intent per run+branch (B03, migration 019).
+
+    Separates the *reservation* — "exactly one MR for this run+branch",
+    durable and committed BEFORE any provider I/O, ``FOR UPDATE``-serialized
+    across concurrent creators — from the immutable ``action_log`` attempt
+    history. ``open → confirmed``; ``confirmed.mr_iid`` is the adopted or
+    created MR. The journal keeps every attempt/observation row (create
+    attempts, adoptions, reconciliations) — resolving a lost response
+    never rewrites a terminal action row.
+    """
+
+    __tablename__ = "mr_reservations"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'confirmed')", name="ck_mr_reservation_status"),
+        UniqueConstraint("flow_run_id", "branch", name="uq_mr_reservation_run_branch"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    flow_run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    branch: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    mr_iid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class LLMCall(Base):

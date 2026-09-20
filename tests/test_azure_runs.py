@@ -1756,7 +1756,12 @@ class TestVerificationGate:
         fake.seed_build(source_version=candidate_sha, definition_name="docs", result="succeeded")
         async with db() as session:
             run = await session.get(FlowRun, run_id)
-            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            # B01: the deadline reads the verification EPOCH, not updated_at
+            # (evidence merges slide updated_at — the bug this pins).
+            started = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
+            run.evidence = dict(run.evidence or {}) | {
+                "verification_epoch": {"candidate_sha": candidate_sha, "started_at": started}
+            }
             await session.commit()
 
         await service.evaluate_waiting_ci_one(run_id, now=datetime.now(timezone.utc))
@@ -2775,7 +2780,12 @@ class TestAzureVerificationDeadlineBeforeIO:
         run_id, _candidate = await drive_to_waiting_ci(service, fake)
         async with db() as session:
             run = await session.get(FlowRun, run_id)
-            run.updated_at = datetime.now(timezone.utc) - timedelta(seconds=601)
+            # B01: the deadline reads the verification EPOCH, not updated_at
+            # (evidence merges slide updated_at — the bug this pins).
+            started = (datetime.now(timezone.utc) - timedelta(seconds=601)).isoformat()
+            run.evidence = dict(run.evidence or {}) | {
+                "verification_epoch": {"candidate_sha": _candidate, "started_at": started}
+            }
             await session.commit()
 
         builds_reads = len(fake.calls_of("list_builds_by_repository"))

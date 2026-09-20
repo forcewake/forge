@@ -595,4 +595,4 @@ class TestGateEvidenceUnification:
         assert verification["status"] == "passed"
         assert verification["tested_oid"] == CANDIDATE  # was "candidate_sha" pre-ADR-0027
         assert verification["producer"] == "github-checks"
-        assert verification["surface"] == [{"name": "ci", "conclusion": "success"}]
+        assert verification["surface"] == [{"name": "ci", "conclusion": "success", "workflow": "name:ci"}]

@@ -307,6 +307,22 @@ async def terminalize_failure(
     log.warning("Run %s -> blocked (fatal, no auto-retry): %s", run_id[:8], reason)
 
 
+def _blocked_runs_query(provider: str, repo_full_name: str | None):
+    """Blocked runs of *provider*, optionally scoped to ONE repository.
+
+    B08: a repo-bound service's recovery scans must never select another
+    repository's runs — the bound adapter would read config and post
+    comments through the WRONG repo's client (review e53ffd2 B08).
+    """
+    query = select(FlowRun).where(
+        FlowRun.provider == provider,
+        FlowRun.status == FlowStatus.BLOCKED.value,
+    )
+    if repo_full_name is not None:
+        query = query.where(FlowRun.github_repo_full_name == repo_full_name)
+    return query
+
+
 async def evaluate_revivals(
     session_factory: async_sessionmaker,
     settings: object,
@@ -315,6 +331,7 @@ async def evaluate_revivals(
     redispatch: Callable[[str], Awaitable[None]],
     now: datetime | None = None,
     log: logging.Logger = logger,
+    repo_full_name: str | None = None,
 ) -> None:
     """One reconciler pass over every run waiting for its auto-revive.
 
@@ -336,16 +353,7 @@ async def evaluate_revivals(
     now = now or datetime.now(timezone.utc)
     async with session_factory() as session:
         runs = (
-            (
-                await session.execute(
-                    select(FlowRun).where(
-                        FlowRun.provider == provider,
-                        FlowRun.status == FlowStatus.BLOCKED.value,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+            (await session.execute(_blocked_runs_query(provider, repo_full_name))).scalars().all()
         )
         due_ids = [run.id for run in runs if revival_due(run, now)]
         holds = {run_id: await revival_hold_reason(session, run_id) for run_id in due_ids}
@@ -687,6 +695,7 @@ async def due_revival_attempts(
     now: datetime,
     pending_bound: int = DISPATCH_RECOVERY_PENDING_SECONDS,
     dispatched_bound: int = DISPATCH_RECOVERY_DISPATCHED_SECONDS,
+    repo_full_name: str | None = None,
 ) -> list[tuple[ActionLog, FlowRun]]:
     """The stranded revival attempts of *provider*, oldest first.
 
@@ -697,31 +706,32 @@ async def due_revival_attempts(
     rows (``dispatch_state`` NULL) count as pending.
     """
     now = as_aware_utc(now)
-    rows = (
-        await session.execute(
-            select(ActionLog, FlowRun)
-            .join(FlowRun, FlowRun.id == ActionLog.flow_run_id)
-            .where(
-                FlowRun.provider == provider,
-                ActionLog.action_kind.in_(REVIVAL_ACTION_KINDS),
-                ActionLog.status == "requested",
-                or_(
-                    and_(
-                        or_(
-                            ActionLog.dispatch_state.is_(None),
-                            ActionLog.dispatch_state == "pending",
-                        ),
-                        ActionLog.created_at < now - timedelta(seconds=pending_bound),
+    query = (
+        select(ActionLog, FlowRun)
+        .join(FlowRun, FlowRun.id == ActionLog.flow_run_id)
+        .where(
+            FlowRun.provider == provider,
+            ActionLog.action_kind.in_(REVIVAL_ACTION_KINDS),
+            ActionLog.status == "requested",
+            or_(
+                and_(
+                    or_(
+                        ActionLog.dispatch_state.is_(None),
+                        ActionLog.dispatch_state == "pending",
                     ),
-                    and_(
-                        ActionLog.dispatch_state == "dispatched",
-                        ActionLog.created_at < now - timedelta(seconds=dispatched_bound),
-                    ),
+                    ActionLog.created_at < now - timedelta(seconds=pending_bound),
                 ),
-            )
-            .order_by(ActionLog.id.asc())
+                and_(
+                    ActionLog.dispatch_state == "dispatched",
+                    ActionLog.created_at < now - timedelta(seconds=dispatched_bound),
+                ),
+            ),
         )
-    ).all()
+        .order_by(ActionLog.id.asc())
+    )
+    if repo_full_name is not None:
+        query = query.where(FlowRun.github_repo_full_name == repo_full_name)
+    rows = (await session.execute(query)).all()
     return [(action, run) for action, run in rows]
 
 
@@ -734,6 +744,7 @@ async def evaluate_attempt_recovery(
     pending_bound: int = DISPATCH_RECOVERY_PENDING_SECONDS,
     dispatched_bound: int = DISPATCH_RECOVERY_DISPATCHED_SECONDS,
     log: logging.Logger = logger,
+    repo_full_name: str | None = None,
 ) -> int:
     """One recovery pass over stranded revival attempts (A11).
 
@@ -764,6 +775,7 @@ async def evaluate_attempt_recovery(
             now=now,
             pending_bound=pending_bound,
             dispatched_bound=dispatched_bound,
+            repo_full_name=repo_full_name,
         )
     re_driven = 0
     for action, run in stranded:
@@ -949,6 +961,7 @@ async def evaluate_config_blocks(
     reread: Callable[[int], Awaitable["ConfigReadResult"]],
     replan: Callable[[str, dict], Awaitable[None]],
     log: logging.Logger = logger,
+    repo_full_name: str | None = None,
 ) -> int:
     """One reconciler pass over runs parked ``blocked(config_…)`` (A13).
 
@@ -970,16 +983,7 @@ async def evaluate_config_blocks(
     """
     async with session_factory() as session:
         runs = (
-            (
-                await session.execute(
-                    select(FlowRun).where(
-                        FlowRun.provider == provider,
-                        FlowRun.status == FlowStatus.BLOCKED.value,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+            (await session.execute(_blocked_runs_query(provider, repo_full_name))).scalars().all()
         )
         candidates: list[tuple[str, int, dict]] = [
             (
