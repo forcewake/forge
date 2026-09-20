@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -269,6 +270,45 @@ def attach_export(
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _render_ci_workflow(task: CohortTask) -> str:
+    """A per-unit CI workflow rendered FROM the predeclared checks.
+
+    Shipping forge's own ``ci.yml`` into a fixture repo guaranteed a
+    permanently red baseline — a fixture carries no ``pyproject.toml``, so
+    every forge job dies at "Install dependencies" and the PR's checks can
+    never go green (LIVE-found 2026-09-20: CU-01 burned repair lanes in a
+    loop no candidate could close). The seed instead ships a workflow that
+    proves exactly the unit's acceptance contract: one step per predeclared
+    check, nothing else.
+    """
+    lines = [
+        "name: cohort-checks",
+        "",
+        "on:",
+        "  pull_request:",
+        "  push:",
+        "",
+        "permissions: {}",
+        "",
+        "jobs:",
+        "  checks:",
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 10",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+    ]
+    for check in task.checks:
+        argv = ["python3" if arg == "{python}" else arg for arg in check.argv]
+        lines.append(f"      - name: {check.name}")
+        lines.append("        run: |")
+        # An argv element may itself be multi-line (e.g. a ``-c`` payload);
+        # shlex.join keeps it one shell word across the newlines, and every
+        # line must carry the block-scalar indent or the YAML breaks.
+        for command_line in shlex.join(argv).splitlines():
+            lines.append("          " + command_line)
+    return "\n".join(lines) + "\n"
+
+
 def _seed_branch(task: CohortTask, repo: str) -> None:
     """Force-push the unit's fixture seed onto the lab repo's default branch.
 
@@ -291,8 +331,11 @@ def _seed_branch(task: CohortTask, repo: str) -> None:
         workflows_src = _REPO_ROOT / ".github" / "workflows"
         workflows_dst = seed_dir / ".github" / "workflows"
         workflows_dst.mkdir(parents=True, exist_ok=True)
-        for name in ("forge-harness.yml", "ci.yml"):
-            shutil.copy2(workflows_src / name, workflows_dst / name)
+        shutil.copy2(workflows_src / "forge-harness.yml", workflows_dst / "forge-harness.yml")
+        # The PR checks must prove the UNIT's contract, not forge's: the
+        # rendered ci.yml runs exactly the predeclared checks (see
+        # _render_ci_workflow for why forge's own ci.yml is never shipped).
+        (workflows_dst / "ci.yml").write_text(_render_ci_workflow(task), encoding="utf-8")
         git("add", ".")
         git(
             "-c",

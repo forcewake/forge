@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import ast
 import json
+import shlex
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -738,3 +740,29 @@ def test_the_runner_imports_no_forge_module() -> None:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             imported.add(node.module)
     assert not any(name == "forge" or name.startswith("forge.") for name in imported)
+
+
+# ---------------------------------------------------------------------------
+# The seed's ci.yml proves the UNIT's contract, never forge's (2026-09-20)
+# ---------------------------------------------------------------------------
+
+
+def test_rendered_ci_workflow_runs_exactly_the_predeclared_checks() -> None:
+    task = TASKS_BY_ID["CU-01-create-greeting"]
+    workflow = yaml.safe_load(cohort_runner._render_ci_workflow(task))
+    steps = workflow["jobs"]["checks"]["steps"]
+    check_steps = [s for s in steps if "run" in s]
+    assert [s["name"] for s in check_steps] == [c.name for c in task.checks]
+    for step, check in zip(check_steps, task.checks):
+        argv = ["python3" if a == "{python}" else a for a in check.argv]
+        assert step["run"].strip() == shlex.join(argv)
+
+
+def test_every_units_checks_render_to_a_valid_workflow() -> None:
+    for task in COHORT_TASKS:
+        workflow = yaml.safe_load(cohort_runner._render_ci_workflow(task))
+        # pyyaml applies YAML 1.1: a bare ``on:`` key parses as True
+        assert workflow[True] == {"pull_request": None, "push": None}
+        assert workflow["jobs"]["checks"]["steps"][0]["uses"] == "actions/checkout@v4"
+        rendered = cohort_runner._render_ci_workflow(task)
+        assert "pyproject" not in rendered  # forge's ci.yml must never leak in
