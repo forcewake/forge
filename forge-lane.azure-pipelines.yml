@@ -1,0 +1,237 @@
+# forge harness executor for Azure Pipelines (ADR-0024, milestone AZ-3)
+#
+# Human-applied to the TARGET Azure DevOps project at onboarding (mirrors
+# the GitLab/GitHub onboarding): this pipeline is what forge dispatches
+# when a run needs a coding agent. The agent runs in the project's
+# ephemeral pipeline agent — the lane has NO write credential and NO forge
+# secrets; its only output is the candidate artifact, which the forge
+# trusted publisher validates and publishes (push CAS + Draft PR).
+#
+# ONBOARDING CONTRACT (all human steps; forge never creates pipelines):
+#   1. Create a pipeline in the target project pointing at this YAML file
+#      (Pipelines -> New pipeline -> Azure Repos Git -> Existing YAML) and
+#      hand forge its numeric id as FORGE_AZDO_LANE_PIPELINE_ID.
+#   2. Provision the harness provider keys as pipeline SECRET variables on
+#      that pipeline — ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
+#      ANTHROPIC_BASE_URL / ZAI_API_KEY / XAI_API_KEY / COPILOT_GITHUB_TOKEN
+#      — and FORGE_HARNESS_MCP as a plain (non-secret) variable. The lane
+#      maps all of them; the driver uses what it needs.
+#   3. OPTIONAL brief transport: provision FORGE_AZDO_READ_TOKEN (a READ-
+#      ONLY work-item PAT of YOURS, vso.work read — never forge's PAT) as
+#      a pipeline secret, and the lane fetches the work item + the forge
+#      plan comment itself before the driver. Without it the lane uses the
+#      pre-provisioned .forge/brief.md as-is.
+#   4. The lane NEVER gets forge credentials: no forge PAT, no webhook
+#      secret, no write token — and the build service's auto-injected
+#      access token is never referenced either. Nothing here can push.
+#
+# Dispatch-only (ADR-0024 §6): forge queues this lane via the Runs API
+# (POST /_apis/pipelines/{pipelineId}/runs) with templateParameters
+# {run_id, attempt_base, driver, model, work_item_id}. There is NO
+# triggers: section at all — Azure Repos IGNORES YAML pr: triggers (PR CI
+# is governed by branch policies, "Build validation", which is exactly the
+# quality contract's enforcement point), and a CI trigger would run the
+# lane outside forge's control.
+#
+# The driver step is rendered by forge's HarnessDriver.build_script() —
+# the template only provisions the lane.
+
+parameters:
+  # Typed queue-time parameters; REST-dispatched templateParameters arrive
+  # as strings, so everything is a string (research §6.2).
+  - name: run_id
+    type: string
+  - name: attempt_base
+    type: string
+  - name: driver
+    type: string
+  - name: model
+    type: string
+    default: ''
+  - name: work_item_id
+    type: string
+  - name: repair_context
+    type: string
+    default: ''
+
+jobs:
+  - job: harness
+    # Pool: any agent pool works — the repo owner picks theirs (a
+    # self-hosted pool with a container job mirrors the ADR-0002 execution
+    # profile). The default below is the Microsoft-hosted agent.
+    pool:
+      vmImage: ubuntu-latest
+    timeoutInMinutes: 60
+    variables:
+      FORGE_RUN_ID: ${{ parameters.run_id }}
+      # The dispatched branch (predefined variable, full ref form): the
+      # lane fetches it belt-and-braces before pinning the attempt base.
+      FORGE_ATTEMPT_REF: $(Build.SourceBranch)
+      # The frozen attempt base comes from the queue-time PARAMETER — a
+      # pipeline YAML cannot pin a commit SHA in a resource ref.
+      FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}
+      FORGE_DRIVER: ${{ parameters.driver }}
+      FORGE_MODEL: ${{ parameters.model }}
+      FORGE_ISSUE_NUMBER: ${{ parameters.work_item_id }}
+      FORGE_BRIEF: .forge/brief.md
+      FORGE_EXIT_FILE: .forge/exit
+    steps:
+      # forge requires Python >=3.13 — the hosted ubuntu-latest image
+      # defaults to 3.12 (LIVE-found in the ADR-0024 lab run: pip refused
+      # the forge install and the lane produced no candidate).
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - checkout: self
+        fetchDepth: 0
+        # Explicit: no credential is persisted into .git/config — nothing
+        # actionable remains in the ephemeral workspace.
+        persistCredentials: false
+
+      - bash: git remote set-url --push origin FORBIDDEN
+        displayName: Disable push (proposal-only lane, ADR-0016/0024)
+
+      - bash: |
+          mkdir -p .forge
+          echo ".forge/" >> .git/info/exclude 2>/dev/null || true
+        displayName: Forge control directory
+
+      # The attempt base arrives as a queue-time parameter (never a write
+      # credential, never the build service's auto token): fetch the
+      # dispatched branch best-effort, then detach at the frozen base the
+      # publisher will CAS against.
+      - bash: |
+          set -euo pipefail
+          # checkout: self already sits at the dispatched branch tip —
+          # which IS the frozen base (the dispatch leg cut the branch
+          # there). Detach straight at the parameter SHA; no extra fetch
+          # (the credential-free remote cannot authenticate a second one).
+          git checkout --detach "$FORGE_ATTEMPT_BASE"
+        displayName: Checkout the frozen attempt base (detached)
+        env:
+          # job variables are NOT step env vars — map explicitly (LIVE-found:
+          # an unmapped \$VAR detached at HEAD instead of the frozen base).
+          FORGE_ATTEMPT_BASE: ${{ parameters.attempt_base }}
+
+      # The driver step NEVER fails the job: harness_entry always exits 0
+      # and writes .forge/exit — the candidate steps below run
+      # condition: always() and forge classifies the run from the
+      # artifact's meta exit (the Actions lane's audit-trail preservation).
+      - bash: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" && break
+            echo "pip install of forge failed (attempt $attempt), retrying..."
+            sleep $((attempt * 5))
+          done
+          # Brief transport: when the repo owner provisions a READ-ONLY
+          # work-item token (FORGE_AZDO_READ_TOKEN — a pipeline secret that
+          # is YOURS, never forge's), the lane fetches the work item + the
+          # approved plan comment itself; a failed fetch falls back to the
+          # pre-provisioned .forge/brief.md.
+          # An UNDEFINED AzDO variable expands its $(macro) to the literal
+          # text (LIVE-found in the ADR-0024 lab run) — treat that as unset.
+          # The junk literal is assembled from parts: AzDO's macro scanner
+          # would substitute the real secret into a whole $(NAME) pattern,
+          # making the guard compare the value against itself.
+          _junk="$(printf '$(%s)' 'FORGE_AZDO_READ_TOKEN')"
+          case "${FORGE_AZDO_READ_TOKEN:-}" in
+            '' | "$_junk") ;;
+            *)
+              python -m forge.harness_entry --render-brief-azure \
+                || echo "brief fetch failed — falling back to .forge/brief.md"
+              ;;
+          esac
+          python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
+          exit 0
+        displayName: Run harness driver
+        env:
+          FORGE_DRIVER: $(FORGE_DRIVER)
+          FORGE_MODEL: $(FORGE_MODEL)
+          FORGE_HARNESS_MODEL: $(FORGE_MODEL)
+          FORGE_ISSUE_NUMBER: $(FORGE_ISSUE_NUMBER)
+          FORGE_REPAIR_CONTEXT: $(repair_context)
+          FORGE_LOG_PLATFORM: azdo
+          # Brief-transport inputs (all optional): the read token is the
+          # owner's own read-only PAT; the org URL and project name route
+          # the two WIT GETs (System.TeamProject is a predefined variable).
+          FORGE_AZDO_READ_TOKEN: $(FORGE_AZDO_READ_TOKEN)
+          FORGE_AZDO_ORG_URL: $(FORGE_AZDO_ORG_URL)
+          FORGE_AZDO_PROJECT: $(System.TeamProject)
+          FORGE_AZDO_BOT_NAME: $(FORGE_AZDO_BOT_NAME)
+          # MCP (ADR-0022): canonical mcpServers JSON from a pipeline
+          # VARIABLE (not secret — it references secrets by name); an empty
+          # value means strict isolation with no servers.
+          FORGE_HARNESS_MCP: $(FORGE_HARNESS_MCP)
+          # Harness keys = pipeline SECRET variables ($(...) macro; secrets
+          # are only surfaced when explicitly mapped like this).
+          ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+          ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
+          ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
+          ZAI_API_KEY: $(ZAI_API_KEY)
+          XAI_API_KEY: $(XAI_API_KEY)
+          COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
+
+      # Candidate capture — condition: always(): the audit trail survives
+      # failures (mirror of the Actions lane).
+      - bash: |
+          set -uo pipefail
+          # The candidate is a TEXT patch (binary_not_supported, R08): the
+          # driver's Python runs leave __pycache__/.pyc behind, and
+          # `git add -A` + `--binary` would smuggle one into the diff and
+          # fail the candidate closed (LIVE-found 2026-09-20 — the Actions
+          # lane has had this scrub since f90867f).
+          rm -rf __pycache__ .pytest_cache
+          find . -name '__pycache__' -type d -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true
+          echo "__pycache__/" >> .git/info/exclude 2>/dev/null || true
+          echo "*.pyc" >> .git/info/exclude 2>/dev/null || true
+          git add -A
+          git diff --cached --full-index "$FORGE_ATTEMPT_BASE" \
+            > .forge/candidate.diff || true
+          python - <<'PY'
+          import json, os
+          usage = None
+          if os.path.exists(".forge/usage.json"):
+              try:
+                  with open(".forge/usage.json") as fh:
+                      usage = json.load(fh)
+              except Exception:
+                  usage = None
+          meta = {
+              "attempt_base": os.environ.get("FORGE_ATTEMPT_BASE", ""),
+              "run_id": os.environ.get("FORGE_RUN_ID", ""),
+              "driver": os.environ.get("FORGE_DRIVER", ""),
+              "model": os.environ.get("FORGE_MODEL", ""),
+              "exit": (open(".forge/exit").read().strip()
+                       if os.path.exists(".forge/exit") else "unknown"),
+              "usage": usage,
+              "completeness": "aggregate",
+          }
+          json.dump(meta, open(".forge/candidate.meta.json", "w"))
+          PY
+        displayName: Emit candidate artifact
+        condition: always()
+
+      # Stage ONLY the candidate contract into a clean directory. The
+      # archive allowlist is CLOSED (exactly candidate.diff +
+      # candidate.meta.json — R16): publishing all of .forge/ also packs
+      # the forensic event/usage logs, and the control plane fails the
+      # candidate closed as harness_artifact_invalid (LIVE-found
+      # 2026-09-20: 6 entries over the cap — lane output, control-plane
+      # contract; the logs stay visible in the pipeline run itself).
+      - bash: |
+          set -euo pipefail
+          rm -rf forge-output
+          mkdir -p forge-output
+          cp .forge/candidate.diff .forge/candidate.meta.json forge-output/
+          echo "forge-output/" >> .git/info/exclude 2>/dev/null || true
+        condition: always()
+        displayName: Stage candidate contract
+
+      # `publish` = the PublishPipelineArtifact task; the Pipelines Runs
+      # artifacts API hands forge an expiring signed URL serving the zip
+      # (research §6.3). Carries exactly the staged contract pair.
+      - publish: forge-output
+        artifact: forge-candidate-${{ parameters.run_id }}
+        condition: always()
+        displayName: Publish candidate artifact
