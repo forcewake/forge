@@ -1,0 +1,570 @@
+{
+  "schema": "forge.cohort.ledger/1",
+  "contract_version": "forge.delivery-cohort/1",
+  "repo": "forcewake/forge-lab-gh",
+  "profile": {
+    "driver": "",
+    "model": "",
+    "budget_class": ""
+  },
+  "opened_at": "2026-09-19T22:20:46+00:00",
+  "units": {
+    "CU-01-create-greeting": {
+      "unit_id": "CU-01-create-greeting",
+      "axis": "create",
+      "title": "Cohort CU-01: add a greeting module",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "edc6faaa911c4fe296c6bd27d5ddb53b",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T00:45:47+00:00",
+          "started_at": "2026-09-20T00:45:47+00:00",
+          "plan_seen_at": "2026-09-20T00:46:08+00:00",
+          "go_posted_at": "2026-09-20T00:46:09+00:00",
+          "candidate_seen_at": null,
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": null,
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        },
+        {
+          "run_id": "cf9296dfc7ba454c9228e301afb9c933",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:08:42+00:00",
+          "started_at": "2026-09-20T01:08:42+00:00",
+          "plan_seen_at": "2026-09-20T01:09:01+00:00",
+          "go_posted_at": "2026-09-20T01:09:03+00:00",
+          "candidate_seen_at": "2026-09-20T01:11:36+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:14:18+00:00",
+        "notes": "PR #54 (run cf9296df): greeting.py only, predeclared checks pass in candidate worktree; PR checks green (cohort-checks)",
+        "checks": []
+      }
+    },
+    "CU-02-create-calculator": {
+      "unit_id": "CU-02-create-calculator",
+      "axis": "create",
+      "title": "Cohort CU-02: add a calculator module",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "3d74c5c0542e40879b7c27daf24d482f",
+          "kind": "initial",
+          "recorded_at": "2026-09-19T22:20:46+00:00",
+          "started_at": "2026-09-19T22:20:46+00:00",
+          "plan_seen_at": "2026-09-19T22:21:51+00:00",
+          "go_posted_at": "2026-09-19T22:21:52+00:00",
+          "candidate_seen_at": null,
+          "ci_concluded_at": null,
+          "terminal_seen_at": "2026-09-19T22:48:26+00:00",
+          "terminal_status": "blocked",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        },
+        {
+          "run_id": "bd6de909ef2b4ca8a904447ae72a0efd",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:14:33+00:00",
+          "started_at": "2026-09-20T01:14:33+00:00",
+          "plan_seen_at": "2026-09-20T01:14:54+00:00",
+          "go_posted_at": "2026-09-20T01:14:55+00:00",
+          "candidate_seen_at": "2026-09-20T01:17:08+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:18:58+00:00",
+        "notes": "PR #56 (run bd6de909): calculator.py only, calculator-contract passes in candidate worktree, PR checks green",
+        "checks": []
+      }
+    },
+    "CU-03-update-slugify": {
+      "unit_id": "CU-03-update-slugify",
+      "axis": "update",
+      "title": "Cohort CU-03: slugify must fold underscores",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "f73a96de71ba4bdbac9ca3766aa37432",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:19:13+00:00",
+          "started_at": "2026-09-20T01:19:13+00:00",
+          "plan_seen_at": "2026-09-20T01:19:49+00:00",
+          "go_posted_at": "2026-09-20T01:19:50+00:00",
+          "candidate_seen_at": "2026-09-20T01:22:23+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:26:01+00:00",
+        "notes": "PR #58 (run f73a96de): human inspected 8273888..b892f33 directly \u2014 only slugify.py, 3/3 predeclared checks pass. Review 'concerns' was diff-unavailable (reviewer saw no diff body), not a code defect; filed follow-up",
+        "checks": []
+      }
+    },
+    "CU-04-update-retry-config": {
+      "unit_id": "CU-04-update-retry-config",
+      "axis": "update",
+      "title": "Cohort CU-04: thread MAX_RETRIES through the client",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "f8d5c9e6c1344d19a485342a81252693",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:26:12+00:00",
+          "started_at": "2026-09-20T01:26:12+00:00",
+          "plan_seen_at": "2026-09-20T01:26:31+00:00",
+          "go_posted_at": "2026-09-20T01:26:33+00:00",
+          "candidate_seen_at": "2026-09-20T01:30:19+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:31:02+00:00",
+        "notes": "PR #60 (run f8d5c9e6): settings.py+client.py only, MAX_RETRIES read not literal, contract passes; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-05-repair-temperature": {
+      "unit_id": "CU-05-repair-temperature",
+      "axis": "repair",
+      "title": "Cohort CU-05: fix the failing temperature test",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "9af0465245cc440cbe0c837984647a84",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:37:20+00:00",
+          "started_at": "2026-09-20T01:37:20+00:00",
+          "plan_seen_at": "2026-09-20T01:37:56+00:00",
+          "go_posted_at": "2026-09-20T01:37:57+00:00",
+          "candidate_seen_at": "2026-09-20T01:40:11+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:42:01+00:00",
+        "notes": "PR (run issue 61): temperature.py only, unittest passes, test file hash-identical to seed; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-06-repair-email": {
+      "unit_id": "CU-06-repair-email",
+      "axis": "repair",
+      "title": "Cohort CU-06: fix the email validator regression",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "e2e7fb15c89a4ca1914e9803b09e9460",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:42:06+00:00",
+          "started_at": "2026-09-20T01:42:06+00:00",
+          "plan_seen_at": "2026-09-20T01:42:42+00:00",
+          "go_posted_at": "2026-09-20T01:42:43+00:00",
+          "candidate_seen_at": "2026-09-20T01:47:25+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:47:51+00:00",
+        "notes": "PR (issue 63): email_validate.py only, unittest passes, test file hash-identical to seed; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-07-large-log-analyze": {
+      "unit_id": "CU-07-large-log-analyze",
+      "axis": "large-file",
+      "title": "Cohort CU-07: count ERROR lines in a 147KB log",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "6a4c780d1cbd46708dd86169271fcf5e",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:47:57+00:00",
+          "started_at": "2026-09-20T01:47:57+00:00",
+          "plan_seen_at": "2026-09-20T01:48:32+00:00",
+          "go_posted_at": "2026-09-20T01:48:33+00:00",
+          "candidate_seen_at": "2026-09-20T01:52:37+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T01:53:38+00:00",
+        "notes": "PR (issue 65): analyze.py only, count_errors matches oracle over the 147KB log; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-08-large-dictionary": {
+      "unit_id": "CU-08-large-dictionary",
+      "axis": "large-file",
+      "title": "Cohort CU-08: prefix counts over a 108KB word list",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "60e6c542fb1a4b36b035cf15edc305e5",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T01:53:43+00:00",
+          "started_at": "2026-09-20T01:53:43+00:00",
+          "plan_seen_at": "2026-09-20T01:54:49+00:00",
+          "go_posted_at": "2026-09-20T01:54:51+00:00",
+          "candidate_seen_at": "2026-09-20T01:57:59+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:00:49+00:00",
+        "notes": "PR (issue 67): lookup.py only (+7 lines), count_prefix matches oracle; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-09-monorepo-billing-scope": {
+      "unit_id": "CU-09-monorepo-billing-scope",
+      "axis": "monorepo",
+      "title": "Cohort CU-09: billing discount, shipping out of scope",
+      "path_scope": [
+        "services/billing/"
+      ],
+      "attempts": [
+        {
+          "run_id": "6132e90af13b4efaafc8152cebc91d2a",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:00:55+00:00",
+          "started_at": "2026-09-20T02:00:55+00:00",
+          "plan_seen_at": "2026-09-20T02:01:30+00:00",
+          "go_posted_at": "2026-09-20T02:01:32+00:00",
+          "candidate_seen_at": "2026-09-20T02:04:23+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:06:30+00:00",
+        "notes": "PR (issue 69): billing tree only, discount contract passes, shipping bytes+behavior untouched; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-10-monorepo-shared-banner": {
+      "unit_id": "CU-10-monorepo-shared-banner",
+      "axis": "monorepo",
+      "title": "Cohort CU-10: CLI banner via the shared package",
+      "path_scope": [
+        "apps/",
+        "packages/"
+      ],
+      "attempts": [
+        {
+          "run_id": "eb521ee2fa6647f3b322dd6cd02ca426",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:06:35+00:00",
+          "started_at": "2026-09-20T02:06:35+00:00",
+          "plan_seen_at": "2026-09-20T02:07:11+00:00",
+          "go_posted_at": "2026-09-20T02:07:12+00:00",
+          "candidate_seen_at": "2026-09-20T02:11:17+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:12:57+00:00",
+        "notes": "PR (issue 71): main.py routes banner through shared shout as specified, vendor untouched; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-11-tests-stringutil": {
+      "unit_id": "CU-11-tests-stringutil",
+      "axis": "tests-only",
+      "title": "Cohort CU-11: write the missing stringutil tests",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "68d593bf587b4e89981024ff9730a40a",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:13:03+00:00",
+          "started_at": "2026-09-20T02:13:03+00:00",
+          "plan_seen_at": "2026-09-20T02:13:39+00:00",
+          "go_posted_at": "2026-09-20T02:13:40+00:00",
+          "candidate_seen_at": "2026-09-20T02:16:49+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:18:36+00:00",
+        "notes": "PR (issue 73): test_stringutil.py only, unittest passes, coverage check passes; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-12-tests-ratios": {
+      "unit_id": "CU-12-tests-ratios",
+      "axis": "tests-only",
+      "title": "Cohort CU-12: write the missing ratios tests",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "c85f04e2abc744b4a5d1b75e9247c5fb",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:18:42+00:00",
+          "started_at": "2026-09-20T02:18:42+00:00",
+          "plan_seen_at": "2026-09-20T02:19:18+00:00",
+          "go_posted_at": "2026-09-20T02:19:19+00:00",
+          "candidate_seen_at": "2026-09-20T02:22:28+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:24:13+00:00",
+        "notes": "PR (issue 75): test_ratios.py only, unittest + coverage checks pass; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-13-infra-retry": {
+      "unit_id": "CU-13-infra-retry",
+      "axis": "infra-failure",
+      "title": "Cohort CU-13: env report (with an injected lane death)",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "3e3bedb99ea3469796c55da689577796",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:24:19+00:00",
+          "started_at": "2026-09-20T02:24:19+00:00",
+          "plan_seen_at": "2026-09-20T02:24:54+00:00",
+          "go_posted_at": "2026-09-20T02:24:55+00:00",
+          "candidate_seen_at": "2026-09-20T02:28:04+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:29:54+00:00",
+        "notes": "PR (issue 77): env_report.py only, contract passes; PR checks green",
+        "checks": []
+      }
+    },
+    "CU-14-cancel-mid-run": {
+      "unit_id": "CU-14-cancel-mid-run",
+      "axis": "cancel-mid-run",
+      "title": "Cohort CU-14: CSV export (cancelled by the operator mid-run)",
+      "path_scope": [],
+      "attempts": [
+        {
+          "run_id": "a0d4d1f1a78d43609961f19f0fdd952d",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:30:00+00:00",
+          "started_at": "2026-09-20T02:30:00+00:00",
+          "plan_seen_at": "2026-09-20T02:30:51+00:00",
+          "go_posted_at": "2026-09-20T02:30:53+00:00",
+          "candidate_seen_at": "2026-09-20T02:34:58+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        },
+        {
+          "run_id": "89222280ad6847fd88b123699cf4150d",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:45:25+00:00",
+          "started_at": "2026-09-20T02:45:25+00:00",
+          "plan_seen_at": "2026-09-20T02:46:16+00:00",
+          "go_posted_at": "2026-09-20T02:46:17+00:00",
+          "candidate_seen_at": "2026-09-20T02:49:45+00:00",
+          "ci_concluded_at": null,
+          "terminal_seen_at": null,
+          "terminal_status": "ready_for_human",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        },
+        {
+          "run_id": "6cd4d7bc51924a07ae3c98aaf129f9ff",
+          "kind": "initial",
+          "recorded_at": "2026-09-20T02:56:09+00:00",
+          "started_at": "2026-09-20T02:56:09+00:00",
+          "plan_seen_at": "2026-09-20T02:56:45+00:00",
+          "go_posted_at": "2026-09-20T02:56:46+00:00",
+          "candidate_seen_at": null,
+          "ci_concluded_at": null,
+          "terminal_seen_at": "2026-09-20T02:58:41+00:00",
+          "terminal_status": "cancelled",
+          "rework_of": null,
+          "superseded_by": null,
+          "commit_cycle": null,
+          "receipts": [],
+          "llm_calls": [],
+          "export_attached": false,
+          "notes": ""
+        }
+      ],
+      "acceptance": {
+        "verdict": "accepted",
+        "decided_by": "coordinator",
+        "decided_at": "2026-09-20T02:59:05+00:00",
+        "notes": "attempt 1+2 (PRs merged): csv-export contract passes. attempt 3: /cancel mid-lane landed 'cancelled by @forcewake' on run 6cd4d7bc with no candidate published \u2014 cancellation semantics verified after the cancel_unit indexing fix (82901e9)",
+        "checks": []
+      }
+    }
+  }
+}

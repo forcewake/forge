@@ -1,0 +1,1390 @@
+{
+  "schema": "forge.cohort.report/1",
+  "contract_version": "forge.delivery-cohort/1",
+  "ledger_schema": "forge.cohort.ledger/1",
+  "repo": "forcewake/forge-lab-gh",
+  "profile": {
+    "driver": "",
+    "model": "",
+    "budget_class": ""
+  },
+  "counts": {
+    "units": 14,
+    "attempts": 18,
+    "pending_units": 0,
+    "accepted_units": 14,
+    "rejected_units": 0,
+    "superseded_units": 0,
+    "cancelled_units": 0,
+    "rejected_attempts": 2,
+    "rework_count": 0,
+    "repairs_total": null
+  },
+  "all_attempt_spend": {
+    "usage": {
+      "receipt_count": 0,
+      "token_classes": {
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "cache_write_tokens": null,
+        "output_tokens": null
+      },
+      "unknown_counts": {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    "llm": {
+      "call_count": 0,
+      "failed_calls": 0,
+      "llm_active_s": 0.0,
+      "ttft": {
+        "p50_ms": null,
+        "p95_ms": null,
+        "known_calls": 0,
+        "unknown_calls": 0
+      }
+    }
+  },
+  "per_accepted_unit": {
+    "denominator": 14,
+    "token_classes_per_unit": {
+      "input_tokens": null,
+      "cached_input_tokens": null,
+      "cache_write_tokens": null,
+      "output_tokens": null
+    },
+    "llm_active_s_per_unit": 0.0,
+    "wall_s_mean": 1282.5,
+    "wall_known_units": 14,
+    "repairs_per_unit": 0.0
+  },
+  "latency": {
+    "decode_output_tokens_per_s": null
+  },
+  "honesty": {
+    "denominator": "14 accepted units (explicit operator verdict); READY counts and attempts are never the denominator",
+    "attempts_retained": true,
+    "token_classes_separate": true,
+    "decode_rate_scope": "known output_tokens / known llm_calls.duration_ms; logical traffic is never divided by decode throughput",
+    "unknown_usage_attempts": 18,
+    "zero_accepted_note": null
+  },
+  "units": [
+    {
+      "unit_id": "CU-01-create-greeting",
+      "axis": "create",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 2,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 1711.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "edc6faaa911c4fe296c6bd27d5ddb53b",
+          "kind": "initial",
+          "terminal_status": null,
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 21.0,
+            "gate_wait_s": 1.0
+          }
+        },
+        {
+          "attempt_no": 2,
+          "run_id": "cf9296dfc7ba454c9228e301afb9c933",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 19.0,
+            "gate_wait_s": 2.0,
+            "execution_wait_s": 153.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-02-create-calculator",
+      "axis": "create",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 2,
+      "rejected_attempts": 1,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 10692.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "3d74c5c0542e40879b7c27daf24d482f",
+          "kind": "initial",
+          "terminal_status": "blocked",
+          "export_attached": false,
+          "rejected": true,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 65.0,
+            "gate_wait_s": 1.0
+          }
+        },
+        {
+          "attempt_no": 2,
+          "run_id": "bd6de909ef2b4ca8a904447ae72a0efd",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 21.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 133.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-03-update-slugify",
+      "axis": "update",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 408.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "f73a96de71ba4bdbac9ca3766aa37432",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 153.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-04-update-retry-config",
+      "axis": "update",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 290.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "f8d5c9e6c1344d19a485342a81252693",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 19.0,
+            "gate_wait_s": 2.0,
+            "execution_wait_s": 226.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-05-repair-temperature",
+      "axis": "repair",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 281.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "9af0465245cc440cbe0c837984647a84",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 134.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-06-repair-email",
+      "axis": "repair",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 345.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "e2e7fb15c89a4ca1914e9803b09e9460",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 282.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-07-large-log-analyze",
+      "axis": "large-file",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 341.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "6a4c780d1cbd46708dd86169271fcf5e",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 35.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 244.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-08-large-dictionary",
+      "axis": "large-file",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 426.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "60e6c542fb1a4b36b035cf15edc305e5",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 66.0,
+            "gate_wait_s": 2.0,
+            "execution_wait_s": 188.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-09-monorepo-billing-scope",
+      "axis": "monorepo",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 335.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "6132e90af13b4efaafc8152cebc91d2a",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 35.0,
+            "gate_wait_s": 2.0,
+            "execution_wait_s": 171.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-10-monorepo-shared-banner",
+      "axis": "monorepo",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 382.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "eb521ee2fa6647f3b322dd6cd02ca426",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 245.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-11-tests-stringutil",
+      "axis": "tests-only",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 333.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "68d593bf587b4e89981024ff9730a40a",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 189.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-12-tests-ratios",
+      "axis": "tests-only",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 331.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "c85f04e2abc744b4a5d1b75e9247c5fb",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 189.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-13-infra-retry",
+      "axis": "infra-failure",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 1,
+      "rejected_attempts": 0,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 335.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "3e3bedb99ea3469796c55da689577796",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 35.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 189.0
+          }
+        }
+      ]
+    },
+    {
+      "unit_id": "CU-14-cancel-mid-run",
+      "axis": "cancel-mid-run",
+      "verdict": "accepted",
+      "decided_by": "coordinator",
+      "checks_passed": null,
+      "attempt_count": 3,
+      "rejected_attempts": 1,
+      "rework_count": 0,
+      "repairs": null,
+      "wall_s": 1745.0,
+      "usage": {
+        "receipt_count": 0,
+        "token_classes": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null
+        },
+        "unknown_counts": {
+          "input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "llm": {
+        "call_count": 0,
+        "failed_calls": 0,
+        "llm_active_s": 0.0,
+        "ttft": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "known_calls": 0,
+          "unknown_calls": 0
+        }
+      },
+      "attempts": [
+        {
+          "attempt_no": 1,
+          "run_id": "a0d4d1f1a78d43609961f19f0fdd952d",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 51.0,
+            "gate_wait_s": 2.0,
+            "execution_wait_s": 245.0
+          }
+        },
+        {
+          "attempt_no": 2,
+          "run_id": "89222280ad6847fd88b123699cf4150d",
+          "kind": "initial",
+          "terminal_status": "ready_for_human",
+          "export_attached": false,
+          "rejected": false,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 51.0,
+            "gate_wait_s": 1.0,
+            "execution_wait_s": 208.0
+          }
+        },
+        {
+          "attempt_no": 3,
+          "run_id": "6cd4d7bc51924a07ae3c98aaf129f9ff",
+          "kind": "initial",
+          "terminal_status": "cancelled",
+          "export_attached": false,
+          "rejected": true,
+          "rework_of": null,
+          "superseded_by": null,
+          "repairs": null,
+          "usage": {
+            "receipt_count": 0,
+            "token_classes": {
+              "input_tokens": null,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null
+            },
+            "unknown_counts": {
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_write_tokens": 0,
+              "output_tokens": 0
+            }
+          },
+          "llm": {
+            "call_count": 0,
+            "failed_calls": 0,
+            "llm_active_s": 0.0,
+            "ttft": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "known_calls": 0,
+              "unknown_calls": 0
+            }
+          },
+          "phases": {
+            "plan_wait_s": 36.0,
+            "gate_wait_s": 1.0
+          }
+        }
+      ]
+    }
+  ]
+}
