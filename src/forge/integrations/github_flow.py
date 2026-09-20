@@ -631,7 +631,9 @@ class GitHubPRReviewer:
         flow_run_id: str | None = None,
     ) -> ReviewVerdict:
         """Review the PR diff and return the parsed verdict."""
-        diff = await self._pr_diff(owner, repo, pr_number)
+        diff = await self._pr_diff(
+            owner, repo, pr_number, base_sha=base_sha, candidate_sha=candidate_sha
+        )
         user = (
             f"Issue title: {issue_title}\n\n"
             f"Plan summary:\n{plan_summary or '(no plan summary available)'}\n\n"
@@ -645,19 +647,51 @@ class GitHubPRReviewer:
             flow_run_id=flow_run_id,
         )
 
-    async def _pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
-        """Render the PR's file patches as diff text, biggest files first."""
-        try:
-            files = await self._client.get_pr_files(owner, repo, pr_number)
-        except Exception:
-            logger.warning(
-                "PR files read failed for %s/%s#%s — reviewing without diff",
-                owner,
-                repo,
-                pr_number,
-                exc_info=True,
-            )
-            return "(diff unavailable)"
+    async def _pr_diff(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        base_sha: str,
+        candidate_sha: str,
+    ) -> str:
+        """Render the reviewed diff text, biggest files first.
+
+        PR file patches when the PR is known; the ``base..candidate``
+        compare otherwise. A run can reach review before its PR reference
+        is journaled (a publication hiccup must not degrade the review),
+        and the reviewed range is base..candidate either way — the compare
+        API needs no PR. ``pr_number=0`` used to 404 straight into
+        ``(diff unavailable)``, so the reviewer filed "concerns" about a
+        diff it never saw (LIVE-found 2026-09-20, cohort CU-03).
+        """
+        files: list[dict[str, Any]] = []
+        if pr_number and pr_number > 0:
+            try:
+                files = await self._client.get_pr_files(owner, repo, pr_number)
+            except Exception:
+                logger.warning(
+                    "PR files read failed for %s/%s#%s — falling back to the sha compare",
+                    owner,
+                    repo,
+                    pr_number,
+                    exc_info=True,
+                )
+        if not files:
+            try:
+                comparison = await self._client.get_compare(owner, repo, base_sha, candidate_sha)
+                files = [dict(entry) for entry in (comparison.get("files") or [])]
+            except Exception:
+                logger.warning(
+                    "Compare read failed for %s/%s %s..%s — reviewing without diff",
+                    owner,
+                    repo,
+                    base_sha[:8],
+                    candidate_sha[:8],
+                    exc_info=True,
+                )
+                return "(diff unavailable)"
         ordered = sorted(files, key=lambda f: len(str(f.get("patch") or "")), reverse=True)
         parts: list[str] = []
         for entry in ordered:

@@ -549,6 +549,51 @@ class TestPRReviewer:
         )
         assert verdict.verdict == "concerns"
 
+    async def test_review_without_a_pr_number_reviews_the_sha_compare(self, fake: FakeGitHub):
+        """Live cohort CU-03: the run reached review before its PR
+        reference was journaled, so ``pr_number=0`` 404'd straight into
+        "(diff unavailable)" and the reviewer filed concerns about a diff
+        it never saw. The reviewed range is base..candidate either way —
+        fall back to the compare API, which needs no PR."""
+        compare_files = [{"filename": "slugify.py", "patch": "@@ -1 +1 @@\n-a\n+b"}]
+        fake.seed_compare(BASE_HEAD, "c" * 40, compare_files)
+        reviewer = self._reviewer(fake, '{"verdict": "ok", "summary": "sound", "findings": []}')
+
+        verdict = await reviewer.review(
+            owner="acme",
+            repo="acme-widget",
+            pr_number=0,  # the exact live shape (pr_number or 0)
+            issue_title="Update slugify",
+            plan_summary="",
+            base_sha=BASE_HEAD,
+            candidate_sha="c" * 40,
+        )
+
+        assert verdict.verdict == "ok"
+        prompt = reviewer._llm.prompts[0]  # type: ignore[attr-defined]
+        assert "slugify.py" in prompt
+        assert "(diff unavailable)" not in prompt
+
+    async def test_pr_file_read_failure_falls_back_to_the_compare(self, fake: FakeGitHub):
+        async def failing(owner, repo, number):
+            raise RuntimeError("boom")
+
+        fake.get_pr_files = failing  # type: ignore[method-assign]
+        fake.seed_compare(BASE_HEAD, "c" * 40, [{"filename": "x.py", "patch": "@@ +1 @@\n+x"}])
+        reviewer = self._reviewer(fake, '{"verdict": "ok", "summary": "sound", "findings": []}')
+
+        await reviewer.review(
+            owner="acme",
+            repo="acme-widget",
+            pr_number=7,
+            issue_title="t",
+            plan_summary="",
+            base_sha=BASE_HEAD,
+            candidate_sha="c" * 40,
+        )
+        prompt = reviewer._llm.prompts[0]  # type: ignore[attr-defined]
+        assert "x.py" in prompt
+
     async def test_review_rejects_an_unknown_verdict(self, fake: FakeGitHub):
         fake.seed_pr_files(7, [{"filename": "a.py", "patch": "@@ -1 +1 @@\n+x"}])
         reviewer = self._reviewer(fake, '{"verdict": "shipit", "summary": "!", "findings": []}')

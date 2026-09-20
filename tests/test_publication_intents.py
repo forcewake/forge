@@ -51,6 +51,7 @@ from forge.durable import (
     SettleDecision,
     classify_probe,
     commit_matches,
+    complete_intent,
     mark_dispatched,
     message_with_marker,
     op_marker,
@@ -59,6 +60,7 @@ from forge.durable import (
     settle_negative_probe,
     settle_state,
 )
+from forge.durable.intents import InvalidIntentTransition
 from forge.integrations.github_flow import GitHubPublishFlow, github_factory_branch
 from forge.models.base import Base
 from forge.repository import Change, ChangeSet, ChangesetWriter, Operation, WriteOutcome
@@ -1376,3 +1378,49 @@ class TestA12DelayedApplyAzureCAS:
         assert second.adopted is True
         assert second.commit_oid == landed  # the previous attempt's push
         assert len(fake.commits[GBRANCH]) == 1  # one push, no duplicate
+
+
+# ----------------------------------------------------------------------
+# Idempotent completion: re-publishing an already-recorded effect
+# ----------------------------------------------------------------------
+
+
+class TestIdempotentCompletion:
+    """A re-publication of an already-terminally-recorded effect is a
+    no-op, not a conflict (LIVE-found 2026-09-20: a repair cycle re-pushed
+    the candidate the probe had already ``adopted``; the direct push then
+    tried ``committed`` over the terminal row, the raise aborted the
+    publish step mid-transaction, and the run's PR reference was never
+    journaled — which degraded the review to "(diff unavailable)")."""
+
+    async def _adopted_intent(self, session_factory) -> PublicationIntent:
+        intent = await TestA12SettleMachine._seed(
+            self, session_factory, provider="github", status="dispatched"
+        )
+        async with session_factory() as session:
+            await complete_intent(
+                session, intent.id, "adopted", provider_object_id="b" * 40
+            )
+            await session.commit()
+        return intent
+
+    async def test_completing_the_same_effect_again_is_a_no_op(self, session_factory):
+        intent = await self._adopted_intent(session_factory)
+
+        async with session_factory() as session:
+            settled = await complete_intent(
+                session, intent.id, "committed", provider_object_id="b" * 40
+            )
+            await session.commit()
+
+        assert settled.status == "adopted"  # terminal row untouched
+        assert settled.provider_object_id == "b" * 40
+
+    async def test_completing_a_different_effect_still_raises(self, session_factory):
+        intent = await self._adopted_intent(session_factory)
+
+        with pytest.raises(InvalidIntentTransition):
+            async with session_factory() as session:
+                await complete_intent(
+                    session, intent.id, "committed", provider_object_id="c" * 40
+                )

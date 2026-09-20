@@ -542,6 +542,18 @@ async def complete_intent(
     if intent is None:
         raise InvalidIntentTransition(f"publication intent {intent_id} not found")
     if status not in _LEGAL_TRANSITIONS[intent.status]:
+        # Terminal rows are immutable — but a RE-publication of an effect
+        # that is already terminally recorded is not a conflict: e.g. a
+        # repair cycle force-pushed the same candidate, the probe had
+        # already ``adopted`` the commit, and the direct push then answers
+        # ok. Completing the same intent ``committed`` over ``adopted``
+        # must be an idempotent no-op, not an exception (LIVE-found
+        # 2026-09-20: the raise aborted the publish step mid-transaction
+        # while the run kept going, poisoning the review context).
+        if intent.status in TERMINAL_STATES and intent.provider_object_id and (
+            intent.provider_object_id == provider_object_id
+        ):
+            return intent
         raise InvalidIntentTransition(
             f"publication intent transition {intent.status!r} -> {status!r} is not legal "
             "(terminal rows are immutable)"
