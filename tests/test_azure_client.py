@@ -1074,6 +1074,38 @@ async def test_list_builds_by_repository_documented_params_only(
     # The API 400s "Repository type is missing/invalid" without it
     # (LIVE-found 2026-09-20: verification read no builds, ever).
     assert params["repositoryType"] == "TfsGit"
+
+    async def test_builds_by_repository_resolves_a_name_to_the_guid(
+        httpx_mock: HTTPXMock, azdo: AzureDevOpsClient
+    ):
+        """With repositoryType=TfsGit the builds list accepts only the
+        repository GUID — a NAME 400s 'Repository ID for a tfsgit
+        repository should be a GUID' (LIVE-found 2026-09-20). Resolve the
+        name once and query by GUID."""
+        httpx_mock.add_response(
+            url=azdo_url(f"{BASE}/{PROJECT}/_apis/git/repositories/forge-lab"),
+            json={"id": "1a2b3c4d-0000-0000-0000-000000000001"},
+        )
+        httpx_mock.add_response(
+            url=azdo_url(
+                f"{BASE}/{PROJECT}/_apis/build/builds",
+                repositoryId="1a2b3c4d-0000-0000-0000-000000000001",
+                repositoryType="TfsGit",
+                queryOrder="queueTimeDescending",
+                **{"$top": "25"},
+            ),
+            json={"value": [{"id": 1}], "count": 1},
+        )
+
+        builds = await azdo.list_builds_by_repository(PROJECT, "forge-lab")
+
+        assert builds[0]["id"] == 1
+        (builds_request,) = [
+            r for r in httpx_mock.get_requests() if "/builds" in str(r.url)
+        ]
+        assert builds_request.url.params["repositoryId"] == (
+            "1a2b3c4d-0000-0000-0000-000000000001"
+        )
     assert params["definitions"] == "207,999"
     assert params["minTime"] == "2026-09-15T12:05:00Z"
     assert params["queryOrder"] == "queueTimeDescending"

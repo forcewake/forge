@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -59,6 +60,10 @@ from forge.gitlab.events import UserInfo
 from forge.gitlab.schemas import Issue, RepositoryFile, TreeEntry
 
 logger = logging.getLogger(__name__)
+
+#: A TFSGit repository GUID (the only repositoryId shape the builds list
+#: accepts next to ``repositoryType=TfsGit``).
+_GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 #: Pinned REST API version (research §1.3: "API version must be specified
 #: with every request"). Server 2022 = API 7.1; pin per connection, not
@@ -934,6 +939,12 @@ class AzureDevOpsClient:
             "queryOrder": "queueTimeDescending",
             "$top": top,
         }
+        # With repositoryType=TfsGit the API accepts only the repository
+        # GUID here — a NAME 400s "Repository ID for a tfsgit repository
+        # should be a GUID" (LIVE-found 2026-09-20). Resolve once.
+        if not _GUID_RE.fullmatch(str(repo_id)):
+            resolved = await self.get_repository(project, str(repo_id))
+            params["repositoryId"] = str(resolved.get("id") or repo_id)
         if definitions:
             params["definitions"] = ",".join(str(d) for d in definitions)
         if min_time is not None:
