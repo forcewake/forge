@@ -766,3 +766,52 @@ def test_every_units_checks_render_to_a_valid_workflow() -> None:
         assert workflow["jobs"]["checks"]["steps"][0]["uses"] == "actions/checkout@v4"
         rendered = cohort_runner._render_ci_workflow(task)
         assert "pyproject" not in rendered  # forge's ci.yml must never leak in
+
+
+# ---------------------------------------------------------------------------
+# Attempt rows record once per drive; the cancel procedure hits the live row
+# ---------------------------------------------------------------------------
+
+
+def _open(tmp_path: Path) -> tuple[Path, dict]:
+    path = tmp_path / "ledger.json"
+    data = cohort_ledger.new_ledger(repo="acme/lab")
+    task = TASKS_BY_ID["CU-14-cancel-mid-run"]
+    cohort_ledger.open_unit(data, task)
+    return path, data
+
+
+def test_drive_re_stamp_does_not_duplicate_the_attempt_row(tmp_path: Path) -> None:
+    path, data = _open(tmp_path)
+    task = TASKS_BY_ID["CU-14-cancel-mid-run"]
+    attempt = cohort_ledger.attempt_record(run_id="", started_at="2026-09-20T00:00:00+00:00")
+    cohort_runner._record_attempt(path, data, task.unit_id, attempt)
+    attempt["run_id"] = "abc"
+    attempt["go_posted_at"] = "2026-09-20T00:01:00+00:00"
+    cohort_runner._record_attempt(path, data, task.unit_id, attempt)
+    reloaded = cohort_ledger.load_ledger(path)
+    rows = reloaded["units"][task.unit_id]["attempts"]
+    assert len(rows) == 1  # one drive, one row
+    assert rows[0]["run_id"] == "abc"  # the stamps persisted
+
+
+def test_cancel_unit_stamps_the_in_flight_row(tmp_path: Path) -> None:
+    path, data = _open(tmp_path)
+    task = TASKS_BY_ID["CU-14-cancel-mid-run"]
+    old = cohort_ledger.attempt_record(run_id="old", started_at="2026-09-20T00:00:00+00:00")
+    cohort_runner._record_attempt(path, data, task.unit_id, old)
+    live = cohort_ledger.attempt_record(run_id="live", started_at="2026-09-20T00:05:00+00:00")
+    cohort_runner._record_attempt(path, data, task.unit_id, live)
+
+    class FakeGh:
+        def __init__(self) -> None:
+            self.comments: list[tuple[int, str]] = []
+
+        def add_comment(self, issue_number: int, body: str) -> None:
+            self.comments.append((issue_number, body))
+
+    cohort_runner.cancel_unit(FakeGh(), path, data, task.unit_id, 1, 99)
+    rows = cohort_ledger.load_ledger(path)["units"][task.unit_id]["attempts"]
+    assert rows[-1]["terminal_status"] == "cancelled"  # the in-flight row
+    assert rows[-1]["run_id"] == "live"
+    assert rows[0]["terminal_status"] != "cancelled"  # history untouched

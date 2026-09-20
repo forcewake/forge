@@ -395,7 +395,7 @@ def _probe_status(gh: GhCli, issue_number: int, run_id: str) -> str | None:
 def _record_attempt(
     ledger_path: Path, ledger_data: dict[str, Any], unit_id: str, attempt: dict
 ) -> int:
-    attempt_no = cohort_ledger.record_attempt(ledger_data, unit_id, attempt)
+    attempt_no = cohort_ledger.upsert_attempt(ledger_data, unit_id, attempt)
     cohort_ledger.save_ledger(ledger_data, ledger_path)
     return attempt_no
 
@@ -463,9 +463,15 @@ def cancel_unit(
     attempt_no: int,
     issue_number: int,
 ) -> None:
-    """The CU-14 procedure: ``/cancel <run-id>`` mid-run, stamp the attempt."""
+    """The CU-14 procedure: ``/cancel <run-id>`` mid-run, stamp the attempt.
+
+    The cancelled attempt is always the IN-FLIGHT drive — the ledger's
+    last row: indexing by *attempt_no* posted a stale historical run id
+    when earlier rows were duplicated, and forge correctly ignored the
+    unknown-run cancel (LIVE-found 2026-09-20).
+    """
     attempts = ledger_data["units"][unit_id]["attempts"]
-    attempt = attempts[attempt_no - 1]
+    attempt = attempts[-1]
     gh.add_comment(issue_number, f"/cancel {attempt['run_id']}")
     attempt["terminal_seen_at"] = _utc_now_iso()
     attempt["terminal_status"] = "cancelled"

@@ -169,6 +169,22 @@ def record_attempt(ledger: dict[str, Any], unit_id: str, attempt: dict[str, Any]
     return len(unit["attempts"])
 
 
+def upsert_attempt(ledger: dict[str, Any], unit_id: str, attempt: dict[str, Any]) -> int:
+    """Append the attempt, or pass through when it is already the last row.
+
+    ``drive_unit`` records at drive start and re-stamps after ``/go`` with
+    the same dict; appending twice DUPLICATED every attempt row, which
+    desynced ``cancel_unit``'s attempt indexing into posting a stale run id
+    (LIVE-found 2026-09-20). The row is appended exactly once; later calls
+    persist the caller's in-place stamps.
+    """
+    unit = _unit(ledger, unit_id)
+    attempts = unit["attempts"]
+    if not (attempts and attempts[-1] is attempt):
+        attempts.append(attempt)
+    return len(attempts)
+
+
 def record_acceptance(
     ledger: dict[str, Any],
     unit_id: str,
