@@ -60,7 +60,7 @@ Add to forge's environment (`.env` / container env):
 | `FORGE_AZDO_PAT` | the service account's PAT from step 1 |
 | `FORGE_AZDO_WEBHOOK_USERNAME` / `FORGE_AZDO_WEBHOOK_PASSWORD` | the Basic pair service hooks must present — THE authenticator (no HMAC exists); generate with `openssl rand -hex 16` each |
 | `FORGE_AZDO_APPROVERS` | comma-separated AzDO identities (`uniqueName` form, e.g. `dev@fabrikam.example`) allowed to `/implement` and `/go`; empty falls back to `FORGE_APPROVERS` (the lists never merge — a GitLab username can never approve an AzDO run) |
-| `FORGE_AZDO_BOT_NAME` | forge's own AzDO identity (`forge-bot`) — its plan comments re-trigger `workitem.commented`, so the bot-loop guard must recognize it |
+| `FORGE_AZDO_BOT_NAME` | forge's own AzDO identity, when it HAS one (`forge-bot`) — its plan comments re-trigger `workitem.commented`, so the bot-loop guard must recognize it. On single-PAT deployments (forge posts under YOUR identity) leave this set to a name that matches nothing: every forge comment carries a hidden `forge:authored` marker and the gateway skips marker-bearing comments regardless of author — setting this to the operator's identity would drop the operator's REAL commands |
 | `FORGE_AZDO_LANE_PIPELINE_ID` | the numeric id of the lane pipeline (step 4); unset = builtin in-worker proposer instead of the Pipelines lane |
 
 Restart forge. Deliveries that fail the Basic check answer **401**;
@@ -101,7 +101,9 @@ candidate artifact forge validates and publishes.
    [ci/templates/forge-lane.azure-pipelines.yml](../../ci/templates/forge-lane.azure-pipelines.yml)
    into the target repo (path of your choice, e.g. `/ci/forge-lane.yml`).
    Replace the `<PINNED_REF>` in its `pip install` with a ref you trust
-   (a tag or full SHA — this is the lane's supply chain).
+   (a tag or full SHA — this is the lane's supply chain). The SHA must
+   exist on the forge remote the lane clones — a commit that exists only
+   locally fails the lane with `not our ref`.
 2. Pipelines → New pipeline → Azure Repos Git → Existing YAML → point at
    that file. **Do not add triggers** — the template has none on purpose:
    it is dispatch-only (forge queues runs via the Runs API), and Azure

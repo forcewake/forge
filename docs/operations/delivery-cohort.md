@@ -31,7 +31,10 @@ are the reason the cohort exists:
    `CU-14`) carries its own seed and predeclared checks. Acceptance is an
    explicit HUMAN verdict (`accept` subcommand) against those checks — the
    agent's self-reported success is never a verdict, and a READY status is
-   never an acceptance.
+   never an acceptance. The seed ships the lane workflow (dispatch 422s
+   without it) plus a per-unit `ci.yml` RENDERED from the unit's checks —
+   the PR's CI proves exactly the acceptance contract (forge's own ci.yml
+   in a fixture repo is a permanently red baseline: no pyproject.toml).
 3. **The denominator is accepted units.** Cost/time per unit divides by the
    count of units with an `accepted` verdict. READY counts, drafted-PR
    counts and attempt counts are never denominators. When nothing was
@@ -97,7 +100,8 @@ force-pushed onto the lab repo's default branch before its issue is opened.
 # 2. special procedures
 #    CU-13: after /go, kill the lane run once; let Tier-1 revive (or /retry).
 #    CU-14: after /go, post /cancel <run-id> while the lane is running
-#           (the runner's cancel_unit does this and stamps the attempt).
+#           (the runner's cancel_unit does this and stamps the IN-FLIGHT
+#           attempt — always the ledger's last row).
 
 # 3. attach usage from the R23 receipt-ledger export (see below)
 .venv/bin/python -m evaluation.cohort.runner observe \

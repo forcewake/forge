@@ -70,10 +70,15 @@ lab: identical headless prompt, 226 s direct vs 2 s via proxy).
 3. `forge-agent` checks out the frozen attempt base (`FORGE_ATTEMPT_BASE`,
    detached), runs the harness headless against the brief — the lane cannot
    commit-and-push (no write credential, push URL disabled) — and uploads
-   the working-tree delta as CI artifacts: `.forge/candidate.diff`
-   (`git diff --binary --full-index` vs the base) plus
-   `.forge/candidate.meta.json` (attempt base, driver, model, exit,
-   usage receipt). Its last trace line is
+   the working-tree delta as CI artifacts: `candidate.diff`
+   (a TEXT `git diff --full-index` vs the base — the driver's
+   `__pycache__`/`.pyc` droppings are scrubbed before staging, and a
+   binary section can only ever be rejected `binary_not_supported`) plus
+   `candidate.meta.json` (attempt base, driver, model, exit,
+   usage receipt). The archive carries EXACTLY these two contract files
+   staged into a clean `forge-output/` directory (the control-plane
+   allowlist is closed — forensic lane logs stay visible in the CI job
+   itself). Its last trace line is
    `FORGE_CANDIDATE:{...}`; the legacy `FORGE_RESULT` line remains during
    the v0.2 → v0.3 migration and carries the attempt base, not a branch.
 4. forge **publishes through the trusted publisher** (ADR-0016): the diff

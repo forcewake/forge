@@ -34,8 +34,10 @@ published as a Draft PR via the Push API — forge never votes or
 completes. Approvers are AzDO identities (`uniqueName`, e.g.
 `dev@fabrikam.example`) in `FORGE_AZDO_APPROVERS`; PR CI on Azure Repos
 is your Build-validation branch policy (YAML `pr:` triggers are ignored).
-The loop is fully contract-tested; live verification against a real org
-is pending — setup and the verification checklist:
+The loop is fully contract-tested and live-verified against a real org
+(2026-09-20: real hosted-agent cycles, candidate → Draft PR → builds
+verification → failure classification → repair) — setup and the
+verification checklist:
 [azure-setup](../getting-started/azure-devops.md), decision record:
 [ADR-0024](../adr/0024-azure-devops-adapter.md).
 
@@ -49,6 +51,21 @@ with a reason when they fire. Triage:
 No. Commands and steps are persisted in Postgres before anything executes;
 a surviving worker reclaims and converges the run. This is proven by the
 failure-injection suite (two workers, kill at six checkpoints).
+
+**A GitLab run finishes honestly `unverified — no verification profile configured`.**
+That is the R02-honest label for "no CI contract to prove": the GitLab
+verification profile is `FORGE_REQUIRED_JOBS` (comma-separated job names
+that must exist AND succeed for the candidate sha). Set it to your repo's
+gate job (e.g. `FORGE_REQUIRED_JOBS=smoke`) and the verdict becomes
+verified with positive proof; empty keeps the honest unverified label.
+
+**Azure DevOps stopped reacting to commands after a network outage.**
+The service-hook subscriptions may be `onProbation` — AzDO withholds
+deliveries after consecutive failures. Re-save each subscription
+(PUT `/``_apis/hooks/subscriptions/{id}`` with its own current payload) to
+reactivate, and check `_apis/hooks/subscriptions` → `status` afterwards.
+A webhook whose URL was edited via PUT without the `token` field also
+loses its secret — forge then answers 401 until the token is restored.
 
 ## Agents and execution
 

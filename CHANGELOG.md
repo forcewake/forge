@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — live leg checks (2026-09-20: GitLab + GitHub + Azure DevOps driven end-to-end against real instances)
+
+- **GitHub — launch correlation**: the runs-list call sent the filter as the undocumented
+  `head_branch=` param (the API wants `branch=` and silently drops unknown names), so
+  concurrent dispatches sharing one re-frozen attempt base latched each other's workflow runs
+  — whole batches died `harness_artifact_missing` in the grace window. Client sends `branch=`;
+  the executor re-verifies branch equality client-side (e7b308a).
+- **Cohort seed CI**: the seed shipped forge's own ci.yml into fixture repos (no
+  pyproject.toml → permanently red baseline, repair loop could never converge). The seed now
+  renders a per-unit checks workflow FROM the predeclared acceptance checks (927021b).
+- **Publication intents**: completing a terminal intent with the SAME effect id is now an
+  idempotent no-op instead of a raise that aborted the publish step mid-transaction (the
+  aborted journaling then degraded the review to "(diff unavailable)" — fixed separately by
+  falling back to the base..candidate compare when the PR ref is missing) (22e855a).
+- **Cohort ledger**: attempt rows record once per drive; the cancel procedure targets the
+  in-flight row instead of a stale historical one (82901e9).
+- **Azure lane packaging**: the lane published all of `.forge/` including forensic logs; the
+  archive allowlist is CLOSED (exactly candidate.diff + candidate.meta.json) — now staged
+  into a clean `forge-output/` (5b2add4).
+- **Azure dispatch/revival**: the dispatch identity is journaled BEFORE the Runs-API call
+  (A12); a revival that still lacks identity re-parks the run blocked instead of stranding a
+  proposing zombie (69e9799).
+- **Azure self-trigger**: every forge comment carries a hidden `forge:authored` marker and
+  the gateway skips marker-bearing comments BEFORE the author check — on single-PAT
+  deployments forge posts under the operator's identity and the author check alone both
+  missed forge's own notes AND would drop the operator's real commands (0acda79).
+- **Azure candidate diff**: the emit step scrubs `__pycache__`/`.pyc` and emits a text-only
+  diff — a staged .pyc failed every candidate `binary_not_supported` (2cbdf4e).
+- **Azure verification read**: the builds list requires `repositoryType=TfsGit` next to
+  `repositoryId` AND a repository GUID (a name 400s) — without these the verification pass
+  read NO builds and every run died `verification_timeout` (06b5554, b36d31f).
+
 ### Changed — guarantee parity (second external review d16f523: all 18 findings closed — evidence in `python -m forge.release_manifest`)
 
 - **A01/A02 — same spec, same verification everywhere**: GitHub and Azure freeze and consume
