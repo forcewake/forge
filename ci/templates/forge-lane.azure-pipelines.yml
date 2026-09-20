@@ -203,11 +203,26 @@ jobs:
         displayName: Emit candidate artifact
         condition: always()
 
+      # Stage ONLY the candidate contract into a clean directory. The
+      # archive allowlist is CLOSED (exactly candidate.diff +
+      # candidate.meta.json — R16): publishing all of .forge/ also packs
+      # the forensic event/usage logs, and the control plane fails the
+      # candidate closed as harness_artifact_invalid (LIVE-found
+      # 2026-09-20: 6 entries over the cap — lane output, control-plane
+      # contract; the logs stay visible in the pipeline run itself).
+      - bash: |
+          set -euo pipefail
+          rm -rf forge-output
+          mkdir -p forge-output
+          cp .forge/candidate.diff .forge/candidate.meta.json forge-output/
+          echo "forge-output/" >> .git/info/exclude 2>/dev/null || true
+        condition: always()
+        displayName: Stage candidate contract
+
       # `publish` = the PublishPipelineArtifact task; the Pipelines Runs
       # artifacts API hands forge an expiring signed URL serving the zip
-      # (research §6.3). Carries .forge/candidate.diff +
-      # .forge/candidate.meta.json (plus the forensic event/usage logs).
-      - publish: .forge
+      # (research §6.3). Carries exactly the staged contract pair.
+      - publish: forge-output
         artifact: forge-candidate-${{ parameters.run_id }}
         condition: always()
         displayName: Publish candidate artifact

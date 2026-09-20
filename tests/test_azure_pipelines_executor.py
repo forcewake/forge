@@ -749,7 +749,9 @@ class TestLaneTemplateContract:
 
         publish = next(step for step in steps if "publish" in step)
         assert publish["artifact"] == "forge-candidate-${{ parameters.run_id }}"
-        assert publish["publish"] == ".forge"
+        # The staged contract directory (R16 closed allowlist), never the
+        # whole .forge/ control directory (LIVE-found 2026-09-20).
+        assert publish["publish"] == "forge-output"
 
     def test_driver_step_runs_the_entry_point_and_never_fails_the_job(self):
         text = TEMPLATE_PATH.read_text()

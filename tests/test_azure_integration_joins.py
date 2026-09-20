@@ -368,6 +368,27 @@ class TestLaneHandleJoin:
         }
         assert all(spec["type"] == "string" for spec in parameters.values())
 
+    def test_the_lane_template_publishes_only_the_staged_contract(self):
+        """Live (2026-09-20): the lane published all of .forge/ including the
+        forensic event/usage logs; the control-plane archive allowlist is
+        CLOSED (exactly candidate.diff + candidate.meta.json), so the
+        candidate failed as harness_artifact_invalid ("6 entries over the
+        4-entry cap"). The publish step must stage the contract pair into a
+        clean forge-output/ directory, never the control directory."""
+        template = yaml.safe_load(TEMPLATE_PATH.read_text())
+        (job,) = template["jobs"]
+        steps = job["steps"]
+        publish = next(
+            s for s in steps if str(s.get("displayName", "")) == "Publish candidate artifact"
+        )
+        assert publish["publish"] == "forge-output"
+        stage = next(
+            s for s in steps if str(s.get("displayName", "")) == "Stage candidate contract"
+        )
+        script = str(stage.get("bash", ""))
+        assert "forge-output/" in script
+        assert "cp .forge/candidate.diff .forge/candidate.meta.json forge-output/" in script
+
 
 # ----------------------------------------------------------------------
 # Join 3: git.pullrequest.updated → review metadata → reactive engine
