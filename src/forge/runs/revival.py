@@ -1169,29 +1169,29 @@ def retry_rejection(run: FlowRun | None, *, other_active: bool = False) -> str:
     if run is None:
         return (
             "`/retry` found no retryable run on this issue. "
-            "Start a fresh run with `@forge /implement`."
+            "Start a fresh run by posting a new implement request."
         )
     if other_active:
         return (
             f"Run `{run.id[:8]}` cannot be retried: another run is already in flight on this "
-            "subject — forge keeps one active run per subject. Let it finish or `/cancel` it "
+            "subject — forge keeps one active run per subject. Let it finish or cancel it "
             "first."
         )
     status = run.status
     if status not in _RETRYABLE_STATUSES:
         return (
             f"Run `{run.id[:8]}` is `{status}`, not `failed`/`blocked` — there is nothing to "
-            "retry. Cancelled runs and fresh work need `@forge /implement`."
+            "retry. Cancelled runs and fresh work need a new implement request."
         )
     if run.cancel_requested:
         return (
             f"Run `{run.id[:8]}` was cancelled by an operator — retrying a revoked publication "
-            "grant is not allowed. Start fresh with `@forge /implement`."
+            "grant is not allowed. Start fresh with a new implement request."
         )
     if not list(run.candidate_shas or []):
         return (
             f"Run `{run.id[:8]}` died before it committed a candidate, so there is no work to "
-            "retry in place. Start fresh with `@forge /implement`."
+            "retry in place. Start fresh with a new implement request."
         )
     return ""
 
@@ -1206,7 +1206,7 @@ def retry_in_flight_rejection(run_id: str) -> str:
     return (
         f"Run `{run_id[:8]}` already has a revival in flight — its dispatch is being driven. "
         "A second retry now would dispatch twice; wait for the current attempt to land, or "
-        "`/cancel` the run first."
+        "cancel the run first."
     )
 
 
@@ -1492,7 +1492,7 @@ def why_blocked_reply(run: FlowRun, *, other_active: bool = False) -> str:
         lines.append(
             f"- **Status:** `{status}` — the run was cancelled"
             + (f": {reason}" if reason else "")
-            + ". Fresh work needs `@forge /implement`."
+            + ". Fresh work needs a new implement request."
         )
     else:
         lines.append(f"- **Status:** `{status}` — the run is in flight, not blocked.")

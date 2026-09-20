@@ -453,7 +453,7 @@ async def test_retry_rejects_a_run_without_a_candidate(db, service, fake_gitlab)
     await service.handle_retry_note(PROJECT_ID, retry_note(run_id), "alice", ISSUE_IID)
 
     assert (await read_run(db, run_id)).status == FlowStatus.BLOCKED.value
-    assert fake_gitlab.notes_containing("/implement")
+    assert fake_gitlab.notes_containing("new implement request")  # no literal slash-command (#67)
 
 
 @pytest.mark.parametrize(
@@ -465,7 +465,7 @@ async def test_retry_rejects_runs_that_are_not_dead(db, service, fake_gitlab, st
     await service.handle_retry_note(PROJECT_ID, retry_note(run_id), "alice", ISSUE_IID)
 
     assert (await read_run(db, run_id)).status == status
-    assert fake_gitlab.notes_containing("/implement")
+    assert fake_gitlab.notes_containing("new implement request")  # no literal slash-command (#67)
 
 
 async def test_retry_rejects_a_cancelled_grant(db, service, fake_gitlab):
