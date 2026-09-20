@@ -919,13 +919,18 @@ class AzureDevOpsClient:
         """Builds for a repository, newest queue time first.
 
         DOCUMENTED QUERY PARAMS ONLY (research §6.6 correction #1):
-        ``repositoryId``, ``definitions``, ``minTime``, ``queryOrder``,
-        ``$top``. There is NO ``sourceVersion`` filter — it exists only as a
-        response field; the commit correlation happens client-side (or via
-        the ``build.complete`` webhook, which carries ``sourceVersion``).
+        ``repositoryId``, ``repositoryType``, ``definitions``, ``minTime``,
+        ``queryOrder``, ``$top``. There is NO ``sourceVersion`` filter — it
+        exists only as a response field; the commit correlation happens
+        client-side (or via the ``build.complete`` webhook, which carries
+        ``sourceVersion``). ``repositoryType=TfsGit`` is REQUIRED next to
+        ``repositoryId`` — the API 400s "Repository type is missing/invalid"
+        without it (LIVE-found 2026-09-20: every verification pass failed
+        blind, runs timed out as builds-did-not-conclude).
         """
         params: dict[str, Any] = {
             "repositoryId": repo_id,
+            "repositoryType": "TfsGit",
             "queryOrder": "queueTimeDescending",
             "$top": top,
         }

@@ -1051,6 +1051,7 @@ async def test_list_builds_by_repository_documented_params_only(
         url=azdo_url(
             f"{BASE}/{PROJECT}/_apis/build/builds",
             repositoryId="1a2b3c4d-0000-0000-0000-000000000001",
+            repositoryType="TfsGit",
             definitions="207,999",
             minTime="2026-09-15T12:05:00Z",
             queryOrder="queueTimeDescending",
@@ -1070,6 +1071,9 @@ async def test_list_builds_by_repository_documented_params_only(
     (request,) = httpx_mock.get_requests()
     params = request.url.params
     assert params["repositoryId"] == "1a2b3c4d-0000-0000-0000-000000000001"
+    # The API 400s "Repository type is missing/invalid" without it
+    # (LIVE-found 2026-09-20: verification read no builds, ever).
+    assert params["repositoryType"] == "TfsGit"
     assert params["definitions"] == "207,999"
     assert params["minTime"] == "2026-09-15T12:05:00Z"
     assert params["queryOrder"] == "queueTimeDescending"
