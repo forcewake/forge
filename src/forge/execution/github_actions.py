@@ -338,9 +338,7 @@ class GitHubActionsExecutor:
             return HarnessOutcome.failed("infrastructure", "harness_timeout")
         return HarnessOutcome.running()
 
-    async def _collect_candidate(
-        self, handle: ActionsHandle, *, now: datetime
-    ) -> HarnessOutcome:
+    async def _collect_candidate(self, handle: ActionsHandle, *, now: datetime) -> HarnessOutcome:
         """Artifact → CandidateBundle (ADR-0016 parse path) → change_candidate.
 
         The attempt base compared against the artifact's meta comes from the

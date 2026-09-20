@@ -1398,9 +1398,7 @@ class TestIdempotentCompletion:
             self, session_factory, provider="github", status="dispatched"
         )
         async with session_factory() as session:
-            await complete_intent(
-                session, intent.id, "adopted", provider_object_id="b" * 40
-            )
+            await complete_intent(session, intent.id, "adopted", provider_object_id="b" * 40)
             await session.commit()
         return intent
 
@@ -1421,6 +1419,4 @@ class TestIdempotentCompletion:
 
         with pytest.raises(InvalidIntentTransition):
             async with session_factory() as session:
-                await complete_intent(
-                    session, intent.id, "committed", provider_object_id="c" * 40
-                )
+                await complete_intent(session, intent.id, "committed", provider_object_id="c" * 40)

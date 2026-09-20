@@ -550,8 +550,10 @@ async def complete_intent(
         # must be an idempotent no-op, not an exception (LIVE-found
         # 2026-09-20: the raise aborted the publish step mid-transaction
         # while the run kept going, poisoning the review context).
-        if intent.status in TERMINAL_STATES and intent.provider_object_id and (
-            intent.provider_object_id == provider_object_id
+        if (
+            intent.status in TERMINAL_STATES
+            and intent.provider_object_id
+            and (intent.provider_object_id == provider_object_id)
         ):
             return intent
         raise InvalidIntentTransition(

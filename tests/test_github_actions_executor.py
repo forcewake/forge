@@ -366,9 +366,7 @@ class TestPoll:
         executor = make_executor(fake)
         # Age the run's updated_at past the grace window: the executor
         # reads it from the run payload, so the fake's stored run is aged.
-        old_stamp = (
-            datetime.now(timezone.utc) - timedelta(seconds=301)
-        ).isoformat()
+        old_stamp = (datetime.now(timezone.utc) - timedelta(seconds=301)).isoformat()
         fake.actions_runs[-1]["updated_at"] = old_stamp
 
         outcome = await executor.poll(make_handle(run_id=501))

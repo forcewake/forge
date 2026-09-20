@@ -63,7 +63,9 @@ logger = logging.getLogger(__name__)
 
 #: A TFSGit repository GUID (the only repositoryId shape the builds list
 #: accepts next to ``repositoryType=TfsGit``).
-_GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_GUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 #: Pinned REST API version (research §1.3: "API version must be specified
 #: with every request"). Server 2022 = API 7.1; pin per connection, not

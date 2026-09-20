@@ -308,7 +308,6 @@ class TestWorkitemCommands:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
         assert inbox == []
 
-
     async def test_forge_marker_is_skipped_regardless_of_author(self, app, client: AsyncClient):
         """Single-PAT deployments: forge posts under the OPERATOR's
         identity, so an author-based guard cannot tell forge's own notes

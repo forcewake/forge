@@ -4888,8 +4888,7 @@ def _azure_revival_redispatch(
                         run_id,
                         FlowStatus.BLOCKED,
                         reason=(
-                            "revival skipped: no repo identity journaled — "
-                            "operator /retry required"
+                            "revival skipped: no repo identity journaled — operator /retry required"
                         ),
                     )
                     await session.commit()
