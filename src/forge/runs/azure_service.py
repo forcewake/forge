@@ -75,6 +75,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
+    ActionLog,
     BudgetLimits,
     Controller,
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -148,6 +149,7 @@ from forge.runs.consistency import (
     ready_evidence,
     ready_reason,
 )
+from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.runs.execution_profile import derive_from_reader
 from forge.runs.harness_selection import (
     BudgetCeilings,
@@ -289,6 +291,9 @@ class AzurePipelinesHandle:
     driver: str
     forge_run_id: str
     started_at: str
+    # B04: the envelope binding inputs (0/"" = legacy, renders unenforced).
+    plan_note_id: int = 0
+    envelope_digest: str = ""
 
     def to_json(self) -> str:
         import json
@@ -312,6 +317,8 @@ class AzurePipelinesHandle:
             driver=str(data.get("driver") or ""),
             forge_run_id=str(data.get("forge_run_id") or ""),
             started_at=str(data["started_at"]),
+            plan_note_id=int(data.get("plan_note_id") or 0),
+            envelope_digest=str(data.get("envelope_digest") or ""),
         )
 
     def with_run_id(self, run_id: int) -> AzurePipelinesHandle:
@@ -906,6 +913,22 @@ class AzureRunService:
             run.spec_digest = spec_digest
             await session.commit()
 
+        # A03/B04: freeze the approved BriefEnvelope beside the spec — the
+        # lane re-verifies the plan comment's rendered sections against the
+        # dispatched envelope digest; an edited work item/comment can never
+        # change the execution input silently.
+        envelope = build_brief_envelope(
+            run_id=run_id,
+            task_title=issue_title,
+            task_description=issue_description,
+            plan_text=plan,
+            spec_digest=spec_digest,
+        )
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.evidence = _merge_evidence(run.evidence, {"brief_envelope": envelope})
+            await session.commit()
+
         # F22 (ADR-0018 §5): open the run's budget from the spec (idempotent
         # — a pre-paid open above already froze the limits; this only
         # backfills the spec_digest provenance, and a no-profile run opens
@@ -919,7 +942,14 @@ class AzureRunService:
         await self._post_journaled_comment(
             project_id,
             issue_number,
-            self._plan_comment(run_id, plan, digest, harness_selection),
+            self._plan_comment(
+                run_id,
+                plan,
+                digest,
+                harness_selection,
+                task_title=issue_title,
+                task_description=issue_description,
+            ),
             run_id,
             "post_plan_note",
         )
@@ -2611,6 +2641,15 @@ class AzureRunService:
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
         if driver is None:
             driver = spec.harness_driver
+        # B04: the envelope binding dispatched to the lane — the plan
+        # comment's journaled id + the frozen envelope digest (both from
+        # the plan leg's evidence). Absent on legacy runs: the lane then
+        # renders unenforced (its loud legacy mode), never guessing.
+        async with self._session_factory() as session:
+            ev_run = await self._get_run(session, run_id)
+            envelope_ev = dict((ev_run.evidence or {}).get("brief_envelope") or {})
+        envelope_digest = str(envelope_ev.get("envelope_digest") or "")
+        plan_note_id = await self._plan_note_comment_id(run_id)
         branch = azure_factory_branch(issue_number, run_id)
         handle = AzurePipelinesHandle(
             provider="azure_devops",
@@ -2624,6 +2663,10 @@ class AzureRunService:
             driver=driver,
             forge_run_id=run_id,
             started_at=datetime.now(timezone.utc).isoformat(),
+            # B04: binding inputs on the handle — the executor's crash
+            # re-dispatch renders ENFORCED like the original dispatch.
+            plan_note_id=plan_note_id,
+            envelope_digest=envelope_digest,
         )
 
         # Intent-first journal for the lane dispatch (ADR-0005).
@@ -2666,6 +2709,20 @@ class AzureRunService:
                     # spec — the gate approved exactly this execution shape.
                     "model": spec.harness_model,
                     "work_item_id": str(issue_number),
+                    # B04/A03: the envelope binding — the addressed plan
+                    # comment + the frozen digests. With all three present
+                    # the lane renders the brief ENFORCED (no fallback):
+                    # the extracted approved sections must re-verify
+                    # against the envelope digest or the lane fails closed.
+                    **(
+                        {
+                            "plan_note_id": str(plan_note_id),
+                            "envelope_digest": envelope_digest,
+                            "spec_digest": str(run.spec_digest or ""),
+                        }
+                        if plan_note_id and envelope_digest
+                        else {}
+                    ),
                     # Bounded verification-failure context on a repair
                     # re-dispatch; empty on cycle 1.
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
@@ -3710,7 +3767,7 @@ class AzureRunService:
             success_conclusions=AZURE_SUCCESS_RESULTS,
             code_failure_conclusions=AZURE_CODE_FAILURE_RESULTS,
             infra_conclusions=AZURE_INFRA_RESULTS,
-            waived_conclusions=waived_conclusions_from_settings(self._settings),
+            waived_conclusions=frozenset(spec.waived_conclusions),  # B06: frozen at approval
             now=now,
         )
 
@@ -4235,6 +4292,7 @@ class AzureRunService:
             model_route=IMPLEMENTER_TIER,
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
+            waived_conclusions=sorted(waived_conclusions_from_settings(self._settings)),
             allowed_paths=allowed_paths or [],
             backend=backend,
             harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
@@ -4348,7 +4406,14 @@ class AzureRunService:
             await session.commit()
 
     def _plan_comment(
-        self, run_id: str, plan: str, digest: str, harness_selection: HarnessSelection
+        self,
+        run_id: str,
+        plan: str,
+        digest: str,
+        harness_selection: HarnessSelection,
+        *,
+        task_title: str = "",
+        task_description: str = "",
     ) -> str:
         # Bare commands suffice (the bot identity's mentions would notify an
         # unrelated account) — the same rule as the GitHub plan comment.
@@ -4364,9 +4429,19 @@ class AzureRunService:
             model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),
             commit_cycles=int(getattr(self._settings, "FORGE_MAX_COMMIT_CYCLES", 3) or 3),
         )
+        # A03/B04: the comment is the human-readable representation of the
+        # approved bytes — the task + plan sections ride between machine
+        # markers (invisible in rendered AzDO markdown) so the lane can
+        # extract the EXACT approved spans and re-verify them against the
+        # frozen envelope digest before rendering the brief.
+        sections = render_approved_sections(
+            task_title=task_title,
+            task_description=task_description,
+            plan_text=plan,
+        )
         return (
             f"## Forge plan — run `{run_id[:8]}`\n\n"
-            f"{plan}\n"
+            f"{sections}\n"
             f"{implementation}\n"
             "---\n\n"
             f"**Plan digest:** `{digest}`\n\n"
@@ -4415,6 +4490,31 @@ class AzureRunService:
             raise
         note_id = note.get("commentId") if isinstance(note, dict) else None
         await self._complete_action(action_id, "succeeded", {"comment_id": note_id})
+
+    async def _plan_note_comment_id(self, run_id: str) -> int:
+        """The journaled commentId of the run's plan note (B04 binding input)."""
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "post_plan_note",
+                            ActionLog.status == "succeeded",
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        raw = (row.remote_result or {}).get("comment_id") if row is not None else None
+        try:
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
 
     async def _complete_action(self, action_id: int, status: str, remote_result=None) -> None:
         async with self._session_factory() as session:

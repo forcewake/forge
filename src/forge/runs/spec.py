@@ -169,6 +169,10 @@ class ExecutableRunSpec:
     # lane-less run freezes neither key and stays byte-identical.
     harness_workflow: str = ""
     lane_pipeline_id: int | None = None
+    # B06 — the waiver set AT FREEZE TIME: every condition the verdict may
+    # lean on is frozen with the spec (a post-approval global waiver flip
+    # must not loosen an already-approved run's proof rules).
+    waived_conclusions: tuple[str, ...] = ()
     # A13: the frozen provenance of the project config the path scope came
     # from — ``valid`` (``config_sha256`` pins the exact approved bytes) or
     # ``confirmed_absent`` (the provider confirmed there is no config). A
@@ -294,6 +298,7 @@ class ExecutableRunSpec:
         config_ref: str = "",
         config_sha256: str = "",
         profile_digest: str = "",
+        waived_conclusions: Iterable[str] = (),
     ) -> ExecutableRunSpec:
         """Freeze the executable spec from plan-time values (F14, R04).
 
@@ -319,6 +324,10 @@ class ExecutableRunSpec:
             allowed_paths=_string_tuple(tuple(allowed_paths), "allowed_paths"),
             required_jobs=_string_tuple(
                 sorted({job.strip() for job in required_jobs if job.strip()}), "required_jobs"
+            ),
+            waived_conclusions=_string_tuple(
+                sorted({w.strip() for w in waived_conclusions if w.strip()}),
+                "waived_conclusions",
             ),
             commit_cycles=int(commit_cycles),
             harness_timeout=int(harness_timeout),
@@ -370,6 +379,9 @@ class ExecutableRunSpec:
                 policy_digest=_digest_or_invalid(document.get("policy_digest"), "policy digest"),
                 allowed_paths=_string_tuple(document.get("allowed_paths"), "allowed_paths"),
                 required_jobs=_string_tuple(verification.get("required_jobs"), "required_jobs"),
+                waived_conclusions=_string_tuple(
+                    verification.get("waived_conclusions"), "waived_conclusions"
+                ),
                 commit_cycles=int(budgets.get("commit_cycles") or 0),
                 harness_timeout=int(budgets.get("harness_timeout") or 0),
                 budget_max_calls=_optional_limit(budgets.get("max_calls"), "budget max_calls"),
@@ -474,7 +486,10 @@ class ExecutableRunSpec:
                 "digest": self.plan_digest,
             },
             "model_route": {"tier": self.model_route},
-            "verification": {"required_jobs": list(self.required_jobs)},
+            "verification": {
+                "required_jobs": list(self.required_jobs),
+                "waived_conclusions": list(self.waived_conclusions),
+            },
         }
         if self.allowed_paths:
             document["allowed_paths"] = list(self.allowed_paths)

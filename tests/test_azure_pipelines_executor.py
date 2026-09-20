@@ -658,19 +658,19 @@ def lane_steps() -> list[dict]:
 
 
 class TestLaneTemplateContract:
-    def test_dispatch_only_no_triggers_section_at_all(self):
-        """Dispatch happens ONLY via the Runs API; Azure Repos ignores
-        YAML pr: triggers anyway (research ground truth) — no triggers:
-        section may exist, not even ``pr: none``."""
+    def test_dispatch_only_with_explicit_trigger_none(self):
+        """B05: dispatch happens ONLY via the Runs API — and without an
+        explicit ``trigger: none`` the IMPLIED CI trigger would queue the
+        lane on every branch push outside forge's control (the required
+        parameters then fail validation or queue a doomed run). pr: is
+        ignored by Azure Repos (research ground truth) and stays absent."""
         template = load_template()
         text = TEMPLATE_PATH.read_text()
 
+        assert template["trigger"] in (None, "none")
         assert "triggers" not in template
         assert True not in template  # pyyaml turns a bare `on:` into True
-        assert not any(
-            line.lstrip().startswith("trigger") or line.lstrip().startswith("pr:")
-            for line in text.splitlines()
-        )
+        assert not any(line.lstrip().startswith("pr:") for line in text.splitlines())
 
     def test_queue_time_parameters_match_the_executor(self):
         """What forge dispatches (launch's templateParameters) is exactly
@@ -685,6 +685,11 @@ class TestLaneTemplateContract:
             "model",
             "work_item_id",
             "repair_context",
+            # B04: the envelope binding trio (empty defaults — legacy
+            # dispatches omit them; enforced renders require all three).
+            "plan_note_id",
+            "envelope_digest",
+            "spec_digest",
         }
         assert all(spec["type"] == "string" for spec in parameters.values())
 

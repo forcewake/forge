@@ -744,7 +744,7 @@ class TestImplement:
         assert spec.document["plan"]["digest"] == run.plan_digest
         assert spec.document["plan"]["summary"]
         assert spec.document["model_route"] == {"tier": IMPLEMENTER_TIER}
-        assert spec.document["verification"] == {"required_jobs": []}
+        assert spec.document["verification"]["required_jobs"] == []
         assert spec.document["budgets"] == {
             "commit_cycles": 3,
             "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
@@ -1151,7 +1151,13 @@ class TestGoLane:
         assert pipeline_call["pipeline_id"] == LANE_PIPELINE_ID
         assert pipeline_call["ref_name"] == f"refs/heads/{branch}"
         params = pipeline_call["template_parameters"]
-        assert set(params) == {"run_id", "attempt_base", "driver", "model", "work_item_id"}
+        assert {"run_id", "attempt_base", "driver", "model", "work_item_id"} <= set(params)
+        # B04: a frozen envelope dispatches the binding trio — the lane
+        # renders ENFORCED (no fallback) when all three are present.
+        if "plan_note_id" in params:
+            assert params["plan_note_id"].isdigit()
+            assert params["envelope_digest"]
+            assert params["spec_digest"]
         assert params["run_id"] == run_id
         assert params["attempt_base"] == BASE_HEAD
         assert params["driver"] == "claude-code"  # the driver frozen in the spec
@@ -1290,7 +1296,7 @@ class TestExecutableSpecA02:
             )
         assert spec.document == frozen_document
         assert spec.digest == frozen_digest
-        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+        assert spec.document["verification"]["required_jobs"] == ["pytest"]
         assert spec.document["budgets"]["commit_cycles"] == 2
         assert spec.document["backend_config"]["lane_pipeline_id"] == LANE_PIPELINE_ID
 
@@ -1715,7 +1721,7 @@ class TestVerificationGate:
                 .scalars()
                 .one()
             )
-        assert spec.document["verification"] == {"required_jobs": ["tests"]}
+        assert spec.document["verification"]["required_jobs"] == ["tests"]
         settings.FORGE_REQUIRED_JOBS = ""  # the post-gate drift A01 is immune to
         fake.seed_build(source_version=candidate_sha, definition_name="docs", result="succeeded")
         reviewer = StubAzureReviewer()

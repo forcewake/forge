@@ -259,7 +259,7 @@ class TestImplement:
         assert spec.document["plan"]["digest"] == run.plan_digest
         assert spec.document["plan"]["summary"]
         assert spec.document["model_route"] == {"tier": IMPLEMENTER_TIER}
-        assert spec.document["verification"] == {"required_jobs": []}
+        assert spec.document["verification"]["required_jobs"] == []
         assert spec.document["budgets"] == {
             "commit_cycles": 3,
             "harness_timeout": make_settings().FORGE_HARNESS_TIMEOUT_SECONDS,
@@ -1427,7 +1427,7 @@ class TestExecutableSpecA02:
             )
         assert spec.document == frozen_document
         assert spec.digest == frozen_digest
-        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+        assert spec.document["verification"]["required_jobs"] == ["pytest"]
         assert spec.document["budgets"]["commit_cycles"] == 2
         assert spec.document["backend_config"]["harness"] == "grok-build"
 
@@ -1917,6 +1917,27 @@ class TestPositiveVerification:
         run = await get_run(db, run_id)
         assert run.status == FlowStatus.REVIEWING.value  # stood down — never READY
 
+    async def test_a_waiver_flipped_after_approval_never_loosens_the_run(self, db, fake):
+        """B06: approving without waivers freezes the proof rules — a
+        later global FORGE_VERIFICATION_WAIVE_CONCLUSIONS flip must not
+        let this run's skipped check pass."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+        await service.evaluate_waiting_ci_one(run_id)
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+        # the operator flips the global waiver AFTER approval
+        service._settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_WAIVE_CONCLUSIONS="skipped"
+        )
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value  # still unproven
+        assert (run.evidence or {})["verification"]["status"] == "unknown"
+
     async def test_required_list_comes_from_the_frozen_spec_not_live_settings(self, db, fake):
         """A02 integration: the proof set is the spec's frozen
         `required_jobs` — mutating FORGE_REQUIRED_JOBS after the freeze
@@ -1930,7 +1951,7 @@ class TestPositiveVerification:
                 .scalars()
                 .one()
             )
-        assert spec.document["verification"] == {"required_jobs": ["tests"]}
+        assert spec.document["verification"]["required_jobs"] == ["tests"]
         # the post-gate settings drift that A01 must be immune to:
         settings.FORGE_REQUIRED_JOBS = ""
         fake.seed_workflow_runs([workflow_run(candidate, "documentation", "success")])

@@ -3831,7 +3831,7 @@ class GitHubRunService:
             success_conclusions=GITHUB_SUCCESS_CONCLUSIONS,
             code_failure_conclusions=GITHUB_CODE_FAILURE_CONCLUSIONS,
             infra_conclusions=GITHUB_INFRA_CONCLUSIONS,
-            waived_conclusions=waived_conclusions_from_settings(self._settings),
+            waived_conclusions=frozenset(spec.waived_conclusions),  # B06: frozen at approval
             now=now,
         )
 
@@ -4069,6 +4069,20 @@ class GitHubRunService:
                 logger.info("Run %s cancelled during review — the leg stands down", run_id[:8])
                 return
         observed_head, enforceable = await self._observed_candidate_head(run_id, issue_number)
+        if not enforceable:
+            # B07: an unreadable head must be VISIBLE, not silently dropped —
+            # the ready evidence records freshness_unknown (the verdict itself
+            # is already provider-proven for the exact sha; the divergence
+            # from the GitLab leg's fail-closed read is deliberate, above).
+            async with self._session_factory() as session:
+                run = await self._get_run(session, run_id)
+                prior = dict((run.evidence or {}).get("verification") or {})
+            prior["freshness"] = "unknown"
+            prior["summary"] = (
+                str(prior.get("summary") or "")
+                + " | freshness_unknown: the PR head could not be re-read"
+            ).strip(" |")
+            await self._merge_run_evidence(run_id, {"verification": prior})
         if enforceable and observed_head != candidate_sha:
             await self._merge_run_evidence(
                 run_id,
@@ -4485,6 +4499,7 @@ class GitHubRunService:
             model_route=IMPLEMENTER_TIER,
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
+            waived_conclusions=sorted(waived_conclusions_from_settings(self._settings)),
             allowed_paths=allowed_paths or [],
             backend=backend,
             harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),

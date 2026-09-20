@@ -181,6 +181,7 @@ from forge.runs.stubs import factory_branch, plan_digest_of
 from forge.runs.verification import (
     PRODUCER_GITLAB_PIPELINE,
     VerificationProfile,
+    waived_conclusions_from_settings,
 )
 from forge.runs.verification import evaluate as evaluate_verification
 
@@ -4585,6 +4586,7 @@ class RunService:
             model_route=IMPLEMENTER_TIER,
             policy_digest=self._policy_digest(),
             required_jobs=self._required_jobs(),
+            waived_conclusions=sorted(waived_conclusions_from_settings(self._settings)),
             allowed_paths=allowed_paths or [],
             backend=backend,
             harness_model=str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or ""),

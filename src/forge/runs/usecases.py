@@ -248,9 +248,14 @@ def observe_verification(
     now = now or datetime.now(timezone.utc)
 
     if not observations:
-        # Nothing observed for the candidate — the honest no-CI form (R02:
-        # never presented as verified). The caller owns the registration
-        # grace window that decides whether this pass observes at all.
+        # Nothing observed for the candidate (B07): with a NON-EMPTY frozen
+        # required list this is a MISSING MANDATORY GATE, not the no-CI
+        # form — the run keeps waiting (bounded by the R17 deadline) and
+        # blocks as verification_timeout, never an unverified READY. Only
+        # a spec without required checks (best-effort mode) keeps the
+        # honest not_configured handoff.
+        if spec.required_jobs:
+            return VerificationDecision(outcome=OUTCOME_WAIT, verdict=None)
         return VerificationDecision(
             outcome=OUTCOME_REVIEW,
             verdict=_verdict(

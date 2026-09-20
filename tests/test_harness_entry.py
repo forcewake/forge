@@ -1652,3 +1652,84 @@ class TestPermissionListsAreTokenized:
         # else is exactly one shell(...) rule.
         for value in copilot_values:
             assert value == "read,write" or value.count("shell(") == 1, value
+
+
+class TestRenderBriefAzureEnforcedB04:
+    """The ENFORCED AzDO brief (B04): with plan_note_id + envelope_digest +
+    spec_digest dispatched, the brief comes from EXACTLY the addressed
+    comment's approved sections re-verified against the frozen digest — an
+    edited comment/work item fails the render CLOSED (rc 1 + .forge/exit
+    failed), never the live-item heuristic, never a fallback brief."""
+
+    ENV = {
+        "FORGE_AZDO_ORG_URL": ORG_URL,
+        "FORGE_AZDO_PROJECT": AZDO_PROJECT,
+        "FORGE_AZDO_READ_TOKEN": READ_TOKEN,  # noqa: S105 — fake
+        "FORGE_ISSUE_NUMBER": str(WORK_ITEM),
+        "FORGE_RUN_ID": "abcd" * 8,
+    }
+
+    def _comment_with(self, sections: str) -> str:
+        return f"## Forge plan — run `abcd`\n\n{sections}\n---\n\n**Plan digest:** `x`"
+
+    def _install(self, monkeypatch, requests: list, *, comment_override: str = "") -> None:
+        from forge.harnesses.brief_envelope import (
+            build_brief_envelope,
+            render_approved_sections,
+        )
+
+        sections = render_approved_sections(
+            task_title="Add a widget",
+            task_description="Make the widget.",
+            plan_text="1. do it",
+        )
+        envelope = build_brief_envelope(
+            run_id=self.ENV["FORGE_RUN_ID"],
+            task_title="Add a widget",
+            task_description="Make the widget.",
+            plan_text="1. do it",
+            spec_digest="spec-digest-1",
+        )
+        monkeypatch.setenv("FORGE_PLAN_NOTE_ID", "77")
+        monkeypatch.setenv("FORGE_ENVELOPE_DIGEST", envelope["envelope_digest"])
+        monkeypatch.setenv("FORGE_SPEC_DIGEST", "spec-digest-1")
+        comment_text = comment_override or self._comment_with(sections)
+        base = f"{ORG_URL}/{AZDO_PROJECT}/_apis/wit/workItems/{WORK_ITEM}"
+        install_witFake(
+            monkeypatch,
+            {f"{base}/comments/77?": {"text": comment_text}},
+            requests,
+        )
+
+    def test_enforced_render_writes_the_verified_brief(self, tmp_path, monkeypatch):
+        import requests as _  # noqa: F401 — ensure import path only
+
+        monkeypatch.chdir(tmp_path)
+        for k, v in self.ENV.items():
+            monkeypatch.setenv(k, v)
+
+        requests: list = []
+        self._install(monkeypatch, requests)
+
+        rc = main(["--render-brief-azure"])
+
+        assert rc == 0
+        brief = (tmp_path / ".forge" / "brief.md").read_text()
+        assert "Add a widget" in brief
+        assert "1. do it" in brief
+
+    def test_an_edited_comment_after_approval_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        for k, v in self.ENV.items():
+            monkeypatch.setenv(k, v)
+        requests: list = []
+        # the SAME addressed comment, its bytes EDITED after approval
+        self._install(
+            monkeypatch, requests, comment_override=self._comment_with("1. do something ELSE")
+        )
+
+        rc = main(["--render-brief-azure", "--exit-file", ".forge/exit"])
+
+        assert rc == 1
+        assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
+        assert not (tmp_path / ".forge" / "brief.md").exists()

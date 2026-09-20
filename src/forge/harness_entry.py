@@ -570,6 +570,43 @@ def fetch_workitem(
     return body, plan_text
 
 
+def fetch_workitem_comment(
+    org_url: str,
+    project: str,
+    work_item_id: int,
+    comment_id: int,
+    token: str,
+) -> str:
+    """Fetch ONE work-item comment by its id — the addressed plan transport.
+
+    B04: the control plane journals the plan comment's ``commentId`` and
+    dispatches it as ``plan_note_id``; the lane reads EXACTLY that comment
+    (stdlib only, same Basic-auth shape as :func:`fetch_workitem`).
+    """
+    import base64
+    import urllib.request
+
+    encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
+    url = (
+        f"{org_url.rstrip('/')}/{project}/_apis/wit/workItems/{work_item_id}"
+        f"/comments/{comment_id}"
+        f"?api-version={_AZDO_COMMENTS_API_VERSION}&format=markdown"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Basic {encoded}",
+            "Accept": "application/json",
+            "User-Agent": "forge-harness-entry",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = json.loads(response.read())
+    if not isinstance(data, dict):
+        raise PlanBindingError(f"plan comment {comment_id}: unexpected payload shape")
+    return str(data.get("text") or "")
+
+
 def render_driver_script(
     driver: str,
     model: str,
@@ -1253,15 +1290,65 @@ def main(argv: list[str] | None = None) -> int:
                 "harness_entry: --render-brief-azure needs --org-url/--project/"
                 "--issue/FORGE_AZDO_READ_TOKEN",
             )
-        # A03 KNOWN GAP (out of scope for this pass): the AzDO lane still
-        # reads the LIVE work item and scans the LATEST matching bot plan
-        # comment — no BriefEnvelope digest is dispatched or verified here,
-        # so a work-item edit or a different/substituted plan comment after
-        # approval can still change the execution input. Deliberately NOT
-        # faked: the GitHub envelope path above is the only enforced
-        # approved-bytes transport in this slice.
-        body, plan = fetch_workitem(org_url, project, issue_number, token, bot_name=bot_name)
+        # B04/A03: the ENFORCED approved-bytes transport — when the control
+        # plane dispatched plan_note_id + envelope_digest + spec_digest, the
+        # brief comes from EXACTLY the addressed comment's approved
+        # sections, re-verified against the frozen envelope digest. A
+        # work-item edit, a substituted second plan comment or a tampered
+        # comment fails the lane CLOSED — never the live-item heuristic,
+        # never a fallback brief. Inputs absent (legacy dispatch) keep the
+        # loud UNENFORCED scan below.
+        run_id = (os.environ.get("FORGE_RUN_ID") or "").strip()
+        plan_note_raw = (os.environ.get("FORGE_PLAN_NOTE_ID") or "").strip()
+        envelope_digest = (os.environ.get("FORGE_ENVELOPE_DIGEST") or "").strip()
+        spec_digest = (os.environ.get("FORGE_SPEC_DIGEST") or "").strip()
+        try:
+            plan_note_id = int(plan_note_raw) if plan_note_raw else 0
+        except ValueError:
+            return _finish("failed", f"harness_entry: bad plan note id {plan_note_raw!r}")
         brief_path = Path(args.brief or ".forge/brief.md")
+        if plan_note_id and envelope_digest and spec_digest:
+            try:
+                comment_text = fetch_workitem_comment(
+                    org_url, project, issue_number, plan_note_id, token
+                )
+                from forge.harnesses.brief_envelope import (
+                    BriefEnvelopeError,
+                    extract_approved_sections,
+                    verify_brief_envelope,
+                )
+
+                task_title, task_description, plan = extract_approved_sections(comment_text)
+                verify_brief_envelope(
+                    envelope_digest,
+                    run_id=run_id,
+                    task_title=task_title,
+                    task_description=task_description,
+                    plan_text=plan,
+                    spec_digest=spec_digest,
+                )
+            except (PlanBindingError, BriefEnvelopeError) as exc:
+                return _finish("failed", f"harness_entry: {exc}")
+            except OSError as exc:
+                return _finish("failed", f"harness_entry: plan comment fetch failed: {exc}")
+            brief_text = render_brief(f"{task_title}\n{task_description}", plan)
+            repair_context = os.environ.get("FORGE_REPAIR_CONTEXT", "")
+            if repair_context.strip():
+                brief_text += (
+                    "\n\n## Repair context — previous candidate failed verification\n\n"
+                    f"{repair_context[:2000]}\n"
+                )
+            brief_path.parent.mkdir(parents=True, exist_ok=True)
+            brief_path.write_text(brief_text)
+            print(f"harness_entry: brief rendered (envelope-verified) at {brief_path}")
+            return 0
+        print(
+            "harness_entry: FORGE_PLAN_NOTE_ID/ENVELOPE_DIGEST/SPEC_DIGEST absent "
+            "(legacy dispatch) — approved-brief-bytes binding NOT enforced; "
+            "reading the LIVE work item",
+            file=sys.stderr,
+        )
+        body, plan = fetch_workitem(org_url, project, issue_number, token, bot_name=bot_name)
         brief_path.parent.mkdir(parents=True, exist_ok=True)
         brief_path.write_text(render_brief(body, plan))
         print(f"harness_entry: brief rendered at {brief_path}")

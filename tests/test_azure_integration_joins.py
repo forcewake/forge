@@ -310,7 +310,15 @@ class TestLaneHandleJoin:
             "driver": "claude-code",
             "model": str(settings.FORGE_HARNESS_MODEL),
             "work_item_id": str(WORK_ITEM),
+            # B04: the envelope binding trio rides the dispatch (the fake's
+            # journaled plan-note id + the frozen digests).
+            "plan_note_id": dispatch["template_parameters"]["plan_note_id"],
+            "envelope_digest": dispatch["template_parameters"]["envelope_digest"],
+            "spec_digest": dispatch["template_parameters"]["spec_digest"],
         }
+        assert dispatch["template_parameters"]["plan_note_id"].isdigit()
+        assert dispatch["template_parameters"]["envelope_digest"]
+        assert dispatch["template_parameters"]["spec_digest"]
 
         # The AZ-3 executor, launched for the SAME lane facts, produces the
         # SAME dispatch — one contract across the slices.
@@ -328,6 +336,10 @@ class TestLaneHandleJoin:
             work_item_id=str(WORK_ITEM),
             forge_run_id=handle.forge_run_id,
             started_at=handle.started_at,
+            # B04: the re-dispatch carries the envelope binding like the
+            # original dispatch.
+            plan_note_id=handle.plan_note_id,
+            envelope_digest=handle.envelope_digest,
         )
         executor_fake = FakeLaneClient()
         executor = AzurePipelinesExecutor(executor_fake, settings)
@@ -365,6 +377,10 @@ class TestLaneHandleJoin:
             "model",
             "work_item_id",
             "repair_context",
+            # B04: the envelope binding trio (empty defaults).
+            "plan_note_id",
+            "envelope_digest",
+            "spec_digest",
         }
         assert all(spec["type"] == "string" for spec in parameters.values())
 
@@ -668,3 +684,61 @@ class TestDebugJoin:
         assert is_forge_lane_build(LANE_PIPELINE_ID, LANE_PIPELINE_ID)
         assert not is_forge_lane_build(LANE_PIPELINE_ID, 999)
         assert not is_forge_lane_build(0, LANE_PIPELINE_ID)
+
+
+# ----------------------------------------------------------------------
+# B04/B05: the shipped lane recipe — envelope binding, dispatch-only,
+# parameter/env contract
+# ----------------------------------------------------------------------
+
+
+class TestLaneRecipeContractB04B05:
+    def lane_yaml(self) -> dict:
+        return yaml.safe_load(TEMPLATE_PATH.read_text())
+
+    def test_the_recipe_is_dispatch_only_with_an_explicit_trigger_none(self):
+        # B05: without trigger:none the IMPLIED CI trigger queues the lane
+        # on every push outside forge's control.
+        assert self.lane_yaml()["trigger"] in (None, "none")
+
+    def test_repair_context_flows_parameter_to_variable_to_env(self):
+        # B05: $(repair_context) macro-references an undefined VARIABLE —
+        # the parameter must reach the env through an explicit mapping.
+        text = TEMPLATE_PATH.read_text()
+        assert "FORGE_REPAIR_CONTEXT: ${{ parameters.repair_context }}" in text
+        assert "FORGE_REPAIR_CONTEXT: $(FORGE_REPAIR_CONTEXT)" in text
+        assert "FORGE_REPAIR_CONTEXT: $(repair_context)" not in text
+
+    def test_the_envelope_binding_parameters_exist(self):
+        names = {p["name"] for p in self.lane_yaml()["parameters"]}
+        assert {"plan_note_id", "envelope_digest", "spec_digest"} <= names
+
+    def test_credentials_are_scoped_to_the_selected_driver(self):
+        # B05: every mapped secret comes through a conditional LANE_*
+        # variable — no provider secret is mapped unconditionally.
+        template = self.lane_yaml()
+        (job,) = template["jobs"]
+        env = {}
+        for step in job["steps"]:
+            env.update(step.get("env") or {})
+        secret_keys = {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ZAI_API_KEY",
+            "XAI_API_KEY",
+            "COPILOT_GITHUB_TOKEN",
+        }
+        for key in secret_keys:
+            assert env[key].startswith("$(LANE_"), key  # conditional lane var only
+        text = TEMPLATE_PATH.read_text()
+        assert "LANE_ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)" in text  # claude/copilot only
+        assert "LANE_XAI_API_KEY: $(XAI_API_KEY)" in text  # grok only
+
+    def test_envelope_inputs_render_enforced_with_no_fallback(self):
+        # B04: with the binding trio dispatched, a failed render writes
+        # .forge/exit=failed and skips the driver — no .forge/brief.md
+        # fallback on the enforced path.
+        text = TEMPLATE_PATH.read_text()
+        assert "envelope-verified brief render FAILED — lane fails closed" in text
+        # the fallback stays ONLY on the legacy (no-envelope) branch
+        assert "falling back to .forge/brief.md" in text

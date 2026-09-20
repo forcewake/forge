@@ -279,11 +279,20 @@ class TestObserveVerification:
         assert "tests" in decision.verdict.summary
         assert "cancelled or timed out" in decision.verdict.summary
 
-    def test_no_ci_reviews_honestly_unverified_bound_to_the_candidate(self, kit):
-        """Nothing observed → the not_configured verdict (R02: never
-        presented as verified), bound to the CANDIDATE sha (there is no
-        provider-observed head), walking to the review leg."""
+    def test_no_ci_with_required_jobs_waits_never_reads_unverified(self, kit):
+        """B07: a NON-EMPTY frozen required list makes missing checks a
+        missing MANDATORY GATE — the run waits (the R17 deadline blocks
+        it), never an unverified READY."""
         decision = _decision(kit, ("tests",), {})
+
+        assert decision.outcome == OUTCOME_WAIT
+        assert decision.verdict is None
+
+    def test_no_ci_without_required_jobs_reviews_honestly_unverified(self, kit):
+        """Best-effort mode (no frozen required checks): nothing observed
+        → the not_configured verdict (R02: never presented as verified),
+        bound to the CANDIDATE sha, walking to the review leg."""
+        decision = _decision(kit, (), {})
 
         assert decision.outcome == OUTCOME_REVIEW
         assert decision.verified is False
@@ -580,7 +589,7 @@ GATE_SCENARIOS = [
     ("green", [("tests", "success")], [("tests", "succeeded")], "ready_verified", "passed"),
     ("red", [("tests", "failure")], [("tests", "failed")], "blocked_quality", None),
     ("infra", [("tests", "cancelled")], [("tests", "canceled")], "blocked_infra", "unknown"),
-    ("no CI configured", [], [], "ready_unverified", "not_configured"),
+    ("no CI configured", [], [], "waiting", None),
     (
         "unproven required",
         [("documentation", "success")],

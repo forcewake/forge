@@ -27,14 +27,18 @@
 #
 # Dispatch-only (ADR-0024 §6): forge queues this lane via the Runs API
 # (POST /_apis/pipelines/{pipelineId}/runs) with templateParameters
-# {run_id, attempt_base, driver, model, work_item_id}. There is NO
-# triggers: section at all — Azure Repos IGNORES YAML pr: triggers (PR CI
-# is governed by branch policies, "Build validation", which is exactly the
-# quality contract's enforcement point), and a CI trigger would run the
-# lane outside forge's control.
+# {run_id, attempt_base, driver, model, work_item_id, plan_note_id,
+# envelope_digest, spec_digest, repair_context}. Azure Repos IGNORES YAML
+# pr: triggers (PR CI is governed by branch policies, "Build validation",
+# which is exactly the quality contract's enforcement point), and — B05 —
+# WITHOUT an explicit ``trigger: none`` the IMPLIED CI trigger would queue
+# the lane on every branch push outside forge's control (the required
+# parameters then fail validation or queue a doomed run).
 #
 # The driver step is rendered by forge's HarnessDriver.build_script() —
 # the template only provisions the lane.
+
+trigger: none
 
 parameters:
   # Typed queue-time parameters; REST-dispatched templateParameters arrive
@@ -51,6 +55,18 @@ parameters:
   - name: work_item_id
     type: string
   - name: repair_context
+    type: string
+    default: ''
+  # B04/A03: the envelope binding — with all three present the lane
+  # renders the brief ENFORCED (approved sections re-verified against the
+  # frozen envelope digest; any mismatch fails the lane CLOSED).
+  - name: plan_note_id
+    type: string
+    default: ''
+  - name: envelope_digest
+    type: string
+    default: ''
+  - name: spec_digest
     type: string
     default: ''
 
@@ -75,6 +91,25 @@ jobs:
       FORGE_ISSUE_NUMBER: ${{ parameters.work_item_id }}
       FORGE_BRIEF: .forge/brief.md
       FORGE_EXIT_FILE: .forge/exit
+      # B05: repair_context is a template PARAMETER — $(repair_context)
+      # macro-references an undefined variable and delivers the LITERAL
+      # string, losing the repair context (LIVE-reviewed e53ffd2 B05).
+      FORGE_REPAIR_CONTEXT: ${{ parameters.repair_context }}
+      FORGE_PLAN_NOTE_ID: ${{ parameters.plan_note_id }}
+      FORGE_ENVELOPE_DIGEST: ${{ parameters.envelope_digest }}
+      FORGE_SPEC_DIGEST: ${{ parameters.spec_digest }}
+      # B05: per-driver credential selection — claude-code/copilot take the
+      # Anthropic surface, grok takes XAI; everything else stays empty.
+      ${{ if or(eq(parameters.driver, 'claude-code'), eq(parameters.driver, 'copilot')) }}:
+        LANE_ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+        LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
+        LANE_ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
+      ${{ if eq(parameters.driver, 'claude-code') }}:
+        LANE_ZAI_API_KEY: $(ZAI_API_KEY)
+      ${{ if eq(parameters.driver, 'grok') }}:
+        LANE_XAI_API_KEY: $(XAI_API_KEY)
+      ${{ if eq(parameters.driver, 'copilot') }}:
+        LANE_COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
     steps:
       # forge requires Python >=3.13 — the hosted ubuntu-latest image
       # defaults to 3.12 (LIVE-found in the ADR-0024 lab run: pip refused
@@ -138,8 +173,26 @@ jobs:
           case "${FORGE_AZDO_READ_TOKEN:-}" in
             '' | "$_junk") ;;
             *)
-              python -m forge.harness_entry --render-brief-azure \
-                || echo "brief fetch failed — falling back to .forge/brief.md"
+              if [ -n "${FORGE_PLAN_NOTE_ID:-}" ] \
+                 && [ -n "${FORGE_ENVELOPE_DIGEST:-}" ] \
+                 && [ -n "${FORGE_SPEC_DIGEST:-}" ]; then
+                # B04 ENFORCED: the addressed plan comment's approved
+                # sections must re-verify against the frozen envelope
+                # digest. Any failure fails the lane CLOSED — a stale
+                # .forge/brief.md from an earlier attempt must NEVER
+                # execute (no fallback).
+                if ! python -m forge.harness_entry --render-brief-azure; then
+                  mkdir -p .forge
+                  printf 'failed\n' > .forge/exit
+                  echo "envelope-verified brief render FAILED — lane fails closed"
+                  exit 0
+                fi
+              else
+                # Legacy dispatch (no envelope inputs): the loud unenforced
+                # fetch with the documented fallback posture.
+                python -m forge.harness_entry --render-brief-azure \
+                  || echo "brief fetch failed — falling back to .forge/brief.md"
+              fi
               ;;
           esac
           python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
@@ -150,7 +203,7 @@ jobs:
           FORGE_MODEL: $(FORGE_MODEL)
           FORGE_HARNESS_MODEL: $(FORGE_MODEL)
           FORGE_ISSUE_NUMBER: $(FORGE_ISSUE_NUMBER)
-          FORGE_REPAIR_CONTEXT: $(repair_context)
+          FORGE_REPAIR_CONTEXT: $(FORGE_REPAIR_CONTEXT)
           FORGE_LOG_PLATFORM: azdo
           # Brief-transport inputs (all optional): the read token is the
           # owner's own read-only PAT; the org URL and project name route
@@ -163,14 +216,17 @@ jobs:
           # VARIABLE (not secret — it references secrets by name); an empty
           # value means strict isolation with no servers.
           FORGE_HARNESS_MCP: $(FORGE_HARNESS_MCP)
-          # Harness keys = pipeline SECRET variables ($(...) macro; secrets
-          # are only surfaced when explicitly mapped like this).
-          ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
-          ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
-          ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
-          ZAI_API_KEY: $(ZAI_API_KEY)
-          XAI_API_KEY: $(XAI_API_KEY)
-          COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
+          # B05: harness keys are scoped to the SELECTED driver — the
+          # macro $(...) surfaces a secret ONLY when explicitly mapped, and
+          # the conditional variables below hold real values for the chosen
+          # driver and empty strings for every other (an unselected
+          # provider's secret is never delivered to the runner).
+          ANTHROPIC_API_KEY: $(LANE_ANTHROPIC_API_KEY)
+          ANTHROPIC_AUTH_TOKEN: $(LANE_ANTHROPIC_AUTH_TOKEN)
+          ANTHROPIC_BASE_URL: $(LANE_ANTHROPIC_BASE_URL)
+          ZAI_API_KEY: $(LANE_ZAI_API_KEY)
+          XAI_API_KEY: $(LANE_XAI_API_KEY)
+          COPILOT_GITHUB_TOKEN: $(LANE_COPILOT_GITHUB_TOKEN)
 
       # Candidate capture — condition: always(): the audit trail survives
       # failures (mirror of the Actions lane).

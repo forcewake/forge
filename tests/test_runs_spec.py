@@ -244,7 +244,7 @@ class TestRunSpec:
         assert document["plan"]["summary"]
         assert document["plan"]["files_hint"] == []
         assert document["model_route"] == {"tier": IMPLEMENTER_TIER}
-        assert document["verification"] == {"required_jobs": []}
+        assert document["verification"] == {"required_jobs": [], "waived_conclusions": []}
         # ADR-0023: the frozen harness decision rides in backend_config —
         # default preference ⇒ the configured backend's driver alone.
         assert document["backend_config"] == {
@@ -914,7 +914,7 @@ class TestFrozenExecution:
         the commit and the CI evaluation blocks instead of judging green."""
         run_id = await drive_to_waiting_ci(service, fake_gitlab, db)
         document = await spec_document_of(db, run_id)
-        document["verification"] = {"required_jobs": ["never-seeded-job"]}
+        document["verification"] = {"required_jobs": ["never-seeded-job"], "waived_conclusions": []}
         await replace_spec(db, run_id, document)
 
         await service.evaluate_waiting_ci()
@@ -931,7 +931,10 @@ class TestFrozenExecution:
         run_id = await service.start_run(PROJECT_ID, ISSUE_IID, ISSUE_TITLE, ISSUE_DESC, "alice")
         spec = await get_spec(db, run_id)
         assert spec is not None
-        assert spec.document["verification"] == {"required_jobs": ["pytest"]}
+        assert spec.document["verification"] == {
+            "required_jobs": ["pytest"],
+            "waived_conclusions": [],
+        }
 
         await service.handle_command_note(
             PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11

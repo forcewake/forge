@@ -99,6 +99,11 @@ class AzurePipelinesHandle:
     work_item_id: str
     forge_run_id: str
     started_at: str
+    # B04: the envelope binding inputs — carried on the handle so a crash
+    # recovery's re-dispatch renders the lane ENFORCED exactly like the
+    # original dispatch (0/"" = legacy, renders unenforced).
+    plan_note_id: int = 0
+    envelope_digest: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -120,6 +125,8 @@ class AzurePipelinesHandle:
             work_item_id=str(data.get("work_item_id") or ""),
             forge_run_id=str(data.get("forge_run_id") or ""),
             started_at=str(data["started_at"]),
+            plan_note_id=int(data.get("plan_note_id") or 0),
+            envelope_digest=str(data.get("envelope_digest") or ""),
         )
 
     def with_run_id(self, run_id: int) -> AzurePipelinesHandle:
@@ -164,6 +171,17 @@ class AzurePipelinesExecutor:
             "driver": handle.driver,
             "model": handle.model,
             "work_item_id": handle.work_item_id,
+            # B04: re-dispatches carry the envelope binding exactly like
+            # the original dispatch (empty = legacy, renders unenforced).
+            **(
+                {
+                    "plan_note_id": str(handle.plan_note_id),
+                    "envelope_digest": handle.envelope_digest,
+                    "spec_digest": handle.run_spec_digest,
+                }
+                if handle.plan_note_id and handle.envelope_digest
+                else {}
+            ),
             **(parameters or {}),
         }
         run = await self._client.run_pipeline(
