@@ -735,7 +735,13 @@ class TestLaneTemplateContract:
         text = TEMPLATE_PATH.read_text()
 
         assert "git add -A" in text
-        assert 'git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE"' in text
+        # The candidate is a TEXT patch (binary_not_supported, R08): the
+        # emit step scrubs the driver's __pycache__/.pyc droppings BEFORE
+        # staging, and the diff is emitted WITHOUT --binary (LIVE-found
+        # 2026-09-20: a staged .pyc failed every candidate closed).
+        assert 'git diff --cached --full-index "$FORGE_ATTEMPT_BASE"' in text
+        assert "rm -rf __pycache__ .pytest_cache" in text
+        assert "*.pyc" in text
 
     def test_meta_json_carries_the_contract_fields(self):
         text = TEMPLATE_PATH.read_text()

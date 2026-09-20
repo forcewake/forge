@@ -176,8 +176,17 @@ jobs:
       # failures (mirror of the Actions lane).
       - bash: |
           set -uo pipefail
+          # The candidate is a TEXT patch (binary_not_supported, R08): the
+          # driver's Python runs leave __pycache__/.pyc behind, and
+          # `git add -A` + `--binary` would smuggle one into the diff and
+          # fail the candidate closed (LIVE-found 2026-09-20 — the Actions
+          # lane has had this scrub since f90867f).
+          rm -rf __pycache__ .pytest_cache
+          find . -name '__pycache__' -type d -not -path './.git/*' -exec rm -rf {} + 2>/dev/null || true
+          echo "__pycache__/" >> .git/info/exclude 2>/dev/null || true
+          echo "*.pyc" >> .git/info/exclude 2>/dev/null || true
           git add -A
-          git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" \
+          git diff --cached --full-index "$FORGE_ATTEMPT_BASE" \
             > .forge/candidate.diff || true
           python - <<'PY'
           import json, os
