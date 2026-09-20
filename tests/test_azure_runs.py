@@ -1199,6 +1199,48 @@ class TestGoLane:
         assert run.status == FlowStatus.BLOCKED.value  # 400 config error: fatal, no auto-retry
         assert "harness_start_failed" in (run.status_reason or "")
 
+        # A12 identity-first journal (LIVE-found 2026-09-20): even a failed
+        # start must leave the dispatch identity in the evidence — the
+        # revival scanner re-dispatches from exactly this handle. A start
+        # failure used to leave NO identity and the scanner skipped the
+        # run it had just parked ("revival without repo identity").
+        handle = AzurePipelinesHandle.from_json(run.evidence["harness"]["handle"])
+        assert handle.run_id == 0  # nothing correlated — the dispatch failed
+        assert handle.forge_run_id == run_id
+        assert handle.project and handle.repo
+
+    async def test_revival_without_identity_re_parks_blocked_and_fails(self, db):
+        """The scanner walks a due run blocked → proposing BEFORE it can
+        know the redispatch is possible. With no journaled identity the
+        redispatch used to return QUIETLY: the attempt recorded succeeded,
+        the run stayed proposing with nothing scheduled — a zombie no
+        command could touch (/retry refuses non-blocked runs). The
+        redispatch must re-park the run blocked and raise."""
+        settings = make_settings(FORGE_AZDO_LANE_PIPELINE_ID=LANE_PIPELINE_ID)
+        service = make_service(db, FakeAzureDevOps(), settings=settings)
+        run_id = await start(service)
+
+        # Simulate the stranded mid-revival state: proposing, no identity.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.PROPOSING.value
+            run.status_reason = "harness_start_failed: Azure DevOps API error 500"
+            run.evidence = {"backend": "ci_harness"}
+            await session.commit()
+
+        async def no_stack(project: str, repo: str):
+            raise AssertionError("stack must not be built without an identity")
+
+        from forge.runs.azure_service import _azure_revival_redispatch
+
+        redispatch = _azure_revival_redispatch(settings, ForgeConfig(), db, no_stack)
+        with pytest.raises(RuntimeError, match="no repo identity"):
+            await redispatch(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "no repo identity" in (run.status_reason or "")
+
 
 # ----------------------------------------------------------------------
 # R02 verification gate: waiting_ci runs are driven by their builds

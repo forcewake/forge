@@ -2630,6 +2630,23 @@ class AzureRunService:
             action_id = await controller.record_action(run_id, "harness_start")
             await session.commit()
 
+        # Intent-first journal, part 2 (A12): pin the dispatch identity
+        # (project/repo/branch/attempt_base) into the evidence BEFORE the
+        # HTTP call. A failed start must leave the revival scanner enough
+        # identity to re-dispatch: with no journaled handle it skipped the
+        # run it had just parked, consumed the revive budget for nothing
+        # and stranded the run mid-transition (LIVE-found 2026-09-20: an
+        # AzDO Runs-API 500 start → "revival without repo identity").
+        async with self._session_factory() as session:
+            run_row = await self._get_run(session, run_id)
+            evidence = dict(run_row.evidence or {})
+            harness_ev = dict(evidence.get("harness") or {})
+            harness_ev.setdefault("backend", "ci_harness")
+            harness_ev["handle"] = handle.to_json()  # run_id=0 until correlated
+            evidence["harness"] = harness_ev
+            run_row.evidence = evidence
+            await session.commit()
+
         try:
             await self._ensure_harness_branch(branch, attempt_base)
             lane_run: PipelineRun = await self._stack.client.run_pipeline(
@@ -4843,8 +4860,34 @@ def _azure_revival_redispatch(
                 repo = ""
             repo = repo or str(run.github_repo_full_name or "").strip()
         if "/" not in repo:
-            logger.warning("AzDO revival of run %s without repo identity — skipping", run_id[:8])
-            return
+            # The scanner already walked the run blocked → proposing; a
+            # quiet skip here stranded it mid-transition — proposing with
+            # nothing scheduled is a zombie no command can touch (/retry
+            # refuses non-blocked runs, a fresh /implement forks the
+            # branch; LIVE-found 2026-09-20). Re-park it blocked so the
+            # operator's /retry can act, and raise so the attempt is
+            # recorded FAILED, not succeeded.
+            logger.warning(
+                "AzDO revival of run %s without repo identity — re-parking blocked",
+                run_id[:8],
+            )
+            try:
+                async with session_factory() as session:
+                    controller = Controller(session)
+                    await controller.transition(
+                        run_id,
+                        FlowStatus.BLOCKED,
+                        reason=(
+                            "revival skipped: no repo identity journaled — "
+                            "operator /retry required"
+                        ),
+                    )
+                    await session.commit()
+            except Exception:
+                logger.exception("AzDO revival re-park failed for run %s", run_id[:8])
+            raise RuntimeError(
+                f"AzDO revival of run {run_id[:8]} skipped: no repo identity journaled"
+            )
         project, repo_name = repo.split("/", 1)
         service = AzureRunService(
             session_factory,
