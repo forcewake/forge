@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.1] - 2026-09-20
 
 ### Fixed — live leg checks (2026-09-20: GitLab + GitHub + Azure DevOps driven end-to-end against real instances)
 
@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repositoryId` AND a repository GUID (a name 400s) — without these the verification pass
   read NO builds and every run died `verification_timeout` (06b5554, b36d31f).
 
+## [0.12.0] - 2026-09-19
+
 ### Changed — guarantee parity (second external review d16f523: all 18 findings closed — evidence in `python -m forge.release_manifest`)
 
 - **A01/A02 — same spec, same verification everywhere**: GitHub and Azure freeze and consume
@@ -66,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A15 — ADR-0027 slice 2**: ObserveVerification extracted as one provider-neutral use case.
 - **A17/A18 — measurement and profiles**: a 14-task delivery evaluation cohort harness and
   a versioned execution profile (target-contract lanes, bootstrap classification).
+
+## [0.11.0] - 2026-09-18
 
 ### Added — Phase B/C/D complete (external review e8bf381: every finding closed — evidence-scoped)
 
@@ -103,6 +107,38 @@ evidence classes and gates.
 - **R29** operator commands: /status, /why-blocked, /reconcile (all providers).
 - **R31** capability-aware harness selection (manifest + policy-bound planner proposal +
   numeric budget binding).
+
+### Fixed
+- Provider-namespaced unique index; Alembic live-head startup gate replaces the
+  stale marker; MCP classic-tool scope bypass; worker reaper parks exhausted
+  steps; late-callback supersede widened to all terminal states.
+
+### Added — terminal-failure revival (Tier 1 auto-revive + Tier 2 `/retry`)
+
+- **Tier 1 — automatic revival of transient deaths**: every `failed`
+  terminalization is classified (`forge.runs.revival`) before the run parks.
+  A *transient* cause (dispatch/CI 5xx, network, timeout, rate limits, runner
+  startup, an empty harness-start error) parks `blocked` with a revival stamp
+  in its evidence; the provider reconciler re-dispatches the SAME branch after
+  bounded backoff (60s doubling, capped), at most
+  `FORGE_RUN_AUTO_REVIVE_LIMIT` (default 2) times, journaled as `auto_revive`
+  actions. No issue comment, no operator. `FORGE_RUN_REVIVE_BACKOFF_SECONDS`
+  sets the ladder base; `0` disables auto-revive.
+- **Tier 2 — `@forge /retry [run-id]`** on GitLab, GitHub and Azure DevOps
+  (bare = the issue's latest `failed`/`blocked` run): approver-authorized like
+  `/go`, it walks the run back to `proposing` through the explicit revival
+  graph edge, grants ONE operator cycle (may exceed `FORGE_MAX_COMMIT_CYCLES`)
+  and re-dispatches the same branch with the terminal reason and the last
+  verification evidence as the repair context. Cancelled runs, and runs that
+  never committed a candidate, are rejected with an actionable note pointing
+  at `/implement`.
+- **Fatal failures park `blocked`, not `failed`**: config errors (4xx input
+  mismatches, missing workflow), driver quality signals and exhausted cycles
+  carry a precise, actionable `status_reason` — nobody watches a run flap.
+  ADR-0004 amended with the revival edge (`Controller.revive_transition`,
+  audited via `authorized_by` in the outbox payload).
+
+## [0.10.0] - 2026-09-18
 
 ### Added — Phase-A correctness alignment (external review e8bf381: all Phase-A P1s closed)
 
@@ -148,36 +184,6 @@ evidence classes and gates.
   runs), pinned toolchain, lane job ceiling 120m.
 - **Research base**: docs/research/{patch-application, remote-effect-reconciliation,
   actions-artifacts-usage, schema-upgrade-gates}.md.
-
-### Fixed
-- Provider-namespaced unique index; Alembic live-head startup gate replaces the
-  stale marker; MCP classic-tool scope bypass; worker reaper parks exhausted
-  steps; late-callback supersede widened to all terminal states.
-
-### Added — terminal-failure revival (Tier 1 auto-revive + Tier 2 `/retry`)
-
-- **Tier 1 — automatic revival of transient deaths**: every `failed`
-  terminalization is classified (`forge.runs.revival`) before the run parks.
-  A *transient* cause (dispatch/CI 5xx, network, timeout, rate limits, runner
-  startup, an empty harness-start error) parks `blocked` with a revival stamp
-  in its evidence; the provider reconciler re-dispatches the SAME branch after
-  bounded backoff (60s doubling, capped), at most
-  `FORGE_RUN_AUTO_REVIVE_LIMIT` (default 2) times, journaled as `auto_revive`
-  actions. No issue comment, no operator. `FORGE_RUN_REVIVE_BACKOFF_SECONDS`
-  sets the ladder base; `0` disables auto-revive.
-- **Tier 2 — `@forge /retry [run-id]`** on GitLab, GitHub and Azure DevOps
-  (bare = the issue's latest `failed`/`blocked` run): approver-authorized like
-  `/go`, it walks the run back to `proposing` through the explicit revival
-  graph edge, grants ONE operator cycle (may exceed `FORGE_MAX_COMMIT_CYCLES`)
-  and re-dispatches the same branch with the terminal reason and the last
-  verification evidence as the repair context. Cancelled runs, and runs that
-  never committed a candidate, are rejected with an actionable note pointing
-  at `/implement`.
-- **Fatal failures park `blocked`, not `failed`**: config errors (4xx input
-  mismatches, missing workflow), driver quality signals and exhausted cycles
-  carry a precise, actionable `status_reason` — nobody watches a run flap.
-  ADR-0004 amended with the revival edge (`Controller.revive_transition`,
-  audited via `authorized_by` in the outbox payload).
 
 ## [0.9.0] - 2026-09-16
 
