@@ -250,7 +250,20 @@ class GitHubActionsExecutor:
                 handle.branch,
             )
             return handle
-        newest = runs[0]
+        # Branch equality is re-enforced client-side: the server-side
+        # ``branch`` filter is best-effort across API versions/proxies, and
+        # concurrent dispatches routinely share one attempt base (revival
+        # re-freezes from main), which makes head_sha alone ambiguous. The
+        # forge-minted branch (forge/<iid>/<run8>) is the unique key.
+        same_branch = [run for run in runs if str(run.get("head_branch") or "") == handle.branch]
+        if not same_branch:
+            logger.info(
+                "Dispatch runs seen for %s but none on branch %s — discovery retries later",
+                handle.workflow,
+                handle.branch,
+            )
+            return handle
+        newest = same_branch[0]
         # ADR-0020 §1: verify head_sha == attempt_base — never trust ordering.
         if str(newest.get("head_sha") or "") != handle.attempt_base:
             logger.warning(

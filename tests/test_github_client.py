@@ -629,7 +629,7 @@ class TestActionsEndpoints:
     ):
         url = (
             f"{BASE}/repos/acme/widget/actions/workflows/forge-harness.github.yml/runs"
-            f"?event=workflow_dispatch&per_page=100&head_sha={TEST_HEAD}&head_branch=forge%2F42%2Fabcd1234"
+            f"?event=workflow_dispatch&per_page=100&head_sha={TEST_HEAD}&branch=forge%2F42%2Fabcd1234"
         )
         httpx_mock.add_response(
             url=url,

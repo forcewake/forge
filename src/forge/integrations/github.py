@@ -910,7 +910,13 @@ class GitHubClient:
         if head_sha is not None:
             params["head_sha"] = head_sha
         if head_branch is not None:
-            params["head_branch"] = head_branch
+            # The runs-list filter is spelled ``branch`` (GitHub REST docs);
+            # an unknown param name is silently DROPPED by the API, so
+            # ``head_branch=`` here would silently widen the filter to
+            # event+head_sha only — and concurrent dispatches sharing one
+            # attempt base then look correlated. The executor additionally
+            # re-verifies branch equality client-side (defense in depth).
+            params["branch"] = head_branch
         runs = [
             dict(run)
             for run in await self._paginated(

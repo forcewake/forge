@@ -694,7 +694,10 @@ class FakeGitHub:
             run
             for run in self.actions_runs
             if run["event"] == "workflow_dispatch"
-            and (head_branch is None or run["head_branch"] == head_branch)
+            # head_branch is deliberately NOT honored: the real runs-list
+            # endpoint only filters on the documented ``branch`` param and
+            # drops unknown names, so correlation must never lean on it
+            # (the executor re-verifies branch equality client-side).
             and (head_sha is None or run["head_sha"] == head_sha)
             and (
                 created_after is None or datetime.fromisoformat(run["created_at"]) >= created_after

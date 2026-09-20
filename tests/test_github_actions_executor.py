@@ -172,6 +172,42 @@ class TestLaunch:
 
         assert handle.run_id == 0  # ordering alone is never trusted (ADR-0020)
 
+    async def test_concurrent_batch_sharing_one_attempt_base_correlates_own_branch(self):
+        """Regression (2026-09-20 cohort wipeout): 12 revival re-dispatches
+        re-froze the SAME attempt base; the API dropped the then-misspelled
+        ``head_branch`` filter and had not indexed our own run yet, so
+        discovery latched the NEIGHBOR's workflow (same head_sha, matching
+        the only client-side check) — every poll then read the wrong run's
+        artifacts and the grace window failed the whole batch with
+        ``harness_artifact_missing``. Branch equality is the unique key."""
+        fake = FakeGitHub()
+        fake.dispatch_mode = "legacy"
+        # Indexing lag: at discovery time only a NEIGHBOR's run is visible —
+        # same attempt base (shared re-freeze), different forge branch.
+        fake.seed_actions_run(
+            run_id=440,
+            head_branch="forge/44/764d2a41",
+            head_sha=ATTEMPT_BASE,
+            status="queued",
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=4),
+        )
+        executor = make_executor(fake)
+
+        handle = await executor.launch(make_handle())
+        assert handle.run_id == 0  # a foreign-branch match is never adopted
+
+        # Our run indexes a moment later; re-discovery finds ONLY it.
+        fake.seed_actions_run(
+            run_id=450,
+            head_branch=BRANCH,
+            head_sha=ATTEMPT_BASE,
+            status="queued",
+            created_at=datetime.now(timezone.utc),
+        )
+        handle = await executor.reconcile_launch(handle)
+        assert handle.run_id == 450
+        assert len(fake.dispatch_inputs) == 1  # still exactly one launch
+
 
 # ----------------------------------------------------------------------
 # reconcile_launch: ADR-0005 re-entry, never a second dispatch
