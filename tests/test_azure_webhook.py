@@ -308,12 +308,39 @@ class TestWorkitemCommands:
             inbox = (await session.execute(select(EventInbox))).scalars().all()
         assert inbox == []
 
-    async def test_bot_display_name_is_also_skipped(self, app, client: AsyncClient):
+
+    async def test_forge_marker_is_skipped_regardless_of_author(self, app, client: AsyncClient):
+        """Single-PAT deployments: forge posts under the OPERATOR's
+        identity, so an author-based guard cannot tell forge's own notes
+        (a rejection note suggesting "/implement") from the operator's
+        real commands — LIVE-found 2026-09-20 self-trigger. The hidden
+        forge:authored marker does."""
         payload = load_json("workitem_commented_implement.json")
-        payload["resource"]["fields"]["System.ChangedBy"] = {"displayName": "forge-bot"}
+        payload["resource"]["fields"]["System.History"] = (
+            "🔁 Start fresh with `@forge /implement`.\n\n<!-- forge:authored -->"
+        )
         body = json.dumps(payload).encode()
         response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
         assert response.json() == {"status": "skipped", "reason": "bot-loop"}
+        async with app.state.session_factory() as session:
+            inbox = (await session.execute(select(EventInbox))).scalars().all()
+        assert inbox == []
+
+    async def test_human_command_without_marker_is_processed(self, app, client: AsyncClient):
+        """Same identity as the bot (shared PAT), no marker: the operator's
+        real command must still be processed."""
+        payload = load_json("workitem_commented_implement.json")
+        # A non-bot author WITHOUT the marker: processed as a real command.
+        payload["resource"]["fields"]["System.ChangedBy"] = "dev@fabrikam.example"
+        payload["resource"]["fields"]["System.History"] = "/implement"
+        body = json.dumps(payload).encode()
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert response.status_code in (200, 202)
+        async with app.state.session_factory() as session:
+            inbox = list((await session.execute(select(EventInbox))).scalars().all())
+        assert any(i.payload.get("command") == "start_run" for i in inbox)
 
     async def test_non_command_comment_recorded_without_step(self, app, client: AsyncClient):
         payload = load_json("workitem_commented_implement.json")

@@ -4382,7 +4382,17 @@ class AzureRunService:
     async def _post_journaled_comment(
         self, project_id: int, issue_number: int, body: str, run_id: str | None, kind: str
     ) -> None:
-        """Post a work-item comment with intent/outcome journaling (ADR-0005)."""
+        """Post a work-item comment with intent/outcome journaling (ADR-0005).
+
+        Every forge-authored comment carries the hidden ``forge:authored``
+        marker: on single-PAT deployments forge posts under the OPERATOR's
+        identity, so the author-based bot-loop guard cannot disambiguate
+        forge's own notes from the operator's commands (LIVE-found
+        2026-09-20: a retry-rejection note suggesting "/implement"
+        self-triggered a fresh run). The gateway skips any comment bearing
+        this marker regardless of author.
+        """
+        body = f"{body}\n\n<!-- forge:authored -->"
         async with self._session_factory() as session:
             controller = Controller(session)
             action_id = await controller.record_action(

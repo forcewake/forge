@@ -74,6 +74,14 @@ from forge.worker.tasks import create_run_command_task
 
 logger = logging.getLogger(__name__)
 
+#: Hidden marker appended to EVERY comment forge posts on the AzDO lane
+#: (``_post_journaled_comment``). On single-PAT deployments forge posts
+#: under the operator's identity, so the author-based bot-loop guard
+#: cannot tell forge's own notes from the operator's commands — the
+#: marker can (LIVE-found 2026-09-20: a rejection note suggesting
+#: "/implement" self-triggered a fresh run).
+FORGE_NOTE_MARKER = "<!-- forge:authored -->"
+
 azure_router = APIRouter()
 
 #: Commands served by the durable run loop — the same set the GitLab and
@@ -639,6 +647,18 @@ async def _ingest_azure_event(
         author = identity_name(
             ((payload.get("resource") or {}).get("fields") or {}).get("System.ChangedBy")
         )
+        note_text = str(
+            ((payload.get("resource") or {}).get("fields") or {}).get("System.History") or ""
+        )
+        if FORGE_NOTE_MARKER in note_text:
+            # Content-based self-trigger guard: the author check alone
+            # cannot disambiguate forge from the operator on shared-PAT
+            # deployments (research §5.1 + LIVE-found 2026-09-20).
+            logger.info(
+                "Skipping forge-authored Azure DevOps work-item comment (marker)",
+                extra={"event": event},
+            )
+            return {"status": "skipped", "reason": "bot-loop"}
         if author and is_bot_identity(author, bot_name):
             # Forge's own plan comments re-trigger this event — they never
             # act as triggers (bot-loop guard, research §5.1).
