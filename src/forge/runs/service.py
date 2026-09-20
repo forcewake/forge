@@ -46,6 +46,8 @@ from uuid import uuid4
 
 import httpx
 from sqlalchemy import select, update
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2520,6 +2522,61 @@ class RunService:
             driver=driver,
         )
 
+    async def _open_or_adopt_mr_action(
+        self, session: AsyncSession, run_id: str, branch: str
+    ) -> int:
+        """The ONE create_merge_request action row for run+branch.
+
+        A crashed attempt leaves its row uncompleted; a concurrent leg or
+        the recovery scanner must adopt that row (and complete it with the
+        outcome) instead of journaling a second one — the row count is part
+        of the audit contract. ``uq_create_mr_per_branch`` (migration 018)
+        is the arbiter: the INSERT collapses onto the winner's row and the
+        ``FOR UPDATE`` here serializes the loser behind the winner's
+        create. MUST run inside the caller's locked transaction.
+        """
+        dialect_insert = (
+            postgresql.insert
+            if session.bind.dialect.name == "postgresql"
+            else sqlite_dialect_insert
+        )
+        await session.execute(
+            dialect_insert(ActionLog)
+            .values(
+                flow_run_id=run_id,
+                action_kind="create_merge_request",
+                correlation_id=branch,
+                status="requested",
+            )
+            .on_conflict_do_nothing()
+        )
+        existing = (
+            (
+                await session.execute(
+                    select(ActionLog.id)
+                    .where(
+                        ActionLog.flow_run_id == run_id,
+                        ActionLog.action_kind == "create_merge_request",
+                        ActionLog.correlation_id == branch,
+                    )
+                    .order_by(ActionLog.id.asc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is None:
+            # ON CONFLICT covers concurrent creators; a row can only be
+            # missing when nobody ever created one for this branch.
+            controller = Controller(session)
+            return await controller.record_action(
+                run_id, "create_merge_request", correlation_id=branch
+            )
+        row_id = int(existing)
+        await session.execute(select(ActionLog).where(ActionLog.id == row_id).with_for_update())
+        return row_id
+
     async def _create_draft_mr(
         self,
         project_id: int,
@@ -2527,15 +2584,101 @@ class RunService:
         branch: str,
         commit_sha: str | None,
     ) -> int:
-        """Create the Draft MR for the run branch, journaling intent/outcome."""
+        """Create the Draft MR for the run branch, journaling intent/outcome.
+
+        ONE ``create_merge_request`` per run+branch, ever — one provider
+        call AND one action row. Two executors can reach this leg
+        concurrently (a lease-expiry re-drive and the publication-intent
+        scanner; LIVE-found via the FI suite 2026-09-20 — a check-then-
+        create race produced a second MR), and a crashed attempt leaves its
+        action row uncompleted. So: adopt any existing row for this
+        run+branch (complete it when its creator died), then adopt any MR
+        the provider already has for the branch, and only a verified miss
+        on both surfaces creates — under the SAME row.
+        """
+        # ONE creator at a time per run+branch: the action-row lock
+        # serializes the check-and-create across the concurrent leg /
+        # recovery scanner (the FI suite's check-then-create race).
         async with self._session_factory() as session:
+            action_id = await self._open_or_adopt_mr_action(session, run_id, branch)
+            await session.execute(
+                select(ActionLog).where(ActionLog.id == action_id).with_for_update()
+            )
             controller = Controller(session)
-            action_id = await controller.record_action(
-                run_id, "create_merge_request", correlation_id=branch
+
+            # A previous attempt may have journaled the MR already.
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "create_merge_request",
+                            ActionLog.correlation_id == branch,
+                            ActionLog.status == "succeeded",
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            raw = (row.remote_result or {}).get("mr_iid") if row is not None else None
+            if raw is not None:
+                try:
+                    await self._gitlab.get_merge_request(project_id, int(raw))
+                    return int(raw)
+                except GitLabAPIError:
+                    pass  # the journaled MR is gone — create a fresh one
+
+            # The journal lags the effect: a crashed attempt may have
+            # created the MR without journaling it. The PROVIDER is the
+            # second arbiter.
+            try:
+                for existing_mr in await self._gitlab.list_merge_requests(
+                    project_id, state="opened", per_page=50
+                ):
+                    if existing_mr.source_branch == branch:
+                        await controller.complete_action(
+                            action_id,
+                            "succeeded",
+                            {"mr_iid": int(existing_mr.iid), "adopted": True},
+                        )
+                        await session.commit()
+                        return int(existing_mr.iid)
+            except GitLabAPIError:
+                pass  # provider read failed — fall through to create
+
+            run = await self._get_run(session, run_id)
+            plan_digest = run.plan_digest or ""
+            issue_iid = run.issue_iid
+            issue_title = await self._read_issue_title(project_id, issue_iid)
+            description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha)
+            try:
+                mr = await self._gitlab.create_merge_request(
+                    project_id,
+                    branch,
+                    self._target_branch(),
+                    f"Draft: {issue_title}",  # Draft: prefix marks it draft
+                    description,
+                )
+            except httpx.HTTPError:
+                await controller.complete_action(action_id, "unknown_outcome")
+                await session.commit()
+                raise
+            except GitLabAPIError as exc:
+                await controller.complete_action(action_id, "failed", {"error": str(exc)})
+                await session.commit()
+                raise
+            await controller.complete_action(
+                action_id,
+                "succeeded",
+                {"mr_iid": mr.get("iid"), "web_url": mr.get("web_url")},
             )
             await session.commit()
+            return int(mr["iid"])
 
-        async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             plan_digest = run.plan_digest or ""
             issue_iid = run.issue_iid
@@ -3567,6 +3710,21 @@ class RunService:
                 sha[:8],
             )
             mr_iid = await self._journaled_draft_mr(intent.run_id, project_id, intent.target_ref)
+            if mr_iid is None:
+                # The journal lags the effect: the crashed leg may have
+                # created the MR without journaling it yet (LIVE-found via
+                # the FI suite 2026-09-20: two create_merge_request calls
+                # for one intent). The PROVIDER is the arbiter — adopt an
+                # already-open MR for this branch before creating one.
+                try:
+                    for mr in await self._gitlab.list_merge_requests(
+                        project_id, state="opened", per_page=50
+                    ):
+                        if mr.source_branch == intent.target_ref:
+                            mr_iid = int(mr.iid)
+                            break
+                except GitLabAPIError:
+                    mr_iid = None
             if mr_iid is None:
                 # A12 convergence: the publish leg may have stood down inside
                 # the effect-certainty window (its step completed, the run
