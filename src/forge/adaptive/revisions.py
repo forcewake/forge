@@ -7,14 +7,24 @@ are approved by a human once, HOW is revised by the agent many times — so
 every rule here answers one question: may this revision land without going
 back to the human?
 
-- PLN-04 — :func:`classify_revision` sorts a proposed revision into the
-  ChangeProposal vocabulary; :func:`apply_tactical` lands the pre-approved
-  class and NOTHING else (a material change raises — it can never slip
-  through as a quiet tactical edit).
-- PLN-05 — material revisions land only through a compare-and-swap
-  :class:`RevisionDecision` (a stale authorization epoch refuses), and
-  :func:`activate_revision` is the single door from approval to plan;
-  activation fences the old publication rights.
+- PLN-04 / NXT-20 — :func:`classify_revision` sorts a proposed revision
+  into the ChangeProposal vocabulary with authority drawn from the
+  CONTRACT alone (the old plan's write grants are lineage, never
+  authority) and unknown materiality routed to ``decision_required`` —
+  fail closed, never a guess of ``tactical_internal``;
+  :func:`apply_tactical` reads the contract's
+  ``tactical_revision_policy`` itself and lands only transformations the
+  policy explicitly pre-approved — anything else raises and must go to
+  the human gate as a decision request.
+- PLN-05 / NXT-19 — material revisions land only through a
+  compare-and-swap :class:`RevisionDecision` (a stale authorization
+  epoch refuses), and :func:`activate_revision` is the single door from
+  approval to plan: it guards the FULL binding tuple (work, plan,
+  proposal identity, proposed-content digest, contract digest, expected
+  active parent, authorization epoch) and then consumes the decision,
+  switches the active revision, and bumps the publication fence in ONE
+  conditional transaction — any mismatch is a typed refusal that
+  consumes nothing.
 - PLN-06 — :class:`Question` makes blocker questions durable planning
   state (answered only by an actor with the required scope, never
   defaulted), and :func:`route_question` sends them to the PARENT
@@ -35,12 +45,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from typing import Literal, Protocol
 
-from forge.adaptive.models import PlanRevision, WorkContract
+from forge.adaptive.models import PlanRevision, PlanStep, WorkContract
 
 __all__ = [
+    "ActivationRecord",
+    "ActivationRefused",
+    "ActivationSession",
+    "ActivePlanState",
     "Question",
     "RevisionDecision",
+    "TacticalPolicy",
     "activate_revision",
     "apply_tactical",
     "change_log",
@@ -48,36 +64,152 @@ __all__ = [
     "decision_record",
     "fresh_session_brief",
     "invalidation_set",
+    "parse_tactical_policy",
     "plan_digest",
+    "proposed_revision_identity",
     "route_question",
     "stale_callback_guard",
+    "transformation_kinds",
 ]
+
+#: Impact classes a tactical edit may carry. This is an ALLOWLIST, not a
+#: blacklist: a declared class outside both this set and
+#: ``_MATERIAL_IMPACTS`` is unknown materiality, and unknown goes to a
+#: human decision — never to a silent tactical landing. Omitting the tag
+#: altogether is equally unknown ("an impact tag was omitted" must never
+#: be the reason a change passed).
+_KNOWN_TACTICAL_IMPACTS = frozenset({"internal", "refactor", "docs", "tests", "cleanup"})
+
+#: Declared compatibility-breaking impact classes — anything naming these
+#: is material by declaration, no approval shortcut exists.
+_MATERIAL_IMPACTS = frozenset({"migration", "schema", "api", "public-api", "event", "effect"})
+
+#: The closed vocabulary of automatic plan transformations a contract's
+#: ``tactical_revision_policy`` may pre-approve. Anything else in the
+#: policy string makes the whole policy unknown (fail closed).
+_TACTICAL_POLICY_OPERATIONS = frozenset(
+    {"reorder", "edit_step", "reword", "add_step", "remove_step"}
+)
+
+
+def _delta_steps(old: PlanRevision, new: PlanRevision) -> list[PlanStep]:
+    """The steps the new plan ADDS or CHANGES — the delta that carries risk.
+
+    A step carried over byte-for-byte keeps the classification its
+    original approval already paid for: the revision is judged by what
+    it changes, not by re-litigating the whole plan (NXT-20: a genuine
+    reorder/refactor succeeds without unnecessary reapproval).
+    """
+    old_by_id = {step.step_id: step for step in old.steps}
+    return [step for step in new.steps if old_by_id.get(step.step_id) != step]
+
+
+def transformation_kinds(old: PlanRevision, new: PlanRevision) -> frozenset[str]:
+    """Name every automatic transformation the delta performs.
+
+    The vocabulary is the closed set the tactical policy grants:
+    ``reorder`` (surviving steps in a new order), ``edit_step`` (a
+    surviving step modified — objective, deps, impact, references),
+    ``reword`` (revision-level text: summary, assumptions), ``add_step``
+    and ``remove_step``. Policy checks are set containment over these
+    kinds, so an unlisted kind is a decision request by construction.
+    """
+    old_by_id = {step.step_id: step for step in old.steps}
+    new_by_id = {step.step_id: step for step in new.steps}
+    kinds: set[str] = set()
+    surviving_old_order = [step.step_id for step in old.steps if step.step_id in new_by_id]
+    surviving_new_order = [step.step_id for step in new.steps if step.step_id in old_by_id]
+    if surviving_new_order != surviving_old_order:
+        kinds.add("reorder")
+    for step in new.steps:
+        if step.step_id not in old_by_id:
+            kinds.add("add_step")
+        elif old_by_id[step.step_id] != step:
+            kinds.add("edit_step")
+    if any(step.step_id not in new_by_id for step in old.steps):
+        kinds.add("remove_step")
+    if new.summary != old.summary or list(new.assumptions) != list(old.assumptions):
+        kinds.add("reword")
+    return frozenset(kinds)
+
+
+@dataclass(frozen=True)
+class TacticalPolicy:
+    """The contract's explicit pre-approval of automatic plan edits.
+
+    ``status`` is the fail-closed verdict on the policy string itself:
+    ``enabled`` (every token recognized; ``allowed`` carries them),
+    ``disabled`` (the contract said no), ``unset`` (the contract never
+    declared one — silence is not consent), ``unknown`` (unrecognized
+    token). Only ``enabled`` permits anything; every other status
+    permits NOTHING, so :func:`classify_revision` routes the revision
+    to a human decision instead of guessing.
+    """
+
+    raw: str
+    status: Literal["enabled", "disabled", "unset", "unknown"]
+    allowed: frozenset[str] = frozenset()
+
+    def permits(self, kinds: frozenset[str] | set[str]) -> bool:
+        """True only when an ENABLED policy covers every requested kind."""
+        return self.status == "enabled" and set(kinds) <= set(self.allowed)
+
+
+def parse_tactical_policy(contract: WorkContract) -> TacticalPolicy:
+    """Parse ``WorkContract.tactical_revision_policy`` fail closed.
+
+    The field is a plain string on the model (see models.py), so the
+    grammar lives here: a comma-separated list of transformation kinds
+    from :data:`_TACTICAL_POLICY_OPERATIONS`, or the single token
+    ``disabled``. Empty means unset. ANY unrecognized token makes the
+    policy unknown — an operator typo must narrow authority, never
+    widen it.
+    """
+    raw = (contract.tactical_revision_policy or "").strip()
+    if not raw:
+        return TacticalPolicy(raw=raw, status="unset")
+    tokens = [token.strip().lower() for token in raw.split(",") if token.strip()]
+    if "disabled" in tokens:
+        return TacticalPolicy(raw=raw, status="disabled")
+    unknown = [token for token in tokens if token not in _TACTICAL_POLICY_OPERATIONS]
+    if unknown:
+        return TacticalPolicy(raw=raw, status="unknown")
+    return TacticalPolicy(raw=raw, status="enabled", allowed=frozenset(tokens))
 
 
 def classify_revision(old: PlanRevision, new: PlanRevision, contract: WorkContract) -> str:
     """Classify a proposed revision into the ChangeProposal vocabulary.
 
-    Precedence follows the blast radius, widest first — a revision that
-    trips two classes reports the one a human must see first:
+    Authority for WRITES comes from the contract alone (NXT-20): the old
+    plan's write repositories contribute nothing to the authorized set —
+    the previous plan is a historical artifact, never a source of new
+    authority, so a restrictive contract replacing a historically
+    broader one narrows immediately. Precedence follows the blast
+    radius, widest first:
 
-    - ``material_scope`` — any NEW step writes a repository that neither
-      the old plan's steps nor the contract's write scope authorized.
-      New write surface is never an internal detail.
+    - ``material_scope`` — any new-plan step writes a repository the
+      contract's write scope never authorized. New write surface is
+      never an internal detail.
     - ``material_contract`` — the new steps stop referencing an
       acceptance id the old plan pursued (or the contract itself
       declares). Dropping pursuit of an approved criterion changes WHAT
       must result, not HOW; adding references is tactical, dropping
       never is.
-    - ``material_migration`` — any new step's impact names ``migration``
-      or ``schema`` (case-insensitive): the compatibility invariants the
-      contract protects live exactly there.
-    - ``tactical_internal`` — everything else: reordering, rewording,
-      adding steps inside the authorized write scope.
+    - ``material_migration`` — a step the revision ADDS OR CHANGES
+      declares a compatibility-breaking impact (``migration``,
+      ``schema``, ``api``, ``public-api``, ``event``, ``effect``).
+      Carried-over steps are not re-litigated here.
+    - ``decision_required`` — the materiality is UNKNOWN: a new or
+      changed step declares no impact at all, or an impact class
+      outside the known tactical vocabulary; or the delta performs a
+      transformation kind the contract's tactical policy does not
+      explicitly pre-approve. The classifier never guesses
+      ``tactical_internal`` — uncertain goes to the human, fail closed.
+    - ``tactical_internal`` — every guard passed AND every
+      transformation kind in the delta is explicitly allowed by an
+      ENABLED ``tactical_revision_policy``.
     """
     authorized_writes = {scope.repository_id for scope in contract.write_scope}
-    authorized_writes.update(
-        step.write_repository_id for step in old.steps if step.write_repository_id
-    )
     for step in new.steps:
         if step.write_repository_id and step.write_repository_id not in authorized_writes:
             return "material_scope"
@@ -92,9 +224,18 @@ def classify_revision(old: PlanRevision, new: PlanRevision, contract: WorkContra
     if required_acceptance - referenced_acceptance:
         return "material_contract"
 
-    for step in new.steps:
-        if any(tag.strip().lower() in ("migration", "schema") for tag in step.impact):
+    delta_steps = _delta_steps(old, new)
+    for step in delta_steps:
+        if any(tag.strip().lower() in _MATERIAL_IMPACTS for tag in step.impact):
             return "material_migration"
+
+    for step in delta_steps:
+        declared = {tag.strip().lower() for tag in step.impact if tag.strip()}
+        if not declared or not declared <= _KNOWN_TACTICAL_IMPACTS:
+            return "decision_required"
+
+    if not parse_tactical_policy(contract).permits(transformation_kinds(old, new)):
+        return "decision_required"
 
     return "tactical_internal"
 
@@ -126,19 +267,41 @@ def apply_tactical(
 ) -> tuple[PlanRevision, dict]:
     """Land a tactical revision inside the pre-approved bounds.
 
-    Tactical edits carry no approval notification — the contract's
-    ``tactical_revision_policy`` pre-approved them — but that speed is
-    only safe because the material classes can NEVER pass through here:
-    anything :func:`classify_revision` calls material raises, and the
-    caller must raise a ChangeProposal for the human gate instead.
+    Tactical edits carry no approval notification — but that speed is
+    only safe because TWO independent gates must agree, and
+    ``apply_tactical`` checks both itself (NXT-20: it reads the
+    contract's ``tactical_revision_policy`` directly, never the
+    caller's say-so):
+
+    - the classification must be ``tactical_internal`` — every material
+      class AND every unknown materiality raises here; neither can ever
+      slip through as a quiet tactical edit. The caller must raise a
+      ChangeProposal / decision request for the human gate instead.
+    - the policy must be ENABLED and cover every transformation kind
+      the delta performs. A disabled, unset, or unrecognized policy
+      permits no automatic revision at all.
 
     The applied revision carries its lineage explicitly: the next
     revision number, its parent, and the preserved-step linkage — every
     old step that survives into the new plan, merged with whatever the
-    proposal already declared, so surviving WIP keeps its anchor.
+    proposal already declared, so surviving WIP keeps its anchor. The
+    event attaches the human-readable diff and the exact transformation
+    kinds + policy under which it landed, so the audit trail shows not
+    just WHAT changed but under WHICH pre-approval.
     """
-    if classify_revision(old, new, contract) != "tactical_internal":
-        raise ValueError("material change requires approval")
+    classification = classify_revision(old, new, contract)
+    if classification != "tactical_internal":
+        raise ValueError(
+            f"{classification} cannot land as a tactical edit — "
+            "it requires an approved decision (raise a ChangeProposal)"
+        )
+    policy = parse_tactical_policy(contract)
+    kinds = transformation_kinds(old, new)
+    if not policy.permits(kinds):  # defense in depth: classify gates this too
+        raise ValueError(
+            f"tactical policy {policy.status!r} does not allow {sorted(kinds)} — "
+            "a decision is required for these transformations"
+        )
 
     new_step_ids = {step.step_id for step in new.steps}
     surviving = [step.step_id for step in old.steps if step.step_id in new_step_ids]
@@ -156,6 +319,8 @@ def apply_tactical(
         "revision": applied.revision,
         "parent": old.revision,
         "change_log": change_log(old, new),
+        "transformation_kinds": sorted(kinds),
+        "tactical_policy": policy.raw,
     }
     return applied, event
 
@@ -172,6 +337,15 @@ class RevisionDecision:
     every transition returns a new record, so the journal keeps both
     sides of every decision.
 
+    NXT-19 widens the CAS slot from "an approval" to "an approval OF
+    EXACTLY THIS proposed revision of exactly this work": the decision
+    carries the proposal's identity (``proposed_revision_id``), its
+    canonical content digest (``proposed_digest`` — a changed proposal
+    body under the same revision number is a DIFFERENT proposal), the
+    contract digest it was judged under, and the parent revision it
+    expects to succeed. :func:`activate_revision` guards every one of
+    these bindings before consuming anything.
+
     ``reject`` takes a ``reason`` but does not store it: the verdict is
     decision state, the reason is audit-trail material — it belongs in
     the durable command log beside the rejection, not in the CAS slot
@@ -182,6 +356,7 @@ class RevisionDecision:
     work_id: str
     parent_revision: int
     proposed_revision_id: str
+    proposed_digest: str
     work_contract_digest: str
     authorization_epoch: int
     decided: bool = False
@@ -230,26 +405,230 @@ class RevisionDecision:
         return replace(self, decided=True, decision="expired")
 
 
-def activate_revision(decision: RevisionDecision, proposed: PlanRevision) -> PlanRevision:
-    """Bind an APPROVED decision to its proposed revision.
+def proposed_revision_identity(proposed: PlanRevision) -> str:
+    """The stable identity string a decision names: ``plan_id#revision``.
 
-    The only door from approval to active plan: rejected, expired, and
-    still-pending decisions all leave the proposal unactivated, so the
-    parent revision (and its last usable checkpoint) remains the honest
-    state.
+    The revision NUMBER alone is not an identity — two different works
+    both have a "revision 2" — so the identity a
+    :class:`RevisionDecision` binds to is the plan-qualified form.
+    """
+    return f"{proposed.plan_id}#{proposed.revision}"
 
-    Activation also FENCES the old publication rights: the revision the
-    decision approved supersedes its parent, and any publication
-    authorization minted against the parent dies with it — the caller
-    bumps its publication epoch as part of applying the activation.
+
+class ActivationRefused(ValueError):
+    """The typed refusal activation returns instead of consuming anything.
+
+    ``code`` is a stable machine-readable reason (the observability
+    ``revision.activation_rejected`` dimension); ``detail`` explains the
+    mismatch for the audit trail. Subclassing ``ValueError`` keeps the
+    raise-site ergonomics, but callers that need to distinguish "the
+    world moved, re-request the decision" from "this decision never
+    bound to this proposal" branch on ``code``, never on message text.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"activation refused [{code}] {detail}")
+        self.code = code
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class ActivePlanState:
+    """What the caller asserts the world is RIGHT NOW for one work.
+
+    The activation guards compare the decision's bindings against this
+    state — it is the compare-and-swap "expected" side. The durable
+    store behind :class:`ActivationSession` is the authoritative one;
+    this record is the snapshot the guard runs against, and the session
+    re-checks the same expectations inside its conditional commit.
+    """
+
+    work_id: str
+    plan_id: str
+    active_revision: int
+    work_contract_digest: str
+    authorization_epoch: int
+    publication_epoch: int = 0
+
+
+@dataclass(frozen=True)
+class ActivationRecord:
+    """The ONE conditional transaction activation asks the store to run.
+
+    A single all-or-nothing commit that consumes the decision, switches
+    the active revision, and bumps the publication fence — there is no
+    intermediate state in which any one of the three happened alone, so
+    a crash between consumption and the switch is unrepresentable. The
+    record is also the durable audit entry: replaying the same decision
+    finds it via :meth:`ActivationSession.prior_activation` and gets the
+    prior outcome back with no new effects.
+    """
+
+    decision_id: str
+    work_id: str
+    plan_id: str
+    parent_revision: int
+    activated_revision: int
+    activated_plan_digest: str
+    work_contract_digest: str
+    authorization_epoch: int
+    publication_epoch: int
+
+
+class ActivationSession(Protocol):
+    """The durable-store seam activation runs its one transaction through.
+
+    ``prior_activation`` answers "was this decision already consumed, and
+    what did it activate". ``commit_activation`` applies the record
+    CONDITIONALLY — the store must refuse (not partially apply) if the
+    world no longer matches the guards' expectations, the same
+    compare-and-swap the in-memory checks perform; what "condition"
+    means concretely (SQL ``WHERE active_revision = ...`` and friends)
+    is the store's to implement, the domain's to demand.
+    """
+
+    def prior_activation(self, decision_id: str) -> ActivationRecord | None: ...
+
+    def commit_activation(self, record: ActivationRecord) -> None: ...
+
+
+def activate_revision(
+    decision: RevisionDecision,
+    proposed: PlanRevision,
+    current: ActivePlanState,
+    session: ActivationSession,
+) -> PlanRevision:
+    """Bind an APPROVED decision to its proposed revision — or refuse, typed.
+
+    NXT-19: an approval authorizes exactly ONE activation, and the guard
+    checks the FULL binding tuple before anything changes:
+
+    - the decision is approved (never pending, rejected, or expired);
+    - ``decision.work_id`` == the proposal's work == the CURRENT work —
+      a decision for work A can never activate work B's proposal;
+    - ``decision.proposed_revision_id`` == the proposal's identity and
+      ``decision.proposed_digest`` == the proposal's canonical digest —
+      a changed proposal body under the same revision number refuses;
+    - ``decision.work_contract_digest`` == the proposal's contract
+      digest == the CURRENT contract digest;
+    - ``decision.parent_revision`` == the currently active revision, and
+      the proposal's revision follows it — an approval whose parent has
+      been superseded fails rather than overwriting newer work;
+    - ``decision.authorization_epoch`` == the current epoch.
+
+    Any mismatch raises :class:`ActivationRefused` BEFORE the session is
+    touched: the decision is NOT consumed, the active revision stays,
+    and the caller re-requests the decision against the world as it now
+    is. When every binding holds, consumption, the active-revision
+    switch, and the publication-epoch fence land as ONE conditional
+    transaction (:class:`ActivationRecord` through
+    ``session.commit_activation``) — a crash between them is impossible
+    by construction, and the returned immutable revision is the identity
+    every downstream dispatch must use. Replaying an already-consumed
+    decision returns its prior outcome with no new effects; replaying
+    DIFFERENT content under a consumed decision refuses.
     """
     if not decision.decided or decision.decision != "approved":
         state = decision.decision or "undecided"
-        raise ValueError(
-            f"decision {decision.decision_id} is {state}; only approved decisions activate"
+        raise ActivationRefused(
+            "not_approved",
+            f"decision {decision.decision_id} is {state}; only approved decisions activate",
+        )
+
+    prior = session.prior_activation(decision.decision_id)
+    if prior is not None:
+        if (
+            prior.activated_plan_digest == plan_digest(proposed)
+            and prior.activated_revision == proposed.revision
+            and prior.work_id == proposed.work_id
+            and prior.plan_id == proposed.plan_id
+        ):
+            return proposed.model_copy(update={"parent_revision": prior.parent_revision})
+        raise ActivationRefused(
+            "decision_already_consumed",
+            f"decision {decision.decision_id} already activated revision "
+            f"{prior.activated_revision} of {prior.plan_id}; it cannot activate different content",
+        )
+
+    proposed_digest = plan_digest(proposed)
+    if decision.work_id != proposed.work_id:
+        raise ActivationRefused(
+            "work_mismatch",
+            f"decision {decision.decision_id} is for work {decision.work_id!r}, "
+            f"the proposal is for work {proposed.work_id!r}",
+        )
+    if proposed.work_id != current.work_id:
+        raise ActivationRefused(
+            "current_work_mismatch",
+            f"the proposal is for work {proposed.work_id!r}, "
+            f"but the current work is {current.work_id!r}",
+        )
+    if proposed.plan_id != current.plan_id:
+        raise ActivationRefused(
+            "plan_mismatch",
+            f"the proposal is for plan {proposed.plan_id!r}, "
+            f"but the active plan is {current.plan_id!r}",
+        )
+    if decision.proposed_revision_id != proposed_revision_identity(proposed):
+        raise ActivationRefused(
+            "proposal_identity_mismatch",
+            f"decision {decision.decision_id} names {decision.proposed_revision_id!r}, "
+            f"the proposal is {proposed_revision_identity(proposed)!r}",
+        )
+    if decision.proposed_digest != proposed_digest:
+        raise ActivationRefused(
+            "proposed_digest_mismatch",
+            f"decision {decision.decision_id} approved content {decision.proposed_digest}, "
+            f"the proposal's canonical digest is {proposed_digest} — a changed proposal "
+            "body is a different proposal and needs its own decision",
+        )
+    if decision.work_contract_digest != proposed.work_contract_digest:
+        raise ActivationRefused(
+            "contract_digest_mismatch",
+            f"decision {decision.decision_id} was judged under contract "
+            f"{decision.work_contract_digest}, the proposal declares "
+            f"{proposed.work_contract_digest}",
+        )
+    if decision.work_contract_digest != current.work_contract_digest:
+        raise ActivationRefused(
+            "current_contract_mismatch",
+            f"decision {decision.decision_id} was judged under contract "
+            f"{decision.work_contract_digest}, the current contract is "
+            f"{current.work_contract_digest} — the approval predates the contract change",
+        )
+    if decision.parent_revision != current.active_revision:
+        raise ActivationRefused(
+            "parent_mismatch",
+            f"decision {decision.decision_id} expects parent revision "
+            f"{decision.parent_revision}, but revision {current.active_revision} is "
+            "active — the approval predates newer work and must be re-requested",
         )
     if proposed.revision <= decision.parent_revision:
-        raise ValueError("proposed revision must follow the decision's parent revision")
+        raise ActivationRefused(
+            "revision_not_forward",
+            "the proposed revision must follow the decision's parent revision",
+        )
+    if decision.authorization_epoch != current.authorization_epoch:
+        raise ActivationRefused(
+            "stale_authorization_epoch",
+            f"decision epoch {decision.authorization_epoch} != current epoch "
+            f"{current.authorization_epoch}; the decision must be re-requested "
+            "against the current epoch",
+        )
+
+    session.commit_activation(
+        ActivationRecord(
+            decision_id=decision.decision_id,
+            work_id=proposed.work_id,
+            plan_id=proposed.plan_id,
+            parent_revision=decision.parent_revision,
+            activated_revision=proposed.revision,
+            activated_plan_digest=proposed_digest,
+            work_contract_digest=decision.work_contract_digest,
+            authorization_epoch=current.authorization_epoch,
+            publication_epoch=current.publication_epoch + 1,
+        )
+    )
     return proposed.model_copy(update={"parent_revision": decision.parent_revision})
 
 

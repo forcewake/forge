@@ -1,20 +1,32 @@
-"""The revision lifecycle rules — PLN-04..PLN-08 (review 05868e9).
+"""The revision lifecycle rules — PLN-04..PLN-08, NXT-19 + NXT-20 (review edf938c).
 
 ``test_adaptive_contracts.py`` proves the SHAPES parse; these tests prove
-the RULES: tactical revisions land inside the pre-approved bounds and
-material ones never slip through, approvals compare-and-swap on their
-epoch, questions block instead of defaulting, evidence is superseded
-precisely rather than deleted, and decision records stay secret-free.
+the RULES: tactical revisions land only inside the transformations the
+contract's policy explicitly pre-approved (authority from the contract
+alone, never from the old plan's grants, unknown materiality routed to a
+decision), approvals compare-and-swap on their epoch AND bind to the
+exact proposed revision and current work — activation is one conditional
+transaction or a typed refusal that consumes nothing. Questions block
+instead of defaulting, evidence is superseded precisely rather than
+deleted, and decision records stay secret-free.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
 
 import pytest
 
 from forge.adaptive.models import PlanRevision, WorkContract
 from forge.adaptive.revisions import (
+    ActivationRecord,
+    ActivationRefused,
+    ActivationSession,
+    ActivePlanState,
     Question,
     RevisionDecision,
+    TacticalPolicy,
     activate_revision,
     apply_tactical,
     change_log,
@@ -22,14 +34,21 @@ from forge.adaptive.revisions import (
     decision_record,
     fresh_session_brief,
     invalidation_set,
+    parse_tactical_policy,
     plan_digest,
+    proposed_revision_identity,
     route_question,
     stale_callback_guard,
+    transformation_kinds,
 )
 
 D_CONTRACT = "1" * 64
 D_SNAPSHOT = "2" * 64
 D_STALE = "9" * 64
+#: The maximally explicit policy: every automatic transformation granted,
+#: so the classic tactical flows stay testable. Narrower policies are
+#: what the NXT-20 fail-closed tests exercise.
+POLICY_ALL = "reorder,edit_step,reword,add_step,remove_step"
 
 
 def _contract(**overrides) -> WorkContract:
@@ -47,6 +66,7 @@ def _contract(**overrides) -> WorkContract:
         "acceptance": [
             {"id": "AC-1", "description": "Expiry handled idempotently.", "required": True}
         ],
+        "tactical_revision_policy": POLICY_ALL,
     }
     return WorkContract.model_validate(base | overrides)
 
@@ -91,16 +111,75 @@ def _base_steps() -> list[dict]:
     ]
 
 
-def _decision(**overrides) -> RevisionDecision:
-    base = {
+def _decision(proposed: PlanRevision | None = None, **overrides: Any) -> RevisionDecision:
+    base: dict[str, Any] = {
         "decision_id": "rd-1",
-        "work_id": "wp-demo-1",
+        "work_id": proposed.work_id if proposed is not None else "wp-demo-1",
         "parent_revision": 1,
-        "proposed_revision_id": "plan-demo-1#2",
+        "proposed_revision_id": (
+            proposed_revision_identity(proposed) if proposed is not None else "plan-demo-1#2"
+        ),
+        "proposed_digest": plan_digest(proposed) if proposed is not None else "8" * 64,
         "work_contract_digest": D_CONTRACT,
         "authorization_epoch": 3,
     }
     return RevisionDecision(**(base | overrides))
+
+
+def _approved(proposed: PlanRevision, **overrides: Any) -> RevisionDecision:
+    """An approved decision correctly bound to ``proposed``'s exact content."""
+    pending = _decision(proposed, **overrides)
+    return pending.approve("approver", pending.authorization_epoch)
+
+
+def _current(**overrides: Any) -> ActivePlanState:
+    base: dict[str, Any] = {
+        "work_id": "wp-demo-1",
+        "plan_id": "plan-demo-1",
+        "active_revision": 1,
+        "work_contract_digest": D_CONTRACT,
+        "authorization_epoch": 3,
+        "publication_epoch": 7,
+    }
+    return ActivePlanState(**(base | overrides))
+
+
+class FakeActivationSession:
+    """Durable-store double: ONE conditional transaction per activation.
+
+    ``calls`` is the transaction log the single-commit shape is asserted
+    against; ``commit_activation`` is conditional exactly the way the
+    domain demands — if the world no longer matches the guards'
+    expectations it applies NOTHING (consumption, switch and fence move
+    together or not at all).
+    """
+
+    def __init__(self, current: ActivePlanState) -> None:
+        self._state = current
+        self.calls: list[tuple[str, ActivationRecord]] = []
+        self.consumed: dict[str, ActivationRecord] = {}
+
+    def snapshot(self) -> ActivePlanState:
+        return self._state
+
+    def prior_activation(self, decision_id: str) -> ActivationRecord | None:
+        return self.consumed.get(decision_id)
+
+    def commit_activation(self, record: ActivationRecord) -> None:
+        self.calls.append(("commit_activation", record))
+        state = self._state
+        if (
+            record.parent_revision != state.active_revision
+            or record.authorization_epoch != state.authorization_epoch
+            or record.work_contract_digest != state.work_contract_digest
+        ):
+            raise RuntimeError("conditional transaction lost the race — nothing applied")
+        self.consumed[record.decision_id] = record
+        self._state = replace(
+            self._state,
+            active_revision=record.activated_revision,
+            publication_epoch=record.publication_epoch,
+        )
 
 
 def _question(**overrides) -> Question:
@@ -110,6 +189,63 @@ def _question(**overrides) -> Question:
         "reason": "Migration authority for the expiry dedup key is unclear.",
     }
     return Question(**(base | overrides))
+
+
+class TestTacticalPolicy:
+    def test_enabled_policy_parses_to_the_explicit_allowlist(self):
+        policy: TacticalPolicy = parse_tactical_policy(
+            _contract(tactical_revision_policy="reorder,add_step")
+        )
+        assert policy.status == "enabled"
+        assert policy.permits({"reorder"}) is True
+        assert policy.permits({"reorder", "add_step"}) is True
+        assert policy.permits({"remove_step"}) is False  # containment, not membership
+
+    @pytest.mark.parametrize(
+        ("raw", "status"),
+        [
+            ("disabled", "disabled"),
+            ("", "unset"),  # silence is not consent
+            ("reorder,sideways", "unknown"),  # a typo narrows, never widens
+        ],
+    )
+    def test_non_enabled_statuses_permit_nothing(self, raw, status):
+        policy = parse_tactical_policy(_contract(tactical_revision_policy=raw))
+        assert policy.status == status
+        assert policy.permits(frozenset()) is False
+        assert policy.permits({"reorder"}) is False
+
+
+class TestTransformationKinds:
+    def test_every_delta_shape_gets_its_named_kind(self):
+        old = _revision(
+            [
+                *_base_steps(),
+                _step("S9", "Write the operator runbook note.", acceptance_refs=[]),
+            ]
+        )
+        new = _revision(
+            [
+                # reordered survivors + a reworded S1 + a genuinely new S3,
+                # while the old runbook step disappears
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+                _step("S1", "Inspect idempotency behavior and record digests."),
+                _step("S3", "Add the operator runbook note.", acceptance_refs=[]),
+            ],
+            revision=2,
+            summary="Updated summary.",
+        )
+        kinds = transformation_kinds(old, new)
+        assert kinds == {"reorder", "edit_step", "add_step", "remove_step", "reword"}
+
+    def test_an_identical_plan_has_no_transformation_kinds(self):
+        old = _revision(_base_steps())
+        assert transformation_kinds(old, _revision(_base_steps())) == frozenset()
 
 
 class TestClassifyRevision:
@@ -138,6 +274,49 @@ class TestClassifyRevision:
         new = _revision(
             [
                 *_base_steps(),
+                _step(
+                    "S3",
+                    "Mirror the fix into Billing.",
+                    write_repository_id="billing",
+                    depends_on=["S2"],
+                ),
+            ],
+            revision=2,
+        )
+        assert classify_revision(old, new, contract) == "material_scope"
+
+    def test_old_plan_write_repo_grants_nothing(self):
+        """The NXT-20 characterization: the old plan is never authority.
+
+        The OLD plan writes ``billing`` — authorized once by a
+        historically broader contract — while the CURRENT contract's
+        write scope names only ``orders``. Under the pre-fix classifier
+        the old plan's write repositories flowed into the authorized set
+        and this revision passed as tactical; it must be material.
+        """
+        contract = _contract()
+        old = _revision(
+            [
+                *_base_steps(),
+                _step(
+                    "S3",
+                    "Mirror the fix into Billing.",
+                    write_repository_id="billing",
+                    depends_on=["S2"],
+                ),
+            ]
+        )
+        new = _revision(
+            [
+                # S3 carried over UNCHANGED — the old plan's grant is the
+                # only thing that could authorize it, and it must not
+                _step("S1", "Inspect existing idempotency behavior."),
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
                 _step(
                     "S3",
                     "Mirror the fix into Billing.",
@@ -180,6 +359,140 @@ class TestClassifyRevision:
         )
         assert classify_revision(old, new, contract) == "material_migration"
 
+    @pytest.mark.parametrize("impact", [["api"], ["public-api"], ["event"], ["effect"]])
+    def test_declared_api_or_event_impact_is_material_migration(self, impact):
+        """New API/schema/event/effect classes are material BY DECLARATION."""
+        contract = _contract()
+        old = _revision(_base_steps())
+        new = _revision(
+            [
+                *_base_steps(),
+                _step("S3", "Expose the expiry hook.", impact=impact, depends_on=["S2"]),
+            ],
+            revision=2,
+        )
+        assert classify_revision(old, new, contract) == "material_migration"
+
+    def test_carried_over_schema_step_does_not_poison_tactical_edits(self):
+        """A step's material class was paid for when it was approved.
+
+        Carrying an approved schema step forward byte-for-byte must not
+        make every later tactical revision material — the DELTA is what
+        is classified (a genuine refactor succeeds without unnecessary
+        reapproval).
+        """
+        contract = _contract()
+        schema_step = _step("S5", "Add the dedup key table.", impact=["schema"], depends_on=["S2"])
+        old = _revision([*_base_steps(), schema_step])
+        new = _revision(
+            [
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+                _step("S1", "Inspect existing idempotency behavior."),
+                schema_step,  # unchanged, still last
+            ],
+            revision=2,
+        )
+        assert classify_revision(old, new, contract) == "tactical_internal"
+
+    @pytest.mark.parametrize(
+        "impact",
+        [[], ["internal", "quantum-entangle"], ["public-contract"]],
+    )
+    def test_unknown_or_missing_impact_is_decision_required_never_tactical(self, impact):
+        """Fail closed: omitted and unrecognized impact classes go to a human.
+
+        A change must never pass solely because an impact tag was
+        omitted — and a class outside the known tactical vocabulary is
+        unknown materiality, not a quiet ``tactical_internal``.
+        """
+        contract = _contract()
+        old = _revision(_base_steps())
+        new = _revision(
+            [
+                *_base_steps(),
+                _step("S3", "Do the new thing.", impact=impact, depends_on=["S2"]),
+            ],
+            revision=2,
+        )
+        assert classify_revision(old, new, contract) == "decision_required"
+
+    @pytest.mark.parametrize(
+        ("policy", "expected"),
+        [
+            ("disabled", "decision_required"),
+            ("", "decision_required"),
+            ("reorder,sideways", "decision_required"),
+        ],
+    )
+    def test_disabled_unset_or_unknown_policy_permits_no_automatic_revision(self, policy, expected):
+        contract = _contract(tactical_revision_policy=policy)
+        old = _revision(_base_steps())
+        new = _revision(  # a pure reorder — the most benign delta there is
+            [
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+                _step("S1", "Inspect existing idempotency behavior."),
+            ],
+            revision=2,
+        )
+        assert classify_revision(old, new, contract) == expected
+
+    def test_transformation_outside_the_policy_is_decision_required(self):
+        contract = _contract(tactical_revision_policy="reorder")
+        old = _revision(
+            [
+                *_base_steps(),
+                _step("S9", "Write the operator runbook note.", acceptance_refs=[]),
+            ]
+        )
+        added = _revision(
+            [
+                *_base_steps(),
+                _step("S9", "Write the operator runbook note.", acceptance_refs=[]),
+                _step("S3", "Add the operator checklist.", acceptance_refs=[]),
+            ],
+            revision=2,
+        )
+        removed = _revision(_base_steps(), revision=2)  # S9 dropped
+        assert classify_revision(old, added, contract) == "decision_required"  # add_step
+        assert classify_revision(old, removed, contract) == "decision_required"  # remove_step
+
+    def test_same_acceptance_ids_with_rewritten_write_step_need_policy(self):
+        """Preserved acceptance IDs do not prove semantic non-materiality.
+
+        The step keeps referencing AC-1, but its objective — what code
+        the plan changes — is rewritten. That is an ``edit_step``
+        transformation: it lands automatically ONLY when the contract
+        explicitly pre-approved editing steps, never merely because the
+        acceptance IDs survived.
+        """
+        old = _revision(_base_steps())
+        rewritten = _revision(
+            [
+                _step("S1", "Inspect existing idempotency behavior."),
+                _step(
+                    "S2",
+                    "Rewrite the Orders service onto the new event bus entirely.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+            ],
+            revision=2,
+        )
+        narrow = _contract(tactical_revision_policy="reorder,add_step")
+        assert classify_revision(old, rewritten, narrow) == "decision_required"
+        granting = _contract(tactical_revision_policy="reorder,edit_step")
+        assert classify_revision(old, rewritten, granting) == "tactical_internal"
+
 
 class TestApplyTactical:
     def test_tactical_applied_bumps_revision_and_emits_event(self):
@@ -211,6 +524,29 @@ class TestApplyTactical:
             "-> Inspect idempotency behavior and record digests.",
             "added S3: Write the operator runbook note.",
         ]
+        # the event names the exact transformations and policy it landed under
+        assert event["transformation_kinds"] == ["add_step", "edit_step"]
+        assert event["tactical_policy"] == POLICY_ALL
+
+    def test_policy_allowed_transform_lands_under_a_narrow_policy(self):
+        contract = _contract(tactical_revision_policy="reorder")
+        old = _revision(_base_steps())
+        reordered = _revision(  # same steps, swapped order — a pure reorder
+            [
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+                _step("S1", "Inspect existing idempotency behavior."),
+            ],
+            revision=2,
+        )
+        applied, event = apply_tactical(old, reordered, contract)
+        assert (applied.revision, applied.parent_revision) == (2, 1)
+        assert event["transformation_kinds"] == ["reorder"]
+        assert event["tactical_policy"] == "reorder"
 
     def test_material_refuses_without_an_approval_path(self):
         contract = _contract()
@@ -227,8 +563,41 @@ class TestApplyTactical:
             ],
             revision=2,
         )
-        with pytest.raises(ValueError, match="material change requires approval"):
+        with pytest.raises(ValueError, match="cannot land as a tactical edit"):
             apply_tactical(old, material, contract)
+
+    def test_decision_required_refuses_even_though_not_material(self):
+        contract = _contract()
+        old = _revision(_base_steps())
+        unknown = _revision(
+            [*_base_steps(), _step("S3", "Do the new thing.", impact=[])],
+            revision=2,
+        )
+        with pytest.raises(ValueError, match="decision_required"):
+            apply_tactical(old, unknown, contract)
+
+    def test_disabled_policy_permits_no_automatic_revision(self):
+        """apply_tactical reads the policy itself (NXT-20), not the caller."""
+        contract = _contract(tactical_revision_policy="disabled")
+        old = _revision(_base_steps())
+        reordered = _revision(
+            [
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+                _step("S1", "Inspect existing idempotency behavior."),
+            ],
+            revision=2,
+        )
+        # classify already routes a disabled policy to decision_required,
+        # and apply_tactical re-derives the same verdict from the policy
+        # itself — neither trusts the caller's classification
+        with pytest.raises(ValueError, match="decision_required"):
+            apply_tactical(old, reordered, contract)
+        assert parse_tactical_policy(contract).permits({"reorder"}) is False
 
 
 class TestChangeLog:
@@ -273,31 +642,188 @@ class TestRevisionDecision:
 
 
 class TestActivateRevision:
-    def test_approved_decision_activates_the_proposed_revision(self):
-        decision = _decision().approve("approver", 3)
+    """NXT-19: activation binds the decision to the exact proposal and work.
+
+    The review's characterization: pre-fix, ``activate_revision`` checked
+    only "approved + newer number" — a decision for work-A/plan-A could
+    activate work-B/plan-B. Every test below drives a mismatch through
+    the full guard and asserts the typed refusal leaves the session's
+    call log EMPTY (nothing consumed, nothing switched, no fence bump).
+    """
+
+    def test_approved_decision_activates_in_one_conditional_transaction(self):
         proposed = _revision(_base_steps(), revision=2)
-        activated = activate_revision(decision, proposed)
-        assert activated.parent_revision == decision.parent_revision
-        assert activated.revision == 2
+        decision = _approved(proposed)
+        current = _current()
+        session: ActivationSession = FakeActivationSession(current)
 
-    def test_rejected_decision_leaves_the_proposal_unactivated(self):
-        rejected = _decision().reject("approver", 3, "scope widened without evidence")
+        activated = activate_revision(decision, proposed, current, session)
+
+        assert (activated.revision, activated.parent_revision) == (2, 1)
+        # the single conditional transaction: ONE commit carrying
+        # consumption + the active-revision switch + the fence bump —
+        # a crash between them is unrepresentable
+        assert [name for name, _ in session.calls] == ["commit_activation"]
+        record = session.calls[0][1]
+        assert record.decision_id == decision.decision_id  # the decision is consumed...
+        assert record.activated_revision == 2  # ...the active revision switches...
+        assert record.publication_epoch == current.publication_epoch + 1  # ...fence bumps
+        assert record.activated_plan_digest == plan_digest(proposed)
+        assert set(session.consumed) == {decision.decision_id}
+        after = session.snapshot()
+        assert (after.active_revision, after.publication_epoch) == (
+            2,
+            current.publication_epoch + 1,
+        )
+
+    def test_replay_returns_the_prior_outcome_without_new_effects(self):
         proposed = _revision(_base_steps(), revision=2)
-        with pytest.raises(ValueError, match="rejected"):
-            activate_revision(rejected, proposed)
-        # the parent revision stays the honest, checkpoint-usable state
-        assert proposed.parent_revision is None
+        decision = _approved(proposed)
+        session = FakeActivationSession(_current())
+        first = activate_revision(decision, proposed, _current(), session)
 
-    def test_expired_and_undecided_never_activate(self):
-        with pytest.raises(ValueError, match="expired"):
-            activate_revision(_decision().expire(), _revision(_base_steps(), revision=2))
-        with pytest.raises(ValueError, match="undecided"):
-            activate_revision(_decision(), _revision(_base_steps(), revision=2))
+        # the same approval arrives again — against the world as it now is
+        replayed = activate_revision(decision, proposed, session.snapshot(), session)
 
-    def test_proposal_must_follow_the_decisions_parent(self):
-        decision = _decision().approve("approver", 3)
-        with pytest.raises(ValueError, match="must follow"):
-            activate_revision(decision, _revision(_base_steps(), revision=1))
+        assert replayed == first
+        assert len(session.calls) == 1  # no second transaction
+
+    def test_consumed_decision_cannot_activate_different_content(self):
+        proposed = _revision(_base_steps(), revision=2)
+        decision = _approved(proposed)
+        session = FakeActivationSession(_current())
+        activate_revision(decision, proposed, _current(), session)
+
+        different = _revision(
+            [*_base_steps(), _step("S3", "Sneak an extra step in.", acceptance_refs=[])],
+            revision=2,
+        )
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, different, session.snapshot(), session)
+        assert excinfo.value.code == "decision_already_consumed"
+        assert len(session.calls) == 1  # the refusal consumed nothing new
+
+    def test_decision_for_another_work_cannot_activate(self):
+        proposed = _revision(_base_steps(), revision=2)  # work wp-demo-1
+        foreign_decision = _approved(proposed, work_id="wp-a")  # minted for work A
+        session = FakeActivationSession(_current())
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(foreign_decision, proposed, _current(), session)
+        assert excinfo.value.code == "work_mismatch"
+        assert session.calls == []
+        assert session.consumed == {}
+
+    def test_work_a_decision_cannot_activate_in_work_bs_world(self):
+        """The review's cross-work regression: A/plan-A vs B/plan-B refused."""
+        proposed = _revision(_base_steps(), revision=2, work_id="wp-a", plan_id="plan-a")
+        decision = _approved(proposed)  # decision for work A / plan A
+        current = _current(work_id="wp-b", plan_id="plan-b")  # the world is work B
+        session = FakeActivationSession(current)
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, proposed, current, session)
+        assert excinfo.value.code == "current_work_mismatch"
+        assert session.calls == []  # nothing consumed
+        assert session.snapshot().active_revision == 1  # nothing switched
+
+    def test_cross_plan_and_identity_mismatches_refuse(self):
+        proposed = _revision(_base_steps(), revision=2)
+        session = FakeActivationSession(_current())
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(
+                _approved(proposed), proposed, _current(plan_id="plan-other"), session
+            )
+        assert excinfo.value.code == "plan_mismatch"
+
+        wrong_identity = _approved(proposed, proposed_revision_id="plan-demo-1#9")
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(wrong_identity, proposed, _current(), session)
+        assert excinfo.value.code == "proposal_identity_mismatch"
+        assert session.calls == []  # still nothing consumed across both attempts
+
+    def test_changed_proposal_body_with_same_revision_number_refuses(self):
+        proposed = _revision(_base_steps(), revision=2)
+        decision = _approved(proposed)
+        mutated = _revision(
+            [
+                _step("S1", "Quietly rewritten objective."),
+                _step(
+                    "S2",
+                    "Implement the authorized Orders change.",
+                    write_repository_id="orders",
+                    depends_on=["S1"],
+                ),
+            ],
+            revision=2,  # same revision number, different content
+        )
+        session = FakeActivationSession(_current())
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, mutated, _current(), session)
+        assert excinfo.value.code == "proposed_digest_mismatch"
+        assert session.calls == []
+        assert session.consumed == {}
+
+    def test_contract_digest_mismatches_refuse(self):
+        proposed = _revision(_base_steps(), revision=2)
+        session = FakeActivationSession(_current())
+        judged_elsewhere = _approved(proposed, work_contract_digest=D_STALE)
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(judged_elsewhere, proposed, _current(), session)
+        assert excinfo.value.code == "contract_digest_mismatch"
+
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(
+                _approved(proposed), proposed, _current(work_contract_digest=D_STALE), session
+            )
+        assert excinfo.value.code == "current_contract_mismatch"
+        assert session.calls == []
+
+    def test_approval_after_parent_advancement_fails_without_overwriting(self):
+        proposed = _revision(_base_steps(), revision=2)
+        decision = _approved(proposed)  # expects parent revision 1...
+        moved_on = _current(active_revision=3)  # ...but revision 3 is active
+        session = FakeActivationSession(moved_on)
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, proposed, moved_on, session)
+        assert excinfo.value.code == "parent_mismatch"
+        assert session.calls == []
+        assert session.snapshot().active_revision == 3  # newer work intact
+
+    def test_non_following_revision_refuses(self):
+        same_number = _revision(_base_steps(), revision=1)
+        decision = _approved(same_number, parent_revision=1)
+        session = FakeActivationSession(_current())
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, same_number, _current(), session)
+        assert excinfo.value.code == "revision_not_forward"
+        assert session.calls == []
+
+    def test_stale_authorization_epoch_refuses(self):
+        proposed = _revision(_base_steps(), revision=2)
+        decision = _approved(proposed)  # granted in epoch 3
+        newer_epoch = _current(authorization_epoch=4)  # the world moved
+        session = FakeActivationSession(newer_epoch)
+        with pytest.raises(ActivationRefused) as excinfo:
+            activate_revision(decision, proposed, newer_epoch, session)
+        assert excinfo.value.code == "stale_authorization_epoch"
+        assert session.calls == []
+        assert session.consumed == {}
+
+    def test_rejected_expired_and_undecided_never_activate(self):
+        proposed = _revision(_base_steps(), revision=2)
+        session = FakeActivationSession(_current())
+        rejected = _decision(proposed).reject("approver", 3, "scope widened")
+        with pytest.raises(ActivationRefused, match="rejected") as excinfo:
+            activate_revision(rejected, proposed, _current(), session)
+        assert excinfo.value.code == "not_approved"
+        with pytest.raises(ActivationRefused, match="expired"):
+            activate_revision(_decision(proposed).expire(), proposed, _current(), session)
+        with pytest.raises(ActivationRefused, match="undecided"):
+            activate_revision(_decision(proposed), proposed, _current(), session)
+        assert session.calls == []  # none of the three consumed anything
+
+    def test_proposed_revision_identity_format(self):
+        proposed = _revision(_base_steps(), revision=2)
+        assert proposed_revision_identity(proposed) == "plan-demo-1#2"
 
 
 class TestQuestion:
