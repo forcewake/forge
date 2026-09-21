@@ -521,6 +521,12 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
 #: (d16f523 review) are deliberately absent: their fixes are not fully
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
+    FindingClosure(
+        finding="WIRING",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_adaptive_wiring.py",),
+    ),
     # 05868e9 backlog (the full eight-epic substrate, v0.17.0)
     FindingClosure(
         finding="FND-03",

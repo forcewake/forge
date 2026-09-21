@@ -121,6 +121,7 @@ FINDING_MARKERS: dict[str, str] = {
     "MRP-EPIC": "compile_dependencies",
     "VER-EPIC": "evidence_aware_review",
     "OPS-EPIC": "usage_lineage",
+    "WIRING": "DiscoveryService",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit

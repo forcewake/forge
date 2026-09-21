@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-21
+
+### Added — the adaptive service wiring (the substrate meets the production seams)
+
+- **DiscoveryService**: creates a durable DiscoveryRun and dispatches it
+  through the caller's harness-start leg — the SAME CI execution profile
+  the classic implement path uses (DSC-01's rule: never inside the
+  privileged API process). A waiting_question discovery redispatches
+  after the answer; a completed discovery's evidence bundle resumes
+  WITHOUT repaying the probes; unresolved critical questions block
+  planning rather than inventing defaults.
+- **OperatorControlService**: the mailbox-backed operator command surface
+  — pause fences the publication epoch BEFORE the interrupt is sent
+  (CTL-05's ordering is the guarantee); resume requires a confirmed
+  checkpoint; steer delivers bounded guidance and REJECTS
+  acceptance-policy changes (routed to the revision gate with a
+  rejection reason); answers route through idempotency-keyed commands
+  (a redelivered answer never duplicates).
+- **WorkPackageCoordination**: a parent WorkPackage launching child runs
+  phase-by-phase through a caller-supplied child-run factory (one
+  writable repository per child lane); dependency phasing from
+  compile_dependencies; a failed child HOLDS the later phases — no
+  partial cascade; completion only after the last phase lands.
+
 ## [0.17.0] - 2026-09-21
 
 ### Added — the full adaptive backlog substrate (all 62 remaining roadmap stories, eight epics)
