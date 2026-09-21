@@ -1099,7 +1099,8 @@ class TestLaneRegistration:
 class TestLaneTemplate:
     def test_rules_filter_on_the_run_id_and_the_lane_driver(self):
         doc = yaml.safe_load(TEMPLATE.read_text())
-        assert doc["forge-agent"]["rules"] == [
+        lane_key = next(k for k in doc if k.startswith("forge-agent"))
+        assert doc[lane_key]["rules"] == [
             {
                 "if": (
                     '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" '
@@ -1125,7 +1126,9 @@ class TestLaneTemplate:
 
     def test_the_candidate_contract_is_byte_compatible_with_the_batch_lane(self):
         text = TEMPLATE.read_text()
-        doc = yaml.safe_load(TEMPLATE.read_text())["forge-agent"]
+        doc = yaml.safe_load(TEMPLATE.read_text())
+        lane_key = next(k for k in doc if k.startswith("forge-agent"))
+        doc = doc[lane_key]
 
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
         assert (
@@ -1175,7 +1178,8 @@ class TestSdkLaneTemplates:
     def test_rules_filter_on_the_run_id_and_the_lane_driver(self, template):
         driver_id, _key = SDK_LANE_TEMPLATES[template]
         doc = yaml.safe_load(template.read_text())
-        assert doc["forge-agent"]["rules"] == [
+        lane_key = next(k for k in doc if k.startswith("forge-agent"))
+        assert doc[lane_key]["rules"] == [
             {
                 "if": (
                     '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" '
@@ -1209,13 +1213,19 @@ class TestSdkLaneTemplates:
     def test_the_cli_installs_over_npm_with_retries(self, template):
         text = self._text(template)
 
-        assert "npm install -g --no-fund --no-audit" in text
+        if "opencode" in str(template):
+            # The OFFICIAL installer, not npm (LIVE-found: the npm
+            # opencode-ai build differs; the v2 prompt route 400s under it).
+            assert "https://opencode.ai/install" in text
+        else:
+            assert "npm install -g --no-fund --no-audit" in text
         assert "for attempt in 1 2 3" in text
         assert "--version" in text
 
     def test_the_candidate_contract_is_byte_compatible_with_the_batch_lane(self, template):
         text = self._text(template)
-        doc = yaml.safe_load(template.read_text())["forge-agent"]
+        parsed = yaml.safe_load(template.read_text())
+        doc = parsed[next(k for k in parsed if k.startswith("forge-agent"))]
 
         assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
         assert (
@@ -1267,10 +1277,13 @@ class TestCodexLaneTemplateDetails:
 
 
 class TestOpenCodeLaneTemplateDetails:
-    def test_the_cli_is_opencode_ai_over_npm(self):
+    def test_the_cli_installs_via_the_official_installer(self):
         text = OPENCODE_TEMPLATE.read_text()
 
-        assert '"opencode-ai@${FORGE_OPENCODE_VERSION:-latest}"' in text
+        # The official installer (LIVE-found 2026-09-21: the npm
+        # opencode-ai build differs from the release channel — the v2
+        # prompt route 400s under it).
+        assert "https://opencode.ai/install" in text
         assert "opencode --version" in text
 
     def test_the_mechanical_deny_rides_the_serve_config(self):
