@@ -19,25 +19,38 @@ into one "just publish everything" step:
   :class:`SagaState` records what published and what failed — no pretend
   rollback by deleting branches that may already carry human edits;
   recovery is by publication intents the CALLER reconciles.
-- Integration verification binds to a FROZEN candidate set (MRP-05):
-  :func:`freeze_candidate_set` snapshots per-repo candidate oids into a
-  :class:`~forge.adaptive.models.CandidateSet`, and
-  :func:`identity_changed` says when an old result no longer confirms a
-  new set.
+- Integration verification binds to a FROZEN candidate set (MRP-05,
+  NXT-25): :func:`freeze_candidate_set` snapshots per-repo candidates,
+  images and bundle digests into a
+  :class:`~forge.adaptive.models.CandidateSet`;
+  :func:`tested_world_digest` fingerprints the COMPLETE tested world
+  (changed AND baseline members, exact image artifacts, contracts, test
+  bundle, environment pins, policy refs) and :func:`identity_changed`
+  says when an old result no longer confirms a new set — a digest
+  change IS an identity change. :func:`applicability_digest` is the
+  separate, narrower reuse fingerprint (the dependencies an evidence
+  record claims to cover), so a plan-revision bump alone — historical
+  provenance — never invalidates a world that did not change.
 
 Pure stdlib + the pydantic contract models; no provider I/O here.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 
 from forge.adaptive.models import CandidateSet, CandidateSetMember
 
 __all__ = [
+    "APPLICABILITY_SCHEMA",
+    "TESTED_WORLD_SCHEMA",
     "SagaState",
     "WorkItemRef",
     "WorkPackage",
+    "applicability_digest",
     "baseline_members",
     "bound_phases",
     "compile_dependencies",
@@ -46,7 +59,16 @@ __all__ = [
     "lane_assignment",
     "recovery_targets",
     "saga_outcomes",
+    "tested_world_digest",
 ]
+
+#: Domain-separation tags for the two digests (versioned: a breaking
+#: change to what a digest covers bumps the tag, so old pinned digests
+#: can never be confused with new ones). The tags also guarantee the
+#: two digests can never collide for the same inputs — they answer
+#: different questions and must stay incomparable.
+TESTED_WORLD_SCHEMA = "forge.verify.tested-world/1"
+APPLICABILITY_SCHEMA = "forge.verify.applicability/1"
 
 
 @dataclass(frozen=True)
@@ -312,15 +334,26 @@ def freeze_candidate_set(
     plan_revision: int,
     contract_digest: str,
     per_repo: dict[str, dict],
+    *,
+    contract_bundle_digest: str | None = None,
+    test_bundle_digest: str | None = None,
+    environment_profile_digest: str | None = None,
 ) -> CandidateSet:
     """Freeze per-repo candidates into the unit of system verification (MRP-05).
 
     *per_repo* maps ``repository_id -> {"base_oid", "candidate_oid",
-    "role", "image_digest"}``. Construction IS the validation: the
-    pydantic model enforces 40-hex git oids, the closed
+    "role", "image_digest"}``. Construction IS the validation that
+    exists today: the pydantic model enforces the closed
     changed/baseline role vocabulary, the 64-hex contract digest and
-    unique repositories — this function adds nothing looser. Members are
-    sorted by repository so the frozen identity is dict-order-proof.
+    unique repositories — this function adds nothing looser. (Known
+    models gap, NXT-25: member oids and image digests have NO format
+    validators yet, so garbage spelled like an oid flows through; the
+    digest below faithfully fingerprints whatever is there.) Members
+    are sorted by repository so the frozen identity is
+    dict-order-proof. The optional bundle digests (NXT-25) freeze the
+    REST of the tested world at the same moment: the contract bundle,
+    the test bundle and the environment profile the candidates will be
+    verified against.
     """
     members = [
         CandidateSetMember(
@@ -337,26 +370,150 @@ def freeze_candidate_set(
         plan_revision=plan_revision,
         work_contract_digest=contract_digest,
         members=members,
+        contract_bundle_digest=contract_bundle_digest,
+        test_bundle_digest=test_bundle_digest,
+        environment_profile_digest=environment_profile_digest,
     )
 
 
-def identity_changed(a: CandidateSet, b: CandidateSet) -> bool:
+def _canonical_digest(payload: object) -> str:
+    """sha256 over the canonical JSON encoding of *payload*.
+
+    ``sort_keys`` makes every mapping dict-order-proof and every list
+    the caller must sort is sorted by construction, so two worlds that
+    differ only in HOW they were spelled serialize to the same bytes —
+    and therefore to the same digest. That determinism is the whole
+    point: the digest is compared across runs and stored as identity.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _member_records(candidate_set: CandidateSet) -> list[dict]:
+    """The per-member world records, sorted by repository.
+
+    Each record carries WHAT was checked out (``candidate_oid``), the
+    EXACT artifact built from it (``image_digest`` — the same source
+    commit can rebuild into a different image) and the member's role.
+    ``base_oid`` is deliberately absent: it is the diff the candidate
+    was cut FROM — provenance of the change, not content of the tested
+    world. (A baseline member rides along with candidate == base, so
+    the baseline version is pinned by its ``candidate_oid``.)
+    """
+    return [
+        {
+            "repository_id": member.repository_id,
+            "role": member.role,
+            "candidate_oid": member.candidate_oid,
+            "image_digest": member.image_digest,
+        }
+        for member in sorted(candidate_set.members, key=lambda member: member.repository_id)
+    ]
+
+
+def _policy_ref_list(policy_refs: Iterable[str] | None) -> list[str]:
+    """Policy refs as a sorted, de-duplicated list — set-like, order-free."""
+    return sorted(set(policy_refs or ()))
+
+
+def tested_world_digest(
+    candidate_set: CandidateSet,
+    environment: Mapping[str, str] | None = None,
+    policy_refs: Iterable[str] | None = None,
+) -> str:
+    """The canonical fingerprint of EVERYTHING that defined the run (NXT-25).
+
+    Same source commits are NOT the same tested world: a rebuilt image,
+    a different test bundle, a moved contract or environment profile,
+    a drifted baseline dependency or a changed compatibility policy all
+    produce a different world, and an old result confirms nothing about
+    a world it did not run in. The digest therefore covers:
+
+    - every member, changed AND baseline (repository, role, candidate
+      oid, exact image artifact digest);
+    - the work contract digest and the contract bundle digest;
+    - the test bundle digest and the environment profile digest;
+    - *environment* — external dependency pins (service/broker/… exact
+      artifact digests) the model does not carry as fields;
+    - *policy_refs* — the compatibility/policy references under which
+      the run was judged.
+
+    Deliberately EXCLUDED: ``work_id`` and ``plan_revision``. They are
+    historical provenance — WHO asked, under which plan revision — not
+    parts of the world. A revision bump alone must not invalidate a
+    world that did not change (the review's counter-warning); the
+    narrower reuse question is answered separately by
+    :func:`applicability_digest`.
+    """
+    payload = {
+        "schema": TESTED_WORLD_SCHEMA,
+        "members": _member_records(candidate_set),
+        "work_contract_digest": candidate_set.work_contract_digest,
+        "contract_bundle_digest": candidate_set.contract_bundle_digest,
+        "test_bundle_digest": candidate_set.test_bundle_digest,
+        "environment_profile_digest": candidate_set.environment_profile_digest,
+        "environment_pins": dict(environment or {}),
+        "policy_refs": _policy_ref_list(policy_refs),
+    }
+    return _canonical_digest(payload)
+
+
+def applicability_digest(
+    candidate_set: CandidateSet,
+    environment: Mapping[str, str] | None = None,
+    policy_refs: Iterable[str] | None = None,
+) -> str:
+    """The fingerprint of what an evidence record claims to COVER (NXT-25).
+
+    Distinct concept from :func:`tested_world_digest`, on purpose. The
+    tested world is everything that defined one run; applicability is
+    the INPUT list a green result vouches for when reused elsewhere:
+    the dependencies (every member, changed and baseline, at their
+    candidate oids and exact image artifacts), judged by that test
+    bundle, under that environment profile and pins, under those
+    policies. Reuse must still be bounded — the review forbids fixing
+    over-broad invalidation with indefinite reuse by SHA alone, so
+    test/environment/policy changes move this digest too.
+
+    Excluded beside the provenance fields: the work-contract and
+    contract-bundle digests. They defined THIS run's obligations; they
+    are not dependencies the evidence speaks about, so evidence stays
+    applicable when only the asking contract changed.
+    """
+    payload = {
+        "schema": APPLICABILITY_SCHEMA,
+        "members": _member_records(candidate_set),
+        "test_bundle_digest": candidate_set.test_bundle_digest,
+        "environment_profile_digest": candidate_set.environment_profile_digest,
+        "environment_pins": dict(environment or {}),
+        "policy_refs": _policy_ref_list(policy_refs),
+    }
+    return _canonical_digest(payload)
+
+
+def identity_changed(
+    a: CandidateSet,
+    b: CandidateSet,
+    *,
+    environment: Mapping[str, str] | None = None,
+    policy_refs: Iterable[str] | None = None,
+) -> bool:
     """Whether two candidate sets are DIFFERENT verification identities (MRP-05).
 
-    True when any member's ``candidate_oid`` differs or a repository was
-    added or removed. An integration result binds to the exact set it
-    verified: changing ONE candidate invalidates that binding — the old
-    green result confirms nothing about the new set and the integration
-    must re-run. (A moved base or new digests with the same candidate
-    content do NOT change identity: the candidates are what was tested.)
+    A thin consumer of :func:`tested_world_digest`: the two sets are
+    the same verification identity exactly when their complete tested
+    worlds — all members with their exact image artifacts, contracts,
+    test bundle, environment pins and policy refs — share one digest.
+    An integration result binds to the exact world it verified: change
+    ANY of it (one candidate, one rebuilt image, one drifted baseline,
+    one bundle digest) and the old green result confirms nothing about
+    the new world — the integration must re-run. What still does NOT
+    move identity: a re-declared base (diff provenance, not tested
+    content) and a plan-revision or work-id bump alone (who asked, and
+    under which revision, is not part of the world that was tested).
     """
-    a_by_repo = {member.repository_id: member for member in a.members}
-    b_by_repo = {member.repository_id: member for member in b.members}
-    if a_by_repo.keys() != b_by_repo.keys():
-        return True
-    return any(
-        a_by_repo[repository_id].candidate_oid != b_by_repo[repository_id].candidate_oid
-        for repository_id in a_by_repo
+    return tested_world_digest(a, environment, policy_refs) != tested_world_digest(
+        b, environment, policy_refs
     )
 
 
@@ -366,6 +523,9 @@ def baseline_members(candidate_set: CandidateSet) -> list[str]:
     Their current digests are part of the frozen set so integration
     verification runs against the SAME world the candidates were cut
     from — a baseline that silently moved is a different system under
-    test, which is exactly what :func:`identity_changed` would catch.
+    test, which is exactly what :func:`tested_world_digest` (and thus
+    :func:`identity_changed`) now catches: baseline members enter the
+    digest with their candidate oids and image artifacts like any
+    other member.
     """
     return [member.repository_id for member in candidate_set.members if member.role == "baseline"]

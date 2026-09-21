@@ -20,7 +20,10 @@ verification EXECUTION separate and its evidence honest:
 - :func:`async_failure_scenarios` — the fixed crash/redelivery/order
   catalog asynchronous semantics must survive.
 - :func:`environment_compose` — the integration environment binds to
-  THIS CandidateSet's OIDs and digests, not to whatever is checked out.
+  THIS CandidateSet's OIDs, image artifacts and baseline identities —
+  every member is pinned, and every launched service resolves to a
+  recorded exact artifact or is flagged unresolved (never a mutable
+  tag) — plus the set's tested-world digest.
 - :class:`VerificationSelector` / :func:`selector_matches` /
   :func:`freshness` — checks are selected by IDENTITY (workflow, job,
   event, ref), never display name, and only recent enough evidence
@@ -37,10 +40,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from forge.adaptive.models import CandidateSet
+from forge.adaptive.workpackage import tested_world_digest
 
 __all__ = [
     "RECIPE_SCHEMA",
@@ -206,24 +211,81 @@ def async_failure_scenarios() -> list[dict]:
     ]
 
 
-def environment_compose(candidate_set: CandidateSet, services: list[str]) -> dict:
-    """Compose the integration environment for THIS CandidateSet.
+def environment_compose(
+    candidate_set: CandidateSet,
+    services: list[str],
+    *,
+    service_pins: Mapping[str, str] | None = None,
+    policy_refs: Iterable[str] | None = None,
+) -> dict:
+    """Compose the integration environment for THIS CandidateSet (NXT-25).
 
-    The environment binds to the set's member OIDs and its environment
-    profile digest — not to whatever happens to be checked out on the
-    runner. A verification result is only meaningful for the exact set
-    it ran against; loose binding is how "passed" stops meaning
+    The environment binds to the set's member identities — OIDs AND
+    exact image artifacts, for changed AND baseline members (a drifted
+    baseline is a different system under test, so baselines are pinned
+    like anyone else) — not to whatever happens to be checked out on
+    the runner. A verification result is only meaningful for the exact
+    world it ran against; loose binding is how "passed" stops meaning
     anything.
+
+    Every name in *services* must resolve to a recorded EXACT artifact:
+    a member repository resolves to that member's ``image_digest``; an
+    external dependency (postgres, kafka, …) resolves only through an
+    explicit *service_pins* entry. A service that resolves to neither
+    is listed with ``"unresolved": True`` and no digest — visible, not
+    silently run as whatever a mutable tag happens to point at today
+    (display names and mutable tags are out of scope as verification
+    identity by decision). A pin that CONTRADICTS a member's artifact
+    is refused: two different claimed artifacts for one launched thing
+    is a caller error, not a compose choice.
+
+    The compose carries the set's :func:`tested_world_digest`
+    (computed over the same *service_pins*/*policy_refs*), so a run
+    record that pins this compose binds to the complete tested world —
+    members, contracts, test bundle, environment pins and policies —
+    not just to the launch list.
     """
+
+    member_artifacts = {member.repository_id: member for member in candidate_set.members}
+    pins = dict(service_pins or {})
+    for name, digest in pins.items():
+        member = member_artifacts.get(name)
+        if member is not None and digest != member.image_digest:
+            raise ValueError(
+                f"service {name} is pinned to {digest} but member {name}'s exact artifact"
+                f" is {member.image_digest}: one launched thing, one recorded artifact"
+            )
+
+    composed_services: list[dict] = []
+    for name in services:
+        member = member_artifacts.get(name)
+        if member is not None:
+            composed_services.append(
+                {"service": name, "artifact_digest": member.image_digest, "source": "member"}
+            )
+        elif name in pins:
+            composed_services.append(
+                {"service": name, "artifact_digest": pins[name], "source": "pin"}
+            )
+        else:
+            # No recorded exact artifact → the service cannot be part of a
+            # verified world yet. Flag it; never invent or trust a tag.
+            composed_services.append({"service": name, "artifact_digest": None, "unresolved": True})
 
     return {
         "members": {
-            member.repository_id: member.candidate_oid
-            for member in candidate_set.members
-            if member.role == "changed"
+            member.repository_id: {
+                "candidate_oid": member.candidate_oid,
+                "image_digest": member.image_digest,
+                "role": member.role,
+            }
+            for member in sorted(candidate_set.members, key=lambda member: member.repository_id)
         },
         "environment_profile_digest": candidate_set.environment_profile_digest,
-        "services": services,
+        "services": composed_services,
+        "tested_world_digest": tested_world_digest(
+            candidate_set, environment=pins, policy_refs=policy_refs
+        ),
     }
 
 

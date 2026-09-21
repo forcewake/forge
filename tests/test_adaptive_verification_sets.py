@@ -4,10 +4,12 @@ These tests pin the separation: verification selects its own trusted
 lane (never the agent's privileged environment), focuses on the
 impacted changed set over baselines, flags contracts that need
 consumer/provider verification, upgrades from a data-bearing baseline,
-binds integration environments to the exact CandidateSet, selects
-checks by IDENTITY, decays stale evidence, and reviews claims only
-through verified evidence — implementation claims are never their own
-proof.
+binds integration environments to the exact CandidateSet — every member
+pinned (baselines included), every launched service resolved to a
+recorded exact artifact or flagged unresolved, the whole bound to the
+tested-world digest — selects checks by IDENTITY, decays stale
+evidence, and reviews claims only through verified evidence —
+implementation claims are never their own proof.
 """
 
 from __future__ import annotations
@@ -31,6 +33,10 @@ from forge.adaptive.verification_sets import (
     select_lane,
     selector_matches,
 )
+
+# aliased: the real name starts with "test" and pytest would collect the
+# imported FUNCTION as a test of its own.
+from forge.adaptive.workpackage import tested_world_digest as world_digest
 
 WORK_CONTRACT_DIGEST = "2e703bcbb99b1d534aedc8e0b22956d9107190a6f1fe635e7438b5a80da87c73"
 
@@ -196,15 +202,81 @@ class TestAsyncFailureScenarios:
 
 
 class TestEnvironmentCompose:
-    def test_the_environment_binds_to_this_sets_changed_oids(self):
-        compose = environment_compose(_candidate_set(), services=["postgres", "kafka"])
-        assert compose["members"] == {"orders": "a" * 40, "billing": "b" * 40}
-        assert compose["environment_profile_digest"] == "c" * 64
-        assert compose["services"] == ["postgres", "kafka"]
-
-    def test_baseline_members_are_not_pinned_as_candidates(self):
+    def test_changed_members_pin_their_oid_and_exact_image(self):
         compose = environment_compose(_candidate_set(), services=[])
-        assert "catalog" not in compose["members"]
+        assert compose["members"]["orders"] == {
+            "candidate_oid": "a" * 40,
+            "image_digest": f"sha256:{'e' * 64}",
+            "role": "changed",
+        }
+
+    def test_baseline_members_are_pinned_too(self):
+        # NXT-25: a drifted baseline is a different system under test —
+        # the compose must pin its identity like anyone else's.
+        compose = environment_compose(_candidate_set(), services=[])
+        assert compose["members"]["catalog"] == {
+            "candidate_oid": "2" * 40,
+            "image_digest": f"sha256:{'e' * 64}",
+            "role": "baseline",
+        }
+
+    def test_all_members_are_pinned_sorted_for_deterministic_output(self):
+        compose = environment_compose(_candidate_set(), services=[])
+        assert list(compose["members"]) == ["billing", "catalog", "orders"]
+
+    def test_the_profile_digest_stays_bound(self):
+        compose = environment_compose(_candidate_set(), services=[])
+        assert compose["environment_profile_digest"] == "c" * 64
+
+    def test_a_member_service_resolves_to_its_recorded_artifact(self):
+        compose = environment_compose(_candidate_set(), services=["orders"])
+        assert compose["services"] == [
+            {"service": "orders", "artifact_digest": f"sha256:{'e' * 64}", "source": "member"}
+        ]
+
+    def test_an_external_service_resolves_only_through_an_exact_pin(self):
+        pin = f"sha256:{'d' * 64}"
+        compose = environment_compose(
+            _candidate_set(), services=["postgres"], service_pins={"postgres": pin}
+        )
+        assert compose["services"] == [
+            {"service": "postgres", "artifact_digest": pin, "source": "pin"}
+        ]
+
+    def test_an_unpinned_service_is_flagged_unresolved_never_a_tag(self):
+        compose = environment_compose(_candidate_set(), services=["postgres", "kafka"])
+        assert compose["services"] == [
+            {"service": "postgres", "artifact_digest": None, "unresolved": True},
+            {"service": "kafka", "artifact_digest": None, "unresolved": True},
+        ]
+        # a mutable tag like "latest" must never be recorded as identity
+        assert not any(
+            str(svc.get("artifact_digest")).startswith("latest") for svc in compose["services"]
+        )
+
+    def test_a_pin_contradicting_a_member_artifact_is_refused(self):
+        with pytest.raises(ValueError, match="one launched thing, one recorded artifact"):
+            environment_compose(
+                _candidate_set(),
+                services=["orders"],
+                service_pins={"orders": f"sha256:{'d' * 64}"},
+            )
+
+    def test_the_compose_carries_the_tested_world_digest(self):
+        pins = {"postgres": f"sha256:{'d' * 64}"}
+        compose = environment_compose(
+            _candidate_set(), services=["postgres"], service_pins=pins, policy_refs=["compat/1"]
+        )
+        assert compose["tested_world_digest"] == world_digest(
+            _candidate_set(), environment=pins, policy_refs=["compat/1"]
+        )
+
+    def test_a_changed_dependency_pin_changes_the_bound_world(self):
+        old_pins = {"postgres": f"sha256:{'d' * 64}"}
+        new_pins = {"postgres": f"sha256:{'f' * 64}"}
+        old = environment_compose(_candidate_set(), services=["postgres"], service_pins=old_pins)
+        new = environment_compose(_candidate_set(), services=["postgres"], service_pins=new_pins)
+        assert old["tested_world_digest"] != new["tested_world_digest"]
 
 
 class TestVerificationSelector:

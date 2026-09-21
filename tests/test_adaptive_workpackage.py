@@ -3,7 +3,9 @@
 These tests pin the review's separations — the service graph is not the
 execution DAG, one writable repository per child lane, publication as an
 explicit saga with no pretend rollback, and verification bound to a
-frozen candidate-set identity.
+frozen candidate-set identity: the COMPLETE tested world (NXT-25), with
+historical provenance deliberately kept out of it and applicability
+kept distinct from it.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from forge.adaptive.workpackage import (
     SagaState,
     WorkItemRef,
     WorkPackage,
+    applicability_digest,
     baseline_members,
     bound_phases,
     compile_dependencies,
@@ -25,6 +28,10 @@ from forge.adaptive.workpackage import (
     recovery_targets,
     saga_outcomes,
 )
+
+# aliased: the real name starts with "test" and pytest would collect the
+# imported FUNCTION as a test of its own.
+from forge.adaptive.workpackage import tested_world_digest as world_digest
 
 
 def _oid(seed: str) -> str:
@@ -393,6 +400,198 @@ class TestIdentityChanged:
         rebased["widgets"]["base_oid"] = _oid("7")
         b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), rebased)
         assert identity_changed(a, b) is False
+
+    def test_the_same_candidates_with_a_rebuilt_image_is_a_new_identity(self):
+        # NXT-25: same source commits, different rebuilt artifact — a
+        # DIFFERENT tested world. The old green result confirms nothing.
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        rebuilt = _per_repo()
+        rebuilt["widgets"]["image_digest"] = _image_digest("9")
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), rebuilt)
+        assert identity_changed(a, b) is True
+
+    def test_the_same_candidates_with_a_new_test_bundle_is_a_new_identity(self):
+        a = freeze_candidate_set(
+            "wp-demo-1", 1, _digest("f"), _per_repo(), test_bundle_digest=_digest("t")
+        )
+        b = freeze_candidate_set(
+            "wp-demo-1", 1, _digest("f"), _per_repo(), test_bundle_digest=_digest("u")
+        )
+        assert identity_changed(a, b) is True
+
+    def test_environment_pins_enter_the_identity_comparison(self):
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        postgres_old = {"postgres": _image_digest("p")}
+        postgres_new = {"postgres": _image_digest("q")}
+        # same pins on both sides → still the same identity
+        assert identity_changed(a, b, environment=postgres_old) is False
+        # the SAME sets compared under different dependency baselines are
+        # different worlds — identity is world + environment context.
+        assert world_digest(a, environment=postgres_old) != world_digest(
+            b, environment=postgres_new
+        )
+
+
+class TestTestedWorldDigest:
+    def test_the_same_world_gives_the_same_digest(self):
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        assert world_digest(a) == world_digest(b)
+
+    def test_a_revision_bump_alone_keeps_the_tested_world_stable(self):
+        # the review's counter-warning: historical provenance (who asked,
+        # under which plan revision) is NOT part of the tested world. A
+        # revision-number bump must not invalidate a world that did not
+        # change — that is what applicability evidence is for.
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        b = freeze_candidate_set("wp-demo-1", 7, _digest("f"), _per_repo())
+        assert world_digest(a) == world_digest(b)
+
+    def test_bundle_and_contract_digests_are_all_part_of_the_world(self):
+        base = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        variants = {
+            "work_contract": freeze_candidate_set("wp-demo-1", 1, _digest("6"), _per_repo()),
+            "contract_bundle": freeze_candidate_set(
+                "wp-demo-1", 1, _digest("f"), _per_repo(), contract_bundle_digest=_digest("c")
+            ),
+            "test_bundle": freeze_candidate_set(
+                "wp-demo-1", 1, _digest("f"), _per_repo(), test_bundle_digest=_digest("t")
+            ),
+            "environment_profile": freeze_candidate_set(
+                "wp-demo-1", 1, _digest("f"), _per_repo(), environment_profile_digest=_digest("e")
+            ),
+        }
+        for label, variant in variants.items():
+            assert world_digest(base) != world_digest(variant), label
+
+    def test_a_drifted_baseline_is_a_different_tested_world(self):
+        # the baseline rides along UNCHANGED — so when it moves (a new
+        # candidate oid or a rebuilt image), the system under test is no
+        # longer the one the candidates were cut against.
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        moved = _per_repo()
+        moved["runbooks"]["candidate_oid"] = _oid("8")
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), moved)
+        assert world_digest(a) != world_digest(b)
+        rebuilt = _per_repo()
+        rebuilt["runbooks"]["image_digest"] = _image_digest("8")
+        c = freeze_candidate_set("wp-demo-1", 1, _digest("f"), rebuilt)
+        assert world_digest(a) != world_digest(c)
+
+    def test_environment_pins_and_policy_refs_are_part_of_the_world(self):
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        bare = world_digest(a)
+        assert bare != world_digest(a, environment={"postgres": _image_digest("p")})
+        assert bare != world_digest(a, policy_refs=["compat/matrix@2"])
+        # both together differ from either alone
+        assert world_digest(a, environment={"postgres": _image_digest("p")}) != (
+            world_digest(
+                a, environment={"postgres": _image_digest("p")}, policy_refs=["compat/matrix@2"]
+            )
+        )
+
+    def test_policy_ref_order_and_duplicates_do_not_matter(self):
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        one = world_digest(a, policy_refs=["compat/a@1", "compat/b@1"])
+        two = world_digest(a, policy_refs=["compat/b@1", "compat/a@1", "compat/a@1"])
+        assert one == two
+
+    def test_deterministic_across_dict_and_member_order(self):
+        # the same world spelled with different insertion orders — per_repo
+        # dicts and even a directly-constructed reversed member list —
+        # must serialize to ONE digest.
+        forward = _per_repo()
+        reverse = {repo: forward[repo] for repo in reversed(list(forward))}
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), forward)
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), reverse)
+        shuffled = CandidateSet(
+            work_id="wp-demo-1",
+            plan_revision=1,
+            work_contract_digest=_digest("f"),
+            members=list(reversed(a.members)),
+        )
+        assert world_digest(a) == world_digest(b)
+        assert world_digest(a) == world_digest(shuffled)
+
+    def test_a_moved_base_does_not_move_the_tested_world(self):
+        # base_oid is the diff the candidate was cut FROM — provenance of
+        # the change, not content of the tested world.
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        rebased = _per_repo()
+        rebased["widgets"]["base_oid"] = _oid("7")
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), rebased)
+        assert world_digest(a) == world_digest(b)
+
+
+class TestApplicabilityDigest:
+    """Provenance vs applicability: the reuse fingerprint is a DISTINCT concept."""
+
+    def _frozen(self, **kwargs) -> CandidateSet:
+        return freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo(), **kwargs)
+
+    def test_the_two_digests_never_coincide_for_the_same_inputs(self):
+        # different questions, domain-separated tags: a tested-world
+        # digest must never be mistakable for an applicability digest.
+        a = self._frozen()
+        assert applicability_digest(a) != world_digest(a)
+        # and each is a stable 64-hex sha256
+        assert len(world_digest(a)) == 64
+        assert len(applicability_digest(a)) == 64
+        # each still moves when its own inputs move
+        assert applicability_digest(a) != applicability_digest(a, policy_refs=["compat/1"])
+
+    def test_a_revision_bump_keeps_applicability_stable(self):
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        b = freeze_candidate_set("wp-demo-1", 7, _digest("f"), _per_repo())
+        assert applicability_digest(a) == applicability_digest(b)
+
+    def test_a_contract_change_moves_the_tested_world_not_applicability(self):
+        # the work contract defined THIS run's obligations; it is not a
+        # dependency the evidence claims to cover — evidence stays
+        # applicable when only the asking contract changes.
+        a = self._frozen()
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("6"), _per_repo())
+        assert world_digest(a) != world_digest(b)
+        assert applicability_digest(a) == applicability_digest(b)
+
+    def test_a_contract_bundle_change_moves_the_tested_world_not_applicability(self):
+        a = self._frozen()
+        b = self._frozen(contract_bundle_digest=_digest("c"))
+        assert world_digest(a) != world_digest(b)
+        assert applicability_digest(a) == applicability_digest(b)
+
+    def test_dependency_changes_move_applicability_too(self):
+        # no indefinite reuse by SHA: a rebuilt image or a drifted
+        # baseline changes what the evidence vouches for.
+        a = self._frozen()
+        rebuilt = _per_repo()
+        rebuilt["widgets"]["image_digest"] = _image_digest("9")
+        b = freeze_candidate_set("wp-demo-1", 1, _digest("f"), rebuilt)
+        assert applicability_digest(a) != applicability_digest(b)
+        drifted = _per_repo()
+        drifted["runbooks"]["candidate_oid"] = _oid("8")
+        c = freeze_candidate_set("wp-demo-1", 1, _digest("f"), drifted)
+        assert applicability_digest(a) != applicability_digest(c)
+
+    def test_test_and_environment_changes_move_applicability(self):
+        a = self._frozen()
+        assert applicability_digest(a) != applicability_digest(
+            self._frozen(test_bundle_digest=_digest("t"))
+        )
+        assert applicability_digest(a) != applicability_digest(
+            self._frozen(environment_profile_digest=_digest("e"))
+        )
+        assert applicability_digest(a) != applicability_digest(
+            a, environment={"postgres": _image_digest("p")}
+        )
+
+    def test_the_same_world_under_a_different_work_shares_applicability(self):
+        # reuse crosses works: which work ASKED is provenance, not world.
+        a = freeze_candidate_set("wp-demo-1", 1, _digest("f"), _per_repo())
+        b = freeze_candidate_set("wp-other-9", 1, _digest("f"), _per_repo())
+        assert applicability_digest(a) == applicability_digest(b)
+        assert world_digest(a) == world_digest(b)
 
 
 class TestBaselineMembers:
