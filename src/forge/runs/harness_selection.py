@@ -48,10 +48,16 @@ __all__ = [
 ]
 
 #: The shipped harness driver ids — one GitLab template (and one Actions-lane
-#: script) each. A preference id outside this set is a config error; the
-#: compiler additionally caps everything by ``available_lanes``, so an
-#: unshipped id can never be selected even if a caller passes it as a lane.
-SHIPPED_DRIVERS: frozenset[str] = frozenset({"claude-code", "grok-build", "opencode", "copilot"})
+#: script) each. ``claude-sdk-lane`` is the EXE-02 interactive twin of
+#: ``claude-code``: same ANTHROPIC_* credential recipe and the same
+#: candidate contract, but the agent is driven by the REAL Claude Agent SDK
+#: driver (``forge.lane_driver``) instead of a scripted ``claude -p`` call.
+#: A preference id outside this set is a config error; the compiler
+#: additionally caps everything by ``available_lanes``, so an unshipped id
+#: can never be selected even if a caller passes it as a lane.
+SHIPPED_DRIVERS: frozenset[str] = frozenset(
+    {"claude-code", "grok-build", "opencode", "copilot", "claude-sdk-lane"}
+)
 
 #: The driver selected when no explicit one is configured (ADR-0015: the bare
 #: ``ci_harness`` backend and the builtin backend both land here).
@@ -66,6 +72,10 @@ BUDGET_CLASSES: frozenset[str] = frozenset({"trivial", "standard", "heavy"})
 #: without creds looks like (the job fails infrastructure at the CI layer).
 DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
+    # EXE-02: the interactive SDK lane rides the SAME gateway credential
+    # recipe as the batch claude-code lane (the driver consumes the
+    # ambient ANTHROPIC_* env; nothing new is requested).
+    "claude-sdk-lane": ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
     "grok-build": ("FORGE_GROK_AUTH",),
     "opencode": ("ZAI_API_KEY",),
     "copilot": ("COPILOT_GITHUB_TOKEN",),
@@ -76,6 +86,8 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
 #: key-auth gateways); doctor does NOT require them.
 DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_API_KEY",),
+    # Same optional surface as the batch claude-code lane.
+    "claude-sdk-lane": ("ANTHROPIC_API_KEY",),
 }
 
 #: A version/dist-tag token in a pinned chain entry (``driver@version``):

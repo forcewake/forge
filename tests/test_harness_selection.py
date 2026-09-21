@@ -241,8 +241,32 @@ class TestValidatePreference:
         """The builtin lane dispatches no harness — only the id set binds."""
         validate_preference(["grok-build"], None)
 
-    def test_shipped_driver_set_is_the_four_templates(self):
-        assert SHIPPED_DRIVERS == {"claude-code", "grok-build", "opencode", "copilot"}
+    def test_shipped_driver_set_is_the_five_lanes(self):
+        # The four scripted harness templates plus the EXE-02 interactive
+        # claude-sdk-lane (the Claude Agent SDK driver — same credential
+        # recipe as claude-code, same candidate contract).
+        assert SHIPPED_DRIVERS == {
+            "claude-code",
+            "grok-build",
+            "opencode",
+            "copilot",
+            "claude-sdk-lane",
+        }
+
+    def test_the_sdk_lane_shares_the_claude_code_credential_recipe(self):
+        # EXE-02: the interactive lane rides the SAME gateway credential
+        # set as the batch claude-code lane — doctor and the lane recipes
+        # cross-check both sides against this one registry.
+        from forge.runs.harness_selection import (
+            DRIVER_CREDENTIAL_VARS,
+            DRIVER_OPTIONAL_CREDENTIAL_VARS,
+        )
+
+        assert DRIVER_CREDENTIAL_VARS["claude-sdk-lane"] == DRIVER_CREDENTIAL_VARS["claude-code"]
+        assert (
+            DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"]
+            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"]
+        )
 
 
 class TestPinnedChainEntries:

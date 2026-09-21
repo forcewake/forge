@@ -811,7 +811,11 @@ class TestCredentialContractC03:
                 text,
                 re.M,
             ):
-                if match.group(2) == driver:
+                # One env line may guard SEVERAL drivers (the ANTHROPIC_*
+                # lines cover claude-code AND the EXE-02 claude-sdk-lane,
+                # which shares the recipe) — credit every arm on the line.
+                arms = re.findall(r"inputs\.driver == '([a-z-]+)'", match.group(0))
+                if driver in arms:
                     granted.add(match.group(1))
             allowed = expected | set(DRIVER_OPTIONAL_CREDENTIAL_VARS.get(driver, ()))
             assert granted <= allowed and granted >= expected, (

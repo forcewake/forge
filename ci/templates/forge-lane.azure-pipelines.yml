@@ -101,11 +101,15 @@ jobs:
       # C03: per-driver credential selection — EXACTLY the control plane's
       # DRIVER_CREDENTIAL_VARS registry (ci contract test cross-checks):
       #   claude-code: ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
+      #   claude-sdk-lane: same ANTHROPIC_* gateway recipe (EXE-02)
       #   grok-build:  FORGE_GROK_AUTH (the provider-native auth blob)
       #   opencode:    ZAI_API_KEY
       #   copilot:     COPILOT_GITHUB_TOKEN
       # A driver never receives another provider's secret.
       ${{ if eq(parameters.driver, 'claude-code') }}:
+        LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
+        LANE_ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
+      ${{ if eq(parameters.driver, 'claude-sdk-lane') }}:
         LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
         LANE_ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
       ${{ if eq(parameters.driver, 'grok-build') }}:

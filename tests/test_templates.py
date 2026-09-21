@@ -20,6 +20,7 @@ HARNESS_TEMPLATES = (
     "claude-code.gitlab-ci.yml",
     "opencode.gitlab-ci.yml",
     "copilot.gitlab-ci.yml",
+    "claude-sdk-lane.gitlab-ci.yml",
 )
 
 # A write token must never appear, but FORGE_BOT_READ_TOKEN (the read-only
@@ -224,6 +225,7 @@ class TestDriverFilter:
         "grok.gitlab-ci.yml": "grok-build",
         "opencode.gitlab-ci.yml": "opencode",
         "copilot.gitlab-ci.yml": "copilot",
+        "claude-sdk-lane.gitlab-ci.yml": "claude-sdk-lane",
     }
 
     def test_every_template_carries_its_own_filter(self, template_doc, request):

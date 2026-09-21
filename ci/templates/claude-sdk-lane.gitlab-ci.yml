@@ -1,0 +1,152 @@
+# forge implementer harness — claude-sdk-lane (EXE-02: the execution lane,
+# driven by the REAL interactive Claude Agent SDK driver)
+#
+# The INTERACTIVE twin of claude-code.gitlab-ci.yml: same skeleton, same
+# rules, same proposal-only candidate contract — but the agent is driven
+# by forge's own driver client (forge.adaptive.drivers.claude_sdk, via
+# `python -m forge.lane_driver`) instead of a scripted `claude -p` call.
+# One task, poll-drained to its ResultMessage, bounded by an overall
+# budget; the same .forge/ artifacts come out the other end.
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/claude-sdk-lane.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block,
+# which also filters on $FORGE_HARNESS_DRIVER (ADR-0023 §7): a repo that
+# includes several forge templates runs exactly one lane
+# (driver: claude-sdk-lane).
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   ANTHROPIC_AUTH_TOKEN   harness API key (never forge's)
+#   ANTHROPIC_BASE_URL     harness API base URL (self-hosted gateway/proxy)
+#   FORGE_BOT_READ_TOKEN   OPTIONAL read-only PAT (repo read only). The
+#                          proposal-only lane (ADR-0016) must NEVER receive
+#                          a write token; when unset the lane keeps the
+#                          runner's default fetch credential only.
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Candidate contract (ADR-0016 §1, proposal-only): the job checks out the
+# frozen attempt base ($FORGE_ATTEMPT_BASE, detached), runs the driver
+# WITHOUT any commit/push capability, and uploads the working-tree delta as
+# CI artifacts:
+#   .forge/candidate.diff        git diff --binary --full-index vs the base
+#   .forge/candidate.meta.json   attempt base, driver, model, exit, usage
+# The last trace lines carry the machine-readable markers:
+#   FORGE_CANDIDATE:{"attempt_base": "<oid>", "artifact": "candidate.diff", "exit": "<completed|failed>"}
+#   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
+# forge downloads the artifacts and publishes via the trusted publisher;
+# claims in the trace are never trusted.
+
+forge-agent:
+  image: node:22-bookworm
+  timeout: 30m
+  rules:
+    # ADR-0023 §7: a repo including MULTIPLE forge templates runs exactly
+    # one lane — the one whose driver matches $FORGE_HARNESS_DRIVER (set by
+    # the dispatch leg). Unset/empty keeps single-driver repos as before.
+    - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "claude-sdk-lane")'
+  variables:
+    ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
+    API_TIMEOUT_MS: "300000"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    # GitLab docker executors run containers as root; the CLI refuses
+    # headless bypass mode for root unless told it is sandboxed. The
+    # ephemeral CI container IS the execution profile (ADR-0002), and the
+    # ambient env flows into the driver's subprocess.
+    IS_SANDBOX: "1"
+    # The forge ref this lane installs the driver from (the worker can pin
+    # by dispatching FORGE_LANE_REF; pipeline variables beat YAML ones).
+    FORGE_LANE_REF: "main"
+  before_script:
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${FORGE_CLAUDE_VERSION:-latest}" && break
+        echo "npm install of claude-code failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+      claude --version
+    # Python side: forge requires >=3.13 and Debian bookworm's apt python3
+    # is 3.11 (LIVE-found in the ADR-0024 AzDO lab run: pip refused the
+    # forge install). apt python3+pip bootstraps uv, which installs a
+    # standalone 3.13 and the lane venv. --break-system-packages is only
+    # used for the uv bootstrap wheel, never for the lane environment.
+    - apt-get update -qq && apt-get install -y -qq python3 python3-pip >/dev/null
+    - python3 -m pip install --quiet --no-input --break-system-packages uv
+    - uv python install 3.13
+    - uv venv /tmp/forge-lane-venv --python 3.13
+    - >
+      uv pip install --quiet --python /tmp/forge-lane-venv/bin/python
+      "forge[interactive] @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF}"
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
+    # credential at most, and push is disabled by construction — the job has
+    # nothing to push even if the model tried.
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_READ_TOKEN:-forge:placeholder}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+    - git remote set-url --push origin FORBIDDEN
+    # .forge/ is a control directory: local-only, never staged, never
+    # committed (ADR-0016 §1 step 5).
+    - mkdir -p .forge
+    - mkdir -p .git/info && echo ".forge/" >> .git/info/exclude
+    # Check out the FROZEN attempt base (detached). The pipeline ref is the
+    # factory branch, whose head IS the attempt base in the proposal-only
+    # model — nothing else ever pushes to it.
+    - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
+    - git checkout --detach "$FORGE_ATTEMPT_BASE"
+  script:
+    # The task brief: approved plan, written into the REPO's control
+    # directory — never /tmp (the sandbox lesson: run context lives with
+    # the run, ephemeral scratch does not).
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # The model route: dispatched FORGE_CLAUDE_MODEL > dispatched
+    # FORGE_HARNESS_MODEL > the template default.
+    - export FORGE_CLAUDE_MODEL="${FORGE_CLAUDE_MODEL:-${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}}"
+    - export FORGE_CLAUDE_CWD="$PWD"
+    # Interactive driver run (EXE-02): lane_driver reads .forge/brief.md,
+    # builds the client from the ambient gateway env, drives ONE task to
+    # its ResultMessage and writes the meta + usage receipts. Its task
+    # appends the batch lane's unattended posture verbatim — the agent is
+    # told: Do NOT commit and do NOT push: leave your changes in the
+    # working tree for collection — and the mechanical commit/push deny
+    # rides in the driver client (deny beats every permission mode), with
+    # the FORBIDDEN push URL as the architectural backstop. No filter.mjs
+    # dependency here: plain stdout trace, the meta artifact is what
+    # matters. A nonzero exit does not abort the audit trail — the
+    # artifacts still upload (when: always) and forge classifies the run
+    # from the meta's exit, exactly like the batch lane.
+    - |
+      FORGE_DRIVER_EXIT="completed"
+      /tmp/forge-lane-venv/bin/python -m forge.lane_driver || FORGE_DRIVER_EXIT="failed"
+      export FORGE_DRIVER_EXIT
+    # Defensive meta floor: lane_driver writes the real meta itself; if it
+    # died before writing one (install/import crash), the artifacts still
+    # carry an honest failed meta instead of nothing.
+    - |
+      if [ ! -f .forge/candidate.meta.json ]; then
+        printf '%s\n' "{\"attempt_base\": \"${FORGE_ATTEMPT_BASE}\", \"driver\": \"claude-sdk-lane\", \"model\": \"${FORGE_CLAUDE_MODEL}\", \"exit\": \"${FORGE_DRIVER_EXIT}\", \"terminal_reason\": \"lane_driver_no_meta\", \"usage\": null}" > .forge/candidate.meta.json
+      fi
+    # Stage the whole working tree and capture the candidate diff against
+    # the FROZEN attempt base. No commit, no push — the artifact is the
+    # deliverable.
+    - git add -A
+    - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
+    # Machine-readable contract. FORGE_CANDIDATE points at the artifact the
+    # backend downloads; the legacy FORGE_RESULT line stays only for the
+    # v0.2 → v0.3 migration window and carries the attempt base — it is not
+    # a branch claim anymore.
+    - 'printf "FORGE_CANDIDATE:{\"attempt_base\": \"%s\", \"artifact\": \"candidate.diff\", \"exit\": \"%s\"}\n" "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"'
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n" "$FORGE_ATTEMPT_BASE"'
+  artifacts:
+    paths:
+      - .forge/candidate.diff
+      - .forge/candidate.meta.json
+    when: always
+    expire_in: 1 week

@@ -33,7 +33,7 @@ on:
         required: true
         type: string
       driver:
-        description: "harness driver: claude-code | grok-build | opencode | copilot"
+        description: "harness driver: claude-code | grok-build | opencode | copilot | claude-sdk-lane"
         required: true
         type: string
       model:
@@ -231,12 +231,13 @@ jobs:
           # configuration decision, never detected or enforced here).
           #   claude-code: ANTHROPIC_* (+ ZAI_API_KEY via the
           #     Anthropic-compatible coding endpoint)
+          #   claude-sdk-lane: the same ANTHROPIC_* gateway recipe (EXE-02)
           #   grok-build: FORGE_GROK_AUTH (full ~/.grok/auth.json contents)
           #   opencode: ZAI_API_KEY
           #   copilot: COPILOT_GITHUB_TOKEN
-          ANTHROPIC_API_KEY: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
-          ANTHROPIC_AUTH_TOKEN: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
-          ANTHROPIC_BASE_URL: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_BASE_URL || '' }}
+          ANTHROPIC_API_KEY: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_API_KEY || '' }}
+          ANTHROPIC_AUTH_TOKEN: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
+          ANTHROPIC_BASE_URL: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_BASE_URL || '' }}
           ZAI_API_KEY: ${{ inputs.driver == 'opencode' && secrets.ZAI_API_KEY || '' }}
           FORGE_GROK_AUTH: ${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}
           COPILOT_GITHUB_TOKEN: ${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
