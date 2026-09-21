@@ -124,8 +124,18 @@ forge-agent-claude-sdk:
     # from the meta's exit, exactly like the batch lane.
     - |
       FORGE_DRIVER_EXIT="completed"
-      /tmp/forge-lane-venv/bin/python -m forge.lane_driver || FORGE_DRIVER_EXIT="failed"
+      set +e
+      /tmp/forge-lane-venv/bin/python -m forge.lane_driver
+      _driver_rc=$?
+      set -e
+      if [ "$_driver_rc" -ne 0 ]; then
+        FORGE_DRIVER_EXIT="failed"
+      fi
       export FORGE_DRIVER_EXIT
+      # A driver FAILURE fails the JOB (batch-lane pipefail parity; the
+      # artifacts still upload via when:always). An agent that completed
+      # without changes keeps the job green — classified at the run level.
+      exit "$_driver_rc"
     # Defensive meta floor: lane_driver writes the real meta itself; if it
     # died before writing one (install/import crash), the artifacts still
     # carry an honest failed meta instead of nothing.

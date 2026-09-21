@@ -1143,13 +1143,14 @@ class TestLaneTemplate:
         }
         assert doc["artifacts"]["when"] == "always"
 
-    def test_a_nonzero_driver_exit_never_aborts_the_audit_trail(self):
-        # The batch lane's || swallow: the job stays green, artifacts still
-        # upload, the worker classifies from the meta's exit.
+    def test_a_driver_failure_fails_the_job_but_uploads_artifacts(self):
+        # USER-directed 2026-09-22: a nonzero driver rc FAILS the job
+        # (batch pipefail parity); artifacts still upload via when:always.
         text = TEMPLATE.read_text()
 
         assert "python -m forge.lane_driver" in text
-        assert '|| FORGE_DRIVER_EXIT="failed"' in text
+        assert '|| FORGE_DRIVER_EXIT="failed"' not in text
+        assert 'exit "$_driver_rc"' in text
 
 
 # ---------------------------------------------------------------------------
@@ -1243,11 +1244,12 @@ class TestSdkLaneTemplates:
         # — these lanes run no vendor TUI that checks it.
         assert "IS_SANDBOX" not in text
 
-    def test_a_nonzero_driver_exit_never_aborts_the_audit_trail(self, template):
+    def test_a_driver_failure_fails_the_job_but_uploads_artifacts(self, template):
         text = self._text(template)
         driver_id, _key = SDK_LANE_TEMPLATES[template]
 
-        assert '|| FORGE_DRIVER_EXIT="failed"' in text
+        assert '|| FORGE_DRIVER_EXIT="failed"' not in text
+        assert 'exit "$_driver_rc"' in text
         # The defensive meta floor names THIS lane's driver id.
         assert f'\\"driver\\": \\"{driver_id}\\"' in text
 
