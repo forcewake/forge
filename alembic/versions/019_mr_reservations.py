@@ -106,6 +106,38 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # C09: the 019-upgrade schema legitimately holds MULTIPLE observation
+    # rows per (run, branch) (create attempts, adoptions, reconciliations —
+    # each its own immutable journal row). Re-creating the 018 unique index
+    # over such data would fail mid-downgrade; the downgrade must not
+    # silently DELETE audit history either. So: keep exactly ONE row per
+    # group — the succeeded observation when present, else the latest —
+    # and mark the rest as reconciled observations rather than removing
+    # them outright is NOT possible under the 018 contract; instead we
+    # refuse when genuine multi-row history exists, telling the operator
+    # the rollback needs the forward-only path.
+    bind = op.get_bind()
+    multi = bind.execute(
+        sa.text(
+            f"""
+            SELECT count(*) FROM (
+                SELECT flow_run_id, correlation_id
+                  FROM action_log
+                 WHERE action_kind = '{_MR_KIND}'
+                 GROUP BY flow_run_id, correlation_id
+                HAVING count(*) > 1
+            ) g
+            """
+        )
+    ).scalar()
+    if multi and int(multi or 0) > 0:
+        raise RuntimeError(
+            "downgrade 019->018 refused: the action journal holds "
+            f"{multi} (run, branch) group(s) with multiple create_merge_request "
+            "observation rows — genuine 019-shaped history that the 018 unique "
+            "index cannot represent without deleting audit rows. This schema "
+            "is forward-only from here; roll forward instead."
+        )
     op.create_index(
         "uq_create_mr_per_branch",
         "action_log",

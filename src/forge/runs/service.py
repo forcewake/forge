@@ -34,6 +34,7 @@ run — the service never blind-retries a write.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -2551,6 +2552,11 @@ class RunService:
             driver=driver,
         )
 
+    def _mr_io_timeout_s(self) -> float:
+        """C08: the bounded provider-I/O window under the reservation lock."""
+        raw = getattr(self._settings, "FORGE_MR_IO_TIMEOUT_SECONDS", None)
+        return float(raw) if raw else 30.0
+
     async def _reserve_mr(self, run_id: str, branch: str) -> None:
         """Durable MR reservation for run+branch, BEFORE any provider I/O.
 
@@ -2659,10 +2665,15 @@ class RunService:
             # journals its OWN observation row (the prior unknown/failed
             # rows stay immutable history).
             try:
-                provider_mrs = await self._gitlab.list_merge_requests(
-                    project_id, state="opened", per_page=50
+                # C08: provider I/O under the reservation lock is BOUNDED —
+                # a hung provider must not pin the row lock forever; the
+                # failure is fail-closed (the reservation stays open, the
+                # next pass retries).
+                provider_mrs = await asyncio.wait_for(
+                    self._gitlab.list_merge_requests(project_id, state="opened", per_page=50),
+                    timeout=self._mr_io_timeout_s(),
                 )
-            except GitLabAPIError:
+            except (GitLabAPIError, TimeoutError):
                 # 4. fail CLOSED: an unreadable list proves nothing — do
                 # not create on top of an unknown surface.
                 await session.rollback()
@@ -2693,14 +2704,18 @@ class RunService:
             issue_title = await self._read_issue_title(project_id, issue_iid)
             description = self._mr_description(run_id, plan_digest, issue_iid, commit_sha)
             try:
-                mr = await self._gitlab.create_merge_request(
-                    project_id,
-                    branch,
-                    target_branch,
-                    f"Draft: {issue_title}",  # Draft: prefix marks it draft
-                    description,
+                mr = await asyncio.wait_for(
+                    self._gitlab.create_merge_request(
+                        project_id,
+                        branch,
+                        target_branch,
+                        f"Draft: {issue_title}",  # Draft: prefix marks it draft
+                        description,
+                    ),
+                    timeout=self._mr_io_timeout_s(),
                 )
-            except httpx.HTTPError:
+            except (httpx.HTTPError, TimeoutError):
+                # a timeout after possibly executing = unknown outcome
                 await controller.complete_action(action_id, "unknown_outcome")
                 await session.commit()
                 raise

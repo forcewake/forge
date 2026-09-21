@@ -307,9 +307,19 @@ def compile_harness_selection(
         if name in available_lanes and name not in chain:
             chain.append(name)
     if not chain:
-        # Rule 2 (byte-compat) + the ADR-0015 floor: the configured backend
-        # is always runnable — an empty/fully-dropped preference degrades to
-        # the one-element list today's behavior implies.
+        # Rule 2 (byte-compat) + the ADR-0015 floor — SPLIT by whether a
+        # capability manifest was EXPLICITLY declared (C06):
+        # - NO manifest (the legacy single-driver posture): the configured
+        #   backend is always runnable — degrade to it, as always.
+        # - an EXPLICIT manifest whose intersection with the preference is
+        #   EMPTY or fully disjoint: a configuration contradiction — the
+        #   default driver may not silently expand a declared boundary.
+        if available_lanes and driver not in available_lanes:
+            raise ValueError(
+                f"capability manifest {sorted(available_lanes)} excludes the configured "
+                f"driver {driver!r} and intersects the preference in nothing — refusing "
+                "to expand a declared boundary with a default"
+            )
         chain = [driver]
 
     budget_class = default_budget_class if default_budget_class in BUDGET_CLASSES else "standard"

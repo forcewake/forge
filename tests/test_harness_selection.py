@@ -888,3 +888,39 @@ class TestDoctorHarnessLanes:
 
         assert "project.harness.claude-code" in results
         assert results["project.harness_chain"].detail == "[claude-code]"
+
+
+# ----------------------------------------------------------------------
+# C06: an explicitly declared manifest is a strict upper bound
+# ----------------------------------------------------------------------
+
+
+class TestStrictManifestC06:
+    def test_an_explicit_disjoint_manifest_refuses_the_default_driver(self):
+        """preference=[claude-code], configured=claude-code, available=
+        {opencode}: the intersection is empty — the default may not expand
+        the DECLARED boundary. A configuration contradiction surfaces at
+        compile time, before any paid work."""
+        import pytest as _pytest
+
+        from forge.runs.harness_selection import compile_harness_selection
+
+        with _pytest.raises(ValueError, match="capability manifest"):
+            compile_harness_selection(
+                ["claude-code"],  # preference
+                "ci_harness:claude-code",  # configured backend
+                {"opencode"},  # EXPLICIT, disjoint manifest
+                None,
+            )
+
+    def test_no_manifest_keeps_the_legacy_default(self):
+        from forge.runs.harness_selection import compile_harness_selection
+
+        selection = compile_harness_selection([], "ci_harness:claude-code", set(), None)
+        assert selection.harness == "claude-code"  # the ADR-0015 floor
+
+    def test_an_manifest_containing_the_default_still_degrades(self):
+        from forge.runs.harness_selection import compile_harness_selection
+
+        selection = compile_harness_selection([], "ci_harness:claude-code", {"claude-code"}, None)
+        assert selection.harness == "claude-code"

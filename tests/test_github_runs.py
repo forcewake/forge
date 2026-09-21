@@ -2992,3 +2992,90 @@ class TestA14ComposedServiceLegs:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         await composed_a03_comment_same_id_edited_body(monkeypatch)
+
+
+# ----------------------------------------------------------------------
+# C11: mutation tests — re-introducing the reviewed defect must go RED.
+# These run the PRODUCTION path; each simulates exactly one reverted line.
+# ----------------------------------------------------------------------
+
+
+class TestMutationGuardsC11:
+    async def test_mutation_name_collapse_restores_the_false_verified(self, db, fake, monkeypatch):
+        """Revert C01 (collapse by name without the ambiguity map) → the
+        inverted collision verifies again → the guard must FAIL the run's
+        readiness assertion (proving the regression test bites)."""
+        import forge.runs.github_service as gs
+
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "failure",
+                    path=".github/workflows/tests.yml",
+                    run_id=30,
+                    attempt=1,
+                ),
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/decoy.yml",
+                    run_id=99,
+                    attempt=1,
+                ),
+            ]
+        )
+
+        # MUTATION: drop the ambiguity map before the decision
+        _real_observe = gs.observe_verification
+
+        def observe_no_ambiguous(**kwargs):
+            kwargs.pop("ambiguous_checks", None)
+            return _real_observe(**kwargs)
+
+        monkeypatch.setattr(gs, "observe_verification", observe_no_ambiguous)
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        # with the mutation the name-collapse verifies → the mutation is
+        # VISIBLE (this asserts the mutated behavior differs from shipped)
+        mutated_verified = run.status == FlowStatus.READY_FOR_HUMAN.value
+        monkeypatch.undo()
+        assert mutated_verified, (
+            "mutation no longer changes behavior — the C01 regression lost its bite; "
+            "update it alongside the identity contract"
+        )
+
+    async def test_mutation_updated_at_deadline_restores_the_slide(self, db, fake, monkeypatch):
+        """Revert B01/C-era epoch (deadline from updated_at) → repeated
+        observations slide the deadline again."""
+        import forge.runs.github_service as gs
+
+        settings = make_settings(
+            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
+        )
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+
+        real_epoch = gs.verification_epoch
+
+        def sliding_epoch(evidence, sha, now):
+            # MUTATION: pretend the epoch restarts every observation
+            return {"candidate_sha": sha, "started_at": now.isoformat()}, True
+
+        monkeypatch.setattr(gs, "verification_epoch", sliding_epoch)
+        far = datetime.now(timezone.utc) + timedelta(seconds=601)
+        await service.evaluate_waiting_ci_one(run_id, now=far)
+        monkeypatch.undo()
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value, (
+            "the sliding-deadline mutation no longer slides — the B01 regression lost its bite"
+        )

@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import asyncio
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -942,3 +944,49 @@ class TestMRReservations:
 
         assert first == second
         assert len(service._gitlab.calls_of("create_merge_request")) == 1
+
+
+class TestBoundedMrIoC08:
+    async def test_a_hung_provider_list_fails_closed_within_the_bound(self, db, service):
+        """C08: a provider read that never answers must not pin the
+        reservation lock forever — the bounded window fails closed (the
+        reservation stays open, zero creates)."""
+        run_id = await start_issue_run(service)
+
+        async def hanging_list(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        service._gitlab.list_merge_requests = hanging_list  # type: ignore[method-assign]
+        service._settings = make_settings(FORGE_MR_IO_TIMEOUT_SECONDS=0.05)
+
+        with pytest.raises((TimeoutError, GitLabAPIError)):
+            await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/hang", "sha-1")
+
+        assert service._gitlab.calls_of("create_merge_request") == []
+
+    async def test_a_hung_create_records_unknown_outcome(self, db, service):
+        run_id = await start_issue_run(service)
+
+        async def hanging_create(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        service._gitlab.create_merge_request = hanging_create  # type: ignore[method-assign]
+        service._settings = make_settings(FORGE_MR_IO_TIMEOUT_SECONDS=0.05)
+
+        with pytest.raises(TimeoutError):
+            await service._create_draft_mr(PROJECT_ID, run_id, "factory/1/hang2", "sha-1")
+
+        async with db() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ActionLog).where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind == "create_merge_request",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert rows[-1].status == "unknown_outcome"

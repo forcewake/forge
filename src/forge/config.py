@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     FORGE_GITHUB_BOT_LOGIN: str = "forcewake-forge[bot]"
     # R02: bounded wait for PR checks on the candidate sha before a
     # waiting_ci run is declared verification_timeout.
+    #: C08: bounded provider-I/O window for MR list/create under the
+    #: reservation lock (seconds; 30 default).
+    FORGE_MR_IO_TIMEOUT_SECONDS: float = 30.0
+
     FORGE_VERIFICATION_TIMEOUT_SECONDS: int = 1800
     # A just-opened PR's checks need a few seconds to register; before this
     # grace elapses the verifier keeps waiting instead of concluding
