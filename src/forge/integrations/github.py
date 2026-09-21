@@ -30,6 +30,11 @@ cannot duplicate a remote effect.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.repository.identity import RepositoryIdentity
+
 import asyncio
 import base64
 import binascii
@@ -343,6 +348,11 @@ class GitHubClient:
             ),
         )
         self._tokens = token_provider
+
+    @property
+    def base_url(self) -> str:
+        """The API base URL (the tenant of every repository identity)."""
+        return str(self._client.base_url)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -1223,6 +1233,17 @@ class GitHubRepositoryReader:
         self._client = client
         self._owner = owner
         self._repo = repo
+
+    def identity(self) -> "RepositoryIdentity":
+        """The canonical repository identity (FND-01)."""
+        from forge.repository.identity import RepositoryIdentity as _RI
+
+        return _RI(
+            tenant=str(self._client.base_url),
+            provider="github",
+            native_id=f"{self._owner}/{self._repo}",
+            display=f"github.com/{self._owner}/{self._repo}",
+        )
 
     async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
         """Complete file content at *ref*, base64-encoded like GitLab's schema.

@@ -62,33 +62,41 @@ _CACHE_TTL = 300  # 5 minutes
 # several repositories (Azure repos of one project share it) and
 # independent providers can collide on the numeric id, so a project-id
 # cache crossed repository policies (review 44cdae D01, probe P01/P02).
-_cache: dict[tuple[str, str, str, str], tuple[ProjectConfig | None, str, str, float]] = {}
+_cache: dict[tuple[str, str, str, str, str], tuple[ProjectConfig | None, str, str, float]] = {}
 
 
 def _authority_identity(
     client: object,
     project_id: int,
     ref: str,
-) -> tuple[str, str, str, str]:
-    """The canonical cache identity of one authority read (D01).
+) -> tuple[str, str, str, str, str]:
+    """The canonical cache identity of one authority read (D01 → FND-01).
 
-    Repository-bound readers (GitHub/Azure) contribute their bound
-    owner+repo; the GitLab client (project-scoped) contributes its base
-    URL + the project id. ``ref`` and the config path complete the key —
-    a different requested ref is a DIFFERENT authority snapshot, never a
-    cache hit (probe P02).
+    The PUBLIC :class:`~forge.repository.identity.RepositoryIdentity`
+    contract owns the identity — adapters implement ``identity()``; this
+    helper NEVER probes private attributes (the 44cdae helper recognized
+    GitHub-style ``_owner``/``_repo`` but the REAL Azure reader carries
+    ``_project``/``_repo``, so two repositories of one project fell into
+    the project-id fallback and could share one policy entry — the first
+    remaining defect of the 05868e9 review).
     """
-    owner = getattr(client, "_owner", None)
-    repo = getattr(client, "_repo", None)
-    if isinstance(owner, str) and isinstance(repo, str) and owner and repo:
-        provider = type(client).__name__
-        authority = f"{owner}/{repo}"
-    else:
-        base = getattr(client, "base_url", None) or getattr(client, "_base_url", None)
-        base_text = base if isinstance(base, str) else ""
-        provider = type(client).__name__
-        authority = f"{base_text.rstrip('/')}/{int(project_id)}"
-    return (provider, authority, ref, CONFIG_FILE)
+    from forge.repository.identity import RepositoryIdentity, repository_identity
+
+    identity = repository_identity(client)
+    if identity is None and callable(getattr(client, "identity", None)):
+        # GitLab: project-scoped at call time — identity(project_id)
+        try:
+            candidate = client.identity(project_id)  # type: ignore[call-arg]
+            if isinstance(candidate, RepositoryIdentity):
+                identity = candidate
+        except TypeError:
+            identity = None
+    if identity is not None:
+        return identity.cache_key(ref, CONFIG_FILE)
+    # Legacy adapter without the contract: fully-qualified type+repr+project
+    # key — never a bare project id (cross-adapter collisions), and two
+    # projects never share the entry.
+    return (type(client).__name__, repr(client), f"legacy:{int(project_id)}", ref, CONFIG_FILE)
 
 
 #: The config path every provider reads (the config authority).

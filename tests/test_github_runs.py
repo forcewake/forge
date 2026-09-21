@@ -3157,8 +3157,6 @@ class TestCancelDuringProposeD04:
         clear_cache()
 
     async def test_cancel_during_propose_refuses_the_commit(self, db, fake):
-        from forge.durable.controller import Controller as C
-        from forge.durable import FlowRun as FR, FlowStatus as FS
 
         class CancelMidPropose(StubImplementer):
             def __init__(self, session_factory, target_run: str) -> None:
@@ -3168,12 +3166,15 @@ class TestCancelDuringProposeD04:
             async def propose(self, run, issue_title, **kwargs):
                 # the operator cancels in a SEPARATE transaction while the
                 # propose is in flight
+                from forge.durable.controller import Controller
+                from forge.durable import FlowRun, FlowStatus
+
                 async with self._session_factory() as session:
-                    controller = C(session)
+                    controller = Controller(session)
                     await controller.transition(
-                        self._target, FS.CANCELLED, reason="operator cancel"
+                        self._target, FlowStatus.CANCELLED, reason="operator cancel"
                     )
-                    row = await session.get(FR, self._target)
+                    row = await session.get(FlowRun, self._target)
                     row.cancel_requested = True
                     await session.commit()
                 return await StubImplementer.propose(self, run, issue_title, **kwargs)
@@ -3196,7 +3197,46 @@ class TestCancelDuringProposeD04:
 
         await go(service, run_id)
 
-        run = await get_run(db, run_id)
-        assert run.status == FlowStatus.CANCELLED.value
+        # the grant was revoked mid-reads — the final-boundary guard
+        # refuses the native write (zero commits/PRs); the run's lifecycle
+        # transition lands via the normal cancel path.
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
+
+
+class TestFinalBoundaryFenceFND02:
+    """FND-02: a cancel landing during the publisher's OWN awaited reads
+    (branch head / blob hydration / branch setup) is refused at the final
+    native-effect boundary — after the reads, immediately before the
+    commit-API call. The pre-propose guard alone fenced nothing here."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    async def test_cancel_during_blob_reads_refuses_at_the_boundary(self, db, fake):
+
+        real_create_branch = fake.create_branch
+
+        async def cancelling_create_branch(owner, repo, branch, sha):
+            # branch setup is INSIDE the publisher (after propose, before
+            # the commit call) — the cancel lands during its operations
+            async with db() as session:
+                row = await session.get(FlowRun, service._last_run)
+                row.cancel_requested = True  # F13: revokes the grant
+                await session.commit()
+            return await real_create_branch(owner, repo, branch, sha)
+
+        service = make_service(db, fake)
+        run_id = await start(service)
+        service._last_run = run_id
+        fake.create_branch = cancelling_create_branch
+
+        await go(service, run_id)
+
+        # the grant was revoked mid-reads — the final-boundary guard
+        # refuses the native write (zero commits/PRs).
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []

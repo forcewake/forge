@@ -44,6 +44,11 @@ token re-mint: a PAT is static, so a 401 is always raised.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.repository.identity import RepositoryIdentity
+
 import asyncio
 import base64
 import logging
@@ -321,13 +326,19 @@ class AzureDevOpsClient:
         timeout: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        self._base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
+            base_url=self._base_url,
             timeout=timeout,
             transport=transport,
         )
         self._token = token
         self._default_api_version = default_api_version
+
+    @property
+    def org_url(self) -> str:
+        """The org/collection base URL (the tenant of every identity)."""
+        return self._base_url
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -1327,6 +1338,22 @@ class AzureRepositoryReader:
         self._client = client
         self._project = project
         self._repo = repo
+
+    def identity(self) -> RepositoryIdentity:
+        """The canonical repository identity (FND-01).
+
+        ``native_id`` is ``project/repo`` — two repositories of ONE Azure
+        project are different repositories and must never share a policy
+        cache entry (the exact defect this contract closes).
+        """
+        from forge.repository.identity import RepositoryIdentity as _RI
+
+        return _RI(
+            tenant=self._client.org_url,
+            provider="azure_devops",
+            native_id=f"{self._project}/{self._repo}",
+            display=f"{self._client.org_url}/{self._project}/_git/{self._repo}",
+        )
 
     async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD") -> RepositoryFile:
         """Complete file content at *ref*, base64-encoded like GitLab's schema.

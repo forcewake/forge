@@ -115,6 +115,10 @@ def make_settings(**overrides) -> Settings:
 
 
 class FakeLaneClient:
+    @property
+    def org_url(self) -> str:
+        return "https://dev.azure.test/fabrikam"
+
     def __init__(self) -> None:
         self.heads: dict[str, str] = {"main": BASE_HEAD}
         self.work_items: dict[int, dict] = {}

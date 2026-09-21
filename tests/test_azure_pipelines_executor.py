@@ -109,6 +109,10 @@ class FakeAzureDevOps:
     drift between the executor and :class:`AzureDevOpsClient` fails here.
     """
 
+    @property
+    def org_url(self) -> str:
+        return "https://dev.azure.test/fabrikam"
+
     def __init__(self) -> None:
         self.dispatches: list[dict[str, Any]] = []
         self.dispatch_run_id = RUN_ID  # 0 emulates the empty Server response

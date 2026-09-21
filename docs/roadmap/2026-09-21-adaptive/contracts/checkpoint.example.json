@@ -1,0 +1,17 @@
+{
+  "schema": "forge.proposal.checkpoint/1",
+  "checkpoint_id": "cp-demo-1",
+  "work_id": "wp-demo-1",
+  "attempt_id": "attempt-demo-1",
+  "execution_epoch": 2,
+  "plan_revision": 1,
+  "snapshot_set_digest": "0d0df29001db1d5943bc9c45ad0483567dd5698d459fc000d0e0d6fe5e44ff74",
+  "work_contract_digest": "2e703bcbb99b1d534aedc8e0b22956d9107190a6f1fe635e7438b5a80da87c73",
+  "wip_artifact_id": "artifact:wip-demo",
+  "wip_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "last_applied_command_sequence": 3,
+  "native_session_artifact_id": null,
+  "profile_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "outstanding_effect_ids": [],
+  "state": "complete"
+}

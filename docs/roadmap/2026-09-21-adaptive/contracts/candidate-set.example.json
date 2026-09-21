@@ -1,0 +1,25 @@
+{
+  "schema": "forge.proposal.candidate-set/1",
+  "work_id": "wp-demo-1",
+  "plan_revision": 1,
+  "work_contract_digest": "2e703bcbb99b1d534aedc8e0b22956d9107190a6f1fe635e7438b5a80da87c73",
+  "members": [
+    {
+      "repository_id": "orders",
+      "base_oid": "1111111111111111111111111111111111111111",
+      "candidate_oid": "3333333333333333333333333333333333333333",
+      "image_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "role": "changed"
+    },
+    {
+      "repository_id": "billing",
+      "base_oid": "2222222222222222222222222222222222222222",
+      "candidate_oid": "2222222222222222222222222222222222222222",
+      "image_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "role": "baseline"
+    }
+  ],
+  "contract_bundle_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "test_bundle_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "environment_profile_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+}

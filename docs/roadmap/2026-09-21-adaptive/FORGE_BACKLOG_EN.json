@@ -1,0 +1,2387 @@
+{
+  "schema": "forge.proposed-backlog/1",
+  "repository": "forcewake/forge",
+  "snapshot": "05868e989a5ab3ae214f905ef0681f224c1dfe5f",
+  "version": "0.15.0",
+  "date": "2026-09-21",
+  "language": "en",
+  "status": "Design proposal; no GitHub issues or source changes were created.",
+  "count": 64,
+  "epics": {
+    "FND": "Authority and durable foundation",
+    "DSC": "System-aware discovery and context",
+    "PLN": "Versioned plans and controlled adaptation",
+    "CTL": "Durable human control",
+    "EXE": "Interactive and resumable harness execution",
+    "MRP": "Coordinated multi-repository work",
+    "VER": "Independent system verification",
+    "OPS": "Evaluation, operations and customer delivery"
+  },
+  "phases": {
+    "P0": "Foundation corrections and compatibility. Read-only discovery prototyping can proceed in parallel; do not enable new privileged write/control paths before their gates.",
+    "P1": "Repository-aware planning and questions. One writable target, one tested runtime, explicit evidence. Some planning scaffolding is shared with P2.",
+    "P2": "Adaptive single-repository delivery: revision decisions, pause/resume/steer, checkpoint portability and independent evidence.",
+    "P3": "System-level read context and bounded two/three-repository coordinated work. Reuse child runs; no generic workflow language.",
+    "P4": "Additional runtime adapters, representative ten-service acceptance, operational hardening and design-partner promotion."
+  },
+  "priority_semantics": "P1 is required before enabling the affected capability, not a claim that every story fixes an existing vulnerability. P2 is planned product work or hardening. Relative sizes are engineering sizing hints, not elapsed-time estimates.",
+  "global_definition_of_done": [
+    "State the invariant and demonstrate a failing baseline before fixing an existing defect.",
+    "Use the production service entry or real adapter constructor for boundary tests; helper-only tests are supplementary.",
+    "Persist versioned inputs, authorization, outputs and lineage; do not derive authority from model output.",
+    "Cover duplicate delivery, cancellation, stale revision and missing evidence wherever the story crosses those boundaries.",
+    "Keep provider writes behind the trusted publisher and never add auto-merge or production deployment rights.",
+    "Update runtime/profile conformance and documentation; record performed, skipped and unsupported evidence honestly.",
+    "Maintain backward compatibility or a versioned migration; do not silently reinterpret old approvals.",
+    "No hard performance/cost claim without the corresponding measurement population and completeness."
+  ],
+  "items": [
+    {
+      "id": "FND-01",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Use canonical repository identity for authority reads",
+      "type": "defect",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "The new cache-key helper understands _owner/_repo but the real Azure reader exposes _project/_repo. Two repositories in one project can still reuse one policy entry.",
+      "implementation": [
+        "Introduce a public RepositoryIdentity value containing tenant, connection, provider, native repository ID and display locator",
+        "Implement identity() on the real GitLab, GitHub and Azure adapters; eliminate private-attribute probing",
+        "Resolve branch names to immutable OIDs before policy reads; key the authority cache by identity, OID, config path and policy schema",
+        "Recheck current read authorization on cache hits; invalidate authorization independently of immutable content caching"
+      ],
+      "acceptance_criteria": [
+        "Actual AzureRepositoryReader instances for two repositories in one project produce different keys",
+        "Different hosts with identical owner/repo names never share content or policy",
+        "A new source OID cannot hit the old ref policy cache",
+        "A revoked principal cannot retrieve cached data",
+        "Cached absence in repository A never grants unrestricted writes in repository B"
+      ],
+      "negative_and_recovery_tests": [
+        "Run the real reader constructors over fake HTTP transports; one repository has no config and the other restricts src/b/**",
+        "Repeat with one host name, two connections and a revoked principal; assert zero unauthorized bytes and zero publish calls"
+      ],
+      "dependencies": [],
+      "sources": [
+        "R05",
+        "R06"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-02",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Fence publication at the final native-effect boundary",
+      "type": "defect",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The run-aware wrapper checks cancellation before the bridge performs awaited authoritative reads and branch setup. A pause or cancel during those operations can still precede a new write.",
+      "implementation": [
+        "Split candidate preparation from native effect dispatch; return a validated manifest with base and policy digests",
+        "Require a current execution claim and publication epoch after all long reads, and serialize native-effect authorization with pause/cancel in Postgres",
+        "Persist the publication intent before dispatch; record accepted-but-superseded outcomes without retrying blindly",
+        "Load the target from the approved spec rather than live service defaults; apply the same rule to adopted PR creation"
+      ],
+      "acceptance_criteria": [
+        "Cancel during propose, blob hydration or branch lookup results in zero subsequent commit dispatches",
+        "A stale claim cannot publish after a new plan revision activates",
+        "Scope is loaded from the approved run, never supplied by the agent",
+        "A cancel after dispatch records uncertain or superseded evidence without claiming the remote effect was undone",
+        "No adapter exposes an unfenced production write shortcut"
+      ],
+      "negative_and_recovery_tests": [
+        "Pause the fake blob reader on a barrier, revoke the run in a separate transaction, then release the barrier",
+        "Delay provider application until after local cancellation and verify reconciliation retains exactly the observed effect, not a fabricated rollback"
+      ],
+      "dependencies": [
+        "FND-01"
+      ],
+      "sources": [
+        "R04",
+        "R07"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-03",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Make authoritative-read failures fail closed in every publisher",
+      "type": "defect",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "The GitHub bridge still catches broad GitHubAPIError during base reads. A read failure is not evidence that a path is absent.",
+      "implementation": [
+        "Use the shared typed blob result in all materializers and publishers",
+        "Distinguish confirmed absence from forbidden, transient failure, incomplete content and unsupported file modes",
+        "Validate full blob digests and strict encoding before candidate application",
+        "Record per-path read evidence without logging raw private file content by default"
+      ],
+      "acceptance_criteria": [
+        "403, 429, 5xx and truncated content never become create permission",
+        "Missing files allow create only after an authoritative absence result",
+        "A proposed update cannot change its operation because evidence was unavailable",
+        "Invalid UTF-8, symlinks and oversized blobs produce explicit supported/unsupported decisions"
+      ],
+      "negative_and_recovery_tests": [
+        "Inject every read failure into builtin and harness publication paths on all providers",
+        "A failure after some files were materialized produces no partial commit"
+      ],
+      "dependencies": [
+        "FND-01",
+        "FND-02"
+      ],
+      "sources": [
+        "R07",
+        "R03"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-04",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Define versioned capability and credential profiles",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Interactive planning requires role-specific controls; a driver name is not a promise of live steering, resumability or arbitrary BYOK compatibility.",
+      "implementation": [
+        "Create a capability record for read tools, structured output, interrupt, live input, checkpoint export, questions and usage completeness",
+        "Bind driver package/image digest, provider route and credential mode to a tested profile",
+        "Preserve absent versus explicitly empty manifests and reject incompatible role/profile combinations",
+        "Reference credentials by broker-owned ID; never put secret values in RunSpec or artifacts"
+      ],
+      "acceptance_criteria": [
+        "Discovery cannot select a write-enabled profile silently",
+        "A CLI with checkpoint-only control is never advertised as native interactive",
+        "Unsupported SDK/provider/credential combinations fail during onboarding",
+        "A missing selected credential does not fall back to another provider key"
+      ],
+      "negative_and_recovery_tests": [
+        "Registry-driven sentinel-credential tests cover all shipped recipes",
+        "A profile loses a capability after an upgrade; existing runs retain their pinned profile or block with an explicit incompatibility"
+      ],
+      "dependencies": [
+        "FND-01"
+      ],
+      "sources": [
+        "R08",
+        "R09",
+        "R11",
+        "X03",
+        "X08"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-05",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Persist immutable evidence and workspace checkpoints safely",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Long human waits and runner recycling require durable artifacts, not local CI paths or vendor session IDs.",
+      "implementation": [
+        "Add a content-addressed artifact store interface with tenant-scoped authorization, retention and encryption configuration",
+        "Store metadata and grants in Postgres; store large diffs, logs and approved evidence in an object store",
+        "Enforce archive size, path traversal, symlink and content-type checks before extraction",
+        "Keep vendor session files optional and redact or exclude credential-bearing state"
+      ],
+      "acceptance_criteria": [
+        "Checkpoint references resolve after the original runner is destroyed",
+        "Cross-tenant digest equality does not grant content access",
+        "Expired artifacts produce a recoverable explicit state, not a fresh empty workspace",
+        "WIP manifests contain tracked changes, untracked files, deletions and source OIDs"
+      ],
+      "negative_and_recovery_tests": [
+        "Test malicious archive entries, overlarge expansions and unauthorized object-store URLs",
+        "Kill upload between content and metadata commit; recovery never advertises an incomplete checkpoint"
+      ],
+      "dependencies": [
+        "FND-01"
+      ],
+      "sources": [
+        "X06",
+        "R11"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-06",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Make checkpoint and control-event deduplication database-enforced",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Interactive retries create more races than a one-shot command. A query-then-insert convention is insufficient for replay keys.",
+      "implementation": [
+        "Add unique keys for run/attempt/step/input digest and command source delivery ID",
+        "Use transactional insert-or-read behavior and explicit first-result-wins semantics",
+        "Record publication, checkpoint and control epochs independently",
+        "Separate immutable event history from mutable projections; never overwrite a historical decision"
+      ],
+      "acceptance_criteria": [
+        "Two workers recording the same checkpoint preserve one authoritative result",
+        "Redelivered commands do not spend another iteration or grant another approval",
+        "Duplicate tool callbacks resolve against one question ID",
+        "Recovery can rebuild projections without rerunning model calls whose result is durable"
+      ],
+      "negative_and_recovery_tests": [
+        "Use two real PostgreSQL sessions with barriers around competing inserts",
+        "Kill the process after event commit but before projection update; rebuilding yields the same state"
+      ],
+      "dependencies": [
+        "FND-05"
+      ],
+      "sources": [
+        "R04",
+        "R10",
+        "X09",
+        "X10"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-07",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Add a compatibility migration for legacy and adaptive runs",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Existing v3 approvals must not acquire new adaptation privileges just because the software was upgraded.",
+      "implementation": [
+        "Introduce a new adaptive contract schema alongside v3 without rewriting old approved bytes",
+        "Add opt-in feature flags per connection/project and safe drain behavior for in-flight old runs",
+        "Define schema downgrade constraints and forward-recovery procedures for new event history",
+        "Validate release artifacts against both old-run replay and new-run startup"
+      ],
+      "acceptance_criteria": [
+        "A v3 run continues under its original authority or explicitly requests reapproval",
+        "No migration invents system read scope or plan-change permission",
+        "Disabling adaptive mode leaves existing evidence readable",
+        "Previous release data migrates with actual nonempty history"
+      ],
+      "negative_and_recovery_tests": [
+        "Upgrade while one run is at approval, one at publication unknown and one waiting for a question",
+        "Attempt downgrade with adaptive history and require a preflight refusal rather than partial destructive changes"
+      ],
+      "dependencies": [
+        "FND-06"
+      ],
+      "sources": [
+        "R10",
+        "R13",
+        "R14"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "FND-08",
+      "epic": "FND",
+      "phase": "P0",
+      "title": "Establish a production-path invariant test suite",
+      "type": "validation",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The last reviews exposed defects that narrow helper tests did not see. New planning and control paths must share the same negative acceptance traces.",
+      "implementation": [
+        "Create provider-neutral fixtures that invoke actual service entry points and real adapter constructors",
+        "Run baseline and mutant on identical clocks/events; kill mutants by unchanged assertions",
+        "Add two-repository, two-ref, malformed-policy, stale-claim and cancel-during-read cases",
+        "Publish performed/skipped/unsupported results per profile and pinned SHA"
+      ],
+      "acceptance_criteria": [
+        "Disabling the final publication fence makes the original negative test fail",
+        "Replacing repository identity with project ID makes a real-adapter test fail",
+        "Success at boot is never labeled live SDLC verification",
+        "A test registration marker alone cannot close a finding"
+      ],
+      "negative_and_recovery_tests": [
+        "Run selected traces on two OS worker processes and a durable fake provider service",
+        "Reorder and duplicate deliveries; final state and authorized effects remain invariant"
+      ],
+      "dependencies": [
+        "FND-01",
+        "FND-02",
+        "FND-03",
+        "FND-06"
+      ],
+      "sources": [
+        "R13",
+        "R15",
+        "R16"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/platform engineer"
+    },
+    {
+      "id": "DSC-01",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Introduce an explicit discovery stage before planning",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The current planner has no repository evidence. Increasing its prompt limit alone does not create project understanding.",
+      "implementation": [
+        "Add DiscoveryRun as a durable pre-plan stage with its own read authorization and spend allowance",
+        "Keep the existing text-only planner as an explicitly limited fast path for trivial or fully supplied tasks",
+        "Dispatch discovery through an existing CI execution profile, not inside the privileged API process",
+        "Return a structured evidence bundle and unresolved questions rather than code changes"
+      ],
+      "acceptance_criteria": [
+        "Normal customer tasks cannot receive an evidence-backed plan without discovery evidence",
+        "Discovery creates no source-control branch, commit or PR",
+        "Restart resumes an existing discovery result instead of paying for it again",
+        "Fast-path plans are visibly marked as not repository-researched"
+      ],
+      "negative_and_recovery_tests": [
+        "Attempt a write tool or arbitrary new repository read during discovery and verify refusal",
+        "Crash after discovery result persistence and ensure the planner consumes the same bundle"
+      ],
+      "dependencies": [
+        "FND-04",
+        "FND-05",
+        "FND-06"
+      ],
+      "sources": [
+        "R02",
+        "X01",
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-02",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Materialize immutable read-only repository snapshots",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "A plan must cite a stable version of the code; live branch reads across a long session produce an incoherent basis.",
+      "implementation": [
+        "Create a SnapshotSet of authorized repository IDs and exact commit OIDs",
+        "Clone or hydrate snapshots only in the execution environment; keep source mounts read-only and use a separate scratch directory",
+        "Validate submodule, LFS, symlink and external-fetch policies explicitly",
+        "Strip source-control credentials after hydration; retain only artifact upload and scoped control access"
+      ],
+      "acceptance_criteria": [
+        "Every evidence reference belongs to one recorded snapshot",
+        "Moving main during discovery does not change the mounted source",
+        "Discovery cannot edit sources or retrieve an unregistered submodule",
+        "The source writer can remain API-based; clone is not added to the control plane"
+      ],
+      "negative_and_recovery_tests": [
+        "Change default branches while the discovery job is running",
+        "Seed repository hooks and external submodule URLs; verify no uncontrolled execution or download"
+      ],
+      "dependencies": [
+        "FND-01",
+        "FND-04",
+        "DSC-01"
+      ],
+      "sources": [
+        "X04",
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-03",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Provide bounded read, search and symbol tools",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The model needs to inspect implementations and references, not guess paths from the issue description.",
+      "implementation": [
+        "Expose read_file, list_paths, grep, find_symbol and find_references through a snapshot-aware tool API",
+        "Start with lexical search and language-native symbols; add a lightweight parser only where needed",
+        "Return source OID, exact path/range and completeness for each result",
+        "Apply authorization before search ranking and again before content hydration"
+      ],
+      "acceptance_criteria": [
+        "No search result exposes names or snippets from an unauthorized repository",
+        "Truncated results are explicitly marked and can be paged",
+        "Exact symbol or API route queries locate the seeded implementation and its tests",
+        "Output budgets never erase a failure or completeness marker"
+      ],
+      "negative_and_recovery_tests": [
+        "Use ambiguous class names across repositories and ensure returned identities remain distinct",
+        "Query beyond result/page limits and inspect a denied path via a symbol alias"
+      ],
+      "dependencies": [
+        "DSC-02"
+      ],
+      "sources": [
+        "X01",
+        "R03"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-04",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Extract a practical project map and test inventory",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Useful planning needs entry points, build commands, ownership hints, contracts and existing tests before a large semantic index.",
+      "implementation": [
+        "Extract manifests, solution/project files, CI definitions, public API/event schemas, migrations and test locations",
+        "Produce observed facts with citations and inferred relations with confidence labels",
+        "Keep commands as discovered metadata until a trusted execution profile validates them",
+        "Exclude generated/vendor artifacts by a declared policy while recording coverage gaps"
+      ],
+      "acceptance_criteria": [
+        "The project map names actual runnable test/build candidates and their source definitions",
+        "A README claim is distinguishable from a verified CI command",
+        "Missing schemas or migrations appear as unknowns, not fabricated paths",
+        "Regeneration is deterministic for a fixed SnapshotSet and extractor version"
+      ],
+      "negative_and_recovery_tests": [
+        "Use a stale README and an updated CI file and require both facts with the conflict visible",
+        "Test a monorepo with generated code and multiple test runners"
+      ],
+      "dependencies": [
+        "DSC-03"
+      ],
+      "sources": [
+        "X01",
+        "X11"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-05",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Build evidence-backed plans with machine-checkable citations",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The current plan is a short JSON guess from issue text and path hints. The proposed output must connect each material step to inspected evidence.",
+      "implementation": [
+        "Run a tool-using planning profile over the discovery snapshot and scratch space",
+        "Return plan steps, evidence_refs, assumptions, affected interfaces, tests, unknowns and decision requests",
+        "Validate all evidence IDs, paths, ranges and hashes outside the model",
+        "Preserve a concise human summary without truncating the executable structured plan"
+      ],
+      "acceptance_criteria": [
+        "Every implementation-affecting factual assertion has resolvable evidence or an explicit assumption label",
+        "A nonexistent files_hint cannot become a claimed existing implementation",
+        "The human sees impacted services, testing strategy and unresolved decisions before approval",
+        "Structured plan size is independent from the old 1,500-character display summary"
+      ],
+      "negative_and_recovery_tests": [
+        "Seed a convincing but nonexistent endpoint name in the issue and require discovery to reject or qualify it",
+        "Give a truncated tool result and ensure the plan records the gap rather than citing unseen content"
+      ],
+      "dependencies": [
+        "DSC-03",
+        "DSC-04",
+        "PLN-01",
+        "PLN-02"
+      ],
+      "sources": [
+        "R02",
+        "R03",
+        "X01"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-06",
+      "epic": "DSC",
+      "phase": "P1",
+      "title": "Run bounded verification probes during discovery",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "L",
+      "problem": "Some questions cannot be answered by file reads, but read-only planning must not acquire arbitrary execution or production access.",
+      "implementation": [
+        "Allow the planner to request named baseline probes from the trusted test executor",
+        "Run requested build/tests in disposable writable copies with synthetic dependencies and no production credentials",
+        "Record baseline failures separately from candidate regressions",
+        "Require an approved discovery budget and tool/network profile for each probe"
+      ],
+      "acceptance_criteria": [
+        "A requested probe maps to an approved command template rather than an arbitrary shell string",
+        "Failing baseline tests are attached before implementation begins",
+        "A probe cannot publish changes or modify persistent shared services",
+        "The planner receives logs and reports with execution identity and redaction"
+      ],
+      "negative_and_recovery_tests": [
+        "Request a migration against a production endpoint and verify refusal",
+        "Run a repository test with a malicious network side effect under the restricted profile"
+      ],
+      "dependencies": [
+        "DSC-02",
+        "VER-01",
+        "VER-02"
+      ],
+      "sources": [
+        "X14",
+        "X04"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-07",
+      "epic": "DSC",
+      "phase": "P3",
+      "title": "Register systems and read-only cross-repository dependencies",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "A customer with ten services needs system awareness before cross-repository writes. Repository count and write scope are separate dimensions.",
+      "implementation": [
+        "Introduce a versioned SystemManifest mapping services, repositories, APIs, events, resources and dependency edges",
+        "Import a simple administrative YAML first; optionally translate Backstage entities",
+        "Preserve provenance and distinguish declared, observed and inferred edges",
+        "Treat owner metadata as routing information only; authorize reads through actual connection/project policy"
+      ],
+      "acceptance_criteria": [
+        "A work item can read ten approved repositories while only one repository is writable",
+        "Unknown or inaccessible dependencies are visible without leaking private names/content",
+        "An imported owner field does not grant approval rights",
+        "Cyclic service topology is accepted as topology rather than forced into a work DAG"
+      ],
+      "negative_and_recovery_tests": [
+        "Import a catalog entry that references an unauthorized repository and verify no fetch",
+        "Rename a service and preserve stable repository/resource identities"
+      ],
+      "dependencies": [
+        "FND-01",
+        "DSC-04",
+        "PLN-01"
+      ],
+      "sources": [
+        "X11"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "DSC-08",
+      "epic": "DSC",
+      "phase": "P3",
+      "title": "Compute bounded impact slices and retrieval coverage",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Loading all repositories into one context is expensive and still misses implicit contracts. Discovery should follow the change impact, not repository size alone.",
+      "implementation": [
+        "Traverse API/event/schema dependency edges to propose a relevant read set",
+        "Separate required evidence from optional exploration and cap depth, tools and bytes",
+        "Use small independent discovery specialists only for separable investigations; one root planner resolves contradictions",
+        "Store omitted dependencies, uncertainty and retrieval coverage for review"
+      ],
+      "acceptance_criteria": [
+        "A change to a producer event discovers registered consumers and contract tests",
+        "Parallel reports cannot extend read authority or rewrite the approved goal",
+        "A low-confidence edge triggers an explicit question or further bounded probe",
+        "An impact report records why unaffected services were excluded"
+      ],
+      "negative_and_recovery_tests": [
+        "Create an indirect event consumer two edges away and a disconnected service; confirm appropriate selection",
+        "Supply contradictory specialist reports and require a recorded resolution or blocking question"
+      ],
+      "dependencies": [
+        "DSC-05",
+        "DSC-07"
+      ],
+      "sources": [
+        "X01",
+        "X17"
+      ],
+      "status": "proposed",
+      "owner_role": "Context/runtime engineer"
+    },
+    {
+      "id": "PLN-01",
+      "epic": "PLN",
+      "phase": "P1",
+      "title": "Separate the approved work contract from the implementation plan",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Freezing an entire plan as if every tactic were permanent makes legitimate adaptation indistinguishable from unauthorized scope change.",
+      "implementation": [
+        "Define WorkContract with goal, invariants, read/write repositories and paths, forbidden effects, budgets and acceptance rules",
+        "Define PlanRevision as a versioned proposal describing how to satisfy that contract",
+        "Assign independent digests and approval records; retain old v3 semantics for legacy runs",
+        "Add a plan-policy field specifying which bounded tactical changes may proceed automatically"
+      ],
+      "acceptance_criteria": [
+        "Reordering internal implementation steps does not require silently mutating the approved contract",
+        "Adding a write repository or weakening an acceptance rule always needs a new authorized decision",
+        "A revision cannot grant capabilities absent from its WorkContract",
+        "Auditors can reconstruct both the approved contract and the active plan at any point"
+      ],
+      "negative_and_recovery_tests": [
+        "Attempt to hide a new database migration under a renamed tactical step",
+        "Replay an old v3 run after upgrade and verify it receives no new adaptation privileges"
+      ],
+      "dependencies": [
+        "FND-07"
+      ],
+      "sources": [
+        "R10",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-02",
+      "epic": "PLN",
+      "phase": "P1",
+      "title": "Define a structured PlanRevision and PlanStep schema",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "A Markdown summary is insufficient for dependency-aware execution, evidence lineage and review of changes to the plan.",
+      "implementation": [
+        "Define stable step IDs, objectives, repository targets, dependencies, evidence references, verification obligations and assumptions",
+        "Mark planned, running, done, invalidated and superseded steps without rewriting old revisions",
+        "Preserve human-readable renderings as projections of the structured artifact",
+        "Validate unknown fields and forbidden authority-bearing content strictly"
+      ],
+      "acceptance_criteria": [
+        "The same revision renders reproducibly and retains a stable digest",
+        "All referenced evidence and repository IDs resolve",
+        "A step points to a goal/test obligation rather than only a generated filename",
+        "New revisions preserve lineage of completed steps and explain invalidations"
+      ],
+      "negative_and_recovery_tests": [
+        "Reorder JSON fields and verify canonical digest behavior",
+        "Introduce a dependency cycle in execution steps and require a useful validation error"
+      ],
+      "dependencies": [
+        "PLN-01",
+        "FND-05"
+      ],
+      "sources": [
+        "R02",
+        "X02"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-03",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Add typed ChangeProposal and drift classification",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "An implementer needs a sanctioned way to report that new evidence makes the current plan unsafe or incomplete.",
+      "implementation": [
+        "Add submit_change_proposal with reason, new evidence, affected steps, proposed contract/plan patch and preserved work",
+        "Classify changes using deterministic rules for repositories, paths, interfaces, data migrations, credentials, budgets and tests",
+        "Allow a semantic reviewer to advise, but escalate unknown classifications instead of letting the model self-authorize",
+        "Freeze candidate publication while a material proposal is awaiting a decision"
+      ],
+      "acceptance_criteria": [
+        "Internal refactoring within approved scope can remain a recorded tactical revision",
+        "API/event changes and schema migrations are material by default",
+        "Missing classification never defaults to allowed",
+        "The proposal includes the useful WIP and tests already completed"
+      ],
+      "negative_and_recovery_tests": [
+        "Agent labels a new network destination as a trivial refactor; deterministic policy still blocks",
+        "Submit the same proposal twice and require one pending decision"
+      ],
+      "dependencies": [
+        "PLN-02",
+        "FND-02",
+        "FND-06"
+      ],
+      "sources": [
+        "X05",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-04",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Apply non-material revisions within preapproved bounds",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "M",
+      "problem": "Asking a human to approve every renamed helper or reordered step makes the workflow slower without improving authority control.",
+      "implementation": [
+        "Implement a revision classifier output for bounded tactical changes",
+        "Commit an immutable revision and event before activating it",
+        "Preserve read/write scope, numerical budgets, external contracts and acceptance tests exactly",
+        "Show a concise change log to the operator without generating an approval notification for every tactic"
+      ],
+      "acceptance_criteria": [
+        "A valid tactical revision activates without a new authority grant",
+        "Scope, public contracts and test obligations compare equal before activation",
+        "Completed step outputs remain reusable only when their input/evidence digests still match",
+        "An ambiguous tactic is promoted to a material ChangeProposal"
+      ],
+      "negative_and_recovery_tests": [
+        "Attempt to delete a required test while changing only a step description",
+        "Crash between revision persistence and activation; recovery selects exactly one active revision"
+      ],
+      "dependencies": [
+        "PLN-03"
+      ],
+      "sources": [
+        "X02"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-05",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Approve material revisions with compare-and-swap semantics",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Approval must bind to the exact proposed change, not to whichever plan happens to be current when a webhook arrives.",
+      "implementation": [
+        "Create a revision decision containing parent revision, proposed revision, WorkContract digest, SnapshotSet and authorization epoch",
+        "Resolve approver identity server-side and enforce per-repository and sensitive-domain rules",
+        "Activate the new revision atomically while fencing all old publication rights",
+        "Retain rejection/expiry history and the prior usable checkpoint"
+      ],
+      "acceptance_criteria": [
+        "Approval for revision 2 cannot activate revision 3",
+        "A stale approval after cancellation cannot revive execution",
+        "A newly added repository needs its own authorized scope decision",
+        "Rejection preserves WIP and returns an actionable blocked state"
+      ],
+      "negative_and_recovery_tests": [
+        "Two approvers race with different decisions; the configured decision policy yields one activation",
+        "Replay a consumed approval after a later amendment and assert zero effect"
+      ],
+      "dependencies": [
+        "PLN-03",
+        "FND-06"
+      ],
+      "sources": [
+        "R04",
+        "X09"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-06",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Manage clarification questions as durable decisions",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "An agent must be able to ask about business meaning or constraints without inventing an answer or holding a runner forever.",
+      "implementation": [
+        "Persist question ID, reason, options/free-text schema, required actor scope and revision context",
+        "Route questions to the parent coordinator, not independently to every subagent",
+        "Store answers as authorized events with provenance, not raw chat history changes",
+        "Set separate answer expiry and active-compute/overall-work deadlines"
+      ],
+      "acceptance_criteria": [
+        "One question produces one visible thread and one durable answer",
+        "An answer may resolve ambiguity but cannot grant extra repository permissions implicitly",
+        "Expired or answered questions reject duplicate/stale answers clearly",
+        "A waiting question releases the runner after checkpoint according to policy"
+      ],
+      "negative_and_recovery_tests": [
+        "Answer the correct text to the wrong question ID and verify rejection",
+        "A subagent attempts to impersonate an approver; the control plane refuses it"
+      ],
+      "dependencies": [
+        "PLN-02",
+        "CTL-01",
+        "CTL-02",
+        "FND-05"
+      ],
+      "sources": [
+        "X05"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-07",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Invalidate evidence precisely after plan or source changes",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Reusing a green test or review from a prior revision is unsafe when the candidate, contracts or environment changed.",
+      "implementation": [
+        "Associate step outputs and verification records with input, source, plan and environment digests",
+        "Compute an explicit invalidation set when a revision activates",
+        "Preserve unaffected evidence and clearly mark superseded evidence rather than deleting it",
+        "Prevent stale native callbacks from advancing the active revision"
+      ],
+      "acceptance_criteria": [
+        "A changed producer contract invalidates its affected consumer verification",
+        "A wording-only display change does not force a rebuild when executable inputs are unchanged",
+        "A late old-run success is visible history but never current proof",
+        "Replanning can explain which work was preserved and why"
+      ],
+      "negative_and_recovery_tests": [
+        "Activate a new plan while an old integration job completes",
+        "Change the environment profile without changing source and require verification invalidation"
+      ],
+      "dependencies": [
+        "PLN-05",
+        "FND-06"
+      ],
+      "sources": [
+        "X12",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "PLN-08",
+      "epic": "PLN",
+      "phase": "P2",
+      "title": "Record decision rationale without storing hidden reasoning",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "M",
+      "problem": "Long-running work needs durable decisions and evidence, not unrestricted model transcripts or a fragile memory summary.",
+      "implementation": [
+        "Persist concise decision records containing alternatives, chosen option, evidence, assumptions and approval identity",
+        "Keep derived summaries linked to immutable source records and label them as summaries",
+        "Exclude secrets and internal model reasoning; retain only operationally useful outputs",
+        "Reconstruct a fresh-session brief from the current contract, revision, decisions and checkpoint"
+      ],
+      "acceptance_criteria": [
+        "A new runner can continue without the old vendor conversation file",
+        "A summary cannot override the underlying approved decision",
+        "Data retention and access rules apply to decision records as to source evidence",
+        "Contradictory prior decisions are surfaced rather than silently overwritten"
+      ],
+      "negative_and_recovery_tests": [
+        "Drop vendor session state and continue from application-owned artifacts",
+        "Inject an instruction into an evidence excerpt that tries to rewrite a decision"
+      ],
+      "dependencies": [
+        "PLN-02",
+        "FND-05"
+      ],
+      "sources": [
+        "X02",
+        "X06"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/architecture engineer"
+    },
+    {
+      "id": "CTL-01",
+      "epic": "CTL",
+      "phase": "P1",
+      "title": "Add a durable command mailbox and event stream",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Issue comments cannot safely be injected into a running process without ordering, deduplication and acknowledgements.",
+      "implementation": [
+        "Define command IDs, monotonic per-work sequence, expected revision/attempt and idempotency key",
+        "Persist commands and outbox notifications in one transaction",
+        "Define separate received, authorized, applied, checkpointed, rejected and expired outcomes",
+        "Store runner events with source identity and offset for reconnect replay"
+      ],
+      "acceptance_criteria": [
+        "HTTP or webhook acceptance means persisted, not already applied",
+        "Duplicate delivery returns the original command result",
+        "Commands for a superseded attempt cannot change a new attempt",
+        "Status can be reconstructed without contacting the model"
+      ],
+      "negative_and_recovery_tests": [
+        "Disconnect between persistence and ACK and redeliver",
+        "Receive events out of order and ensure projections converge"
+      ],
+      "dependencies": [
+        "FND-06",
+        "PLN-01"
+      ],
+      "sources": [
+        "X09"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-02",
+      "epic": "CTL",
+      "phase": "P1",
+      "title": "Authorize human commands against the full work subject",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Multi-repository plans need object-level authorization for every intervention, not just a username allowlist on the originating issue.",
+      "implementation": [
+        "Normalize actor identity and platform delivery provenance at ingress",
+        "Bind commands to connection, repository/work package, question/revision and expected generation",
+        "Separate read, steer, pause, resume, amend and approve capabilities",
+        "Revalidate current permissions for sensitive actions and reject agent-authored approvals"
+      ],
+      "acceptance_criteria": [
+        "A user who can comment but not approve cannot expand write scope",
+        "A full run ID never bypasses repository checks",
+        "A runner control token cannot submit human approvals",
+        "Revoked approvers cannot activate a pending revision"
+      ],
+      "negative_and_recovery_tests": [
+        "Replay an authorized command from another repository or connection",
+        "Use bot-loop markers, quoted commands and forged actor fields to test ingress parsing"
+      ],
+      "dependencies": [
+        "CTL-01",
+        "FND-01"
+      ],
+      "sources": [
+        "R04",
+        "X11"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-03",
+      "epic": "CTL",
+      "phase": "P1",
+      "title": "Expose questions and plan decisions through native comments",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "The customer needs a usable control surface without waiting for a separate web dashboard.",
+      "implementation": [
+        "Render one status thread with active revision, pending question/decision and concise valid command examples",
+        "Add proposed /answer and /approve-revision parsing with explicit IDs",
+        "Keep original plan and later revisions linked rather than replacing the evidence trail",
+        "Escape user content so quotations and generated instructions are not parsed as new commands"
+      ],
+      "acceptance_criteria": [
+        "The operator can answer a pending question from GitLab, GitHub or Azure comments",
+        "Exactly one current projection identifies the active revision",
+        "User sees command receipt and later application separately",
+        "Unsupported commands are rejected explicitly, not silently ignored"
+      ],
+      "negative_and_recovery_tests": [
+        "Duplicate/edit/reorder comments while the runner reconnects",
+        "A model-generated example containing /approve-revision never becomes authorization"
+      ],
+      "dependencies": [
+        "CTL-02",
+        "PLN-02"
+      ],
+      "sources": [
+        "R04",
+        "X05"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-04",
+      "epic": "CTL",
+      "phase": "P1",
+      "title": "Implement discovery clarification wait and resume",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Planning should ask about a blocking business ambiguity before a misleading implementation plan is approved.",
+      "implementation": [
+        "Connect discovery question events to the durable question service",
+        "Persist the evidence gathered before the question and release resources on the configured wait threshold",
+        "Resume with the original SnapshotSet plus the authorized answer",
+        "Mark unresolved critical questions as a planning block rather than inventing defaults"
+      ],
+      "acceptance_criteria": [
+        "A question raised during discovery survives worker and runner restart",
+        "The resumed plan cites the answer as a decision source",
+        "Discovery budget is not reset when the human replies",
+        "New source commits require a deliberate snapshot refresh decision"
+      ],
+      "negative_and_recovery_tests": [
+        "Wait longer than the CI job limit and resume in a new workspace",
+        "Answer after question expiry and verify it cannot silently start a new paid run"
+      ],
+      "dependencies": [
+        "PLN-06",
+        "CTL-03",
+        "EXE-03"
+      ],
+      "sources": [
+        "X05",
+        "X06"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-05",
+      "epic": "CTL",
+      "phase": "P2",
+      "title": "Implement pause as revoke, interrupt and checkpoint",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Pause cannot mean only a UI status change; publication must stop even when a process is slow to acknowledge interruption.",
+      "implementation": [
+        "Increment publication epoch and persist pause_requested before sending a runtime interrupt",
+        "Stop new tool starts at cooperative boundaries and drain the active turn",
+        "Capture WIP and last applied command sequence before marking paused",
+        "On timeout, terminate the runner and expose the last recoverable checkpoint, not a false clean pause"
+      ],
+      "acceptance_criteria": [
+        "No new effect authorization is created after the pause transaction; the acknowledgement lists any previously authorized unresolved effects",
+        "Paused means a checkpoint was durably stored or a clear work-loss boundary was recorded",
+        "An already-dispatched remote effect is reconciled and never claimed undone",
+        "A waiting human does not consume an idle runner indefinitely"
+      ],
+      "negative_and_recovery_tests": [
+        "Pause during a long file read, test process, artifact upload and native commit dispatch",
+        "Force an uncooperative driver and verify timeout/termination plus honest checkpoint status"
+      ],
+      "dependencies": [
+        "CTL-01",
+        "CTL-02",
+        "EXE-02",
+        "EXE-03",
+        "FND-02"
+      ],
+      "sources": [
+        "X03",
+        "X06"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-06",
+      "epic": "CTL",
+      "phase": "P2",
+      "title": "Resume from a confirmed checkpoint with a fresh epoch",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Restarting an interrupted session must restore code as well as conversation and reject stale late output.",
+      "implementation": [
+        "Validate checkpoint integrity, snapshot availability, active plan and current permissions",
+        "Create a new execution attempt/epoch before restoring workspace",
+        "Resume native session only for a compatible pinned profile; otherwise reconstruct from durable task artifacts",
+        "Keep historical spend and pending remote effects attached to the same work"
+      ],
+      "acceptance_criteria": [
+        "Resume preserves confirmed WIP edits and does not start from main",
+        "A late artifact from the paused attempt cannot overwrite the resumed candidate",
+        "Corrupt or missing checkpoints block with an actionable reason",
+        "A provider/model change requires explicit session-reset semantics and any needed approval"
+      ],
+      "negative_and_recovery_tests": [
+        "Resume on another host with no vendor session files",
+        "Advance the target branch during pause and require explicit reconcile/rebase handling without force overwrite"
+      ],
+      "dependencies": [
+        "CTL-05",
+        "PLN-07",
+        "EXE-03"
+      ],
+      "sources": [
+        "X06"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-07",
+      "epic": "CTL",
+      "phase": "P2",
+      "title": "Deliver bounded steering instructions without granting new authority",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The customer needs to correct implementation direction during a run, but arbitrary chat text must not become a privilege change.",
+      "implementation": [
+        "Add /steer with expected plan/attempt and classify instruction scope",
+        "Deliver non-material guidance through the runtime adapter or next checkpoint boundary",
+        "Promote new constraints, repository changes or public-contract changes into a ChangeProposal",
+        "Record whether the instruction was accepted, applied or deferred and at which turn"
+      ],
+      "acceptance_criteria": [
+        "A steering note never expands read/write or tool permissions",
+        "The operator sees the boundary at which guidance took effect",
+        "Unsupported live steering falls back to explicit checkpoint-and-resume, not terminal keystroke injection",
+        "Two steering messages are applied in durable sequence order"
+      ],
+      "negative_and_recovery_tests": [
+        "Send a steer for an old native turn after a reconnect",
+        "Ask through /steer to disable tests or add an unapproved service; require a material decision"
+      ],
+      "dependencies": [
+        "CTL-06",
+        "PLN-03",
+        "EXE-02"
+      ],
+      "sources": [
+        "X03",
+        "X07",
+        "X08"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "CTL-08",
+      "epic": "CTL",
+      "phase": "P2",
+      "title": "Preserve a final cancel contract across all interactive states",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Adding pause/resume/question states creates new opportunities for late callbacks to resurrect cancelled work.",
+      "implementation": [
+        "Apply cancellation generation to discovery, implementation, questions, revisions, verification and child work items",
+        "Cancel outstanding runner tasks where supported and revoke future tool/publication grants",
+        "Retain immutable artifacts and correlate effects that were already accepted",
+        "Require a new work command for any intentional post-cancel restart"
+      ],
+      "acceptance_criteria": [
+        "Cancelled work cannot be resumed by an old answer or approval",
+        "Cancelled child work cannot move its parent to ready",
+        "Running native jobs are cancelled best-effort with observed status recorded",
+        "Unknown remote effects remain visible and never trigger blind compensating writes"
+      ],
+      "negative_and_recovery_tests": [
+        "Cancel while answer, revision approval and candidate callback race",
+        "Replay all earlier command events after cancellation"
+      ],
+      "dependencies": [
+        "CTL-05",
+        "PLN-05",
+        "FND-06"
+      ],
+      "sources": [
+        "R04",
+        "X09"
+      ],
+      "status": "proposed",
+      "owner_role": "Core/runtime engineer"
+    },
+    {
+      "id": "EXE-01",
+      "epic": "EXE",
+      "phase": "P1",
+      "title": "Define a role-aware HarnessRuntime protocol",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Planning, implementation and review should reuse runtime integration without inheriting the same permissions.",
+      "implementation": [
+        "Define start, send_input, interrupt, snapshot, resume, events and terminate with an explicit capability matrix",
+        "Add roles discovery, implementer and readonly reviewer with separate tool, filesystem and network profiles",
+        "Keep native session/turn IDs opaque and separate from Forge run/attempt IDs",
+        "Normalize outcomes: completed, needs_input, change_proposal, checkpointed, failed and unsupported"
+      ],
+      "acceptance_criteria": [
+        "A role change cannot reuse wider credentials implicitly",
+        "Every runtime event carries run, attempt, epoch and native correlation",
+        "Missing capabilities are detected before dispatch",
+        "Existing batch CLIs remain usable via an honest checkpoint-restart adapter"
+      ],
+      "negative_and_recovery_tests": [
+        "Select a batch-only adapter for required live steering and reject or negotiate explicit downgrade",
+        "Feed a native event from another session and verify it cannot affect the run"
+      ],
+      "dependencies": [
+        "FND-04",
+        "FND-05"
+      ],
+      "sources": [
+        "X03",
+        "X07",
+        "X08"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-02",
+      "epic": "EXE",
+      "phase": "P2",
+      "title": "Implement the first interactive driver with ClaudeSDKClient",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Forge already has a Claude Code lane, so it is the smallest practical first integration for structured interactive sessions.",
+      "implementation": [
+        "Run a pinned SDK/CLI in the execution environment behind HarnessRuntime",
+        "Use ClaudeSDKClient for continuous messages and interrupt; drain the interrupted turn before processing the next response",
+        "Route questions and tool approvals through durable control requests",
+        "Gate each sensitive tool via hooks and OS/process isolation; validate the chosen BYOK route independently"
+      ],
+      "acceptance_criteria": [
+        "Interrupt produces one well-defined native turn boundary and no stale result is treated as the next turn",
+        "The same session can receive an authorized clarification",
+        "Discovery denies edits/remote writes despite model instructions",
+        "A failed SDK/proxy compatibility probe prevents claiming the profile supported"
+      ],
+      "negative_and_recovery_tests": [
+        "Interrupt during streaming output, during a tool and after completion",
+        "Return permission callback failures and reconnect midway through question delivery"
+      ],
+      "dependencies": [
+        "EXE-01",
+        "CTL-01",
+        "CTL-02"
+      ],
+      "sources": [
+        "X03",
+        "X04",
+        "X05"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-03",
+      "epic": "EXE",
+      "phase": "P1",
+      "title": "Implement portable workspace checkpoints and session restoration",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Vendor conversation persistence alone does not restore the filesystem or prevent replay against a different code snapshot.",
+      "implementation": [
+        "Capture source SnapshotSet, WIP manifest, untracked files, decision/evidence references and last applied command sequence",
+        "Include optional encrypted native session state only when supported by the pinned adapter",
+        "Restore into a fresh isolated workspace and verify every digest before starting tools",
+        "Support session-reconstruction fallback from application-owned artifacts"
+      ],
+      "acceptance_criteria": [
+        "Destroying the original CI runner does not lose the last confirmed checkpoint",
+        "A checkpoint cannot be restored onto an unrelated base",
+        "Hidden credentials and control tokens are not copied into artifacts",
+        "A reported recovery point identifies any changes after it that may have been lost"
+      ],
+      "negative_and_recovery_tests": [
+        "Restore with missing untracked files, changed permissions, corrupt archive and stale session version",
+        "Fork a conversation without restoring files and require the adapter to refuse claiming a complete resume"
+      ],
+      "dependencies": [
+        "FND-05",
+        "EXE-01",
+        "PLN-08"
+      ],
+      "sources": [
+        "X06",
+        "X02"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-04",
+      "epic": "EXE",
+      "phase": "P2",
+      "title": "Connect runners with an outbound authenticated control channel",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Self-managed CI environments may not allow inbound callbacks, and long-running jobs need durable command delivery.",
+      "implementation": [
+        "Use outbound HTTPS long polling and event batches as the initial transport; add SSE only where helpful",
+        "Issue short-lived run/attempt-scoped credentials through a broker",
+        "Rotate tokens without transferring provider write credentials to the lane",
+        "Distinguish transport reconnect from command replay and authenticate every artifact/event upload"
+      ],
+      "acceptance_criteria": [
+        "No public inbound agent port is required",
+        "A runner can read only its own commands and upload only its own results",
+        "Lost responses are retried with stable event IDs",
+        "Expired/revoked tokens stop new tools and publication without silently changing credential mode"
+      ],
+      "negative_and_recovery_tests": [
+        "Partition the control channel while a tool runs; enforce bounded continuation policy",
+        "Reuse a token for a second work package and verify denial"
+      ],
+      "dependencies": [
+        "CTL-01",
+        "EXE-01",
+        "FND-05"
+      ],
+      "sources": [
+        "X09",
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-05",
+      "epic": "EXE",
+      "phase": "P2",
+      "title": "Support checkpoint-restart control for batch-only harnesses",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "M",
+      "problem": "Not every existing CLI provides a safe live input API. Portability requires truthful degraded behavior rather than pretending all agents are interactive.",
+      "implementation": [
+        "Wrap batch execution in bounded episodes and capture checkpoints between them",
+        "Queue steering for the next safe episode and expose deferred status",
+        "Cancel the current job when a hard pause is required; resume from the last confirmed bundle",
+        "Record unsupported native operations in the capability manifest"
+      ],
+      "acceptance_criteria": [
+        "A batch-only driver never receives simulated terminal keystrokes as control",
+        "The UI distinguishes next-checkpoint guidance from already-applied guidance",
+        "Episode boundaries preserve budget and plan versions",
+        "Loss of uncheckpointed work is explicitly reported"
+      ],
+      "negative_and_recovery_tests": [
+        "Send multiple commands while the driver cannot read input",
+        "Terminate halfway through diff capture and recover only from the last complete checkpoint"
+      ],
+      "dependencies": [
+        "EXE-03",
+        "EXE-04",
+        "CTL-05"
+      ],
+      "sources": [
+        "R11",
+        "X19"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-06",
+      "epic": "EXE",
+      "phase": "P4",
+      "title": "Add a Codex App Server interactive adapter",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "L",
+      "problem": "Codex should be a second adapter over the established contract, not a parallel controller.",
+      "implementation": [
+        "Pin the app-server protocol and negotiate advertised capabilities",
+        "Map Forge attempts to threads/turns; use turn/steer with expectedTurnId and turn/interrupt",
+        "Treat workspace/model/sandbox changes as new execution-profile decisions rather than steering",
+        "Preserve the same candidate, checkpoint, permissions and budget contracts as the first adapter"
+      ],
+      "acceptance_criteria": [
+        "Steering an outdated turn is rejected safely",
+        "Changing a sandbox policy is impossible through free-text steer",
+        "Existing conformance traces pass unchanged apart from adapter fixtures",
+        "Unsupported experimental protocol fields are never required silently"
+      ],
+      "negative_and_recovery_tests": [
+        "Restart app-server between thread creation and turn execution",
+        "Interrupt and deliver an old completed event after a new turn begins"
+      ],
+      "dependencies": [
+        "EXE-02",
+        "EXE-03",
+        "EXE-04",
+        "FND-08"
+      ],
+      "sources": [
+        "X07"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-07",
+      "epic": "EXE",
+      "phase": "P4",
+      "title": "Add an OpenCode server adapter for tested BYOK profiles",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "L",
+      "problem": "Provider portability should be explicit at the harness/model boundary, not assumed from an OpenAI-compatible URL.",
+      "implementation": [
+        "Map session, prompt, abort and event endpoints to HarnessRuntime",
+        "Validate structured-output, tool-call and usage behavior for each supported provider/model route",
+        "Apply the same runner isolation and scoped control-token model",
+        "Keep Grok/Copilot on checkpoint mode until their native control contracts pass equivalent tests"
+      ],
+      "acceptance_criteria": [
+        "A route enters the supported matrix only after end-to-end conformance",
+        "Invalid tool output is rejected before it becomes a plan/candidate artifact",
+        "Provider failover cannot cross data-residency or budget policy",
+        "Credential modes are named separately from model IDs"
+      ],
+      "negative_and_recovery_tests": [
+        "Run the same discovery/question/resume trace through two BYOK routes",
+        "Simulate a gateway response that reports aggregate usage only and preserve partial accounting"
+      ],
+      "dependencies": [
+        "EXE-01",
+        "EXE-03",
+        "EXE-04",
+        "FND-08"
+      ],
+      "sources": [
+        "X08",
+        "X18"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "EXE-08",
+      "epic": "EXE",
+      "phase": "P2",
+      "title": "Isolate tools, egress and privileged test execution",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Read-only prompts, CLI deny rules and a forbidden push URL are not sufficient isolation for arbitrary code execution.",
+      "implementation": [
+        "Use isolated per-run processes/containers with separate source and writable scratch mounts",
+        "Restrict egress, package mirrors, DNS and secret injection per execution role",
+        "Keep Docker/Kubernetes control credentials and source write tokens in trusted brokers/executors",
+        "Scan artifact boundaries for secret-bearing files and record capability decisions"
+      ],
+      "acceptance_criteria": [
+        "The agent cannot reach production DBs, the Docker socket or the trusted publisher token",
+        "Discovery source mounts remain immutable even through shell tools",
+        "Test dependencies use disposable credentials and data",
+        "Operator-installed MCP servers cannot silently broaden runtime scope"
+      ],
+      "negative_and_recovery_tests": [
+        "Attempt writes via Python, symlinks and alternate git remotes rather than only blocked CLI strings",
+        "Attempt metadata-endpoint and unauthorized HTTP requests from repository tests"
+      ],
+      "dependencies": [
+        "FND-04",
+        "EXE-01",
+        "FND-05"
+      ],
+      "sources": [
+        "X04",
+        "X16",
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Harness/platform engineer"
+    },
+    {
+      "id": "MRP-01",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Introduce WorkPackage as a parent of repository work items",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "One FlowRun per issue/repository cannot represent one business change spanning several services without losing approval and evidence lineage.",
+      "implementation": [
+        "Add a parent WorkPackage with goal, approved system scope, budget and active PlanRevision",
+        "Link per-repository work items to existing run machinery instead of replacing it",
+        "Keep discovery read set separate from the planned write set",
+        "Define parent states for planning, blocked, executing, partially published, verifying and ready for human"
+      ],
+      "acceptance_criteria": [
+        "A parent can read ten repositories while creating only two child write runs",
+        "Child failures do not erase successful candidates or spend",
+        "Parent readiness requires the declared child and integration obligations",
+        "No parent operation merges child PRs automatically"
+      ],
+      "negative_and_recovery_tests": [
+        "Cancel a parent while one child publishes and another waits for approval",
+        "Recover parent projections from immutable child events after a restart"
+      ],
+      "dependencies": [
+        "DSC-07",
+        "PLN-02",
+        "CTL-08"
+      ],
+      "sources": [
+        "X11",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-02",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Compile bounded cross-repository execution dependencies",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Service topology may be cyclic; the execution order for one change must still be explicit and schedulable.",
+      "implementation": [
+        "Build a small work-item DAG from artifact, contract and candidate dependencies",
+        "Separate build order, verification order and human merge/deploy recommendations",
+        "Validate graph cycles at the work-item level and allow deliberate compatibility phases to break cycles",
+        "Avoid adding a general workflow DSL in the first multi-repo release"
+      ],
+      "acceptance_criteria": [
+        "A cyclic service dependency graph does not automatically block an additive change plan",
+        "A work item starts only when its declared input artifacts are available",
+        "Partial completion and waiting dependencies are visible",
+        "Replanning invalidates only affected downstream nodes"
+      ],
+      "negative_and_recovery_tests": [
+        "Construct a true execution cycle and require a clear plan error",
+        "Reorder independent child completions and verify deterministic parent readiness"
+      ],
+      "dependencies": [
+        "MRP-01",
+        "PLN-07"
+      ],
+      "sources": [
+        "X15"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-03",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Assign one writable repository per child execution lane",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Giving every agent write access to the entire system makes ownership and validation unmanageable.",
+      "implementation": [
+        "Mount the child target repository writable only inside its sandbox; mount related snapshots read-only",
+        "Pass per-repository contract outputs as immutable dependencies",
+        "Issue capability tokens and candidate scopes for exactly one child/attempt",
+        "Detect competing writers and human pushes without force overwrite"
+      ],
+      "acceptance_criteria": [
+        "One child cannot emit a publishable candidate for a sibling repository",
+        "Read-only neighbors remain available for reference and tests",
+        "External branch movement yields a visible reconciliation decision",
+        "Parallelism is bounded by system WIP and repository ownership constraints"
+      ],
+      "negative_and_recovery_tests": [
+        "Agent tries to patch a mounted neighboring service",
+        "Human edits the child branch while its candidate is materializing"
+      ],
+      "dependencies": [
+        "MRP-02",
+        "EXE-08",
+        "FND-02"
+      ],
+      "sources": [
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-04",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Publish coordinated candidates as an explicit saga",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Source-control providers do not provide one atomic transaction across multiple repositories.",
+      "implementation": [
+        "Prepare and validate all required child candidates before coordinated publication begins",
+        "Persist per-repository publication intents and a parent CandidateSet draft",
+        "Publish Draft MR/PRs independently with idempotent reconciliation",
+        "Expose partial publication and safe operator actions; never delete human edits as compensation"
+      ],
+      "acceptance_criteria": [
+        "A failure on the second repository leaves the first PR visible as partial, not an all-or-nothing success",
+        "Reconciliation does not create duplicate commits or PRs",
+        "Human review remains the only merge authority",
+        "Prepared candidates reference the same active plan/contract generation"
+      ],
+      "negative_and_recovery_tests": [
+        "Apply the first remote effect, lose the response, then fail the second provider",
+        "Resume after one PR was manually updated and require conflict handling rather than forced rollback"
+      ],
+      "dependencies": [
+        "MRP-03",
+        "FND-02",
+        "FND-06"
+      ],
+      "sources": [
+        "X15",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-05",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Freeze CandidateSet identity for integration verification",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Ten independently green commits do not prove that the selected versions work together.",
+      "implementation": [
+        "Compute CandidateSet digest over repository candidate OIDs, unchanged baseline image digests, contracts, tests and environment profile",
+        "Bind every integration result to this exact set",
+        "Store publication completeness separately from verification status",
+        "Invalidate integration evidence when any member changes"
+      ],
+      "acceptance_criteria": [
+        "Changing one service image changes CandidateSet identity",
+        "A result from an old set cannot mark the current package ready",
+        "Baseline neighbors are pinned, not pulled as latest",
+        "Evidence names the exact tests and environment that ran"
+      ],
+      "negative_and_recovery_tests": [
+        "Rerun tests with the same sources but a changed broker/database image",
+        "Deliver a successful result for a superseded set after a repair"
+      ],
+      "dependencies": [
+        "MRP-04",
+        "PLN-07"
+      ],
+      "sources": [
+        "X12",
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-06",
+      "epic": "MRP",
+      "phase": "P3",
+      "title": "Require compatibility plans for API, event and database changes",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "A multi-service feature often needs a safe transition between old and new versions, not just a successful final-state test.",
+      "implementation": [
+        "Add expand/migrate/contract steps and explicit old/new consumer/provider combinations",
+        "Require separate approval for destructive schema changes, data migrations and new external infrastructure",
+        "Generate human merge/deploy sequencing notes and rollback constraints",
+        "Keep production migration execution outside the coding-agent capability"
+      ],
+      "acceptance_criteria": [
+        "The plan identifies mixed-version states that will exist during rollout",
+        "An event rename includes a compatibility decision rather than only changing both repositories",
+        "Destructive DB cleanup is not bundled into an automatic tactical revision",
+        "Rollback limitations are stated when new data cannot be reversed safely"
+      ],
+      "negative_and_recovery_tests": [
+        "Test old consumer/new producer and new consumer/old producer according to the plan",
+        "Introduce a schema change that passes fresh DB tests but fails upgrade from the baseline schema"
+      ],
+      "dependencies": [
+        "MRP-02",
+        "PLN-03",
+        "VER-04"
+      ],
+      "sources": [
+        "X15",
+        "X12"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-07",
+      "epic": "MRP",
+      "phase": "P4",
+      "title": "Handle partial completion, human changes and selective replan",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "L",
+      "problem": "Long system changes will encounter accepted child work, rejected work and moving branches. Restarting the entire package wastes effort and evidence.",
+      "implementation": [
+        "Reconcile each child against current native PR/branch identity",
+        "Preserve accepted work and generate targeted new revisions for unresolved obligations",
+        "Mark human-modified candidates as requiring fresh validation instead of silently taking ownership",
+        "Support explicit abandon or detach decisions without automatic branch deletion"
+      ],
+      "acceptance_criteria": [
+        "A rejected child can be replanned without rerunning unrelated accepted children",
+        "A manual commit invalidates only applicable evidence",
+        "A partially merged package remains visible with mixed-version obligations",
+        "Parent cancellation does not pretend already merged code was rolled back"
+      ],
+      "negative_and_recovery_tests": [
+        "Merge one child manually and then reject another",
+        "Force a concurrent plan amendment while branch reconciliation is pending"
+      ],
+      "dependencies": [
+        "MRP-05",
+        "MRP-06",
+        "CTL-08"
+      ],
+      "sources": [
+        "X15",
+        "R04"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "MRP-08",
+      "epic": "MRP",
+      "phase": "P4",
+      "title": "Add hierarchical budgets, admission and fair scheduling",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Independent child budgets can collectively exceed a customers total allowance or saturate shared CI/review capacity.",
+      "implementation": [
+        "Reserve child allowances atomically against a WorkPackage budget",
+        "Track discovery, planning, native CLI, tests, repair and review separately while retaining total spend",
+        "Bound concurrent writable lanes and expensive environments per tenant/system",
+        "Preserve unknown CLI spend conservatively and define active-compute versus human-wait clocks"
+      ],
+      "acceptance_criteria": [
+        "Two child admissions cannot reserve more than the remaining parent budget",
+        "Pausing does not reset consumed or unresolved spend",
+        "One large work package cannot starve unrelated admitted work indefinitely",
+        "Partial accounting is exposed rather than reported as a hard exact cap"
+      ],
+      "negative_and_recovery_tests": [
+        "Race reservations from multiple children and force provider throttling",
+        "Leave a question unanswered beyond the overall deadline while active compute remains low"
+      ],
+      "dependencies": [
+        "MRP-01",
+        "FND-06",
+        "CTL-05"
+      ],
+      "sources": [
+        "R04",
+        "X18"
+      ],
+      "status": "proposed",
+      "owner_role": "Workflow/integration engineer"
+    },
+    {
+      "id": "VER-01",
+      "epic": "VER",
+      "phase": "P1",
+      "title": "Separate verification execution from coding-agent execution",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "An agent can change tests or claim that a command ran. Acceptance evidence must come from a separately controlled producer.",
+      "implementation": [
+        "Define a trusted verification job/executor with pinned commands and a minimal credential set",
+        "Execute accepted test bundles against published candidate OIDs or validated candidate images",
+        "Record producer identity, command exit, report digest and completeness",
+        "Keep local agent test output useful but explicitly non-authoritative for final gates"
+      ],
+      "acceptance_criteria": [
+        "Agent-authored commands.tsv never substitutes for independent acceptance evidence",
+        "Verification cannot obtain production credentials",
+        "A test job without required reports is inconclusive even if the wrapper exits zero",
+        "The candidate writer cannot silently weaken the verifier profile"
+      ],
+      "negative_and_recovery_tests": [
+        "Forge a successful local receipt without executing tests",
+        "Modify a candidate test configuration to skip the required suite"
+      ],
+      "dependencies": [
+        "FND-04",
+        "FND-05"
+      ],
+      "sources": [
+        "X16",
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-02",
+      "epic": "VER",
+      "phase": "P1",
+      "title": "Build a baseline and focused dependency test recipe",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The first useful customer slice needs realistic tests without booting all ten services for every coding turn.",
+      "implementation": [
+        "Provide a versioned recipe for the customers selected language/runtime and a focused database/broker subset",
+        "Execute a baseline before candidate work when feasible",
+        "Use synthetic fixtures, health checks, readiness deadlines and isolated networks",
+        "Pin dependency images and record startup/configuration failures as infrastructure"
+      ],
+      "acceptance_criteria": [
+        "A candidate regression is distinguishable from a red baseline",
+        "Dependency startup failure never invokes code repair automatically",
+        "The recipe can run independently outside the coding-agent session",
+        "Resource cleanup occurs after success, failure and cancellation"
+      ],
+      "negative_and_recovery_tests": [
+        "Broker never becomes ready; assert infrastructure classification",
+        "Seed a baseline test failure and confirm it is not attributed to the new candidate"
+      ],
+      "dependencies": [
+        "VER-01",
+        "EXE-08"
+      ],
+      "sources": [
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-03",
+      "epic": "VER",
+      "phase": "P3",
+      "title": "Add HTTP and message contract verification",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Cross-repository plans need executable interface compatibility checks before expensive system tests.",
+      "implementation": [
+        "Integrate existing customer contract tooling or a versioned Pact profile",
+        "Bind consumer/provider contracts to candidate and baseline versions",
+        "Support message schema compatibility while explicitly excluding broker-delivery guarantees",
+        "Export compatibility matrix evidence into CandidateSet verification"
+      ],
+      "acceptance_criteria": [
+        "Old/new version pairs are tested as declared by the compatibility plan",
+        "A contract from another commit cannot be reused as current evidence",
+        "Missing provider verification blocks a required compatibility gate",
+        "Message payload success does not claim real broker delivery behavior"
+      ],
+      "negative_and_recovery_tests": [
+        "Use a stale contract version that would falsely pass a changed consumer",
+        "Change an optional event field into a required one and require incompatibility evidence"
+      ],
+      "dependencies": [
+        "MRP-05",
+        "VER-01"
+      ],
+      "sources": [
+        "X12",
+        "X13"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-04",
+      "epic": "VER",
+      "phase": "P3",
+      "title": "Test real database upgrades and asynchronous failure semantics",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Contract tests alone do not validate migrations, transactions, duplicate delivery, ordering or retry behavior.",
+      "implementation": [
+        "Run schema upgrade tests from the pinned baseline with representative synthetic data",
+        "Test relevant idempotency, duplicate events, out-of-order messages, redelivery and bounded retry scenarios",
+        "Exercise outbox/inbox behavior only where the design uses it and report unsupported semantics explicitly",
+        "Separate reversible schema expansion from destructive cleanup and production deployment"
+      ],
+      "acceptance_criteria": [
+        "Fresh schema success cannot replace a required upgrade-path result",
+        "Duplicate delivery does not create a duplicate business side effect in the selected scenario",
+        "A broker restart produces a deterministic recovery assertion",
+        "Data fixtures contain no copied production secrets or personal data"
+      ],
+      "negative_and_recovery_tests": [
+        "Crash a consumer between database commit and acknowledgement",
+        "Reorder two business events and verify the intended conflict policy"
+      ],
+      "dependencies": [
+        "VER-02",
+        "VER-03"
+      ],
+      "sources": [
+        "X13",
+        "X14",
+        "X15"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-05",
+      "epic": "VER",
+      "phase": "P3",
+      "title": "Run focused CandidateSet integration environments",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The work package must demonstrate that changed services and pinned unchanged neighbors work together.",
+      "implementation": [
+        "Assemble environments from CandidateSet image digests and baseline manifests",
+        "Start only impacted services and required dependencies for the fast integration tier",
+        "Run full-system smoke at an explicit slower tier, not on every model turn",
+        "Capture endpoints, versions, resource limits and teardown evidence"
+      ],
+      "acceptance_criteria": [
+        "The environment cannot pull an unpinned latest image",
+        "Every result resolves to one CandidateSet and test-bundle digest",
+        "A changed child candidate invalidates the prior integration result",
+        "Cancellation tears down resources or records an actionable cleanup failure"
+      ],
+      "negative_and_recovery_tests": [
+        "Change an image tag after scheduling and verify digest pinning prevents drift",
+        "Fail teardown and verify the resource remains tracked for a janitor"
+      ],
+      "dependencies": [
+        "MRP-05",
+        "VER-02",
+        "VER-04"
+      ],
+      "sources": [
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-06",
+      "epic": "VER",
+      "phase": "P2",
+      "title": "Introduce typed verification selectors and freshness policy",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Name-only workflow conclusions are too weak for complex repositories with several workflows, jobs and synthetic merge revisions.",
+      "implementation": [
+        "Define required selectors by provider-native workflow/check/job identity and expected event/ref semantics",
+        "Preserve subject head, target base and tested OID separately",
+        "Make unknown producer, missing required proof and stale candidate explicit decisions",
+        "Recheck freshness before readiness and define behavior for an unreadable head"
+      ],
+      "acceptance_criteria": [
+        "Unrelated same-named green workflow cannot satisfy a required selector",
+        "Optional pending jobs do not indefinitely block completed required proof",
+        "A synthetic merge test records its source/target relationship accurately",
+        "An unreadable required freshness check never becomes an implicit success"
+      ],
+      "negative_and_recovery_tests": [
+        "Seed old reruns, duplicate names, wrong event types and reordered API pages",
+        "Move target or source during review and verify correct invalidation"
+      ],
+      "dependencies": [
+        "FND-08",
+        "VER-01"
+      ],
+      "sources": [
+        "R04",
+        "X12"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-07",
+      "epic": "VER",
+      "phase": "P2",
+      "title": "Make review evidence-aware and independent from implementation claims",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "M",
+      "problem": "An LLM review should assess the actual candidate against the active contract, not certify a self-reported plan completion.",
+      "implementation": [
+        "Build review packets from trusted diffs, active PlanRevision, decisions and verification reports",
+        "Keep review tools read-only and disallow acceptance-test editing",
+        "Require findings to reference exact candidate evidence and distinguish unknown coverage",
+        "Route material discrepancies into ChangeProposal or blocked states rather than silently revising the goal"
+      ],
+      "acceptance_criteria": [
+        "Review of candidate A cannot be reused for candidate B",
+        "Missing required evidence is visible rather than summarized as clean",
+        "Reviewer cannot approve a plan amendment or merge",
+        "Findings preserve severity, evidence and the applicable obligation"
+      ],
+      "negative_and_recovery_tests": [
+        "Implementation summary claims a test passed while the trusted report failed",
+        "Present a diff with a hidden compatibility change and require the obligation mismatch"
+      ],
+      "dependencies": [
+        "PLN-07",
+        "VER-01"
+      ],
+      "sources": [
+        "R03",
+        "R04",
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "VER-08",
+      "epic": "VER",
+      "phase": "P4",
+      "title": "Create a ten-service benchmark system with seeded hazards",
+      "type": "validation",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Ten repositories in a diagram do not prove that Forge can safely deliver a representative system change.",
+      "implementation": [
+        "Build a synthetic but realistic ten-service fixture with a documented dependency graph, at least one DB and one broker",
+        "Define single-repo, two-repo and three-repo tasks with predeclared acceptance checks",
+        "Seed missing contract, stale schema, duplicate-event, wrong-repo, pause/replan and partial-publication cases",
+        "Evaluate read coverage, adaptation correctness, recovery, useful WIP retention and accepted outcomes"
+      ],
+      "acceptance_criteria": [
+        "All safety hazards in the fixed acceptance suite cause the expected stop or approval request",
+        "The fixture exposes exact candidate/test/environment versions",
+        "Passing a small cohort is reported as pilot evidence, not a universal success rate",
+        "The same tasks can be repeated across tested harness profiles"
+      ],
+      "negative_and_recovery_tests": [
+        "Run faults while discovery, approval, publication and integration overlap",
+        "Swap a baseline version mid-run and verify the evidence chain catches it"
+      ],
+      "dependencies": [
+        "MRP-07",
+        "MRP-08",
+        "VER-05",
+        "VER-06",
+        "VER-07"
+      ],
+      "sources": [
+        "X12",
+        "X14",
+        "R13"
+      ],
+      "status": "proposed",
+      "owner_role": "Test-platform engineer"
+    },
+    {
+      "id": "OPS-01",
+      "epic": "OPS",
+      "phase": "P1",
+      "title": "Establish plan-quality evaluation before model selection",
+      "type": "validation",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "The customer objection is about plan quality. Improving runtime sophistication without measuring plan usefulness could only add cost.",
+      "implementation": [
+        "Create a small expert-reviewed set of representative tasks with hidden impact/contract checks",
+        "Compare current issue-only planning, evidence-pack planning and tool-using discovery under matched constraints",
+        "Score factual citations, dependency recall, feasibility, unknown handling and reviewer corrections",
+        "Record latency/spend distributions and avoid declaring a winner from one showcase"
+      ],
+      "acceptance_criteria": [
+        "Every evaluated plan resolves cited paths at its SnapshotSet",
+        "The benchmark includes a task that requires a clarification rather than guessing",
+        "Expert corrections are retained, not deleted after acceptance",
+        "Results separate provider/model profile from planning architecture"
+      ],
+      "negative_and_recovery_tests": [
+        "Add a misleading issue path and a relevant consumer not named in the issue",
+        "Repeat with limited retrieval budgets and compare coverage gaps honestly"
+      ],
+      "dependencies": [
+        "DSC-05",
+        "PLN-06"
+      ],
+      "sources": [
+        "R02",
+        "X01",
+        "X17"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-02",
+      "epic": "OPS",
+      "phase": "P2",
+      "title": "Implement end-to-end usage lineage and budget reporting",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Current tokens/s or cost calculations are not meaningful without joining the same calls, attempts and output populations.",
+      "implementation": [
+        "Assign trace IDs from WorkPackage through role episode, attempt, model call and receipt",
+        "Keep input, cached input, cache writes, output, reasoning and completeness separate where reported",
+        "Record TTFT, full request duration, active execution, CI wait and human wait independently",
+        "Report accepted-work economics including failed, cancelled and superseded attempts"
+      ],
+      "acceptance_criteria": [
+        "No input/cache class is counted twice",
+        "Unmatched receipt/timing records produce unknown rates, not an invented average",
+        "Reordering reports does not change totals",
+        "Hard and partial budget enforcement are separately labeled for builtin and CLI profiles"
+      ],
+      "negative_and_recovery_tests": [
+        "Use missing, duplicate, aggregate-only and delayed receipts",
+        "Pause for hours and verify model-active time and overall elapsed time remain distinct"
+      ],
+      "dependencies": [
+        "FND-06",
+        "MRP-08"
+      ],
+      "sources": [
+        "R12",
+        "X18"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-03",
+      "epic": "OPS",
+      "phase": "P2",
+      "title": "Provide operator diagnostics and one coherent status projection",
+      "type": "feature",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Interactive work is unusable when comments say only started or failed, or when an accepted command is mistaken for applied control.",
+      "implementation": [
+        "Project durable states into one native status comment and read-only API",
+        "Show current revision, last checkpoint, command ACK, blocked reason, remaining budget and native run links",
+        "Explain verified, unverified, partial publication and awaiting human states separately",
+        "Rate-limit notifications and preserve history links for audit"
+      ],
+      "acceptance_criteria": [
+        "Pause requested and paused are visibly different",
+        "The user can identify the latest valid checkpoint without reading raw JSON",
+        "A recovery replay does not spam duplicate contradictory status comments",
+        "Parent and child readiness do not disagree silently"
+      ],
+      "negative_and_recovery_tests": [
+        "Race final verification with a late pause and inspect the projection",
+        "Rebuild all projections from history after deleting their cached state"
+      ],
+      "dependencies": [
+        "CTL-01",
+        "CTL-03",
+        "PLN-07"
+      ],
+      "sources": [
+        "R04",
+        "X09"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-04",
+      "epic": "OPS",
+      "phase": "P2",
+      "title": "Enforce evidence retention, residency and deletion policy",
+      "type": "enabler",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "Cross-repository discovery and session checkpoints can contain more sensitive data than a final diff.",
+      "implementation": [
+        "Classify source snippets, task descriptions, decisions, transcripts, WIP and test reports",
+        "Apply tenant/project retention, encryption and model-route residency rules",
+        "Implement deletion/tombstone behavior that preserves minimal audit identity without retaining prohibited content",
+        "Prevent stale cached copies from outliving revocation or retention policy"
+      ],
+      "acceptance_criteria": [
+        "An excluded repository never reaches an external model route",
+        "Deleting a checkpoint removes associated session data under the declared policy",
+        "Audit metadata does not leak deleted source snippets",
+        "Operators can inspect where each artifact was stored and which model route received it"
+      ],
+      "negative_and_recovery_tests": [
+        "Revoke access while a cached evidence pack exists",
+        "Expire an artifact needed for resume and require an explicit recovery decision"
+      ],
+      "dependencies": [
+        "FND-05",
+        "DSC-03",
+        "EXE-04"
+      ],
+      "sources": [
+        "X06",
+        "X16"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-05",
+      "epic": "OPS",
+      "phase": "P4",
+      "title": "Add capacity controls and failure-oriented service objectives",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "L",
+      "problem": "A system-wide workload can saturate CI, provider quotas and human reviewers before raw model throughput is exhausted.",
+      "implementation": [
+        "Measure queue delay, time to command ACK/application, checkpoint latency, unknown effects and accepted-work lead time",
+        "Implement bounded retries, fairness and provider circuit-breaking without dropping durable commands",
+        "Size discovery and integration concurrency independently from coding workers",
+        "Build load tests with realistic long contexts and waiting periods rather than short-prompt token benchmarks"
+      ],
+      "acceptance_criteria": [
+        "An unavailable provider does not block unrelated eligible work indefinitely",
+        "Queue and budget limits are enforced before expensive job dispatch",
+        "Load-test reports distinguish peak assumptions from measured behavior",
+        "Human review backlog is visible as a separate bottleneck"
+      ],
+      "negative_and_recovery_tests": [
+        "Inject sustained 429s, long CI queue times and a disconnected control channel",
+        "Verify no retry storm and no duplicate effect under burst admission"
+      ],
+      "dependencies": [
+        "MRP-08",
+        "OPS-02",
+        "OPS-03"
+      ],
+      "sources": [
+        "X09",
+        "R13"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-06",
+      "epic": "OPS",
+      "phase": "P0",
+      "title": "Generate release claims from versioned executed evidence",
+      "type": "validation",
+      "priority": "P1",
+      "relative_size": "M",
+      "problem": "Greppable closure markers and a green boot canary do not prove every claimed production behavior on every adapter.",
+      "implementation": [
+        "Emit a manifest combining declared capabilities with actual test/profile results for the pinned SHA and image digest",
+        "Generate README version/image examples from one release source",
+        "Mark not_run, skipped and unsupported distinctly; include migration and compatibility results",
+        "Require release-specific evidence for any promoted customer capability"
+      ],
+      "acceptance_criteria": [
+        "A file containing a finding ID cannot alone close that finding",
+        "A boot canary is never represented as multi-repo SDLC e2e",
+        "README/quick-start image version agrees with the release or is explicitly labeled a compatibility example",
+        "The manifest identifies executed test commands, jobs and artifact digests"
+      ],
+      "negative_and_recovery_tests": [
+        "Release with a skipped interactive suite and ensure the corresponding capability stays unverified",
+        "Intentionally mismatch package/tag/docs version and block promotion"
+      ],
+      "dependencies": [
+        "FND-08",
+        "FND-07"
+      ],
+      "sources": [
+        "R13",
+        "R14",
+        "R17"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-07",
+      "epic": "OPS",
+      "phase": "P4",
+      "title": "Run a bounded design-partner pilot with explicit success criteria",
+      "type": "validation",
+      "priority": "P1",
+      "relative_size": "L",
+      "problem": "The customer should see realistic system work without being promised unrestricted autonomous delivery of ten services.",
+      "implementation": [
+        "Agree one business slice, authorized repositories, dependencies, test data, cost ceiling and human decision owners",
+        "Start with multi-repo reads and one writable target; progress to two/three write repositories only after the first gate",
+        "Measure plan corrections, accepted outcomes, interventions, WIP retained and total spend",
+        "Record limitations and customer acceptance evidence before broadening the supported matrix"
+      ],
+      "acceptance_criteria": [
+        "The pilot scope excludes production deployment and autonomous merge",
+        "At least one task requires an intentional material replan and one an operator pause/steer",
+        "Unknown telemetry is visible and not treated as a free run",
+        "Expansion is tied to observed exit criteria rather than repository-count marketing"
+      ],
+      "negative_and_recovery_tests": [
+        "Run a staged demonstration where a hidden migration need is discovered after coding starts",
+        "Stop the run mid-implementation, resume elsewhere and demonstrate preserved valid work"
+      ],
+      "dependencies": [
+        "OPS-01",
+        "OPS-02",
+        "VER-08",
+        "OPS-06"
+      ],
+      "sources": [
+        "R01",
+        "X12",
+        "X14"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    },
+    {
+      "id": "OPS-08",
+      "epic": "OPS",
+      "phase": "P4",
+      "title": "Produce supported recipes and an architecture/runbook handoff",
+      "type": "feature",
+      "priority": "P2",
+      "relative_size": "M",
+      "problem": "The product needs reproducible onboarding and clear boundaries, not only a working maintainer environment.",
+      "implementation": [
+        "Publish one tested end-to-end recipe per promoted provider/runtime profile",
+        "Document safe control commands, lifecycle meanings, recovery, credentials, data flow and unsupported combinations",
+        "Include the decision record for retaining the current Postgres controller and criteria for later Temporal evaluation",
+        "Provide a read-only doctor that checks permissions, control-channel reachability, profile compatibility and required verification"
+      ],
+      "acceptance_criteria": [
+        "A fresh operator can onboard the selected pilot without copying private maintainer state",
+        "Doctor never mutates repository permissions or creates infrastructure silently",
+        "Documentation distinguishes system read scope, write coordination and production deployment",
+        "Every example is versioned and tested or clearly labeled illustrative"
+      ],
+      "negative_and_recovery_tests": [
+        "Run onboarding from an empty environment with only documented prerequisites",
+        "Remove one prerequisite and require a precise diagnostic before the first paid agent job"
+      ],
+      "dependencies": [
+        "OPS-03",
+        "OPS-04",
+        "OPS-06",
+        "OPS-07"
+      ],
+      "sources": [
+        "R14",
+        "X09"
+      ],
+      "status": "proposed",
+      "owner_role": "Platform/evaluation engineer"
+    }
+  ]
+}

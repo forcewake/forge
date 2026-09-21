@@ -3638,6 +3638,20 @@ class GitHubRunService:
                 expected_head_oid=expected_head or "",
                 branch=github_factory_branch(issue_number, run_id),
             )
+
+        async def _final_boundary_guard() -> bool:
+            """FND-02: re-check the grant at the NATATIVE-effect boundary —
+            after the bridge's awaited reads (branch head, blob hydration)
+            and branch setup, immediately before the commit-API call."""
+            if await self._publication_revoked(run_id):
+                logger.warning(
+                    "GitHub run %s cancelled during publish reads — native "
+                    "write refused at the final boundary",
+                    run_id[:8],
+                )
+                return False
+            return True
+
         return await self._stack.flow.publish_changeset(
             owner=self._owner,
             repo=self._repo,
@@ -3648,6 +3662,7 @@ class GitHubRunService:
             expected_head=expected_head,
             operation_key=operation_key,
             allowed_paths=allowed_paths,
+            pre_dispatch_guard=_final_boundary_guard,
         )
 
     async def _finish_harness_publish_leg(

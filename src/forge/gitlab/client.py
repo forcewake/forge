@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.repository.identity import RepositoryIdentity
+
 import asyncio
 import logging
 from typing import Any
@@ -67,10 +72,22 @@ class GitLabClient:
         token: str,
         timeout: float = 30.0,
     ) -> None:
+        self._tenant = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             base_url=f"{base_url.rstrip('/')}/api/v4",
             headers={"PRIVATE-TOKEN": token},
             timeout=timeout,
+        )
+
+    def identity(self, project_id: int) -> "RepositoryIdentity":
+        """The canonical identity of one GitLab project (FND-01)."""
+        from forge.repository.identity import RepositoryIdentity as _RI
+
+        return _RI(
+            tenant=self._tenant,
+            provider="gitlab",
+            native_id=f"project/{int(project_id)}",
+            display=f"{self._tenant}/projects/{int(project_id)}",
         )
 
     async def close(self) -> None:

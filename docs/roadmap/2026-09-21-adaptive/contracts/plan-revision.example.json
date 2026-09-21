@@ -1,0 +1,48 @@
+{
+  "schema": "forge.proposal.plan-revision/1",
+  "plan_id": "plan-demo-1",
+  "work_id": "wp-demo-1",
+  "revision": 1,
+  "parent_revision": null,
+  "work_contract_digest": "2e703bcbb99b1d534aedc8e0b22956d9107190a6f1fe635e7438b5a80da87c73",
+  "snapshot_set_digest": "0d0df29001db1d5943bc9c45ad0483567dd5698d459fc000d0e0d6fe5e44ff74",
+  "summary": "Inspect the current expiry producer and consumer; clarify migration authority before changing Billing.",
+  "steps": [
+    {
+      "step_id": "S1",
+      "objective": "Inspect existing contracts and idempotency behavior.",
+      "write_repository_id": null,
+      "depends_on": [],
+      "evidence_refs": [],
+      "acceptance_refs": [
+        "AC-1"
+      ],
+      "impact": [
+        "event_contract"
+      ]
+    },
+    {
+      "step_id": "S2",
+      "objective": "Implement the authorized Orders change after the blocking question is resolved.",
+      "write_repository_id": "orders",
+      "depends_on": [
+        "S1"
+      ],
+      "evidence_refs": [],
+      "acceptance_refs": [
+        "AC-1"
+      ],
+      "impact": [
+        "internal"
+      ]
+    }
+  ],
+  "assumptions": [
+    "Billing changes require a separate scope approval."
+  ],
+  "open_question_ids": [
+    "Q1"
+  ],
+  "preserved_step_ids": [],
+  "invalidated_step_ids": []
+}

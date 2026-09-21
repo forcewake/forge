@@ -32,6 +32,8 @@ boundary's :class:`~forge.runs.publisher.ValidatedCandidate` wrapper.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,6 +222,7 @@ class GitHubPublishFlow:
         body: str | None = None,
         allowed_paths: list[str] | None = None,
         operation_key: str | None = None,
+        pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
     ) -> GitHubPublishOutcome:
         """Boundary-validate *changeset*, ensure the factory branch, commit.
 
@@ -256,6 +259,7 @@ class GitHubPublishFlow:
             title=title,
             body=body,
             operation_key=operation_key,
+            pre_dispatch_guard=pre_dispatch_guard,
         )
 
     async def publish_validated(
@@ -271,8 +275,16 @@ class GitHubPublishFlow:
         title: str | None = None,
         body: str | None = None,
         operation_key: str | None = None,
+        pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
     ) -> GitHubPublishOutcome:
         """Commit an ALREADY-VALIDATED candidate (ADR-0026 transport contract).
+
+        FND-02: *pre_dispatch_guard* is re-evaluated IMMEDIATELY BEFORE the
+        native commit-API call — after every awaited authoritative read
+        (branch head, blob hydration) and branch setup. A pause/cancel that
+        lands during those operations forbids the write at the final
+        boundary; a guard that returns False yields the blocked-class
+        outcome with zero mutations.
 
         The only route from a candidate to the commit API: the
         :class:`~forge.runs.publisher.ValidatedCandidate` wrapper is issued
@@ -323,6 +335,13 @@ class GitHubPublishFlow:
         # (research §3.4); the CAS plus the headline marker probe are the
         # exactly-once guards.
         try:
+            if pre_dispatch_guard is not None and not await pre_dispatch_guard():
+                return GitHubPublishOutcome(
+                    ok=False,
+                    reason="publication_refused: guard failed at the native-effect boundary",
+                    expected_head_oid=expected_head,
+                    branch=branch,
+                )
             result = await self._client.create_commit_on_branch(
                 owner,
                 repo,
@@ -442,6 +461,7 @@ class GitHubPublishFlow:
         title: str | None = None,
         body: str | None = None,
         operation_key: str | None = None,
+        pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
     ) -> GitHubPublishOutcome:
         """The publication boundary of the GitHub transport (ADR-0026).
 
@@ -490,6 +510,7 @@ class GitHubPublishFlow:
             title=title,
             body=body,
             operation_key=operation_key,
+            pre_dispatch_guard=pre_dispatch_guard,
         )
 
     def _reader_for(self, owner: str, repo: str) -> BaseContentReader:

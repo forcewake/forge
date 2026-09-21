@@ -108,6 +108,10 @@ class FakeAzureDevOps:
     per-ref ``GitRefUpdateResult`` response shape (research §3.3/§10.11).
     """
 
+    @property
+    def org_url(self) -> str:
+        return "https://dev.azure.test/fabrikam"
+
     def __init__(self) -> None:
         # branch name -> head sha
         self.heads: dict[str, str] = {"main": BASE_HEAD}

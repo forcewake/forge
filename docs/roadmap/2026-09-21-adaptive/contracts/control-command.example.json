@@ -1,0 +1,18 @@
+{
+  "schema": "forge.proposal.control-command/1",
+  "command_id": "cmd-demo-1",
+  "work_id": "wp-demo-1",
+  "sequence": 3,
+  "kind": "pause",
+  "actor_ref": "human:reviewer-17",
+  "actor_origin": "server_authenticated_human",
+  "idempotency_key": "gitlab-note:12345",
+  "expected_plan_revision": 1,
+  "expected_execution_epoch": 2,
+  "payload": {
+    "text": "Inspect the discovered migration requirement before proceeding.",
+    "question_id": null,
+    "revision_id": null
+  },
+  "status": "authorized"
+}

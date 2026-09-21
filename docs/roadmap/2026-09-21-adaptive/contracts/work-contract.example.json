@@ -1,0 +1,60 @@
+{
+  "schema": "forge.proposal.work-contract/1",
+  "work_id": "wp-demo-1",
+  "contract_revision": 1,
+  "objective": "Add order reservation expiry without duplicate billing side effects.",
+  "non_goals": [
+    "No production deployment",
+    "No automatic merge",
+    "No broker replacement"
+  ],
+  "invariants": [
+    "Retain compatibility with the currently deployed event consumer",
+    "Do not use production data"
+  ],
+  "read_scope": [
+    {
+      "repository_id": "orders",
+      "paths": [
+        "**"
+      ]
+    },
+    {
+      "repository_id": "billing",
+      "paths": [
+        "**"
+      ]
+    }
+  ],
+  "write_scope": [
+    {
+      "repository_id": "orders",
+      "paths": [
+        "src/**",
+        "tests/**"
+      ]
+    }
+  ],
+  "allowed_effects": [
+    "discovery_read",
+    "candidate_publication",
+    "verification_run"
+  ],
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "description": "An expiry event is handled idempotently in the agreed version matrix.",
+      "producer_profile": "trusted-integration-v1",
+      "required": true
+    }
+  ],
+  "budget": {
+    "max_calls": 100,
+    "max_total_tokens": 2000000,
+    "active_compute_seconds": 7200,
+    "overall_deadline_seconds": 86400,
+    "max_parallel_writers": 1
+  },
+  "tactical_revision_policy": "bounded_internal_changes",
+  "required_decision_profile": "customer-scope-approvers"
+}

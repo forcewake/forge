@@ -247,3 +247,102 @@ class TestStrictPolicySchemaD02:
         result = await read_project_config(client, 15, ref="main")
         assert result.config is not None
         assert list(result.config.implement_paths) == ["src/**", "docs/**"]
+
+
+# ----------------------------------------------------------------------
+# FND-01: the PUBLIC RepositoryIdentity contract — real adapter shapes
+# ----------------------------------------------------------------------
+
+
+class TestRepositoryIdentityContractFND01:
+    def _real_readers(self):
+        """The REAL reader constructors over stub HTTP transports (the
+        review's acceptance: not doubles that conveniently add _owner)."""
+        import httpx
+        from forge.integrations.azure import AzureDevOpsClient
+        from forge.integrations.github import GitHubClient
+
+        class _StaticToken:
+            def get_token(self) -> str:
+                return "t"
+
+        gh_transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        gh_client = GitHubClient(
+            "https://api.github.test", token_provider=_StaticToken(), transport=gh_transport
+        )
+        az_transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        az_client = AzureDevOpsClient("https://dev.azure.test/org", "t", transport=az_transport)
+        return gh_client, az_client
+
+    def test_two_azure_repos_of_one_project_have_different_identities(self):
+        from forge.integrations.azure import AzureRepositoryReader
+
+        _, az_client = self._real_readers()
+        reader_a = AzureRepositoryReader(az_client, "Proj", "repo-a")
+        reader_b = AzureRepositoryReader(az_client, "Proj", "repo-b")
+
+        key_a = reader_a.identity().cache_key("main", ".forge.yml")
+        key_b = reader_b.identity().cache_key("main", ".forge.yml")
+        assert key_a != key_b, "two repositories of ONE project must never share a policy entry"
+        assert reader_a.identity().native_id == "Proj/repo-a"
+        assert reader_b.identity().native_id == "Proj/repo-b"
+
+    def test_two_hosts_with_identical_names_never_share(self):
+        import httpx
+        from forge.integrations.github import GitHubClient, GitHubRepositoryReader
+
+        t = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+
+        class _StaticToken:
+            def get_token(self) -> str:
+                return "t"
+
+        host1 = GitHubRepositoryReader(
+            GitHubClient("https://api.github.test", token_provider=_StaticToken(), transport=t),
+            "acme",
+            "widget",
+        )
+        host2 = GitHubRepositoryReader(
+            GitHubClient("https://api.github.mirror", token_provider=_StaticToken(), transport=t),
+            "acme",
+            "widget",
+        )
+        assert host1.identity().cache_key("main", ".forge.yml") != host2.identity().cache_key(
+            "main", ".forge.yml"
+        )
+
+    def test_gitlab_identity_is_project_qualified(self):
+        from forge.gitlab.client import GitLabClient
+
+        client = GitLabClient("https://gitlab.test", "t")
+        assert client.identity(4).cache_key("main", ".forge.yml") != client.identity(5).cache_key(
+            "main", ".forge.yml"
+        )
+
+    async def test_real_reader_identities_key_the_authority_cache(self):
+        """End-to-end: two REAL Azure readers of one project, two policies —
+        the cache must not cross them (the review's first remaining defect)."""
+        from forge.integrations.azure import AzureRepositoryReader
+
+        _, az_client = self._real_readers()
+
+        class ConfigurableReader(AzureRepositoryReader):
+            def __init__(self, client, project, repo, paths):
+                super().__init__(client, project, repo)
+                self._paths = paths
+
+            async def read_blob(self, project_id, file_path, ref="HEAD"):
+                from forge.gitlab.blob_reads import BlobReadResult
+
+                content = "implement:\n  paths:\n" + "".join(f"    - '{p}'\n" for p in self._paths)
+                return BlobReadResult.found(content)
+
+        clear_cache()
+        reader_a = ConfigurableReader(az_client, "Proj", "repo-a", ["src/a/**"])
+        reader_b = ConfigurableReader(az_client, "Proj", "repo-b", ["src/b/**"])
+
+        result_a = await read_project_config(reader_a, 42, ref="main")
+        result_b = await read_project_config(reader_b, 42, ref="main")
+
+        assert list(result_a.config.implement_paths) == ["src/a/**"]
+        assert list(result_b.config.implement_paths) == ["src/b/**"]

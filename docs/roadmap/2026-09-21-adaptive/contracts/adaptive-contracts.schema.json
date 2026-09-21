@@ -1,0 +1,840 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:proposed-adaptive-contracts:1",
+  "$comment": "DESIGN FIXTURE. Not a supported schema/API in Forge 0.15.0. Cross-object authorization and referential invariants require application validation.",
+  "$defs": {
+    "RepositoryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "gitlab",
+            "github",
+            "azure_devops"
+          ]
+        },
+        "native_repository_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repository_id",
+        "tenant_id",
+        "connection_id",
+        "provider",
+        "native_repository_id",
+        "display_name"
+      ]
+    },
+    "Snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_oid": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "resolved_from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "repository_id",
+        "source_oid",
+        "resolved_from",
+        "config_digest"
+      ]
+    },
+    "SnapshotSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.snapshot-set/1"
+        },
+        "snapshot_set_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Snapshot"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "schema",
+        "snapshot_set_id",
+        "snapshots"
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "repository_id",
+        "paths"
+      ]
+    },
+    "Acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "producer_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "producer_profile",
+        "required"
+      ]
+    },
+    "Budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_total_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "active_compute_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "overall_deadline_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_parallel_writers": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "max_calls",
+        "max_total_tokens",
+        "active_compute_seconds",
+        "overall_deadline_seconds",
+        "max_parallel_writers"
+      ]
+    },
+    "WorkContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.work-contract/1"
+        },
+        "work_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contract_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "non_goals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "read_scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Scope"
+          },
+          "minItems": 1
+        },
+        "write_scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Scope"
+          },
+          "minItems": 0
+        },
+        "allowed_effects": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "discovery_read",
+              "scratch_probe",
+              "candidate_publication",
+              "verification_run"
+            ]
+          },
+          "minItems": 0
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Acceptance"
+          },
+          "minItems": 1
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "tactical_revision_policy": {
+          "type": "string",
+          "enum": [
+            "none",
+            "bounded_internal_changes"
+          ]
+        },
+        "required_decision_profile": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "schema",
+        "work_id",
+        "contract_revision",
+        "objective",
+        "non_goals",
+        "invariants",
+        "read_scope",
+        "write_scope",
+        "allowed_effects",
+        "acceptance",
+        "budget",
+        "tactical_revision_policy",
+        "required_decision_profile"
+      ]
+    },
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "source",
+            "test_report",
+            "human_decision",
+            "inference"
+          ]
+        },
+        "repository_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_oid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "completeness": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "origin_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "evidence_id",
+        "kind",
+        "repository_id",
+        "source_oid",
+        "path",
+        "line_start",
+        "line_end",
+        "content_digest",
+        "completeness",
+        "origin_ref"
+      ]
+    },
+    "PlanStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "step_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "write_repository_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "acceptance_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "impact": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "internal",
+              "public_api",
+              "event_contract",
+              "database_schema",
+              "infrastructure",
+              "security_policy"
+            ]
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "step_id",
+        "objective",
+        "write_repository_id",
+        "depends_on",
+        "evidence_refs",
+        "acceptance_refs",
+        "impact"
+      ]
+    },
+    "PlanRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.plan-revision/1"
+        },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "work_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "parent_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "work_contract_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot_set_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          },
+          "minItems": 1
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "open_question_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "preserved_step_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "invalidated_step_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "schema",
+        "plan_id",
+        "work_id",
+        "revision",
+        "parent_revision",
+        "work_contract_digest",
+        "snapshot_set_digest",
+        "summary",
+        "steps",
+        "assumptions",
+        "open_question_ids",
+        "preserved_step_ids",
+        "invalidated_step_ids"
+      ]
+    },
+    "ControlCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.control-command/1"
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "work_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "pause",
+            "resume",
+            "steer",
+            "answer",
+            "amend",
+            "approve_revision",
+            "cancel"
+          ]
+        },
+        "actor_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor_origin": {
+          "type": "string",
+          "enum": [
+            "server_authenticated_human",
+            "authorized_system"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_plan_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_execution_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "question_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "question_id",
+            "revision_id"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "received",
+            "authorized",
+            "applied",
+            "checkpointed",
+            "rejected",
+            "expired"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "command_id",
+        "work_id",
+        "sequence",
+        "kind",
+        "actor_ref",
+        "actor_origin",
+        "idempotency_key",
+        "expected_plan_revision",
+        "expected_execution_epoch",
+        "payload",
+        "status"
+      ]
+    },
+    "Checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.checkpoint/1"
+        },
+        "checkpoint_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "work_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snapshot_set_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "work_contract_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "wip_artifact_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wip_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "last_applied_command_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "native_session_artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "outstanding_effect_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "publication_uncertain"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "checkpoint_id",
+        "work_id",
+        "attempt_id",
+        "execution_epoch",
+        "plan_revision",
+        "snapshot_set_digest",
+        "work_contract_digest",
+        "wip_artifact_id",
+        "wip_digest",
+        "last_applied_command_sequence",
+        "native_session_artifact_id",
+        "profile_digest",
+        "outstanding_effect_ids",
+        "state"
+      ]
+    },
+    "CandidateMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_oid": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "candidate_oid": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "image_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "changed",
+            "baseline"
+          ]
+        }
+      },
+      "required": [
+        "repository_id",
+        "base_oid",
+        "candidate_oid",
+        "image_digest",
+        "role"
+      ]
+    },
+    "CandidateSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "forge.proposal.candidate-set/1"
+        },
+        "work_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "plan_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "work_contract_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateMember"
+          },
+          "minItems": 1
+        },
+        "contract_bundle_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "test_bundle_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "environment_profile_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "schema",
+        "work_id",
+        "plan_revision",
+        "work_contract_digest",
+        "members",
+        "contract_bundle_digest",
+        "test_bundle_digest",
+        "environment_profile_digest"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SnapshotSet"
+    },
+    {
+      "$ref": "#/$defs/WorkContract"
+    },
+    {
+      "$ref": "#/$defs/PlanRevision"
+    },
+    {
+      "$ref": "#/$defs/ControlCommand"
+    },
+    {
+      "$ref": "#/$defs/Checkpoint"
+    },
+    {
+      "$ref": "#/$defs/CandidateSet"
+    }
+  ]
+}

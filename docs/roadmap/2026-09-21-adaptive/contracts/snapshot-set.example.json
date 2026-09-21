@@ -1,0 +1,18 @@
+{
+  "schema": "forge.proposal.snapshot-set/1",
+  "snapshot_set_id": "snap-demo-1",
+  "snapshots": [
+    {
+      "repository_id": "orders",
+      "source_oid": "1111111111111111111111111111111111111111",
+      "resolved_from": "main",
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "repository_id": "billing",
+      "source_oid": "2222222222222222222222222222222222222222",
+      "resolved_from": "main",
+      "config_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}
