@@ -57,4 +57,13 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# B14: the suite runs warning-clean except ONE known upstream artifact —
+# aiosqlite's worker thread finalizes its anyio memory stream after the
+# event loop closed (ResourceWarning from anyio/streams/memory.__del__).
+# The engines are disposed correctly (fixtures call engine.dispose()); the
+# stream belongs to aiosqlite's own thread teardown. Everything else stays
+# visible — no blanket ignores.
+filterwarnings = [
+    "ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning",
+]
 testpaths = ["tests"]

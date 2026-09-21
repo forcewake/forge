@@ -777,3 +777,37 @@ async def test_auto_revive_is_superseded_by_a_live_sibling(db, service, monkeypa
     run = await read_run(db, run_id)
     assert run.status == FlowStatus.BLOCKED.value
     assert revival_due(run, datetime.now(timezone.utc))  # still parked and due
+
+
+# ----------------------------------------------------------------------
+# B15: recovery scans live in ONE place — the provider services never
+# re-implement their own blocked-run scans (the e53ffd2 B08 lesson)
+# ----------------------------------------------------------------------
+
+
+def test_provider_services_never_reimplement_recovery_scans() -> None:
+    """The recovery dispatcher helpers (evaluate_revivals /
+    evaluate_attempt_recovery / evaluate_config_blocks) own the blocked-run
+    scans; a provider service defining its own ``select(FlowRun)...BLOCKED``
+    scan is exactly how B08's cross-repository recovery happened."""
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent / "src" / "forge"
+    # The DISPATCH enumerations (which repos hold config-blocked runs — read
+    # only, they never drive a run through an adapter) are the scheduler's
+    # legitimate own queries; everything else must live in revival.py.
+    allowed_markers = ("Distinct", "distinct GitHub repos", "config-blocked repos")
+    offenders: list[str] = []
+    for service in ("runs/service.py", "runs/github_service.py", "runs/azure_service.py"):
+        text = (repo / service).read_text(encoding="utf-8")
+        for match in re.finditer(r"select\(FlowRun\)[\s\S]{0,400}?FlowStatus\.BLOCKED", text):
+            # the enclosing function IS the dispatcher's repo enumeration
+            head = text[: match.start()]
+            fn = head[head.rfind("def ") :][:60]
+            if "_repos_with_config_blocked" in fn or any(
+                marker in head[-500:] for marker in allowed_markers
+            ):
+                continue
+            offenders.append(f"{service}: own blocked-run scan near offset {match.start()}")
+    assert offenders == [], offenders

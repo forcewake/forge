@@ -1218,6 +1218,64 @@ class CountingStackPlanner:
         return "## Implementation plan\n\n- create the thing\n"
 
 
+class TestCurrentPlanSelectionB11:
+    """B11: the task-aware selection is compiled against the CURRENT plan —
+    a planner object reused across runs must never leak a PREVIOUS run's
+    last_plan into this run's frozen selection."""
+
+    class ProposingPlanner(CountingStackPlanner):
+        def __init__(self, proposals: list[dict | None]) -> None:
+            super().__init__()
+            self._proposals = proposals
+
+        async def plan(self, issue_title, issue_description, *, flow_run_id=None, path_scope=None):
+            plan = await super().plan(
+                issue_title, issue_description, flow_run_id=flow_run_id, path_scope=path_scope
+            )
+            proposal = self._proposals.pop(0) if self._proposals else None
+            # A real planner always re-points last_plan at the plan it just
+            # made (the proposal keys ride along when present).
+            self.last_plan = {"text": plan, **(proposal or {})}
+            return plan
+
+    async def test_previous_last_plan_never_leaks_into_the_next_selection(self, db, fake):
+        planner = self.ProposingPlanner(
+            [
+                {"harness": "opencode", "budget_class": "trivial"},  # run 1's proposal
+                None,  # run 2: NO proposal
+            ]
+        )
+        fake.seed_repo(REPO, {"src/app.py": "x\n"})
+        service = make_service(db, fake, stack=make_stack(fake, planner=planner))
+
+        issue2 = ISSUE + 1
+        fake.seed_issue(REPO, issue2, ISSUE_TITLE, ISSUE_DESC)
+        run1 = await start(service)
+        await go(service, run1)
+        run2 = await service.start_run(
+            project_id=PROJECT_ID,
+            issue_number=issue2,
+            issue_title=ISSUE_TITLE,
+            issue_description=ISSUE_DESC,
+            author_username="alice",
+        )  # same REUSED planner; last_plan still run 1's
+        assert run2 != run1
+        await go(service, run2)
+
+        for run_id, expect_lite in ((run1, True), (run2, False)):
+            async with db() as session:
+                spec = (
+                    (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                    .scalars()
+                    .one()
+                )
+            budget_class = spec.document["backend_config"]["budget_class"]
+            if expect_lite:
+                assert budget_class == "trivial", run_id  # run 1: its OWN proposal
+            else:
+                assert budget_class == "standard", run_id  # run 2: NOT run 1's leak
+
+
 class TestConfigGateA13:
     """A13: an unreadable/invalid `.forge.yml` parks the run — scope never
     widens, nothing is paid while the reconciler retries the read."""

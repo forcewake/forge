@@ -66,6 +66,21 @@ FINDING_MARKERS: dict[str, str] = {
     "A02": "executable spec",
     "A03": "BriefEnvelope",
     "A13": "test_confirmed_404_is_the_only_absence",
+    "B01": "verification_epoch",
+    "B02": "old_rerun_success_never_masks",
+    "B03": "MRReservation",
+    "B04": "TestRenderBriefAzureEnforcedB04",
+    "B05": "trigger: none",
+    "B06": "waived_conclusions",
+    "B07": "missing MANDATORY GATE",
+    "B08": "never_touches_another_repository",
+    "B09": "cost_lower_bound_usd_mean",
+    "B10": "backfilled_at",
+    "B11": "TestCurrentPlanSelectionB11",
+    "B12": "observed_execution",
+    "B13": "verification pending",
+    "B14": "TestRegistrationRule",
+    "B15": "test_provider_services_never_reimplement_recovery_scans",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit

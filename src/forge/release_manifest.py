@@ -498,12 +498,125 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         "when the previous image is not pullable (first release, private registry). Recorded "
         "as not_run so a skipped stage is never counted as a passed upgrade.",
     ),
+    ManifestEntry(
+        capability="cohort-economics",
+        provider="*",
+        backend="*",
+        level="contract_tested",
+        evidence_class="contract_suite",
+        gating="pr_gate",
+        ci_jobs=("test",),
+        evidence=("tests/test_cohort_runner.py",),
+        note=(
+            "B09: unknown stays unknown in the cohort economics (all-unknown "
+            "durations/repairs are None; a receipt-less attempt makes exact cost "
+            "unknown with a priced lower bound; rates only over matched "
+            "populations). B10: the pass-1 ledger/report carry the backfilled "
+            "profile with honest unknown spend."
+        ),
+    ),
 )
 
 #: Findings with VERIFIED landed evidence in the current tree. A01, A04-A12
 #: (d16f523 review) are deliberately absent: their fixes are not fully
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
+    # e53ffd2 review (B01-B15, closed 2026-09-21 — every finding carries its
+    # composed regression on a production service path; B14's own coverage
+    # IS this block, machine-validated like the R-series)
+    FindingClosure(
+        finding="B01",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py", "tests/test_azure_runs.py"),
+    ),
+    FindingClosure(
+        finding="B02",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="B03",
+        capability="publication-intents",
+        level="contract_tested",
+        evidence=("tests/test_runs_service.py", "tests/test_failure_injection.py"),
+    ),
+    FindingClosure(
+        finding="B04",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_harness_entry.py", "tests/test_azure_integration_joins.py"),
+    ),
+    FindingClosure(
+        finding="B05",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=(
+            "tests/test_azure_integration_joins.py",
+            "tests/test_azure_pipelines_executor.py",
+        ),
+    ),
+    FindingClosure(
+        finding="B06",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py", "tests/test_runs_spec.py"),
+    ),
+    FindingClosure(
+        finding="B07",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_usecases.py", "tests/test_github_runs.py"),
+    ),
+    FindingClosure(
+        finding="B08",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="B09",
+        capability="cohort-economics",
+        level="contract_tested",
+        evidence=("tests/test_cohort_runner.py",),
+    ),
+    FindingClosure(
+        finding="B10",
+        capability="cohort-economics",
+        level="contract_tested",
+        evidence=("docs/evaluation/2026-09-20-pass1/report.json",),
+    ),
+    FindingClosure(
+        finding="B11",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py", "tests/test_runs_service.py"),
+    ),
+    FindingClosure(
+        finding="B12",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_execution_profile.py", "tests/test_harness_entry.py"),
+    ),
+    FindingClosure(
+        finding="B13",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_harness.py", "tests/test_azure_runs.py"),
+    ),
+    FindingClosure(
+        finding="B14",
+        capability="durable-failure-injection",
+        level="contract_tested",
+        evidence=("tests/test_conformance.py",),
+    ),
+    FindingClosure(
+        finding="B15",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_runs_revival.py", "tests/test_usecases.py"),
+    ),
     # e8bf381 review (the R-series the CHANGELOG claims closed)
     FindingClosure(
         finding="R01",

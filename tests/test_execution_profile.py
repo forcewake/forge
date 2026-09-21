@@ -529,3 +529,29 @@ class TestSpecEmbedding:
             digest=canonical_json_digest(document),
         )
         assert verified.profile_digest == profile.profile_digest
+
+
+# ----------------------------------------------------------------------
+# B12: the OBSERVED execution — the declared profile's honest twin
+# ----------------------------------------------------------------------
+
+
+def test_observed_execution_records_facts_not_allowance() -> None:
+    from forge.runs.execution_profile import observed_execution
+
+    record = observed_execution(
+        driver="claude-code",
+        exit_status="completed",
+        usage_completeness="aggregate",
+        candidate_changed=True,
+    )
+    # allowance vocabulary (allowed commands) never appears here — only facts
+    assert record.driver == "claude-code"
+    assert record.exit_status == "completed"
+    assert record.usage_completeness == "aggregate"
+    assert record.candidate_changed is True
+    assert record.observed_at  # ISO stamp
+    # unknown stays unknown, never defaulted
+    blank = observed_execution()
+    assert blank.exit_status == "unknown"
+    assert blank.candidate_changed is None
