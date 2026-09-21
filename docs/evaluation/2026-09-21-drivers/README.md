@@ -18,6 +18,20 @@ recorded with outcome + timing (failures included — they are evidence).
 | codex-app | `codex app-server` (codex-cli 0.153.4) over stdio JSON-RPC, ChatGPT-plan auth | thread → turn completed → mid-flight steer (`expectedTurnId`) → interrupt → `turn/completed(interrupted)` | `codex-live.json` — **5/5 ok** |
 | opencode-server | `opencode serve` v2.0.10, lane-local spawn (OpenCodeServer), zai-coding-plan provider, glm-5-turbo | spawn+ready → session+PONG → prompt(BONG)+events → abort | `opencode-live.json` |
 
+## Real-usage mode (`--e2e`, added after the first pass)
+
+PONG proves the wire, not the lane. The `--e2e` mode gives each driver
+a fresh scratch repo holding a FAILING test (`calc.py` stub +
+`test_calc.py`) and the task *implement `add` so the tests pass, run
+pytest to verify* — the agent must read, edit, and execute; **the
+judge is pytest run by the smoke itself, never the agent's reply**:
+
+| Driver | Agent turn | Repo tests after | Evidence |
+|---|---|---|---|
+| claude-sdk | completed (25s, `terminal_reason=completed`) | green | `claude-e2e.json` |
+| codex-app | completed (19s, `turn/completed(completed)`) | green | `codex-e2e.json` |
+| opencode-server | completed (13s, `session.execution.succeeded`) | green — after the two driver fixes below | `opencode-e2e.json` |
+
 Re-run (this machine, with the vendor CLIs authed):
 
 ```bash
@@ -62,6 +76,23 @@ contract tests alone.
 6. **Subprocess env must MERGE, not replace** (fixed in the spawner):
    passing only the password env dropped `PATH` and the binary lookup
    died (`FileNotFoundError` on macOS).
+
+### Found by the e2e pass (the wire smokes could not see these)
+
+7. **The SSE reader was being killed by its own wait machinery**
+   (fixed in `opencode.py`): `_ensure_subscription` awaited the reader
+   through a cancellable observer wrapper; cancelling the observer on
+   the fast-path raced a `CancelledError` INTO the reader — the stream
+   silently died after the first frame and every turn limped home on
+   transcript reconciliation. The reader task now goes into
+   `asyncio.wait` DIRECTLY (wait never cancels its arguments) and
+   readiness is a bounded event wait.
+8. **`finish: "tool-calls"` is not turn completion** (fixed in
+   `opencode.py`): intermediate assistant messages of the agent loop
+   carry non-terminal finish values; reconciliation that treated any
+   finish as completion declared the turn done after the first tool
+   round while the loop was still running. Only `stop`/`error` are
+   terminal now (regression-pinned by a test).
 
 ## Honesty bounds
 

@@ -6,6 +6,16 @@ a mechanical commit/push deny in the driver itself, a candidate artifact
 as the only output, and usage receipts where the vendor provides them
 (unknown ≠ zero).
 
+> **Not to be confused with the interactive drivers.** The harnesses
+> below are the BATCH lanes: a CI job runs to completion and returns a
+> candidate. The INTERACTIVE drivers (`forge.adaptive.drivers`:
+> claude-sdk, codex-app, opencode-server) are real steering clients —
+> start, mid-turn guidance, interrupt, drain — for the adaptive
+> execution lane; they are live-verified separately
+> ([adaptive-runbook.md](../operations/adaptive-runbook.md),
+> [driver evidence](../evaluation/2026-09-21-drivers/README.md)). The
+> harness docs here do not apply to them.
+
 | Driver | Doc | One-liner |
 |---|---|---|
 | Claude Code | [claude-code.md](claude-code.md) | `-p` + stream-json, settings isolation, always-strict MCP |

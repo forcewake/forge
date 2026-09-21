@@ -744,3 +744,20 @@ is skipped when a custom transport is supplied.
 - **Primary source for this document**: the `claude_agent_sdk-0.2.157-py3-none-macosx_11_0_arm64.whl`
   wheel, downloaded from PyPI and inspected directly (types.py / client.py / query.py /
   _errors.py / __init__.py / _cli_version.py)
+
+
+---
+
+## LIVE CONFIRMATION — 2026-09-21 (forge live smoke + e2e)
+
+The wheel-verified shapes held against a real gateway end-to-end
+(z.ai Anthropic-compatible route, claude-agent-sdk 0.2.157, claude CLI
+2.1.273): interactive `ClaudeSDKClient`, session ids on the init
+SystemMessage and every ResultMessage, `terminal_reason` on
+completion, bounded interrupt, and drain-to-ResultMessage across
+repeated `query()` calls. Two of OUR smoke's initial assumptions were
+wrong, not the doc's: `asdict` content blocks carry NO `type` field (a
+text block is a dict WITH a `text` key; thinking has `thinking`), and
+stream/system messages serialize as `{"data", "subtype"}`. A real
+implement-a-failing-test task completed green through the driver
+(evidence: `docs/evaluation/2026-09-21-drivers/claude-e2e.json`).

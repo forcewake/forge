@@ -75,10 +75,38 @@ Claude Code, Grok Build CLI, opencode (as ephemeral CI jobs), plus the
 *candidate* that forge validates and publishes — agents never hold write
 credentials to your repository.
 
+**What are the "interactive drivers" (claude-sdk / codex-app / opencode-server)?**
+Real clients in `forge.adaptive.drivers` for steering a coding agent
+LIVE — start, mid-turn steering, interrupt, drain — as opposed to the
+batch CI harnesses above, where a job runs to completion and only its
+artifact comes back. They satisfy the frozen adapter contracts in
+`forge.adaptive.adapters` and run in the execution lane next to the
+runner, never inside the privileged API process. All three are
+LIVE-verified against real vendor binaries, including a real
+implement-a-failing-test task per driver
+(`docs/evaluation/2026-09-21-drivers/`).
+
+**What does "live-verified" mean, exactly?**
+The smoke's recorded steps passed against the named binary versions on
+the recorded date — nothing broader. The `DriverMatrix` seed
+(`forge.adaptive.drivers.live_registrations`) refuses to register a
+combination whose evidence JSON is missing or shows a failed run.
+Re-verify after vendor upgrades with
+`scripts/driver_live_smoke.py` (`--e2e` for the real-task mode).
+
+**Can a driver be steered into granting itself permissions?**
+No — steering is guidance only. On codex, `turn/steer` carries input
+and cannot change the turn's sandbox or approval policy; on claude the
+mechanical `git commit`/`git push` deny is unioned into every session
+and cannot be removed; on opencode, permission requests are answered
+with the configured response (default `reject`) and never escalate.
+
 **Where do the agents run?**
 In the target project's own CI (GitLab CI / GitHub Actions) — ephemeral
 containers, your runner, your quota. Forge's own host never executes agent
-code.
+code. Interactive drivers run in the execution lane the runner owns
+(e.g., a lane-local `opencode serve` via `OpenCodeServer`, loopback +
+generated password).
 
 **Can an agent change CI configuration or workflows?**
 No — denied by policy at the trusted publisher, for every driver.

@@ -50,7 +50,9 @@ is missing or whose recorded run failed (no evidence, no claim):
 
 A green entry means the SMOKE's steps passed (session start, a
 completed turn, steering, interrupt/abort) — not a full lane cycle.
-Re-verify after vendor upgrades:
+Re-verify after vendor upgrades (add `--e2e` for the real-task mode —
+the agent implements a failing test in a scratch repo and repo pytest
+is the judge):
 
 ```bash
 uv run --extra interactive python scripts/driver_live_smoke.py \

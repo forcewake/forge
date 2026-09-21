@@ -313,6 +313,44 @@ class TestPrompt:
             with pytest.raises(TimeoutError, match="session.execution"):
                 await driver.prompt("ses_1", "say hi")
 
+    async def test_tool_call_round_is_not_turn_completion(
+        self, httpx_mock: HTTPXMock
+    ):
+        """LIVE-found (e2e campaign): intermediate assistant messages
+        carry finish="tool-calls" — reconciliation that treats ANY
+        finish as completion declares the turn done after the model's
+        first tool round while the agent loop is still running. Only
+        stop/error are terminal."""
+        register_event_stream(httpx_mock, CONNECTED)
+        register_prompt(httpx_mock, "ses_1", "implement it")
+        # The transcript shows an intermediate tool-call round FIRST,
+        # the terminal message only later.
+        tool_round = {
+            "id": "msg_tool",
+            "type": "assistant",
+            "finish": "tool-calls",
+            "content": [{"type": "tool", "name": "read", "executed": False}],
+        }
+        terminal = {
+            "id": "msg_done",
+            "type": "assistant",
+            "finish": "stop",
+            "content": [{"type": "text", "text": "DONE"}],
+        }
+        pages = [
+            {"data": [], "cursor": {}},  # baseline snapshot: nothing yet
+            {"data": [tool_round], "cursor": {}},  # mid-turn poll: NOT done
+            {"data": [tool_round, terminal], "cursor": {}},  # now terminal
+        ]
+        calls = counting_transcript(httpx_mock, "ses_1", pages)
+
+        async with opencode_lane(httpx_mock, prompt_timeout=10.0) as driver:
+            await driver.prompt("ses_1", "implement it")
+
+        # The tool-call round alone did NOT satisfy the wait: the
+        # reconciliation had to keep polling until the terminal page.
+        assert calls["count"] >= 3
+
 
 class TestEvents:
     async def test_returns_the_session_filtered_buffer_with_both_event_generations_parsed(

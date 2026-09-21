@@ -56,6 +56,17 @@ _TASK_DONE = (
     "number per line. Do not stop early."
 )
 
+#: The real-usage task (--e2e): the agent must READ a failing test,
+#: EDIT the module, RUN pytest, and leave the repo green. This is what
+#: "the driver can drive coding work" means — PONG proves the wire,
+#: this proves the lane.
+_TASK_E2E = (
+    "In this working directory, implement the `add` function in calc.py so "
+    "that every test in test_calc.py passes. Run "
+    "`python3 -m pytest test_calc.py -q` to verify your work. Do not create "
+    "git commits. Reply with DONE when the tests pass."
+)
+
 
 def _binary_version(binary: str) -> str:
     try:
@@ -434,15 +445,186 @@ async def smoke_opencode(out: Path) -> int:
     return 0 if evidence["all_ok"] else 1
 
 
+# -- real-usage mode (--e2e) ---------------------------------------------
+#
+# The PONG/BONG smokes prove the WIRE. This mode proves the LANE: a
+# fresh scratch repo with a failing test, a real agent task (read,
+# edit, run pytest), the driver as the only control surface, and the
+# repo's tests as the independent judge. The agent's reply is NOT
+# trusted for success — pytest run by THIS script is.
+
+
+def _setup_task_repo(driver: str) -> Path:
+    """A fresh scratch repo whose tests fail until the agent works."""
+    import shutil
+
+    root = REPO_ROOT / ".forge" / "live-e2e" / driver
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    (root / "calc.py").write_text(
+        '"""A stub the driving agent must implement."""\n\n\ndef add(a: int, b: int) -> int:\n'
+        '    """Return the sum (implemented by the agent)."""\n'
+        "    raise NotImplementedError\n"
+    )
+    (root / "test_calc.py").write_text(
+        "from calc import add\n\n"
+        "def test_add_positive():\n    assert add(2, 3) == 5\n\n"
+        "def test_add_negative():\n    assert add(-1, 1) == 0\n\n"
+        "def test_add_zero():\n    assert add(0, 0) == 0\n"
+    )
+    return root
+
+
+def _repo_tests_pass(root: Path) -> tuple[bool, str]:
+    """The independent judge: pytest in the task repo, run by us."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "test_calc.py", "-q"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    tail = (proc.stdout or proc.stderr).strip().splitlines()
+    return proc.returncode == 0, (tail[-1] if tail else "")
+
+
+def _e2e_check_result(ok: bool, detail: str, seconds: float, rec: Recorder) -> bool:
+    return rec.step(
+        "repo tests green after the agent turn",
+        ok=ok,
+        seconds=seconds,
+        pytest_tail=detail,
+    )
+
+
+async def e2e_claude(out: Path) -> int:
+    from forge.adaptive.drivers import claude_sdk_client_from_env
+
+    rec = Recorder("claude-sdk-e2e")
+    root = _setup_task_repo("claude")
+    settings = json.loads((Path.home() / ".claude" / "settings.json").read_text())
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        if (settings.get("env") or {}).get(key):
+            os.environ[key] = settings["env"][key]
+    os.environ.setdefault("FORGE_CLAUDE_MODEL", str(settings.get("model") or "glm-5.3-flash[1m]"))
+    os.environ["FORGE_CLAUDE_CWD"] = str(root)
+
+    client = claude_sdk_client_from_env()
+    t0 = time.time()
+    session_id = await _with_budget(client.start_session(_TASK_E2E), 120, "start_session")
+    messages = await _with_budget(
+        _drain_until_result(client, session_id, budget_s=420), 440, "turn"
+    )
+    summary = _classify_claude_messages(messages)
+    terminal = (summary["last_result"] or {}).get("terminal_reason")
+    rec.step(
+        "agent turn completed",
+        ok=terminal == "completed",
+        seconds=time.time() - t0,
+        terminal_reason=terminal,
+        reply_excerpt=summary["all_text"][:200],
+    )
+    await client.close(session_id)
+
+    ok, detail = _repo_tests_pass(root)
+    _e2e_check_result(ok, detail, time.time() - t0, rec)
+    evidence = rec.evidence({"task_repo": str(root), "task": _TASK_E2E})
+    out.write_text(json.dumps(evidence, indent=2))
+    return 0 if evidence["all_ok"] else 1
+
+
+async def e2e_codex(out: Path) -> int:
+    from forge.adaptive.drivers import codex_app_client_from_env
+
+    rec = Recorder("codex-app-e2e")
+    root = _setup_task_repo("codex")
+    os.environ["CODEX_CWD"] = str(root)
+
+    client = codex_app_client_from_env()
+    try:
+        t0 = time.time()
+        await _with_budget(client.start_thread(_TASK_E2E), 120, "start_thread")
+        deadline = time.time() + 600
+        status: dict[str, Any] | None = None
+        while time.time() < deadline:
+            for event in reversed(client.events()):
+                if event.get("method") == "turn/completed":
+                    status = (event.get("params") or {}).get("turn") or {}
+                    break
+            if status:
+                break
+            await asyncio.sleep(3)
+        rec.step(
+            "agent turn completed",
+            ok=bool(status) and status.get("status") == "completed",
+            seconds=time.time() - t0,
+            turn_status=(status or {}).get("status"),
+        )
+    finally:
+        await client.close()
+
+    ok, detail = _repo_tests_pass(root)
+    _e2e_check_result(ok, detail, time.time() - t0, rec)
+    evidence = rec.evidence({"task_repo": str(root), "task": _TASK_E2E})
+    out.write_text(json.dumps(evidence, indent=2))
+    return 0 if evidence["all_ok"] else 1
+
+
+async def e2e_opencode(out: Path) -> int:
+    from forge.adaptive.drivers import opencode_server_from_env
+    from forge.adaptive.drivers.opencode import opencode_client_from_env
+
+    rec = Recorder("opencode-server-e2e")
+    root = _setup_task_repo("opencode")
+    server = opencode_server_from_env({"OPENCODE_SERVE_CWD": str(root)})
+    async with server:
+        client = opencode_client_from_env(
+            env={
+                "OPENCODE_SERVER_URL": server.url,
+                "OPENCODE_SERVER_PASSWORD": server.password,
+                "OPENCODE_PROVIDER_ID": "zai-coding-plan",
+                "OPENCODE_MODEL_ID": "glm-5-turbo",
+                "OPENCODE_SESSION_DIRECTORY": str(root),
+                "OPENCODE_PROMPT_TIMEOUT": "600",
+            }
+        )
+        t0 = time.time()
+        try:
+            session_id = await _with_budget(client.start_session(_TASK_E2E), 600, "start_session")
+            rec.step(
+                "agent turn completed", ok=True, seconds=time.time() - t0, session_id=session_id
+            )
+        finally:
+            await client.aclose()
+
+    ok, detail = _repo_tests_pass(root)
+    _e2e_check_result(ok, detail, time.time() - t0, rec)
+    evidence = rec.evidence({"task_repo": str(root), "task": _TASK_E2E})
+    out.write_text(json.dumps(evidence, indent=2))
+    return 0 if evidence["all_ok"] else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--driver", required=True, choices=("claude", "codex", "opencode"))
     parser.add_argument("--out", type=Path, required=True, help="evidence JSON path")
+    parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="real-usage mode: the agent implements a failing-test task in a "
+        "scratch repo through the driver; repo pytest is the judge",
+    )
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
-    runners = {"claude": smoke_claude, "codex": smoke_codex, "opencode": smoke_opencode}
-    print(f"live smoke: {args.driver}")
+    runners = {
+        "claude": e2e_claude if args.e2e else smoke_claude,
+        "codex": e2e_codex if args.e2e else smoke_codex,
+        "opencode": e2e_opencode if args.e2e else smoke_opencode,
+    }
+    mode = "e2e task" if args.e2e else "smoke"
+    print(f"live {mode}: {args.driver}")
     try:
         return asyncio.run(runners[args.driver](args.out))
     except Exception as error:  # noqa: BLE001 — the evidence file must exist either way

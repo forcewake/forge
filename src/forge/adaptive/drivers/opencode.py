@@ -100,22 +100,41 @@ DEFAULT_PROMPT_TIMEOUT = 1800.0
 #: drift is expected.
 KNOWN_EVENT_TYPES: frozenset[str] = frozenset(
     {
-        # -- live-verified on v2.0.10 --
+        # -- live-verified on v2.0.10 (smoke + e2e campaigns) --
         "server.connected",
+        "session.created",
         "session.execution.started",
         "session.execution.succeeded",
         "session.execution.failed",
         "session.step.started",
         "session.step.streamed",
         "session.step.ended",
+        "session.reasoning.started",
+        "session.reasoning.delta",
+        "session.reasoning.ended",
+        "session.text.started",
+        "session.text.delta",
+        "session.text.ended",
+        "session.tool.input.started",
+        "session.tool.input.ended",
+        "session.tool.called",
+        "session.tool.success",
+        "session.tool.progress",
+        "session.usage.updated",
+        "session.instructions.updated",
+        "session.inbox.enqueued",
+        "session.inbox.delivered",
+        "session.model.selected",
+        "shell.created",
+        "shell.exited",
         # -- plausible on v2.0.10, not live-verified --
         "server.heartbeat",
-        "session.created",
         "session.disposed",
         "session.permission.requested",
         "session.inbox.started",
         "session.inbox.message",
         "installation.updated",
+        "mcp.resources.changed",
         # -- legacy v1 spelling, tolerated defensively --
         "permission.asked",
     }
@@ -124,6 +143,10 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset(
 #: What ends a ``prompt`` wait. The two execution verdicts are the
 #: verified v2 turn-done signals; the v1 names stay so an older server
 #: still unblocks the wait instead of hanging it.
+#: The transcript ``finish`` values that mark a TERMINAL assistant
+#: message (LIVE-found: intermediate tool rounds finish "tool-calls").
+_TERMINAL_FINISHES: frozenset[str] = frozenset({"stop", "error"})
+
 _TURN_DONE_EVENT_TYPES: tuple[str, ...] = (
     "session.execution.succeeded",
     "session.execution.failed",
@@ -206,12 +229,6 @@ def _spec_from_text(text: str) -> dict[str, Any] | None:
     if isinstance(parsed, dict) and ("paths" in parsed or "openapi" in parsed):
         return parsed
     return None
-
-
-async def _observe_task(task: asyncio.Task[None]) -> None:
-    """Let a waiter notice a finished reader without inheriting its fate."""
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await task
 
 
 @dataclass(frozen=True)
@@ -442,17 +459,19 @@ class OpenCodeDriverClient:
                 )
             reader = self._sse_task
             if not reconciling and reader is not None and not reader.done():
-                turn_done = asyncio.ensure_future(done.wait())
-                stream_lost = asyncio.ensure_future(_observe_task(reader))
+                # The reader task goes into the wait set DIRECTLY —
+                # asyncio.wait never cancels its arguments, so there is
+                # no cancellable intermediary between this waiter and
+                # the stream (the LIVE-found reader-kill mechanism; see
+                # _ensure_subscription's docstring).
                 try:
                     await asyncio.wait(
-                        {turn_done, stream_lost},
+                        {done_wait := asyncio.ensure_future(done.wait()), reader},
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
-                    turn_done.cancel()
-                    stream_lost.cancel()
+                    done_wait.cancel()
                 continue
             # The stream is uncovered and /api/event has no replay: reconcile
             # completion from the transcript instead — the transcript, never
@@ -473,10 +492,16 @@ class OpenCodeDriverClient:
         return bool(completed - baseline)
 
     async def _completed_assistant_ids(self, session_id: str) -> set[str] | None:
-        """Ids of assistant messages with a ``finish`` (LIVE CORRECTION:
-        ``finish: "stop" | "error"`` marks a completed assistant message;
-        an interrupted turn completes with ``finish: "error"`` and empty
-        content — there is no dedicated interrupted value)."""
+        """Ids of TERMINALLY finished assistant messages.
+
+        LIVE-found (the e2e campaign): intermediate tool-call rounds
+        carry ``finish: "tool-calls"`` — treating ANY finish as
+        completion reconciled the turn as done after the model's first
+        tool round while the agent loop was still running. Only
+        ``stop`` (LIVE CORRECTION: the success value) and ``error``
+        (failures AND interruptions — there is no dedicated interrupted
+        value) are terminal here.
+        """
         messages = await self._fetch_transcript(session_id)
         if messages is None:
             return None
@@ -484,7 +509,10 @@ class OpenCodeDriverClient:
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            if message.get("type") == "assistant" and message.get("finish"):
+            if (
+                message.get("type") == "assistant"
+                and message.get("finish") in _TERMINAL_FINISHES
+            ):
                 message_id = message.get("id")
                 if isinstance(message_id, str):
                     completed.add(message_id)
@@ -585,20 +613,26 @@ class OpenCodeDriverClient:
     # -- the /api/event subscription (LIVE CORRECTION §Routes) ---------------
 
     async def _ensure_subscription(self) -> bool:
-        """Have a live ``GET /api/event`` subscription before prompting."""
+        """Have a live ``GET /api/event`` subscription before prompting.
+
+        LIVE-found (2026-09-21, the e2e campaign): awaiting the reader
+        through an observer wrapper and CANCELLING that wrapper raced a
+        CancellationError into the reader itself — the stream silently
+        died after the first frame and every turn limped home on
+        transcript reconciliation (which then fired early on
+        ``finish: "tool-calls"`` rounds; see
+        :meth:`_completed_assistant_ids`). The reader task is therefore
+        never awaited through a cancellable intermediary: readiness is a
+        bounded wait on the event, and reader death is observed by
+        polling ``task.done()`` where it matters.
+        """
         if self._sse_task is None or self._sse_task.done():
             self._sse_ready.clear()
             self._sse_task = asyncio.create_task(self._read_event_stream())
-        reader = self._sse_task
-        ready = asyncio.ensure_future(self._sse_ready.wait())
-        failed = asyncio.ensure_future(_observe_task(reader))
         try:
-            await asyncio.wait(
-                {ready, failed}, timeout=_SUBSCRIBE_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            ready.cancel()
-            failed.cancel()
+            await asyncio.wait_for(self._sse_ready.wait(), timeout=_SUBSCRIBE_TIMEOUT)
+        except TimeoutError:
+            pass
         return self._sse_ready.is_set()
 
     async def _read_event_stream(self) -> None:
