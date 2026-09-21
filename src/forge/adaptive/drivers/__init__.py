@@ -35,6 +35,16 @@ from forge.adaptive.drivers.opencode import (
     SpecProbe,
     opencode_client_from_env,
 )
+from forge.adaptive.drivers.opencode_serve import (
+    OpenCodeServer,
+    OpenCodeServerError,
+    opencode_server_from_env,
+)
+from forge.adaptive.drivers.live_registrations import (
+    LIVE_REGISTRATIONS,
+    LiveRegistration,
+    seed_live_matrix,
+)
 
 __all__ = [
     # claude-sdk (vendor package optional — the ``interactive`` extra)
@@ -54,4 +64,12 @@ __all__ = [
     "OpenCodeDriverClient",
     "SpecProbe",
     "opencode_client_from_env",
+    # the lane-local ``opencode serve`` process lifecycle
+    "OpenCodeServer",
+    "OpenCodeServerError",
+    "opencode_server_from_env",
+    # the live-verified DriverMatrix seed (EXE-07's honest half)
+    "LIVE_REGISTRATIONS",
+    "LiveRegistration",
+    "seed_live_matrix",
 ]

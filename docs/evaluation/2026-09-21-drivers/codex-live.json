@@ -1,0 +1,47 @@
+{
+  "driver": "codex-app",
+  "recorded_at": "2026-09-21T19:42:41+0200",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.13.11"
+  },
+  "steps": [
+    {
+      "step": "start_thread",
+      "ok": true,
+      "seconds": 0.28,
+      "thread_id": "01a0c50f-f37f-79f3-859e-a73fd45c5e5e"
+    },
+    {
+      "step": "turn1(completed)",
+      "ok": true,
+      "seconds": 4.0,
+      "turn_status": "completed",
+      "note": "turn/start response timing observed live: the response arrives at turn ACCEPTANCE (~0.4s), completion is the turn/completed notification"
+    },
+    {
+      "step": "start_thread(2)",
+      "ok": true,
+      "seconds": 0.16,
+      "thread_id": "01a0c510-0408-7812-afde-ebc51ce0ee65"
+    },
+    {
+      "step": "steer_active_turn",
+      "ok": true,
+      "seconds": 0.0,
+      "turn_id": "01a0c510-0496-7942-93a6-a71f4b281793"
+    },
+    {
+      "step": "interrupt(->interrupted)",
+      "ok": true,
+      "seconds": 5.01,
+      "turn_status": "interrupted"
+    }
+  ],
+  "all_ok": true,
+  "failures": [],
+  "versions": {
+    "codex_cli": "codex-cli 0.153.4"
+  },
+  "event_count": 179
+}

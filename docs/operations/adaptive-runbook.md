@@ -35,6 +35,32 @@ Unregistered (SDK × provider_route × credential_mode) combinations
 **fail during onboarding** — the DriverMatrix is fail-closed. A missing
 selected credential does not fall back to another provider key.
 
+### Live-verified combinations (since 2026-09-21)
+
+`forge.adaptive.drivers.live_registrations.seed_live_matrix()` seeds a
+matrix from the live smoke evidence — each entry cites its evidence
+JSON under `docs/evaluation/`, and seeding REFUSES an entry whose file
+is missing or whose recorded run failed (no evidence, no claim):
+
+| SDK | provider_route | credential_mode | Verified against | Evidence |
+|---|---|---|---|---|
+| claude-sdk | zai-anthropic-gateway | byok-env-token | claude 2.1.273 + claude-agent-sdk 0.2.157 | `docs/evaluation/2026-09-21-drivers/claude-live.json` |
+| codex-app | chatgpt-login | chatgpt-plan | codex-cli 0.153.4 | `docs/evaluation/2026-09-21-drivers/codex-live.json` |
+| opencode-server | zai-coding-plan | server-basic+stored-key | opencode v2.0.10 | `docs/evaluation/2026-09-21-drivers/opencode-live.json` |
+
+A green entry means the SMOKE's steps passed (session start, a
+completed turn, steering, interrupt/abort) — not a full lane cycle.
+Re-verify after vendor upgrades:
+
+```bash
+uv run --extra interactive python scripts/driver_live_smoke.py \
+  --driver claude --out docs/evaluation/<date>-drivers/claude-live.json
+```
+
+The opencode lane needs no manual server: the spawner
+(`forge.adaptive.drivers.OpenCodeServer`) owns the process, the port,
+and the server password end-to-end.
+
 ## 3. Safe control commands
 
 | Command | What it does | What it does NOT do |

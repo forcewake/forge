@@ -587,3 +587,64 @@ Useful for smoke tests; a real adapter should own the server lifecycle via `open
   client-server architecture), daytona.io SDK walkthrough
 - Reported issues (Mar 2026): SDK `HeadersTimeoutError` after ~5 min on long `session.prompt`
   calls; empty `session.prompt()` responses with custom OpenAI-compatible providers
+
+
+---
+
+## LIVE CORRECTION — opencode v2.0.10 (verified 2026-09-21, forge live smoke)
+
+The server this research documented is NOT v2.0.10. Every route, the
+prompt model, the event vocabulary, and the auth default changed. The
+v2.0.10 contract below is what actually runs (verified request/response
+against a live `opencode serve` on macOS, evidence in
+`docs/evaluation/2026-09-21-drivers/opencode-live.json`):
+
+### Routes (everything moved under `/api`)
+
+| Purpose | v2.0.10 (verified) | This doc had |
+|---|---|---|
+| Create session | `POST /api/session` `{title?}` → `{"data": {id, ...}}` | `POST /session` |
+| Set model | `POST /api/session/{id}/model` `{"model": {"providerID", "id"}}` → 204 | (model rode the prompt body) |
+| Prompt | `POST /api/session/{id}/prompt` `{"text": "..."}` — **NON-blocking user echo** (`delivery: "steer"`), turn runs async | `POST /session/:id/message` (blocking) / `prompt_async` (gone) |
+| Transcript | `GET /api/session/{id}/message` → `{"data": [msg], "cursor": {...}}` (paginated) | unprefixed, bare list |
+| Abort | `POST /api/session/{id}/interrupt` → `{"interrupted": bool}` | `POST /session/:id/abort` |
+| Events | `GET /api/event` (SSE) | `GET /event` |
+| Spec | `GET /openapi.json` (JSON; `/doc` is an HTML viewer) | `/doc` spec link |
+| Permission reply | `POST /api/session/{id}/permission/{requestID}/reply` | `/session/:id/permissions/:permissionID` |
+
+### Model selection is MANDATORY
+
+A fresh session resolves a DEFAULT model that may point at a stale
+provider (observed: `github-copilot/gpt-6-astra` → `provider.auth:
+Unauthorized`, surfaced as `session.execution.failed`). The lane MUST
+set the model explicitly after create. The model object shape is
+`{"providerID": ..., "id": ...}` (NOT `{providerID, modelID}` — that
+400s with `Missing key at ["model"]["id"]`).
+
+### Event vocabulary (EventV2 landed fully)
+
+Frame: flat `{"id", "created", "type", "location"?, "data": {...}, "durable"?}`
+— payload in `data`, no `properties` wrapper. First frame
+`server.connected`. Turn lifecycle:
+`session.execution.started` → `session.step.started` →
+`session.step.streamed` → `session.step.ended` →
+`session.execution.succeeded | session.execution.failed`.
+No `session.idle`, no `session.next.text.delta` — text streams via
+`session.step.streamed` and lands in the transcript message.
+
+### Completion + interrupt shapes
+
+Assistant transcript message: `{"id", "time": {"created", "streamed"?,
+"completed"}, "type": "assistant", "agent", "model": {"id",
+"providerID"}, "content": [{"type": "reasoning"|"text", "text", ...}],
+"finish": "stop" | "error"}`. A turn interrupted mid-flight:
+`interrupt` answers `{"interrupted": true}` and the assistant message
+completes with `finish: "error"` and EMPTY content — there is no
+dedicated interrupted finish value.
+
+### Auth (verified)
+
+`OPENCODE_SERVER_PASSWORD` in the child env pins the password (Basic
+auth `opencode:<pw>` → 200). UNSET, v2.0.10 GENERATES a random
+password and prints it to stdout — a DEVNULL lane loses it. Always
+pin it.

@@ -302,7 +302,7 @@ class TestWireHandshake:
                 "model": "gpt-5.6-terra",
                 "cwd": "/repo",
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
             },
         }
         assert turn_start == {
@@ -610,9 +610,11 @@ class TestFactoryFromEnv:
         assert client.cwd == "/workspace/lane"
         assert client.model == "gpt-5.6-terra"
         assert client.approval_policy == "never"
-        assert client.sandbox == "workspaceWrite"
+        assert client.sandbox == "workspace-write"
         assert client.turn_overrides["effort"] == "low"
         policy = client.turn_overrides["sandboxPolicy"]
+        # LIVE-verified asymmetry: thread/start wants kebab-case, the
+        # turn/start sandboxPolicy.type wants camelCase.
         assert policy["type"] == "workspaceWrite"
         assert policy["writableRoots"] == ["/workspace/lane"]
         assert policy["networkAccess"] is True
@@ -626,4 +628,19 @@ class TestFactoryFromEnv:
         assert client.cwd == os.getcwd()
         assert client.model is None
         assert client.approval_policy == "never"
-        assert client.sandbox == "workspaceWrite"
+        assert client.sandbox == "workspace-write"
+
+    def test_legacy_camelcase_sandbox_is_normalized_to_the_wire_spelling(self):
+        """LIVE-found 2026-09-21 (codex-cli 0.153.4): the wire variant enums
+        are ASYMMETRIC — thread/start's sandbox is kebab-case while
+        turn/start's sandboxPolicy.type is camelCase. Operator config in
+        either spelling keeps working: normalized to kebab internally,
+        emitted per-surface."""
+        client = codex_app_client_from_env({"CODEX_SANDBOX": "workspaceWrite"})
+
+        assert client.sandbox == "workspace-write"
+        assert client.turn_overrides["sandboxPolicy"]["type"] == "workspaceWrite"
+
+        read_only = codex_app_client_from_env({"CODEX_SANDBOX": "readOnly"})
+        assert read_only.sandbox == "read-only"
+        assert read_only.turn_overrides["sandboxPolicy"] == {"type": "readOnly"}

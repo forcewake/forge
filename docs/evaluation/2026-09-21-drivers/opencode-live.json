@@ -1,0 +1,40 @@
+{
+  "driver": "opencode-server",
+  "recorded_at": "2026-09-21T20:01:25+0200",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.13.11"
+  },
+  "steps": [
+    {
+      "step": "serve_spawn+ready",
+      "ok": true,
+      "seconds": 0.54,
+      "url": "http://127.0.0.1:55157"
+    },
+    {
+      "step": "start_session",
+      "ok": true,
+      "seconds": 3.59,
+      "session_id": "ses_f3adf1fafffe7pcTXtNcLgGc1B"
+    },
+    {
+      "step": "prompt(BONG)+events",
+      "ok": true,
+      "seconds": 5.07,
+      "event_count": 1,
+      "matched_events": 1
+    },
+    {
+      "step": "abort(long session)",
+      "ok": true,
+      "seconds": 15.12,
+      "events_after_abort": 2
+    }
+  ],
+  "all_ok": true,
+  "failures": [],
+  "versions": {
+    "opencode_cli": "opencode v2.0.10"
+  }
+}

@@ -211,7 +211,12 @@ class CodexAppDriverClient:
     cwd: str = ""
     model: str | None = None
     approval_policy: str = "never"
-    sandbox: str = "workspaceWrite"
+    #: The wire spelling is kebab-case (`read-only` / `workspace-write` /
+    #: `danger-full-access`) — LIVE-verified against codex-cli 0.153.4
+    #: (2026-09-21): the camelCase forms the research doc carried are
+    #: rejected as unknown variants. :func:`_wire_sandbox` normalizes
+    #: the legacy camelCase spellings so operator config keeps working.
+    sandbox: str = "workspace-write"
     turn_overrides: Mapping[str, Any] = field(default_factory=dict)
     experimental_api: bool = False
     client_name: str = "forge"
@@ -545,6 +550,35 @@ class CodexAppDriverClient:
         self._turn_waiters.clear()
 
 
+def _wire_sandbox(sandbox: str) -> str:
+    """Normalize a sandbox name to the THREAD/START wire spelling.
+
+    LIVE-verified 2026-09-21 (codex-cli 0.153.4): the wire has an
+    ASYMMETRY the research doc only half-caught — ``thread/start``'s
+    ``sandbox`` string is kebab-case (``read-only`` /
+    ``workspace-write`` / ``danger-full-access``), while
+    ``turn/start``'s ``sandboxPolicy.type`` is camelCase
+    (``readOnly`` / ``workspaceWrite`` / ``dangerFullAccess`` /
+    ``externalSandbox``). The canonical internal form is kebab; the
+    turn-override emit maps it via :data:`_POLICY_TYPE`. Legacy
+    camelCase INPUT keeps working (normalized here).
+    """
+    legacy = {
+        "workspaceWrite": "workspace-write",
+        "readOnly": "read-only",
+        "dangerFullAccess": "danger-full-access",
+    }
+    return legacy.get(sandbox, sandbox)
+
+
+#: kebab (thread/start sandbox) -> camelCase (turn/start sandboxPolicy.type).
+_POLICY_TYPE = {
+    "workspace-write": "workspaceWrite",
+    "read-only": "readOnly",
+    "danger-full-access": "dangerFullAccess",
+}
+
+
 def codex_app_client_from_env(env: Mapping[str, str] | None = None) -> CodexAppDriverClient:
     """Build the stdio client from the environment, headless by default.
 
@@ -555,7 +589,7 @@ def codex_app_client_from_env(env: Mapping[str, str] | None = None) -> CodexAppD
       ``writableRoots``.
     - ``CODEX_MODEL`` / ``CODEX_EFFORT`` — model config passthrough.
     - ``CODEX_APPROVAL_POLICY`` (default ``never``), ``CODEX_SANDBOX``
-      (default ``workspaceWrite`` with explicit ``writableRoots`` and
+      (default ``workspace-write`` with explicit ``writableRoots`` and
       ``networkAccess``, §4.2's deterministic headless recipe),
       ``CODEX_NETWORK_ACCESS`` (default on — the implementation lane's
       package-registry egress, EXE-08).
@@ -568,7 +602,7 @@ def codex_app_client_from_env(env: Mapping[str, str] | None = None) -> CodexAppD
     binary = source.get("CODEX_BINARY", "codex")
     cwd = source.get("CODEX_CWD") or os.getcwd()
     approval_policy = source.get("CODEX_APPROVAL_POLICY", "never")
-    sandbox = source.get("CODEX_SANDBOX", "workspaceWrite")
+    sandbox = _wire_sandbox(source.get("CODEX_SANDBOX", "workspace-write"))
     network_access = source.get("CODEX_NETWORK_ACCESS", "true").strip().lower() in {
         "1",
         "true",
@@ -577,9 +611,13 @@ def codex_app_client_from_env(env: Mapping[str, str] | None = None) -> CodexAppD
     }
     turn_overrides: dict[str, Any] = {
         "sandboxPolicy": (
-            {"type": "workspaceWrite", "writableRoots": [cwd], "networkAccess": network_access}
-            if sandbox == "workspaceWrite"
-            else {"type": sandbox}
+            {
+                "type": _POLICY_TYPE[sandbox],
+                "writableRoots": [cwd],
+                "networkAccess": network_access,
+            }
+            if sandbox == "workspace-write"
+            else {"type": _POLICY_TYPE.get(sandbox, sandbox)}
         )
     }
     effort = source.get("CODEX_EFFORT")

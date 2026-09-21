@@ -698,3 +698,30 @@ rpc("turn/start", {"threadId": thread["thread"]["id"],
 - [Promptfoo OpenAI Codex App Server provider](https://www.promptfoo.dev/docs/providers/openai/)
 - GitHub issues: [#12329 — Expose turn/steer in the TypeScript SDK](https://github.com/openai/codex/issues/12329); repeated `turn/interrupt` pending bug (Aug 2026); app-server client attach-to-active-thread feature request (June 2026)
 - [Codex App Server Python SDK guide (jaesolshin.com, May 2026)](https://jaesolshin.com/)
+
+
+---
+
+## LIVE CORRECTION — codex-cli 0.153.4 (verified 2026-09-21, forge live smoke)
+
+The sandbox spellings this doc carried are wrong for 0.153.4, and the
+doc left turn/start response timing ambiguous. Verified against a real
+`codex app-server` (evidence: `docs/evaluation/2026-09-21-drivers/codex-live.json`):
+
+1. **The sandbox variant enums are ASYMMETRIC per surface.**
+   `thread/start`'s `sandbox` string parameter wants kebab-case —
+   `read-only`, `workspace-write`, `danger-full-access` (camelCase is
+   rejected: "unknown variant `workspaceWrite`"). `turn/start`'s
+   `sandboxPolicy.type` wants camelCase — `readOnly`, `workspaceWrite`,
+   `dangerFullAccess`, plus an `externalSandbox` variant this doc did
+   not know (kebab rejected there). The forge driver normalizes input
+   of either spelling and emits per-surface.
+2. **`turn/start` responds at turn ACCEPTANCE (~0.4 s), not at turn
+   completion.** Completion is the `turn/completed` notification
+   (status `completed|interrupted|failed`). A client that treats the
+   response as the turn result will see turns "finish" instantly.
+3. The handshake (`initialize` → response → `initialized`
+   notification), `thread/start`, `turn/steer` with `expectedTurnId`
+   (stale id errors, never queues), `turn/interrupt` keyed off
+   `turn/completed(interrupted)`, and ChatGPT-login auth via inherited
+   environment all behaved exactly as this doc describes.
