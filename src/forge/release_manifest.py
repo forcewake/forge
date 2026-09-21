@@ -521,6 +521,80 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
 #: (d16f523 review) are deliberately absent: their fixes are not fully
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
+    # 7f0139e review (C01-C12, closed 2026-09-21 — the contract hand-off
+    # campaign; each closure carries its composed regression)
+    FindingClosure(
+        finding="C01",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="C02",
+        capability="numeric-budgets",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="C03",
+        capability="harness-selection",
+        level="contract_tested",
+        evidence=("tests/test_azure_integration_joins.py", "tests/test_harness_selection.py"),
+    ),
+    FindingClosure(
+        finding="C04",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_azure_runs.py",),
+    ),
+    FindingClosure(
+        finding="C05",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_runs_backends.py", "tests/test_runs_service.py"),
+    ),
+    FindingClosure(
+        finding="C06",
+        capability="harness-selection",
+        level="contract_tested",
+        evidence=("tests/test_harness_selection.py",),
+    ),
+    FindingClosure(
+        finding="C07",
+        capability="cohort-economics",
+        level="contract_tested",
+        evidence=("tests/test_cohort_runner.py",),
+    ),
+    FindingClosure(
+        finding="C08",
+        capability="publication-intents",
+        level="contract_tested",
+        evidence=("tests/test_runs_service.py",),
+    ),
+    FindingClosure(
+        finding="C09",
+        capability="durable-failure-injection",
+        level="contract_tested",
+        evidence=("alembic/versions/019_mr_reservations.py",),
+    ),
+    FindingClosure(
+        finding="C10",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_harness_entry.py", "tests/test_execution_profile.py"),
+    ),
+    FindingClosure(
+        finding="C11",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="C12",
+        capability="release-artifact-canary",
+        level="contract_tested",
+        evidence=("README.md",),
+    ),
     # e53ffd2 review (B01-B15, closed 2026-09-21 — every finding carries its
     # composed regression on a production service path; B14's own coverage
     # IS this block, machine-validated like the R-series)

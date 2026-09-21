@@ -81,6 +81,18 @@ FINDING_MARKERS: dict[str, str] = {
     "B13": "verification pending",
     "B14": "TestRegistrationRule",
     "B15": "test_provider_services_never_reimplement_recovery_scans",
+    "C01": "ambiguous_check_identity",
+    "C02": "one_set_of_numbers",
+    "C03": "TestCredentialContractC03",
+    "C04": "never_touches_another_repository",
+    "C05": "BackendStartSpec",
+    "C06": "StrictManifestC06",
+    "C07": "effective_output_rate",
+    "C08": "TestBoundedMrIoC08",
+    "C09": "downgrade 019->018 refused",
+    "C10": "TestCommandReceiptsC10",
+    "C11": "TestMutationGuardsC11",
+    "C12": "v0.13.0",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit

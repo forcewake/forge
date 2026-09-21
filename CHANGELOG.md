@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-09-21
+
+### Fixed — contract hand-off coherence (fourth external review 7f0139e: all 12 findings closed — evidence in `python -m forge.release_manifest`)
+
+- **C01 — identity-preserving CI verdicts**: a display name claimed by
+  several workflow identities with DISAGREEING conclusions is
+  ambiguous_check_identity (never verified; agreeing collisions are fine);
+  has_pending is decided after the authoritative collapse over the PROOF
+  set — a stale/optional pending run no longer holds completed required
+  checks hostage.
+- **C02 — one budget truth**: the spec builders use the selection's
+  RESOLVED ceilings (pinned to the opened RunBudget when the planner moved
+  the class) — RunBudget == RunSpec == selection; the class name is never
+  re-resolved at freeze.
+- **C03 — the credential registry is the contract**: the AzDO recipe maps
+  grok-build→FORGE_GROK_AUTH (not XAI, not 'grok'), opencode→ZAI_API_KEY,
+  copilot→its token alone, claude-code→the Anthropic surface; both shipped
+  recipes AND the GitHub workflow are cross-checked against
+  DRIVER_CREDENTIAL_VARS by tests. An enforced dispatch missing the read
+  token or any envelope input FAILS CLOSED — a stale pre-provisioned brief
+  never executes.
+- **C04 — Azure recovery is repository-scoped** (B08's twin): the config/
+  attempt recovery scans select only the bound repo; the durable subject
+  column is populated at AzDO start (the scans could never match before).
+- **C05 — frozen-spec dispatch on GitLab**: BackendStartSpec — the harness
+  backend executes the approved model/target (legacy callers fall back
+  loudly); the Draft MR target comes from the frozen spec too. Settings
+  drift after approval cannot move a dispatch or an MR.
+- **C06 — a declared capability manifest is a strict upper bound**: an
+  empty/disjoint intersection raises at compile time instead of silently
+  degrading to the default driver.
+- **C07 — identity-joined effective output rate**: the cohort rate divides
+  tokens by the SAME calls' durations (attempt-id join); count equality
+  proves nothing and yields None; the name is honest (full-request
+  duration ≠ decode speed).
+- **C08 — bounded MR I/O under the reservation lock**
+  (FORGE_MR_IO_TIMEOUT_SECONDS): a hung list fails CLOSED, a hung create
+  records unknown_outcome.
+- **C09 — honest 019 downgrade**: genuine multi-observation history refuses
+  ('forward-only from here') instead of failing mid-index or deleting audit
+  rows; proven on real Postgres both ways.
+- **C10 — ObservedExecution command receipts**: the trusted wrapper's
+  (argv, exit, report) rows from .forge/commands.tsv ride the candidate
+  meta — 'allowed' stays declared vocabulary, these are the proof it ran.
+- **C11 — mutation guards**: reverting C01's ambiguity map or B01's epoch
+  makes the guards FAIL (the regression tests keep their bite).
+- **C12 — README/quick-start synced** to the current release (was
+  0.11.0/2601 tests — a new user could install a release predating every
+  fix the docs describe).
+
 ## [0.13.0] - 2026-09-21
 
 ### Fixed — recovery/evidence/recipe coherence (third external review e53ffd2: all 15 findings closed — evidence in `python -m forge.release_manifest`)
