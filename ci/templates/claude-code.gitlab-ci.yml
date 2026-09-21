@@ -86,7 +86,7 @@ forge-agent:
     - export FORGE_LOG_PLATFORM=gitlab
     # The task brief: approved plan, written to an ephemeral file (ADR-0012:
     # context passes through GitLab CI variables, not forge-side state).
-    - printf '%s\n' "$FORGE_PLAN" > /tmp/brief.md
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
     - set -o pipefail
     # Headless harness run. The driver NEVER commits or pushes: its
     # working-tree edits ARE the candidate. A nonzero exit does not abort
@@ -123,7 +123,7 @@ forge-agent:
       else
         echo '{"mcpServers":{}}' > /tmp/forge-mcp.json
       fi
-      claude -p "Implement the task described in /tmp/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
+      claude -p "Implement the task described in .forge/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
         --model "$ANTHROPIC_MODEL" \
         --allowedTools "$CLAUDE_TOOLS" \
         --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \
