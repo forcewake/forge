@@ -3053,28 +3053,53 @@ class TestMutationGuardsC11:
         )
 
     async def test_mutation_updated_at_deadline_restores_the_slide(self, db, fake, monkeypatch):
-        """Revert B01/C-era epoch (deadline from updated_at) → repeated
-        observations slide the deadline again."""
+        """D10: BASELINE first, then the SAME trace with the mutation —
+        the epoch is fixed by a first poll at T0, observations follow, and
+        the deadline poll at T0+601s must block the baseline while the
+        sliding-epoch mutant keeps waiting. Without the baseline arm the
+        test proves nothing (a first poll at deadline-time would fix the
+        epoch either way)."""
         import forge.runs.github_service as gs
 
-        settings = make_settings(
-            FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
-        )
-        service = make_service(db, fake, settings=settings)
-        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
-        fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
+        async def _drive(mutated: bool) -> str:
+            clear_comments(fake)
+            fake2 = FakeGitHub()
+            fake2.seed_repo(REPO, {"src/app.py": "print('hi')\n"})
+            fake2.heads[REPO]["main"] = BASE_HEAD
+            fake2.seed_issue(REPO, ISSUE, ISSUE_TITLE, ISSUE_DESC)
+            settings = make_settings(
+                FORGE_REQUIRED_JOBS="tests", FORGE_VERIFICATION_TIMEOUT_SECONDS=600
+            )
+            service = make_service(db, fake2, settings=settings)
+            run_id, candidate = await drive_to_waiting_ci(db, service, fake2)
+            fake2.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
 
-        def sliding_epoch(evidence, sha, now):
-            # MUTATION: pretend the epoch restarts every observation
-            return {"candidate_sha": sha, "started_at": now.isoformat()}, True
+            t0 = datetime.now(timezone.utc)
+            # first poll fixes the epoch at T0
+            await service.evaluate_waiting_ci_one(run_id, now=t0)
+            # repeated observations (each merges evidence)
+            await service.evaluate_waiting_ci_one(run_id, now=t0 + timedelta(seconds=300))
+            await service.evaluate_waiting_ci_one(run_id, now=t0 + timedelta(seconds=450))
 
-        monkeypatch.setattr(gs, "verification_epoch", sliding_epoch)
-        far = datetime.now(timezone.utc) + timedelta(seconds=601)
-        await service.evaluate_waiting_ci_one(run_id, now=far)
-        monkeypatch.undo()
+            if mutated:
 
-        run = await get_run(db, run_id)
-        assert run.status == FlowStatus.WAITING_CI.value, (
+                def sliding_epoch(evidence, sha, now):
+                    # MUTATION: the epoch restarts every observation
+                    return {"candidate_sha": sha, "started_at": now.isoformat()}, True
+
+                monkeypatch.setattr(gs, "verification_epoch", sliding_epoch)
+            try:
+                # deadline poll: T0 + 601s > the 600s window
+                await service.evaluate_waiting_ci_one(run_id, now=t0 + timedelta(seconds=601))
+            finally:
+                monkeypatch.undo()
+            return (await get_run(db, run_id)).status
+
+        baseline = await _drive(mutated=False)
+        assert baseline == FlowStatus.BLOCKED.value, "baseline must block at the deadline"
+
+        mutant = await _drive(mutated=True)
+        assert mutant == FlowStatus.WAITING_CI.value, (
             "the sliding-deadline mutation no longer slides — the B01 regression lost its bite"
         )
 

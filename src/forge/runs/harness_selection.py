@@ -224,8 +224,13 @@ def resolve_preference(config: ForgeConfig, settings: Settings) -> list[str]:
     return parse_preference(str(getattr(settings, "FORGE_HARNESS_PREFERENCE", "") or ""))
 
 
-def resolve_available_drivers(config: ForgeConfig, settings: Settings) -> set[str]:
+def resolve_available_drivers(config: ForgeConfig, settings: Settings) -> set[str] | None:
     """The project's available-driver set — the R31 capability manifest.
+
+    D06: returns ``None`` when NO manifest is declared anywhere (the
+    documented legacy default — every shipped driver); returns a set —
+    possibly EMPTY — when a manifest IS declared (an explicitly empty
+    manifest allows no driver). Callers widen only ``None``.
 
     ``ForgeConfig.implement.available_drivers`` (the YAML form) wins; the
     ``FORGE_AVAILABLE_DRIVERS`` JSON is the lab/CI alternative (the same
@@ -237,12 +242,24 @@ def resolve_available_drivers(config: ForgeConfig, settings: Settings) -> set[st
     (``FORGE_DRIVER_VERSIONS``) presupposes the capability — a pinned entry
     never widens this set.
     """
+    # D06: a DECLARED manifest — even an explicitly EMPTY one — is the
+    # boundary; only a manifest declared NOWHERE keeps the legacy
+    # all-shipped default. The empty-string/empty-list forms of each
+    # source are ambiguous, so they are read as UNSET (legacy); an
+    # explicit empty JSON object {"version": 1, "drivers": []} declares
+    # "no driver is allowed" and flows through as an empty set.
     from_config = list(config.available_drivers)
     if from_config:
         return set(from_config)
     from forge.config import parse_available_drivers
 
-    return set(parse_available_drivers(str(getattr(settings, "FORGE_AVAILABLE_DRIVERS", "") or "")))
+    raw = str(getattr(settings, "FORGE_AVAILABLE_DRIVERS", "") or "")
+    if raw.strip().startswith("{"):
+        # an explicit JSON manifest — validate_available_drivers owns the
+        # shape; an empty drivers list is a DECLARED empty boundary.
+        return set(parse_available_drivers(raw))
+    parsed = parse_available_drivers(raw)
+    return set(parsed) if parsed else None
 
 
 def validate_preference(preference: list[str], driver: str | None = None) -> None:

@@ -4080,7 +4080,11 @@ class AzureRunService:
         preference = resolve_preference(self._config, self._settings)
         lane = self._lane_pipeline_id()
         validate_preference(preference, self._harness_driver() if lane else None)
-        available = resolve_available_drivers(self._config, self._settings) or set(SHIPPED_DRIVERS)
+        # D06: None (no manifest anywhere) widens to the shipped legacy set;
+        # a DECLARED set — even empty — is the boundary (C06 raises on a
+        # disjoint configured driver below).
+        _resolved = resolve_available_drivers(self._config, self._settings)
+        available = _resolved if _resolved is not None else set(SHIPPED_DRIVERS)
         selection = compile_harness_selection(
             preference,
             f"ci_harness:{self._harness_driver()}" if lane else "builtin",

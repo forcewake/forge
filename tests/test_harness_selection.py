@@ -924,3 +924,34 @@ class TestStrictManifestC06:
 
         selection = compile_harness_selection([], "ci_harness:claude-code", {"claude-code"}, None)
         assert selection.harness == "claude-code"
+
+
+class TestManifestEmptinessD06:
+    def test_an_explicitly_empty_json_manifest_allows_no_driver(self):
+        """D06: {'version': 1, 'drivers': []} is a DECLARED boundary —
+        no driver is available; the compiler raises on any configured
+        driver rather than silently defaulting."""
+        import pytest as _pytest
+
+        from forge.runs.harness_selection import resolve_available_drivers
+
+        class S:
+            FORGE_AVAILABLE_DRIVERS = '{"version": 1, "drivers": []}'
+
+        class C:
+            available_drivers: list[str] = []
+
+        resolved = resolve_available_drivers(C(), S())  # type: ignore[arg-type]
+        assert resolved is not None
+        assert resolved == set()
+
+    def test_no_manifest_anywhere_is_legacy_none(self):
+        from forge.runs.harness_selection import resolve_available_drivers
+
+        class S:
+            FORGE_AVAILABLE_DRIVERS = ""
+
+        class C:
+            available_drivers: list[str] = []
+
+        assert resolve_available_drivers(C(), S()) is None  # type: ignore[arg-type]

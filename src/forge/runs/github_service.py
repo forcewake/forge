@@ -2461,19 +2461,12 @@ class GitHubRunService:
             )
             return
 
-        outcome = await self._stack.flow.publish_changeset(
-            owner=self._owner,
-            repo=self._repo,
+        outcome = await self._publish_candidate_run_aware(
+            run_id,
             issue_number=issue_number,
-            run_id=run_id,
             changeset=changeset,
-            base_branch=self._target_branch(),
             expected_head=expected_head or None,
             operation_key=intent.operation_key,
-            # D03: the FROZEN path scope reaches the commit boundary — the
-            # bridge's None default means whole-repository, which silently
-            # dropped the approved restriction on this production path.
-            allowed_paths=list(spec.allowed_paths or []),
         )
         await self._complete_intent_from_outcome(intent.id, outcome)
 
@@ -3592,17 +3585,12 @@ class GitHubRunService:
         # outcome — ingest it before the CAS write so a failed/unknown
         # publish still leaves the attempt's cost on the ledger.
         await self._record_harness_usage(run_id, outcome)
-        publish_outcome = await self._stack.flow.publish_changeset(
-            self._owner,
-            self._repo,
+        publish_outcome = await self._publish_candidate_run_aware(
+            run_id,
             issue_number=issue_number,
-            run_id=run_id,
             changeset=changeset,
-            base_branch=self._target_branch(),
             expected_head=bundle.attempt_base_oid,
             operation_key=intent.operation_key,
-            # D03: the frozen scope validates the harness candidate too.
-            allowed_paths=await self._read_spec_allowed_paths(run_id),
         )
         await self._complete_intent_from_outcome(intent.id, publish_outcome)
         if not publish_outcome.ok:
@@ -3623,6 +3611,43 @@ class GitHubRunService:
             return
         await self._finish_harness_publish_leg(
             run_id, project_id, issue_number, publish_outcome, plan_digest, handle
+        )
+
+    async def _publish_candidate_run_aware(
+        self,
+        run_id: str,
+        *,
+        issue_number: int,
+        changeset: object,
+        expected_head: str | None,
+        operation_key: str | None,
+    ) -> "GitHubPublishOutcome":
+        """D11: the RUN-AWARE publication entry — the only way this service
+        publishes. Loads the approved policy by run identity (the frozen
+        spec's allowed_paths — D03), re-checks the grant immediately before
+        dispatch (D04), and hands the validated bundle to the transport.
+        The bridge is never called with a caller-supplied scope on this
+        path: ``None`` may not mean whole-repository here."""
+        allowed_paths = await self._read_spec_allowed_paths(run_id)
+        if await self._publication_revoked(run_id):
+            from forge.integrations.github_flow import GitHubPublishOutcome as _Outcome
+
+            return _Outcome(
+                ok=False,
+                reason="publication_refused: run cancelled before dispatch",
+                expected_head_oid=expected_head or "",
+                branch=github_factory_branch(issue_number, run_id),
+            )
+        return await self._stack.flow.publish_changeset(
+            owner=self._owner,
+            repo=self._repo,
+            issue_number=issue_number,
+            run_id=run_id,
+            changeset=changeset,
+            base_branch=self._target_branch(),
+            expected_head=expected_head,
+            operation_key=operation_key,
+            allowed_paths=allowed_paths,
         )
 
     async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
@@ -4363,7 +4388,11 @@ class GitHubRunService:
         preference = resolve_preference(self._config, self._settings)
         workflow = self._harness_workflow()
         validate_preference(preference, self._harness_driver() if workflow else None)
-        available = resolve_available_drivers(self._config, self._settings) or set(SHIPPED_DRIVERS)
+        # D06: None (no manifest anywhere) widens to the shipped legacy set;
+        # a DECLARED set — even empty — is the boundary (C06 raises on a
+        # disjoint configured driver below).
+        _resolved = resolve_available_drivers(self._config, self._settings)
+        available = _resolved if _resolved is not None else set(SHIPPED_DRIVERS)
         selection = compile_harness_selection(
             preference,
             f"ci_harness:{self._harness_driver()}" if workflow else "builtin",

@@ -526,12 +526,40 @@ class TestBackendStartSpecC05:
         (pv,) = fake_gitlab.pipeline_variables
         model_var = next(v for v in pv["variables"] if v["key"] == "FORGE_HARNESS_MODEL")
         assert model_var["value"] == "frozen-model"
-        # the factory branch was cut from the FROZEN target
+        # D05: the factory branch is cut from the ATTEMPT OID (the frozen
+        # snapshot), not the target name
         (branch_call,) = fake_gitlab.calls_of("create_branch")
-        assert branch_call[1][2] == "frozen-target"
+        assert branch_call[1][2] == "b" * 40
 
     async def test_legacy_caller_keeps_the_settings_fallback(self, db, fake_gitlab):
         from forge.runs.backends import CITharnessBackend
+
+    async def test_a_moved_target_never_moves_the_branch_base(self, db, fake_gitlab):
+        """D05 (probe P07): approval was for SHA-A, main moved to SHA-B —
+        the factory branch is cut at A (the attempt OID), the diff base."""
+        from forge.runs.backends import CITharnessBackend, BackendStartSpec
+
+        writer = ChangesetWriter(fake_gitlab, db, PROJECT_ID)
+        backend = CITharnessBackend(gitlab=fake_gitlab, writer=writer, settings=object())
+        run_like = SimpleNamespace(
+            id="d" * 32, issue_iid=7, project_id=PROJECT_ID, base_sha="a" * 40
+        )
+
+        await backend.start(
+            run_like,
+            "t",
+            "",
+            "p",
+            spec=BackendStartSpec(
+                model="m",
+                target_branch="main",
+                driver="claude-code",
+                attempt_base="a" * 40,
+            ),
+        )
+
+        branch_calls = fake_gitlab.calls_of("create_branch")
+        assert branch_calls[-1][1][2] == "a" * 40  # the attempt OID, not "main"
 
         class Settings:
             FORGE_TARGET_BRANCH = "live-target"
@@ -545,6 +573,6 @@ class TestBackendStartSpecC05:
 
         await backend.start(run_like, "t", "", "p")
 
-        (pv,) = fake_gitlab.pipeline_variables
+        pv = fake_gitlab.pipeline_variables[-1]
         model_var = next(v for v in pv["variables"] if v["key"] == "FORGE_HARNESS_MODEL")
         assert model_var["value"] == "live-model"

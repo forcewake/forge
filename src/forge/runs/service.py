@@ -4526,7 +4526,11 @@ class RunService:
         validate_preference(
             preference, current_driver(backend) if is_harness_backend(backend) else None
         )
-        available = resolve_available_drivers(self._config, self._settings) or set(SHIPPED_DRIVERS)
+        # D06: None (no manifest anywhere) widens to the shipped legacy set;
+        # a DECLARED set — even empty — is the boundary (C06 raises on a
+        # disjoint configured driver below).
+        _resolved = resolve_available_drivers(self._config, self._settings)
+        available = _resolved if _resolved is not None else set(SHIPPED_DRIVERS)
         selection = compile_harness_selection(
             preference,
             backend,

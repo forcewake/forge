@@ -350,14 +350,23 @@ class CITharnessBackend:
         spec: BackendStartSpec | None = None,
     ) -> str:
         branch = factory_branch(run.issue_iid, run.id)
-        # C05: the APPROVED shape wins over live defaults — the caller
-        # passes a BackendStartSpec built from the frozen RunSpec; only a
-        # legacy caller without one falls back to settings (loudly).
-        start_ref = (
-            spec.target_branch
-            if spec
-            else (getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
-        )
+        # D05: the factory branch is cut from the ATTEMPT OID — the frozen
+        # snapshot the diff builds against — never from the target branch
+        # NAME (``main`` may have moved past the approval; the branch then
+        # disagrees with the diff base and the agent works on an
+        # unapproved context). ``target_branch`` stays the MR DESTINATION.
+        # Legacy callers without a spec fall back to the old name form.
+        attempt_base_oid = attempt_base_for(run)
+        if attempt_base_oid:
+            start_ref = attempt_base_oid
+        elif spec and spec.attempt_base:
+            start_ref = spec.attempt_base
+        else:
+            start_ref = (
+                spec.target_branch
+                if spec
+                else (getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
+            )
         await self._writer.ensure_branch(branch, start_ref)
 
         model = (
