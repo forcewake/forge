@@ -1838,6 +1838,166 @@ class TestPositiveVerification:
         # the required workflow's failure drives repair — never READY
         assert run.status != FlowStatus.READY_FOR_HUMAN.value
 
+    async def test_a_newer_same_named_success_never_masks_an_older_failure(self, db, fake):
+        """C01, the INVERTED collision: the reviewer's counterexample — the
+        successful same-named workflow is the NEWER run, so the old
+        name-collapse picked its success over the failed required workflow.
+        Identity disagrees → ambiguous_check_identity → never verified."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "failure",
+                    path=".github/workflows/tests.yml",
+                    run_id=30,
+                    attempt=1,
+                ),
+                # same DISPLAY name, DIFFERENT workflow, NEWER run — success
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/decoy.yml",
+                    run_id=99,
+                    attempt=1,
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status != FlowStatus.READY_FOR_HUMAN.value  # never verified
+        verification = (run.evidence or {}).get("verification") or {}
+        assert "ambiguous_check_identity" in str(verification.get("summary", ""))
+
+    async def test_agreeing_same_named_workflows_are_not_ambiguous(self, db, fake):
+        """C01 boundary: identities that AGREE on the conclusion are not an
+        ambiguity — any occurrence proves the same fact."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=30,
+                    attempt=1,
+                ),
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/mirror.yml",
+                    run_id=99,
+                    attempt=1,
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value
+
+    async def test_a_stale_pending_optional_run_never_holds_required_checks(self, db, fake):
+        """C01: pending is decided over the authoritative occurrences and
+        the PROOF set — an optional workflow stuck pending cannot hold
+        completed required checks hostage."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    "success",
+                    path=".github/workflows/tests.yml",
+                    run_id=10,
+                    attempt=1,
+                ),
+                workflow_run(
+                    candidate,
+                    "docs",
+                    None,
+                    path=".github/workflows/docs.yml",
+                    run_id=11,
+                    attempt=1,
+                    status="in_progress",
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.READY_FOR_HUMAN.value  # required proven
+
+    async def test_a_pending_required_run_still_waits(self, db, fake):
+        """C01 inverse: a pending run whose name IS required still holds
+        the verdict (completeness over the proof set)."""
+        settings = make_settings(FORGE_REQUIRED_JOBS="tests")
+        service = make_service(db, fake, settings=settings)
+        run_id, candidate = await drive_to_waiting_ci(db, service, fake)
+        fake.seed_workflow_runs(
+            [
+                workflow_run(
+                    candidate,
+                    "tests",
+                    None,
+                    path=".github/workflows/tests.yml",
+                    run_id=10,
+                    attempt=1,
+                    status="queued",
+                ),
+            ]
+        )
+
+        await service.evaluate_waiting_ci_one(run_id)
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+    async def test_a_class_change_freezes_one_set_of_numbers_everywhere(self, db, fake):
+        """C02: planner moves standard→trivial post-plan; the selection pin,
+        the frozen RunSpec ceilings and the OPENED RunBudget must all carry
+        the SAME numbers (the opened ones) — the spec builder must not
+        re-resolve the trivial profile."""
+        from forge.durable.budgets import budget_for_run
+
+        limits = {"max_calls": 100, "max_tokens": 500000, "wallclock_s": 3600}
+        settings = make_settings(
+            FORGE_BUDGET_PROFILES='{"standard": {"max_calls": 100, "max_tokens": 500000, "wallclock_s": 3600}, "trivial": {"max_calls": 5, "max_tokens": 1000, "wallclock_s": 60}}'
+        )
+        planner = TestCurrentPlanSelectionB11.ProposingPlanner(
+            [{"harness": "claude-code", "budget_class": "trivial"}]
+        )
+        fake.seed_repo(REPO, {"src/app.py": "x\n"})
+        service = make_service(db, fake, settings=settings, stack=make_stack(fake, planner=planner))
+        run_id = await start(service)
+
+        async with db() as session:
+            spec = (
+                (await session.execute(select(RunSpec).where(RunSpec.run_id == run_id)))
+                .scalars()
+                .one()
+            )
+            budget = await budget_for_run(session, run_id)
+        doc = spec.document
+        assert doc["budgets"]["max_calls"] == limits["max_calls"]  # the OPENED row
+        assert doc["budgets"]["max_tokens"] == limits["max_tokens"]
+        assert doc["budgets"]["wallclock_s"] == limits["wallclock_s"]
+        assert budget is not None and budget.max_calls == limits["max_calls"]
+        # the selection evidence records the pin honestly
+        ev = (await get_run(db, run_id)).evidence["harness_selection"]
+        assert "budget pinned" in str(ev.get("selection_reason") or ev.get("reason") or "")
+
     async def test_unproven_required_still_blocks_on_the_verification_deadline(self, db, fake):
         """Unknown is a WAITING verdict — the R17 deadline is the bound: a
         required check that never registers parks verification_timeout."""

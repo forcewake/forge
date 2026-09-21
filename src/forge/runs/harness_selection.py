@@ -71,6 +71,13 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "copilot": ("COPILOT_GITHUB_TOKEN",),
 }
 
+#: OPTIONAL per-driver credential surfaces (C03): a recipe may map them
+#: beside the required ones (the Actions recipe maps ANTHROPIC_API_KEY for
+#: key-auth gateways); doctor does NOT require them.
+DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
+    "claude-code": ("ANTHROPIC_API_KEY",),
+}
+
 #: A version/dist-tag token in a pinned chain entry (``driver@version``):
 #: letters, digits, dot, underscore, dash — never shell metacharacters.
 _ENTRY_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")

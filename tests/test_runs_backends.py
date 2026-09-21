@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 """Tests for the ADR-0015/0016 implementer backends over FakeGitLab.
 
 CITharnessBackend: pipeline trigger with run variables (including the frozen
@@ -489,3 +491,61 @@ class TestBuildBackend:
     )
     def test_is_harness_backend(self, name, expected):
         assert is_harness_backend(name) is expected
+
+
+# ----------------------------------------------------------------------
+# C05: the backend executes the APPROVED shape, never live defaults
+# ----------------------------------------------------------------------
+
+
+class TestBackendStartSpecC05:
+    async def test_the_spec_overrides_live_settings(self, db, fake_gitlab):
+        """Model + target come from the BackendStartSpec (frozen RunSpec)
+        even when live settings say otherwise — a post-approval settings
+        drift cannot move the dispatch."""
+        from forge.runs.backends import CITharnessBackend, BackendStartSpec
+
+        writer = ChangesetWriter(fake_gitlab, db, PROJECT_ID)
+        backend = CITharnessBackend(gitlab=fake_gitlab, writer=writer, settings=object())
+        run_like = SimpleNamespace(
+            id="a" * 32, issue_iid=7, project_id=PROJECT_ID, base_sha="b" * 40
+        )
+
+        await backend.start(
+            run_like,
+            "title",
+            "",
+            "plan",
+            spec=BackendStartSpec(
+                model="frozen-model",
+                target_branch="frozen-target",
+                driver="claude-code",
+                attempt_base="b" * 40,
+            ),
+        )
+
+        (pv,) = fake_gitlab.pipeline_variables
+        model_var = next(v for v in pv["variables"] if v["key"] == "FORGE_HARNESS_MODEL")
+        assert model_var["value"] == "frozen-model"
+        # the factory branch was cut from the FROZEN target
+        (branch_call,) = fake_gitlab.calls_of("create_branch")
+        assert branch_call[1][2] == "frozen-target"
+
+    async def test_legacy_caller_keeps_the_settings_fallback(self, db, fake_gitlab):
+        from forge.runs.backends import CITharnessBackend
+
+        class Settings:
+            FORGE_TARGET_BRANCH = "live-target"
+            FORGE_HARNESS_MODEL = "live-model"
+
+        writer = ChangesetWriter(fake_gitlab, db, PROJECT_ID)
+        backend = CITharnessBackend(gitlab=fake_gitlab, writer=writer, settings=Settings())
+        run_like = SimpleNamespace(
+            id="c" * 32, issue_iid=7, project_id=PROJECT_ID, base_sha="b" * 40
+        )
+
+        await backend.start(run_like, "t", "", "p")
+
+        (pv,) = fake_gitlab.pipeline_variables
+        model_var = next(v for v in pv["variables"] if v["key"] == "FORGE_HARNESS_MODEL")
+        assert model_var["value"] == "live-model"

@@ -229,13 +229,11 @@ class TestWorkflowTemplateContract:
 DRIVER_CREDENTIALS = {
     "claude-code": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
     "grok-build": ("FORGE_GROK_AUTH",),
-    "opencode": (),
+    "opencode": ("ZAI_API_KEY",),  # C03: opencode's OWN key (registry)
     "copilot": ("COPILOT_GITHUB_TOKEN",),
 }
 #: Names shared by several drivers carry their own multi-driver guard.
-SHARED_CREDENTIALS = {
-    "ZAI_API_KEY": ("claude-code", "opencode"),
-}
+SHARED_CREDENTIALS = {}
 
 
 class TestDriverCredentialGating:

@@ -112,6 +112,7 @@ from forge.repository import (
 from forge.repository.writer import BranchDriftError
 from forge.runs.admission import check_admission
 from forge.runs.backends import (
+    BackendStartSpec,
     HarnessOutcome,
     build_backend,
     fetch_git_base,
@@ -917,6 +918,17 @@ class RunService:
             return from_config
         return parse_budget_profiles(
             str(getattr(self._settings, "FORGE_BUDGET_PROFILES", "") or "")
+        )
+
+    def _limits_of_selection(self, selection) -> BudgetLimits | None:
+        """C02: the selection's RESOLVED ceilings as the canonical limits."""
+        ceilings = getattr(selection, "budget_ceilings", None)
+        if ceilings is None:
+            return None
+        return BudgetLimits(
+            max_calls=ceilings.max_calls,
+            max_tokens=ceilings.max_tokens,
+            wallclock_s=ceilings.wallclock_s,
         )
 
     def _budget_limits_for_class(self, budget_class: str) -> BudgetLimits | None:
@@ -2399,7 +2411,18 @@ class RunService:
             await session.commit()
 
         try:
-            handle = await backend.start(run, issue_title, "", brief)
+            # C05: the backend executes the APPROVED shape — model, target
+            # and driver from the frozen RunSpec, never live settings (a
+            # post-approval settings change or worker restart cannot move
+            # what the gate approved).
+            start_spec = BackendStartSpec(
+                model=spec.harness_model,
+                target_branch=spec.target_branch or self._target_branch(),
+                driver=driver or spec.harness_driver,
+                attempt_base=run.base_sha or "",
+                timeout_seconds=spec.harness_timeout,
+            )
+            handle = await backend.start(run, issue_title, "", brief, spec=start_spec)
         except (GitLabAPIError, httpx.HTTPError) as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
@@ -2549,6 +2572,22 @@ class RunService:
             )
             await session.commit()
 
+    async def _draft_target_branch(self, run_id: str) -> str:
+        """The MR target from the FROZEN spec (C05) — never live settings.
+
+        A post-approval FORGE_TARGET_BRANCH change must not move the MR
+        target of a run the gate already approved; legacy runs without a
+        readable spec keep the live default (recorded in the run's spec
+        provenance when it exists).
+        """
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except Exception:
+            return self._target_branch()
+        if spec is None:
+            return self._target_branch()
+        return spec.target_branch or self._target_branch()
+
     async def _create_draft_mr(
         self,
         project_id: int,
@@ -2576,6 +2615,10 @@ class RunService:
            list proves nothing about the MR's existence — no create.
         """
         await self._reserve_mr(run_id, branch)
+        # C05: resolve the FROZEN target BEFORE the locked transaction (the
+        # spec read opens its own session; under the row lock it would
+        # interleave with this transaction's uncommitted state).
+        target_branch = await self._draft_target_branch(run_id)
         async with self._session_factory() as session:
             reservation = (
                 (
@@ -2653,7 +2696,7 @@ class RunService:
                 mr = await self._gitlab.create_merge_request(
                     project_id,
                     branch,
-                    self._target_branch(),
+                    target_branch,
                     f"Draft: {issue_title}",  # Draft: prefix marks it draft
                     description,
                 )
@@ -4574,8 +4617,10 @@ class RunService:
         # R13: the budget class's numeric profile is resolved AT FREEZE TIME
         # and stored IN the spec — the gate approves exactly these ceilings
         # and the honest enforcement level of this lane. ``None`` (no finite
-        # profile) freezes no ceiling fields at all (byte-compatible).
-        limits = self._budget_limits_for_class(selection.budget_class)
+        # profile) freezes no ceiling fields at all (byte-compatible). C02:
+        # the CANONICAL numbers are the selection's RESOLVED ceilings —
+        # never re-resolved from the class NAME here.
+        limits = self._limits_of_selection(selection)
         enforcement = budget_enforcement_for_backend(backend) if limits is not None else ""
         spec = ExecutableRunSpec.freeze(
             provider="gitlab",

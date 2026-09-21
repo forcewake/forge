@@ -306,15 +306,25 @@ class PositiveProof:
     inconclusive: tuple[str, ...]
     code_failures: tuple[str, ...]
     infra_failures: tuple[str, ...]
+    #: C01: checks whose name matched MULTIPLE distinct workflow identities
+    #: with DISAGREEING conclusions — which workflow is "the check" cannot
+    #: be decided by picking the newest run number; the proof stays unknown.
+    ambiguous: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
-        return not (self.missing or self.inconclusive or self.code_failures or self.infra_failures)
+        return not (
+            self.missing
+            or self.inconclusive
+            or self.code_failures
+            or self.infra_failures
+            or self.ambiguous
+        )
 
     @property
     def unproven(self) -> tuple[str, ...]:
         """Required checks with no explicit verdict — unknown, never green."""
-        return tuple(sorted((*self.missing, *self.inconclusive)))
+        return tuple(sorted((*self.missing, *self.inconclusive, *self.ambiguous)))
 
     def summary(self) -> str:
         """The human one-liner for the honest ``unknown`` verdict."""
@@ -329,6 +339,11 @@ class PositiveProof:
             parts.append(f"required checks not run: {', '.join(self.missing)}")
         if self.inconclusive:
             parts.append(f"required checks inconclusive: {', '.join(self.inconclusive)}")
+        if self.ambiguous:
+            parts.append(
+                "ambiguous_check_identity (same display name, disagreeing workflows): "
+                f"{', '.join(self.ambiguous)}"
+            )
         return "; ".join(parts)
 
 
@@ -340,6 +355,7 @@ def evaluate_positive_proof(
     code_failure_conclusions: frozenset[str] = GITHUB_CODE_FAILURE_CONCLUSIONS,
     infra_conclusions: frozenset[str] = GITHUB_INFRA_CONCLUSIONS,
     waived_conclusions: frozenset[str] = frozenset(),
+    ambiguous_checks: Mapping[str, Sequence[str]] | None = None,
 ) -> PositiveProof:
     """Classify one candidate's observed check conclusions into the proof.
 
@@ -365,7 +381,13 @@ def evaluate_positive_proof(
     inconclusive: list[str] = []
     code_failures: list[str] = []
     infra_failures: list[str] = []
+    ambiguous: list[str] = []
     for name in names:
+        if name in (ambiguous_checks or {}):
+            # C01: the name matched multiple workflow identities whose
+            # conclusions disagree — no single occurrence is THE check.
+            ambiguous.append(name)
+            continue
         if name not in observations:
             missing.append(name)
             continue
@@ -390,4 +412,5 @@ def evaluate_positive_proof(
         inconclusive=tuple(inconclusive),
         code_failures=tuple(code_failures),
         infra_failures=tuple(infra_failures),
+        ambiguous=tuple(sorted(ambiguous)),
     )

@@ -13,7 +13,7 @@
 #      hand forge its numeric id as FORGE_AZDO_LANE_PIPELINE_ID.
 #   2. Provision the harness provider keys as pipeline SECRET variables on
 #      that pipeline — ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
-#      ANTHROPIC_BASE_URL / ZAI_API_KEY / XAI_API_KEY / COPILOT_GITHUB_TOKEN
+#      ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ZAI_API_KEY / FORGE_GROK_AUTH / COPILOT_GITHUB_TOKEN
 #      — and FORGE_HARNESS_MCP as a plain (non-secret) variable. The lane
 #      maps all of them; the driver uses what it needs.
 #   3. OPTIONAL brief transport: provision FORGE_AZDO_READ_TOKEN (a READ-
@@ -98,16 +98,20 @@ jobs:
       FORGE_PLAN_NOTE_ID: ${{ parameters.plan_note_id }}
       FORGE_ENVELOPE_DIGEST: ${{ parameters.envelope_digest }}
       FORGE_SPEC_DIGEST: ${{ parameters.spec_digest }}
-      # B05: per-driver credential selection — claude-code/copilot take the
-      # Anthropic surface, grok takes XAI; everything else stays empty.
-      ${{ if or(eq(parameters.driver, 'claude-code'), eq(parameters.driver, 'copilot')) }}:
-        LANE_ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+      # C03: per-driver credential selection — EXACTLY the control plane's
+      # DRIVER_CREDENTIAL_VARS registry (ci contract test cross-checks):
+      #   claude-code: ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
+      #   grok-build:  FORGE_GROK_AUTH (the provider-native auth blob)
+      #   opencode:    ZAI_API_KEY
+      #   copilot:     COPILOT_GITHUB_TOKEN
+      # A driver never receives another provider's secret.
+      ${{ if eq(parameters.driver, 'claude-code') }}:
         LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
         LANE_ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
-      ${{ if eq(parameters.driver, 'claude-code') }}:
+      ${{ if eq(parameters.driver, 'grok-build') }}:
+        LANE_FORGE_GROK_AUTH: $(FORGE_GROK_AUTH)
+      ${{ if eq(parameters.driver, 'opencode') }}:
         LANE_ZAI_API_KEY: $(ZAI_API_KEY)
-      ${{ if eq(parameters.driver, 'grok') }}:
-        LANE_XAI_API_KEY: $(XAI_API_KEY)
       ${{ if eq(parameters.driver, 'copilot') }}:
         LANE_COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
     steps:
@@ -170,31 +174,40 @@ jobs:
           # would substitute the real secret into a whole $(NAME) pattern,
           # making the guard compare the value against itself.
           _junk="$(printf '$(%s)' 'FORGE_AZDO_READ_TOKEN')"
+          _token=''
           case "${FORGE_AZDO_READ_TOKEN:-}" in
             '' | "$_junk") ;;
-            *)
-              if [ -n "${FORGE_PLAN_NOTE_ID:-}" ] \
-                 && [ -n "${FORGE_ENVELOPE_DIGEST:-}" ] \
-                 && [ -n "${FORGE_SPEC_DIGEST:-}" ]; then
-                # B04 ENFORCED: the addressed plan comment's approved
-                # sections must re-verify against the frozen envelope
-                # digest. Any failure fails the lane CLOSED — a stale
-                # .forge/brief.md from an earlier attempt must NEVER
-                # execute (no fallback).
-                if ! python -m forge.harness_entry --render-brief-azure; then
-                  mkdir -p .forge
-                  printf 'failed\n' > .forge/exit
-                  echo "envelope-verified brief render FAILED — lane fails closed"
-                  exit 0
-                fi
-              else
-                # Legacy dispatch (no envelope inputs): the loud unenforced
-                # fetch with the documented fallback posture.
-                python -m forge.harness_entry --render-brief-azure \
-                  || echo "brief fetch failed — falling back to .forge/brief.md"
-              fi
-              ;;
+            *) _token=yes ;;
           esac
+          if [ -n "${FORGE_PLAN_NOTE_ID:-}" ] \
+             || [ -n "${FORGE_ENVELOPE_DIGEST:-}" ] \
+             || [ -n "${FORGE_SPEC_DIGEST:-}" ]; then
+            # C03: an enforced dispatch REQUIRES all three envelope inputs
+            # AND the read token — a missing prerequisite fails the lane
+            # closed; a stale pre-provisioned .forge/brief.md must NEVER
+            # execute in place of the verified brief.
+            if [ -z "$_token" ] \
+               || [ -z "${FORGE_PLAN_NOTE_ID:-}" ] \
+               || [ -z "${FORGE_ENVELOPE_DIGEST:-}" ] \
+               || [ -z "${FORGE_SPEC_DIGEST:-}" ]; then
+              mkdir -p .forge
+              printf 'failed\n' > .forge/exit
+              echo "enforced dispatch missing prerequisite (read token or envelope inputs) — lane fails closed"
+              exit 0
+            fi
+            if ! python -m forge.harness_entry --render-brief-azure; then
+              mkdir -p .forge
+              printf 'failed\n' > .forge/exit
+              echo "envelope-verified brief render FAILED — lane fails closed"
+              exit 0
+            fi
+          elif [ -n "$_token" ]; then
+            # Legacy dispatch (NO envelope inputs — an explicitly weaker
+            # mode, never the result of a missing field): the loud
+            # unenforced fetch with the documented fallback posture.
+            python -m forge.harness_entry --render-brief-azure \
+              || echo "brief fetch failed — falling back to .forge/brief.md"
+          fi
           python -m forge.harness_entry || echo "harness_entry reported failure — .forge/exit carries it"
           exit 0
         displayName: Run harness driver
@@ -221,11 +234,10 @@ jobs:
           # the conditional variables below hold real values for the chosen
           # driver and empty strings for every other (an unselected
           # provider's secret is never delivered to the runner).
-          ANTHROPIC_API_KEY: $(LANE_ANTHROPIC_API_KEY)
           ANTHROPIC_AUTH_TOKEN: $(LANE_ANTHROPIC_AUTH_TOKEN)
           ANTHROPIC_BASE_URL: $(LANE_ANTHROPIC_BASE_URL)
+          FORGE_GROK_AUTH: $(LANE_FORGE_GROK_AUTH)
           ZAI_API_KEY: $(LANE_ZAI_API_KEY)
-          XAI_API_KEY: $(LANE_XAI_API_KEY)
           COPILOT_GITHUB_TOKEN: $(LANE_COPILOT_GITHUB_TOKEN)
 
       # Candidate capture — condition: always(): the audit trail survives

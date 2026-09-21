@@ -247,7 +247,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
           ANTHROPIC_AUTH_TOKEN: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
           ANTHROPIC_BASE_URL: ${{ inputs.driver == 'claude-code' && secrets.ANTHROPIC_BASE_URL || '' }}
-          ZAI_API_KEY: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'opencode') && secrets.ZAI_API_KEY || '' }}
+          ZAI_API_KEY: ${{ inputs.driver == 'opencode' && secrets.ZAI_API_KEY || '' }}
           FORGE_GROK_AUTH: ${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}
           COPILOT_GITHUB_TOKEN: ${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           # R15: per-driver CLI version pins (JSON object driver → version;

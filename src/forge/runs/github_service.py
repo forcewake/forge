@@ -3766,11 +3766,16 @@ class GitHubRunService:
         # the run's `path`), never by the mutable display name.
         harness_workflow = spec.harness_workflow
         checks = [r for r in runs if not _harness_lane_run(r, harness_workflow)]
-        has_pending = any((c.get("status") or "") != "completed" for c in checks)
         # The adapter-normalized input (empty observations = the no-CI form).
         observations: dict[str, str | None]
         surface: tuple[dict, ...]
         subject_head_oid: str
+        # C01: names whose display name matched MULTIPLE distinct workflow
+        # identities with DISAGREEING conclusions — built by the collapse
+        # below (has_pending too: it is decided AFTER the authoritative
+        # occurrences are chosen, over the proof set only).
+        ambiguous_checks: dict[str, tuple[str, ...]] = {}
+        has_pending = False
 
         if not checks:
             # RACE GUARD: a just-opened PR's checks take a few seconds to
@@ -3793,19 +3798,10 @@ class GitHubRunService:
             surface = ()
             subject_head_oid = ""
         else:
-            if has_pending:
-                # Bounded (R17): the deadline itself is enforced pre-I/O above —
-                # a checks API that never answers cannot hold the run forever.
-                return
-
             # A01 positive-proof normalization, B02 authority rules: the
             # authoritative occurrence of each check is its NEWEST RUN
             # (never its newest ATTEMPT across runs), and checks are keyed
-            # by workflow IDENTITY — display names collide, and a
-            # setdefault-by-name merge let one workflow's conclusion
-            # overwrite another's. The tested oid is the head sha the
-            # PROVIDER verified (every listed run carries head_sha ==
-            # candidate).
+            # by workflow IDENTITY — display names collide.
             by_identity: dict[str, Mapping[str, Any]] = {}
             for workflow_run in sorted(checks, key=_run_order_key, reverse=True):
                 by_identity.setdefault(_workflow_identity(workflow_run), workflow_run)
@@ -3814,7 +3810,39 @@ class GitHubRunService:
             ordered = sorted(
                 (dict(run) for run in by_identity.values()), key=_run_order_key, reverse=True
             )
+            # C01: collapse to names for the verdict — but a name claimed by
+            # several identities with DISAGREEING conclusions is AMBIGUOUS:
+            # which workflow is "the check" cannot be decided by run number.
+            name_conclusions: dict[str, dict[str, str | None]] = {}
+            for workflow_run in ordered:
+                name = str(workflow_run.get("name") or "check")
+                conclusion = str(workflow_run.get("conclusion") or "") or None
+                name_conclusions.setdefault(name, {})[_workflow_identity(workflow_run)] = conclusion
+            for name, by_ident in name_conclusions.items():
+                distinct = {c for c in by_ident.values()}
+                if len(distinct) > 1:
+                    ambiguous_checks[name] = tuple(sorted({str(c) for c in distinct}))
+
+            # C01: pending is decided over the AUTHORITATIVE occurrences and
+            # the PROOF SET (the frozen required names; all names when no
+            # contract was frozen) — a stale or optional pending run no
+            # longer holds completed required checks hostage.
+            proof_names = frozenset(spec.required_jobs) if spec.required_jobs else None
+            for workflow_run in ordered:
+                if (workflow_run.get("status") or "") == "completed":
+                    continue
+                name = str(workflow_run.get("name") or "check")
+                if proof_names is None or name in proof_names:
+                    has_pending = True
+                    break
+
+            if has_pending:
+                # Bounded (R17): the deadline itself is enforced pre-I/O above —
+                # a checks API that never answers cannot hold the run forever.
+                return
+
             observations = {}  # typed at the branch head above
+
             for workflow_run in ordered:
                 observations.setdefault(
                     str(workflow_run.get("name") or "check"),
@@ -3857,6 +3885,7 @@ class GitHubRunService:
             code_failure_conclusions=GITHUB_CODE_FAILURE_CONCLUSIONS,
             infra_conclusions=GITHUB_INFRA_CONCLUSIONS,
             waived_conclusions=frozenset(spec.waived_conclusions),  # B06: frozen at approval
+            ambiguous_checks=ambiguous_checks or None,  # C01: name collisions
             now=now,
         )
 
@@ -4356,6 +4385,24 @@ class GitHubRunService:
             str(getattr(self._settings, "FORGE_BUDGET_PROFILES", "") or "")
         )
 
+    def _limits_of_selection(self, selection: HarnessSelection) -> BudgetLimits | None:
+        """C02: the selection's RESOLVED ceilings as the canonical limits.
+
+        The compile/pin path already resolved the class profile (and pinned
+        it to the opened RunBudget when the planner moved the class) —
+        re-resolving by class NAME here is exactly how the spec and the
+        open budget could disagree. A selection without ceilings (no
+        finite profile) freezes none.
+        """
+        ceilings = selection.budget_ceilings
+        if ceilings is None:
+            return None
+        return BudgetLimits(
+            max_calls=ceilings.max_calls,
+            max_tokens=ceilings.max_tokens,
+            wallclock_s=ceilings.wallclock_s,
+        )
+
     def _budget_limits_for_class(self, budget_class: str) -> BudgetLimits | None:
         """The numeric ceilings of *budget_class*'s profile, or ``None``.
 
@@ -4515,11 +4562,14 @@ class GitHubRunService:
         selection = harness_selection or self._compile_harness_selection()
         workflow = self._harness_workflow()
         backend = "ci_harness" if workflow else "builtin"
-        # R13/A02: the budget class's numeric profile is resolved AT FREEZE
+        # R13/A02/C02: the budget's numeric profile is resolved AT FREEZE
         # TIME and stored IN the spec — the gate approves exactly these
         # ceilings and the honest enforcement level of this lane. ``None``
-        # freezes no ceiling fields at all (byte-compatible).
-        limits = self._budget_limits_for_class(selection.budget_class)
+        # freezes no ceiling fields at all (byte-compatible). C02: the
+        # CANONICAL numbers are the selection's RESOLVED ceilings (pinned to
+        # the already-opened RunBudget when the planner moved the class) —
+        # never re-resolved from the class NAME here.
+        limits = self._limits_of_selection(selection)
         enforcement = budget_enforcement_for_backend(backend) if limits is not None else ""
         spec = ExecutableRunSpec.freeze(
             provider="github",

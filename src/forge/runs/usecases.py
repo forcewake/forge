@@ -222,6 +222,7 @@ def observe_verification(
     subject_head_oid: str = "",
     surface: Sequence[Mapping[str, Any]] = (),
     pending: bool = False,
+    ambiguous_checks: Mapping[str, Sequence[str]] | None = None,
     success_conclusions: frozenset[str] = GITHUB_SUCCESS_CONCLUSIONS,
     code_failure_conclusions: frozenset[str] = GITHUB_CODE_FAILURE_CONCLUSIONS,
     infra_conclusions: frozenset[str] = GITHUB_INFRA_CONCLUSIONS,
@@ -278,6 +279,7 @@ def observe_verification(
     proof = evaluate_positive_proof(
         spec.required_jobs,
         observations,
+        ambiguous_checks=ambiguous_checks,
         success_conclusions=success_conclusions,
         code_failure_conclusions=code_failure_conclusions,
         infra_conclusions=infra_conclusions,

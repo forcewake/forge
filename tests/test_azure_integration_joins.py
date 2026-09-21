@@ -714,25 +714,23 @@ class TestLaneRecipeContractB04B05:
         assert {"plan_note_id", "envelope_digest", "spec_digest"} <= names
 
     def test_credentials_are_scoped_to_the_selected_driver(self):
-        # B05: every mapped secret comes through a conditional LANE_*
-        # variable — no provider secret is mapped unconditionally.
+        # C03: every mapped secret comes through a conditional LANE_*
+        # variable; no provider secret is mapped unconditionally. The exact
+        # per-driver sets live in TestCredentialContractC03.
         template = self.lane_yaml()
         (job,) = template["jobs"]
         env = {}
         for step in job["steps"]:
             env.update(step.get("env") or {})
-        secret_keys = {
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ZAI_API_KEY",
-            "XAI_API_KEY",
-            "COPILOT_GITHUB_TOKEN",
-        }
-        for key in secret_keys:
-            assert env[key].startswith("$(LANE_"), key  # conditional lane var only
         text = TEMPLATE_PATH.read_text()
-        assert "LANE_ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)" in text  # claude/copilot only
-        assert "LANE_XAI_API_KEY: $(XAI_API_KEY)" in text  # grok only
+        for key in (
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ZAI_API_KEY",
+            "FORGE_GROK_AUTH",
+            "COPILOT_GITHUB_TOKEN",
+        ):
+            assert env[key].startswith("$(LANE_"), key
 
     def test_envelope_inputs_render_enforced_with_no_fallback(self):
         # B04: with the binding trio dispatched, a failed render writes
@@ -742,3 +740,90 @@ class TestLaneRecipeContractB04B05:
         assert "envelope-verified brief render FAILED — lane fails closed" in text
         # the fallback stays ONLY on the legacy (no-envelope) branch
         assert "falling back to .forge/brief.md" in text
+
+
+class TestCredentialContractC03:
+    """C03: the shipped recipes' per-driver credential selection is EXACTLY
+    the control plane's DRIVER_CREDENTIAL_VARS registry — one source of
+    truth, cross-checked, never three drifting copies of conditions."""
+
+    def _azdo_driver_vars(self) -> dict[str, set[str]]:
+        import re
+
+        text = (
+            Path(__file__).parent.parent / "ci" / "templates" / "forge-lane.azure-pipelines.yml"
+        ).read_text()
+        # conditional variables:  ${{ if eq(parameters.driver, '<id>') }}: block of LANE_X: $(SECRET)
+        mapping: dict[str, set[str]] = {}
+        for match in re.finditer(
+            r"\$\{\{ if eq\(parameters\.driver, '([^']+)'\) \}\}:\n((\s+LANE_[A-Z_]+: \$\([A-Z_]+\)\n)+)",
+            text,
+        ):
+            driver = match.group(1)
+            names = set(re.findall(r"LANE_([A-Z_]+):", match.group(2)))
+            mapping.setdefault(driver, set()).update(names)
+        return mapping
+
+    def test_azdo_matrix_matches_the_registry_exactly(self):
+        from forge.runs.harness_selection import DRIVER_CREDENTIAL_VARS, SHIPPED_DRIVERS
+
+        matrix = self._azdo_driver_vars()
+        for driver in SHIPPED_DRIVERS:
+            from forge.runs.harness_selection import DRIVER_OPTIONAL_CREDENTIAL_VARS
+
+            allowed = set(DRIVER_CREDENTIAL_VARS[driver]) | set(
+                DRIVER_OPTIONAL_CREDENTIAL_VARS.get(driver, ())
+            )
+            mapped = matrix.get(driver, set())
+            # the recipe maps a NON-EMPTY subset of the allowed surfaces —
+            # never anything outside the contract.
+            assert mapped and mapped <= allowed, (
+                f"{driver}: template maps {mapped}, registry allows {allowed}"
+            )
+            # grok-build's auth blob and opencode/copilot keys are REQUIRED
+            required = {
+                "grok-build": {"FORGE_GROK_AUTH"},
+                "opencode": {"ZAI_API_KEY"},
+                "copilot": {"COPILOT_GITHUB_TOKEN"},
+            }
+            assert mapped >= required.get(driver, set()), driver
+
+    def test_github_workflow_matches_the_registry_exactly(self):
+        import re
+
+        from forge.runs.harness_selection import (
+            DRIVER_CREDENTIAL_VARS,
+            DRIVER_OPTIONAL_CREDENTIAL_VARS,
+            SHIPPED_DRIVERS,
+        )
+
+        text = (
+            Path(__file__).parent.parent / ".github" / "workflows" / "forge-harness.yml"
+        ).read_text()
+        for driver in SHIPPED_DRIVERS:
+            expected = set(DRIVER_CREDENTIAL_VARS[driver])
+            granted: set[str] = set()
+            for match in re.finditer(
+                r"^          ([A-Z_]+): \$\{\{.*?inputs\.driver == '([a-z-]+)'.*?\}\}$",
+                text,
+                re.M,
+            ):
+                if match.group(2) == driver:
+                    granted.add(match.group(1))
+            allowed = expected | set(DRIVER_OPTIONAL_CREDENTIAL_VARS.get(driver, ()))
+            assert granted <= allowed and granted >= expected, (
+                f"{driver}: github workflow grants {granted}, "
+                f"registry requires {expected} (allows {allowed})"
+            )
+
+    def test_enforced_dispatch_without_a_read_token_never_reaches_the_driver(self):
+        text = (
+            Path(__file__).parent.parent / "ci" / "templates" / "forge-lane.azure-pipelines.yml"
+        ).read_text()
+        # the prerequisite check fires on ANY envelope input present
+        assert "enforced dispatch missing prerequisite (read token or envelope inputs)" in text
+        # partial envelope inputs are also a missing prerequisite
+        assert (
+            '[ -n "${FORGE_PLAN_NOTE_ID:-}" ] \\\n             || [ -n "${FORGE_ENVELOPE_DIGEST:-}" ] \\\n             || [ -n "${FORGE_SPEC_DIGEST:-}" ]'
+            in text
+        )

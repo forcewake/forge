@@ -672,8 +672,11 @@ class AzureRunService:
                         provider="azure_devops",
                         # The durable subject columns are int-typed (the GitHub
                         # schema); the Azure string identity — project/repo —
-                        # travels in the run's evidence subject block below.
+                        # rides the generic subject column (C04: repo-scoped
+                        # recovery scans select on it) and the evidence
+                        # subject block below.
                         github_issue_number=issue_number,
+                        github_repo_full_name=self._repo_full_name,
                     )
                 )
                 await controller.transition(run_id, FlowStatus.PREFLIGHT)
@@ -1432,6 +1435,7 @@ class AzureRunService:
             redispatch=self._redispatch_revival,
             now=now,
             log=logger,
+            repo_full_name=self._repo_full_name,  # C04: bound adapters, one repo
         )
 
     # ------------------------------------------------------------------
@@ -2014,6 +2018,10 @@ class AzureRunService:
             reread=self._read_start_config,
             replan=self._resume_config_blocked,
             log=logger,
+            # C04 (B08's twin on Azure): this service's adapters are bound to
+            # ONE repository — the scan selects only its runs; another
+            # repository's config-blocked run is recovered by ITS service.
+            repo_full_name=self._repo_full_name,
         )
 
     async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
@@ -4121,6 +4129,24 @@ class AzureRunService:
             str(getattr(self._settings, "FORGE_BUDGET_PROFILES", "") or "")
         )
 
+    def _limits_of_selection(self, selection: HarnessSelection) -> BudgetLimits | None:
+        """C02: the selection's RESOLVED ceilings as the canonical limits.
+
+        The compile/pin path already resolved the class profile (and pinned
+        it to the opened RunBudget when the planner moved the class) —
+        re-resolving by class NAME here is exactly how the spec and the
+        open budget could disagree. A selection without ceilings (no
+        finite profile) freezes none.
+        """
+        ceilings = selection.budget_ceilings
+        if ceilings is None:
+            return None
+        return BudgetLimits(
+            max_calls=ceilings.max_calls,
+            max_tokens=ceilings.max_tokens,
+            wallclock_s=ceilings.wallclock_s,
+        )
+
     def _budget_limits_for_class(self, budget_class: str) -> BudgetLimits | None:
         """The numeric ceilings of *budget_class*'s profile, or ``None``.
 
@@ -4277,11 +4303,14 @@ class AzureRunService:
         selection = harness_selection or self._compile_harness_selection()
         lane = self._lane_pipeline_id()
         backend = "ci_harness" if lane else "builtin"
-        # R13/A02: the budget class's numeric profile is resolved AT FREEZE
+        # R13/A02/C02: the budget's numeric profile is resolved AT FREEZE
         # TIME and stored IN the spec — the gate approves exactly these
         # ceilings and the honest enforcement level of this lane. ``None``
-        # freezes no ceiling fields at all (byte-compatible).
-        limits = self._budget_limits_for_class(selection.budget_class)
+        # freezes no ceiling fields at all (byte-compatible). C02: the
+        # CANONICAL numbers are the selection's RESOLVED ceilings (pinned to
+        # the already-opened RunBudget when the planner moved the class) —
+        # never re-resolved from the class NAME here.
+        limits = self._limits_of_selection(selection)
         enforcement = budget_enforcement_for_backend(backend) if limits is not None else ""
         spec = ExecutableRunSpec.freeze(
             provider="azure_devops",

@@ -798,15 +798,18 @@ class TestLaneTemplateContract:
     def test_harness_provider_keys_mapped_from_secret_variables(self):
         text = TEMPLATE_PATH.read_text()
 
-        for secret in (
-            "ANTHROPIC_API_KEY",
+        # C03: the driver env maps the REGISTRY surfaces through the
+        # conditional LANE_* variables (an unselected provider's secret is
+        # never delivered). grok's auth blob rides FORGE_GROK_AUTH.
+        for name in (
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
             "ZAI_API_KEY",
-            "XAI_API_KEY",
+            "FORGE_GROK_AUTH",
             "COPILOT_GITHUB_TOKEN",
         ):
-            assert f"{secret}: $({secret})" in text
+            assert f"{name}: $(LANE_" in text, name
+        assert "XAI_API_KEY" not in text  # C03: grok-build takes FORGE_GROK_AUTH
         assert "FORGE_HARNESS_MCP: $(FORGE_HARNESS_MCP)" in text
 
     def test_lane_never_receives_forge_credentials(self):

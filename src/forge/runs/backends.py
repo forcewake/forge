@@ -289,6 +289,23 @@ class BuiltinBackend:
 # ----------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class BackendStartSpec:
+    """The approved execution shape a harness backend must execute (C05).
+
+    Built from the digest-verified RunSpec at every dispatch (initial,
+    repair, retry, recovery) — the adapter NEVER re-resolves model/target
+    from live settings: a post-approval settings change or a worker
+    restart cannot move what the gate approved.
+    """
+
+    model: str
+    target_branch: str
+    driver: str
+    attempt_base: str
+    timeout_seconds: int = 0
+
+
 class CITharnessBackend:
     """Delegates implementation to a harness job in the target project's CI.
 
@@ -324,12 +341,28 @@ class CITharnessBackend:
 
     # -- start ------------------------------------------------------------
 
-    async def start(self, run: FlowRun, issue_title: str, issue_description: str, plan: str) -> str:
+    async def start(
+        self,
+        run: FlowRun,
+        issue_title: str,
+        issue_description: str,
+        plan: str,
+        spec: BackendStartSpec | None = None,
+    ) -> str:
         branch = factory_branch(run.issue_iid, run.id)
-        start_ref = getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main"
+        # C05: the APPROVED shape wins over live defaults — the caller
+        # passes a BackendStartSpec built from the frozen RunSpec; only a
+        # legacy caller without one falls back to settings (loudly).
+        start_ref = (
+            spec.target_branch
+            if spec
+            else (getattr(self._settings, "FORGE_TARGET_BRANCH", "main") or "main")
+        )
         await self._writer.ensure_branch(branch, start_ref)
 
-        model = str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "")
+        model = (
+            spec.model if spec else str(getattr(self._settings, "FORGE_HARNESS_MODEL", "") or "")
+        )
         attempt_base = attempt_base_for(run)
         variables = [
             {"key": "FORGE_RUN_ID", "value": run.id},

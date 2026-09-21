@@ -589,8 +589,9 @@ def make_stack(
     planner=None,
     implementer=None,
     reviewer=None,
+    repo: str = REPO,
 ) -> AzureAgents:
-    reader = AzureRepositoryReader(fake, PROJECT, REPO)
+    reader = AzureRepositoryReader(fake, PROJECT, repo)
     return AzureAgents(
         client=fake,
         reader=reader,
@@ -606,13 +607,14 @@ def make_service(
     *,
     settings: Settings | None = None,
     stack: AzureAgents | None = None,
+    repo: str = REPO_FULL,
 ) -> AzureRunService:
     return AzureRunService(
         db,
         settings or make_settings(),
         ForgeConfig(),
         stack=stack or make_stack(fake),
-        repo_full_name=REPO_FULL,
+        repo_full_name=repo,
     )
 
 
@@ -1234,6 +1236,7 @@ class TestGoLane:
             run.status = FlowStatus.PROPOSING.value
             run.status_reason = "harness_start_failed: Azure DevOps API error 500"
             run.evidence = {"backend": "ci_harness"}
+            run.github_repo_full_name = None  # C04: legacy row, no subject
             await session.commit()
 
         async def no_stack(project: str, repo: str):
@@ -2378,6 +2381,45 @@ class TestConfigGateA13:
 
         fake.get_item = flaky
         return original
+
+    async def test_a_repo_bound_recovery_never_touches_another_repository(self, db, fake):
+        """C04 (B08's twin on Azure): the service's adapters are bound to
+        ONE repository — a config-blocked run of repo B must not be
+        recovered through repo A's service. Two SEPARATE fakes prove the
+        routing; only B's own service resumes B's run."""
+        self.seed_config(fake, "implement:\n  paths:\n    - 'services/**'\n")
+        other_full = f"{PROJECT}/other-repo"
+        fake_b = FakeAzureDevOps()
+        fake_b.seed_work_item(WORK_ITEM, WORK_ITEM_TITLE, WORK_ITEM_DESC_HTML)
+        fake_b.seed_snapshot("main", {".forge.yml": "implement:\n  paths:\n    - 'svc/**'\n"})
+
+        original_b = self.arm_403(fake_b)
+        planner_a = CountingStackPlanner()
+        planner_b = CountingStackPlanner()
+        service_a = make_service(db, fake, stack=make_stack(fake, planner=planner_a))
+        service_b = make_service(
+            db,
+            fake_b,
+            stack=make_stack(fake_b, planner=planner_b, repo="other-repo"),
+            repo=other_full,
+        )
+        run_b = await start(service_b)
+        assert (await get_run(db, run_b)).status == FlowStatus.BLOCKED.value
+
+        fake_b.get_item = original_b  # the read recovers on B's client
+
+        await service_a.evaluate_config_recovery()  # A's pass must not touch B
+        run = await get_run(db, run_b)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert planner_a.calls == 0
+        assert planner_b.calls == 0
+
+        await service_b.evaluate_config_recovery()  # B's own pass resumes it
+        run = await get_run(db, run_b)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value, (
+            f"B did not resume: {run.status_reason!r}"
+        )
+        assert planner_b.calls == 1
 
     async def test_403_parks_config_unreadable_with_zero_paid_calls(self, db, fake):
         self.seed_config(fake, self.RESTRICTED)
