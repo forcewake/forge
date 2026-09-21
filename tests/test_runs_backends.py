@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 """Tests for the ADR-0015/0016 implementer backends over FakeGitLab.
 
 CITharnessBackend: pipeline trigger with run variables (including the frozen
@@ -10,6 +8,7 @@ same protocol. build_backend: settings-driven construction.
 """
 
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
