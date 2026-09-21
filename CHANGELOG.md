@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-09-21
+
+### Added — REAL interactive-driver clients (claude-sdk, codex-app, opencode-server)
+
+The adaptive adapters always took injected Protocol-shaped clients;
+until now only test fakes existed. This release adds the real clients
+in `forge.adaptive.drivers`, one per vendor surface, each written
+against multi-step web research that was verified against the vendor's
+actual artifacts (`docs/research/`):
+
+- **claude_sdk.py** — the `claude-agent-sdk` Python package (new
+  `interactive` optional-dependencies group, `>=0.2.118` for
+  `terminal_reason` on aborted turns). Interactive `ClaudeSDKClient`
+  with bounded interrupt (the #1094 never-ack hang), drain-to-
+  ResultMessage discipline before re-querying, and the harness hacks
+  ported as first-class behavior: ephemeral per-session
+  `CLAUDE_CONFIG_DIR`, `setting_sources=[]` isolation,
+  `bypassPermissions` default with a `can_use_tool` policy hook,
+  unremovable mechanical deny on `git commit`/`git push`, one-rule-
+  per-literal allowlists (A09), and the `ANTHROPIC_BASE_URL` gateway
+  (LiteLLM/BYOK) with proxy passthrough. The research was verified
+  against the actual 0.2.157 wheel source — where the docs site and
+  the package disagreed, the package won.
+- **codex_app.py** — no vendor package: pure asyncio stdlib driving
+  `codex app-server` over JSON-RPC 2.0 JSONL stdio. initialize →
+  thread/start (approvalPolicy `never`, workspaceWrite sandbox) →
+  turn/start; steering via `turn/steer` bound to the tracked
+  `expectedTurnId` (stale id surfaces the error, never queues);
+  interrupt keys completion off `turn/completed(interrupted)` rather
+  than the method response; server-initiated approvals are answered
+  `decline` (the unattended lane); `-32001` overload retried with
+  backoff+jitter; injectable Transport seam.
+- **opencode.py** — httpx against `opencode serve`: async-first
+  prompting (`prompt_async` + `session.idle` over SSE) with the
+  blocking route as fallback and status-polling reconciliation for
+  the SSE no-replay gap; defensive EventV2 parsing; `permission.asked`
+  answered `reject` by default; Basic auth + BYOK `PUT /auth/:id`
+  (key material dropped after send); `probe_spec()` reads the served
+  OpenAPI spec and warns on unknown event vocabulary.
+- Package wiring pins (`tests/test_adaptive_drivers_package.py`)
+  freeze the join between the frozen adapter Protocols and the real
+  client classes; the drivers package imports clean WITHOUT any vendor
+  package installed.
+
+Suite 3828 (+71); ruff check + format clean.
+
 ## [0.20.0] - 2026-09-21
 
 ### Added — the adaptive runbook (OPS-08: recipes, control commands, recovery, credentials, decision record)
