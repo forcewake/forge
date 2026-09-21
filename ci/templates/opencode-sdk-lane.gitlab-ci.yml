@@ -75,13 +75,18 @@ forge-agent:
     # already installs pinned; retry loop like every forge lane's npm
     # preamble. The curl installer `curl -fsSL https://opencode.ai/install
     # | bash` + PATH="$HOME/.opencode/bin" is the batch lane's equivalent
-    # if npm is ever wrong).
+    # installer is ever wrong).
     - |
       for attempt in 1 2 3; do
-        npm install -g --no-fund --no-audit "opencode-ai@${FORGE_OPENCODE_VERSION:-latest}" && break
-        echo "npm install of opencode failed (attempt $attempt), retrying..."
+        # The OFFICIAL installer — the same distribution the batch
+        # opencode lane uses (LIVE-found 2026-09-21: the npm
+        # `opencode-ai` package is a different build; v2.0.10's prompt
+        # route 400s under it while the installer build works).
+        curl -fsSL https://opencode.ai/install | bash && break
+        echo "opencode install failed (attempt $attempt), retrying..."
         sleep $((attempt * 5))
       done
+      export PATH="$HOME/.opencode/bin:$PATH"
       opencode --version
     # Python side: forge requires >=3.13 and Debian bookworm's apt python3
     # is 3.11 (LIVE-found in the ADR-0024 AzDO lab run: pip refused the
