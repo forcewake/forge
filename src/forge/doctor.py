@@ -9,9 +9,12 @@ Usage::
     uv run python -m forge.doctor                 # human-readable report
     uv run python -m forge.doctor --json          # machine-readable
     uv run python -m forge.doctor --project 68    # + target-project checks
+    uv run python -m forge.doctor --capabilities  # the capability matrix (NXT-02)
 
 Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = usage error.
-Warnings do not affect the exit code.
+Warnings do not affect the exit code. ``--capabilities`` is offline: it prints
+the reachability-based capability manifest (no environment contacts) and exits
+nonzero if the manifest fails its own honesty validation.
 """
 
 from __future__ import annotations
@@ -368,6 +371,58 @@ def _short(exc: Exception) -> str:
     return text[:200]
 
 
+def check_capabilities() -> CheckResult:
+    """NXT-02: the reachability-based capability manifest holds honestly.
+
+    Re-validates the seeded registry on every doctor run — including the
+    routed-command cross-check against the LIVE ingress sets — so doctor
+    never reports an unavailable command as supported, and a removed
+    application binding surfaces here instead of as a silent over-claim.
+    """
+    from forge.capability_manifest import capabilities, manifest_problems
+
+    rows = capabilities()
+    problems = manifest_problems(rows)
+    detail = f"{len(rows)} rows, {sum(1 for r in rows if r.entry_point is None)} not wired"
+    if problems:
+        return _result("capabilities.manifest", False, "", f"{detail} — " + "; ".join(problems[:3]))
+    return _result("capabilities.manifest", True, detail, "")
+
+
+def _capabilities_mode(as_json: bool) -> int:
+    """``--capabilities``: print the matrix (NXT-02); exit 1 on drift."""
+    import json as _json
+
+    from forge.capability_manifest import (
+        TIER_LEGEND,
+        capabilities,
+        format_matrix,
+        manifest_problems,
+    )
+
+    rows = capabilities()
+    problems = manifest_problems(rows)
+    if as_json:
+        print(
+            _json.dumps(
+                {
+                    "status": "failed" if problems else "ok",
+                    "legend": TIER_LEGEND,
+                    "capabilities": [row.to_json() for row in rows],
+                    "problems": problems,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(format_matrix(rows))
+        if problems:
+            print()
+            for problem in problems:
+                print(f"  DRIFT: {problem}")
+    return 1 if problems else 0
+
+
 async def run_checks(settings: Settings, project_id: int | None = None) -> list[CheckResult]:
     """Core environment checks (+ project checks when requested)."""
     import sys
@@ -383,6 +438,9 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     results.extend(await check_azure_devops(settings))
     if project_id is not None:
         results.extend(await check_project(settings, project_id))
+    # NXT-02: offline honesty check, appended last so existing ordering
+    # guarantees (python.version, gitlab.token first) are untouched.
+    results.append(check_capabilities())
     return results
 
 
@@ -405,7 +463,16 @@ def main(argv: list[str] | None = None) -> int:
         "--project", type=int, default=None, help="also check a target project (id)"
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument(
+        "--capabilities",
+        action="store_true",
+        help="print the reachability-based capability matrix (NXT-02) and exit; offline",
+    )
     args = parser.parse_args(argv)
+
+    if args.capabilities:
+        # Offline mode: no environment contacts, no Settings needed.
+        return _capabilities_mode(args.json)
 
     settings = Settings()  # type: ignore[call-arg]
     results = asyncio.run(run_checks(settings, args.project))

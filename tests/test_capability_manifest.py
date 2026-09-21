@@ -8,8 +8,12 @@ gateway breaks the claim instead of silently passing.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import forge.gateway.azure_webhook as azure_webhook
+import forge.gateway.github_webhook as github_webhook
 import forge.gateway.router as gateway_router
 from forge.capability_manifest import (
     ADAPTIVE_OPERATOR_COMMANDS,
@@ -32,9 +36,7 @@ def _by_name(name: str) -> Capability:
     return matches[0]
 
 
-def _repo_root() -> "object":
-    from pathlib import Path
-
+def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
@@ -138,11 +140,21 @@ def test_helper_without_production_caller_is_library_level_only():
         assert row.note  # the WHY is mandatory
 
 
+def _unbind_everywhere(monkeypatch, command: str) -> None:
+    """Remove a command from ALL three checked ingresses — an application
+    binding is gone, not one provider's spelling of it."""
+    for module, attr in (
+        (gateway_router, "_RUN_COMMANDS"),
+        (github_webhook, "_GITHUB_RUN_COMMANDS"),
+        (azure_webhook, "_AZDO_RUN_COMMANDS"),
+    ):
+        monkeypatch.setattr(module, attr, frozenset(set(getattr(module, attr)) - {command}))
+
+
 def test_removing_an_ingress_binding_breaks_the_claim(monkeypatch):
-    """Negative/recovery: drop one command from the live ingress set and the
+    """Negative/recovery: drop one command from the live ingress sets and the
     manifest must flag the now-unsupported claim (no silent over-claim)."""
-    shrunken = frozenset(set(gateway_router._RUN_COMMANDS) - {"/reconcile"})
-    monkeypatch.setattr(gateway_router, "_RUN_COMMANDS", shrunken)
+    _unbind_everywhere(monkeypatch, "/reconcile")
     problems = manifest_problems(CAPABILITIES)
     flagged = [p for p in problems if "/reconcile" in p and "does not route" in p]
     assert flagged, f"a removed binding must surface as a problem, got: {problems}"
@@ -257,7 +269,6 @@ def test_format_matrix_marks_unwired_rows_explicitly():
     assert "not wired" in text
     assert "operator-commands/classic" in text
     assert "production_wiring" in text
-    assert "17 of" in text  # every seeded row counted
     unwired = sum(1 for row in CAPABILITIES if row.entry_point is None)
     assert f"{unwired} of {len(CAPABILITIES)} capabilities are NOT wired" in text
 
@@ -273,8 +284,7 @@ def test_doctor_capability_check_passes_and_reports_rows():
 def test_doctor_capability_check_fails_on_drift(monkeypatch):
     """Doctor never reports an unavailable command as supported: a drifted
     ingress set turns the check into a FAIL."""
-    shrunken = frozenset(set(gateway_router._RUN_COMMANDS) - {"/status"})
-    monkeypatch.setattr(gateway_router, "_RUN_COMMANDS", shrunken)
+    _unbind_everywhere(monkeypatch, "/status")
     result = check_capabilities()
     assert result.status == "fail"
     assert "/status" in result.detail

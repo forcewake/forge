@@ -64,6 +64,17 @@ injection regression corpus. The evidence says this is the one place
 where cheap measures have outsized, measured effect (spotlighting
 >50 %→<2 % ASR pre-adaptive; output filtering the only zero-leak layer;
 metadata-gated policy 0/240 unsafe at 99 % usefulness).
+
+> **Correction (2026-09-22, NXT-02)**: the sentence above overstates
+> reachability. Issue-text ingestion IS routed in production; `/steer` and
+> `/answer` are NOT — no checked ingress (GitLab router, GitHub webhook,
+> Azure webhook) routes any adaptive control command, and nothing mounts
+> the mailbox or the lane steering bridge on the operator path. What is
+> "live" for steering is the DRIVER layer: the 2026-09-21 smokes prove
+> steer/interrupt against vendor binaries. The authoritative per-capability
+> state is now `forge.capability_manifest` (see `uv run python -m
+> forge.doctor --capabilities`); the text above is retained as written.
+
 **First moves**: egress allowlist + output filtering at the lane boundary;
 randomized provenance envelopes for issue/repo/tool content; an
 injection-canary suite next to the failure-injection suites.

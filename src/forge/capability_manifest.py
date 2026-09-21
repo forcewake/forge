@@ -245,8 +245,7 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
             "ci/templates/copilot.gitlab-ci.yml",
             "tests/test_harness_selection.py",
         ),
-        note="Template + selection wired; no recorded real-provider run "
-        "artifact in-tree.",
+        note="Template + selection wired; no recorded real-provider run artifact in-tree.",
     ),
     # ---- the three interactive SDK lanes ----
     Capability(
@@ -507,8 +506,11 @@ def format_matrix(rows: tuple[Capability, ...] | list[Capability] | None = None)
     checked = list(rows) if rows is not None else list(CAPABILITIES)
     name_w = max((len(row.name) for row in checked), default=4)
     tier_w = max((len(row.tier) for row in checked), default=4)
-    lines = [f"forge capabilities — {len(checked)} rows (tiers: domain_contract → "
-    "production_wiring → real_provider_scenario → cross_process_recovery)", ""]
+    lines = [
+        f"forge capabilities — {len(checked)} rows (tiers: domain_contract → "
+        "production_wiring → real_provider_scenario → cross_process_recovery)",
+        "",
+    ]
     for row in checked:
         entry = row.entry_point if row.entry_point is not None else "not wired"
         lines.append(f"  {row.name:<{name_w}}  {row.tier:<{tier_w}}  {entry}")
@@ -519,7 +521,6 @@ def format_matrix(rows: tuple[Capability, ...] | list[Capability] | None = None)
     not_wired = sum(1 for row in checked if row.entry_point is None)
     lines.append("")
     lines.append(
-        f"  {not_wired} of {len(checked)} capabilities are NOT wired to any "
-        "production entry point"
+        f"  {not_wired} of {len(checked)} capabilities are NOT wired to any production entry point"
     )
     return "\n".join(lines)
