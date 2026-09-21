@@ -46,6 +46,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from forge.runs.spec import canonical_json_digest
@@ -418,6 +419,8 @@ class ObservedExecution:
     exit_status: str = "unknown"
     usage_completeness: str = "unknown"
     candidate_changed: bool | None = None
+    # C10: the trusted wrapper's command receipts — (argv_head, exit, report).
+    commands: tuple[tuple[str, int, str], ...] = ()
     observed_at: str = ""
 
 
@@ -427,9 +430,15 @@ def observed_execution(
     exit_status: str = "unknown",
     usage_completeness: str = "unknown",
     candidate_changed: bool | None = None,
+    commands: Sequence[tuple[str, int, str]] = (),
     now: Any = None,
 ) -> ObservedExecution:
-    """Build the observed record (ISO timestamp default: wall clock)."""
+    """Build the observed record (ISO timestamp default: wall clock).
+
+    *commands* are the trusted wrapper's receipts: ``(argv_head, exit_code,
+    report_file)`` — e.g. ``("pytest -q", 0, "")`` proves the test command
+    ran green, which the declared profile can never claim (C10).
+    """
     from datetime import datetime, timezone
 
     stamp = now if now is not None else datetime.now(timezone.utc)
@@ -438,6 +447,7 @@ def observed_execution(
         exit_status=str(exit_status or "unknown"),
         usage_completeness=str(usage_completeness or "unknown"),
         candidate_changed=candidate_changed,
+        commands=tuple((str(c[0]), int(c[1]), str(c[2])) for c in commands),
         observed_at=stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp),
     )
 

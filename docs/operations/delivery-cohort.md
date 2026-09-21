@@ -176,7 +176,7 @@ all_attempt_spend   usage  (4 token-class sums + per-class unknown counts)
 per_accepted_unit   denominator · token_classes_per_unit ·
                     llm_active_s_per_unit · wall_s_mean · repairs_per_unit ·
                     cost_usd_mean (only with a pricebook, only fully priced)
-latency             decode_output_tokens_per_s   (output / llm seconds ONLY)
+latency             effective_output_tokens_per_s (identity-joined output / the SAME calls' seconds — C07; None when unpaired)
 honesty             denominator statement · attempts_retained ·
                     token_classes_separate · decode_rate_scope ·
                     unknown_usage_attempts · zero_accepted_note

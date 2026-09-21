@@ -555,3 +555,19 @@ def test_observed_execution_records_facts_not_allowance() -> None:
     blank = observed_execution()
     assert blank.exit_status == "unknown"
     assert blank.candidate_changed is None
+
+
+def test_observed_execution_carries_command_receipts() -> None:
+    """C10: the trusted wrapper's receipts ride the observed record —
+    (argv_head, exit, report); allowed-but-unexecuted stays absent."""
+    from forge.runs.execution_profile import observed_execution
+
+    record = observed_execution(
+        driver="claude-code",
+        exit_status="completed",
+        commands=[("pytest -q", 0, ""), ("ruff check", 1, "ruff.log")],
+    )
+    assert record.commands == (("pytest -q", 0, ""), ("ruff check", 1, "ruff.log"))
+    # no receipts → no claims
+    blank = observed_execution()
+    assert blank.commands == ()

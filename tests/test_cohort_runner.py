@@ -319,8 +319,18 @@ def receipt(**overrides: object) -> dict:
     return values
 
 
-def llm_call(duration_ms: int, first_token_ms: int | None = None, status: str = "ok") -> dict:
-    return {"duration_ms": duration_ms, "first_token_ms": first_token_ms, "status": status}
+def llm_call(
+    duration_ms: int,
+    first_token_ms: int | None = None,
+    status: str = "ok",
+    attempt: str = "501:1",
+) -> dict:
+    return {
+        "duration_ms": duration_ms,
+        "first_token_ms": first_token_ms,
+        "status": status,
+        "attempt": attempt,
+    }
 
 
 def fixture_ledger() -> dict:
@@ -462,15 +472,15 @@ def test_failed_and_cancelled_spend_stays_in_the_totals() -> None:
     assert report["honesty"]["attempts_retained"] is True
 
 
-def test_token_classes_stay_separate_and_the_only_rate_is_decode() -> None:
+def test_token_classes_stay_separate_and_the_only_rate_is_effective() -> None:
     report = aggregate.cohort_report(fixture_ledger())
     assert set(report["all_attempt_spend"]["usage"]["token_classes"]) == set(
         aggregate.TOKEN_CLASSES
     )
     # 200+150+50... output known = 1000 over 18s of llm activity (2+3+4+1+8)
-    # B09: receipt tokens (2 receipts) over llm-call durations (5 calls) is
-    # an UNMATCHED population pair — no proven join, no rate.
-    assert report["latency"]["decode_output_tokens_per_s"] is None
+    # C07: the rate is identity-joined per attempt — unpaired or
+    # keyless records yield None.
+    assert report["latency"]["effective_output_tokens_per_s"] is None
     assert report["all_attempt_spend"]["llm"]["llm_active_s"] == pytest.approx(18.0)
     assert "total_tokens" not in json.dumps(report["all_attempt_spend"]["usage"])
 
@@ -880,16 +890,28 @@ def test_partially_priced_unit_costs_report_a_lower_bound_not_a_mean() -> None:
     assert per["cost_lower_bound_usd_mean"] == pytest.approx(0.001)
 
 
-def test_decode_rate_requires_matched_populations() -> None:
-    """B09: receipt tokens over llm-call durations is only a rate when the
-    populations match — fewer receipts than calls means no proven join."""
-    usage = {
-        "token_classes": {"output_tokens": 1000},
-        "receipt_count": 1,
-        "unknown_counts": {},
-    }
-    llm = {"call_count": 3, "failed_calls": 0, "llm_active_s": 10.0, "ttft": {}}
-    assert aggregate._decode_rate(usage, llm) is None  # 1 receipt over 3 calls
+def test_effective_rate_requires_identity_joined_populations() -> None:
+    """C07: a rate divides tokens by the SAME calls' durations — the join
+    is by attempt identity; count equality proves nothing."""
+    receipt_a = {"attempt_id": "501:1", "output_tokens": 1000}
+    unrelated_calls = [{"attempt": "502:9", "duration_ms": 10000}]
+    result = aggregate.effective_output_rate([receipt_a], unrelated_calls)
+    assert result["effective_output_tokens_per_s"] is None  # no join
+    assert result["joined"] is False
 
-    matched = dict(usage, receipt_count=3)
-    assert aggregate._decode_rate(matched, llm) == pytest.approx(100.0)
+    joined_calls = [{"attempt": "501:1", "duration_ms": 10000}]
+    result = aggregate.effective_output_rate([receipt_a], joined_calls)
+    assert result["effective_output_tokens_per_s"] == pytest.approx(100.0)
+    assert result["joined"] is True
+
+    # count-matched but identity-MISMATCHED (the reviewer's counterexample):
+    # two planner/reviewer durations + two unrelated harness receipts
+    receipts = [
+        {"attempt_id": "h:1", "output_tokens": 500},
+        {"attempt_id": "h:2", "output_tokens": 500},
+    ]
+    calls = [
+        {"attempt": "p:1", "duration_ms": 5000},
+        {"attempt": "p:2", "duration_ms": 5000},
+    ]
+    assert aggregate.effective_output_rate(receipts, calls)["effective_output_tokens_per_s"] is None

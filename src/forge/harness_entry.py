@@ -1025,6 +1025,28 @@ def _load_json_object(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _load_command_receipts(path: Path) -> list[tuple[str, int, str]]:
+    """The trusted wrapper's command receipts (C10): TSV rows
+    ``argv_head<TAB>exit<TAB>report`` — absent/unreadable means NO claim
+    (never fabricated)."""
+    if not path.is_file():
+        return []
+    receipts: list[tuple[str, int, str]] = []
+    for raw in path.read_text(errors="replace").splitlines():
+        parts = raw.split("\t")
+        if len(parts) < 2:
+            continue
+        argv_head = parts[0].strip()
+        try:
+            code = int(parts[1])
+        except ValueError:
+            continue
+        report = parts[2].strip() if len(parts) > 2 else ""
+        if argv_head:
+            receipts.append((argv_head, code, report))
+    return receipts
+
+
 def emit_candidate_meta(
     *,
     run_id: str,
@@ -1097,6 +1119,9 @@ def emit_candidate_meta(
                     (_load_json_object(Path(usage_file)) or {}).get("completeness") or "unknown"
                 ),
                 candidate_changed=len(diff_bytes) > 0,
+                # C10: the trusted wrapper's receipts — one TSV row per
+                # executed command: argv_head<TAB>exit<TAB>report_file.
+                commands=_load_command_receipts(Path(".forge/commands.tsv")),
             )
         ),
     }

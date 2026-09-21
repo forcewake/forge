@@ -1165,7 +1165,8 @@ class TestEmitCandidateMeta:
         # The usage receipt rides INSIDE the meta (R23).
         assert meta["usage"] == {"input_tokens": 42, "output_tokens": 7}
         written = json.loads((staged / "candidate.meta.json").read_text())
-        assert written == meta
+        # C10: tuples JSON-round-trip to lists — compare through the same lens
+        assert written == json.loads(json.dumps(meta))
 
     def test_missing_usage_exit_and_env_degrade_to_unknown(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
@@ -1733,3 +1734,46 @@ class TestRenderBriefAzureEnforcedB04:
         assert rc == 1
         assert (tmp_path / ".forge" / "exit").read_text().strip() == "failed"
         assert not (tmp_path / ".forge" / "brief.md").exists()
+
+
+class TestCommandReceiptsC10:
+    def test_the_wrapper_receipts_file_rides_the_meta(self, tmp_path, monkeypatch):
+        """C10: .forge/commands.tsv (argv<TAB>exit<TAB>report rows) lands in
+        the meta's observed_execution — proof a command RAN, which the
+        declared profile can never claim."""
+        import json as _json
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "forge-output").mkdir()
+        (tmp_path / "forge-output" / "candidate.diff").write_text("+x\n")
+        (tmp_path / ".forge").mkdir()
+        (tmp_path / ".forge" / "exit").write_text("completed\n")
+        (tmp_path / ".forge" / "commands.tsv").write_text(
+            "pytest -q\t0\t\nruff check src\t2\truff.log\n"
+        )
+
+        meta = emit_candidate_meta(
+            run_id="a" * 32, attempt_base_oid="b" * 40, driver="claude-code", model="m"
+        )
+
+        commands = list(meta["observed_execution"]["commands"])
+        assert ("pytest -q", 0, "") in commands or ["pytest -q", 0, ""] in commands
+        assert ("ruff check src", 2, "ruff.log") in commands or [
+            "ruff check src",
+            2,
+            "ruff.log",
+        ] in commands
+
+    def test_a_malformed_receipts_file_claims_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "forge-output").mkdir()
+        (tmp_path / "forge-output" / "candidate.diff").write_text("+x\n")
+        (tmp_path / ".forge").mkdir()
+        (tmp_path / ".forge" / "exit").write_text("completed\n")
+        (tmp_path / ".forge" / "commands.tsv").write_text("garbage line\npytest\tnotanint\t\n")
+
+        meta = emit_candidate_meta(
+            run_id="a" * 32, attempt_base_oid="b" * 40, driver="claude-code", model="m"
+        )
+
+        assert not meta["observed_execution"]["commands"]

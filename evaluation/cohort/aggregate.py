@@ -459,26 +459,65 @@ def _per_accepted_block(
     return block
 
 
-def _decode_rate(usage: Mapping[str, Any], llm: Mapping[str, Any]) -> float | None:
-    """Known output tokens over known active seconds — the ONLY rate built.
+def effective_output_rate(
+    receipts: Sequence[Mapping[str, Any]],
+    calls: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The EFFECTIVE output rate (C07) over IDENTITY-JOINED records.
 
-    B09: the numerator (receipt tokens) and denominator (llm_calls
-    durations) come from DIFFERENT measurement populations; dividing them
-    without a proven join produces a number that is neither population's
-    rate. The rate is built ONLY when both sides are known AND the
-    populations match (every call has a receipt-sourced duration —
-    receipt_count covers the whole call population)."""
-    output = _mapping(usage.get("token_classes")).get("output_tokens")
-    output = output if isinstance(output, int) else None
-    active_raw = llm.get("llm_active_s")
-    if output is None or active_raw is None:
-        return None
-    active = float(active_raw)
-    calls = int(llm.get("call_count") or 0)
-    receipts = int(usage.get("receipt_count") or 0)
-    if active <= 0 or (calls and receipts and receipts < calls):
-        return None  # unmatched populations — no rate, with the reason riding the block
-    return output / active
+    A rate divides output tokens by the duration of the SAME calls. The
+    only honest join available in the ledger is by attempt identity: a
+    receipt's ``attempt_id`` must match the llm-call's ``attempt`` (both
+    sides carry it when exported from the same attempt). Records without
+    the join key, or whose populations don't fully pair, produce ``None``
+    with the reason — never a number over mismatched populations. Even a
+    perfect join divides output by the FULL request duration (queue,
+    prefill, decode) — hence the honest name *effective*, never decode
+    speed.
+    """
+
+    def _key(record: Mapping[str, Any]) -> str:
+        return str(record.get("attempt_id") or record.get("attempt") or "")
+
+    joined_tokens = 0
+    joined_ms: float | None = 0.0
+    unpaired_receipts = 0
+    unpaired_calls = 0
+    calls_by_key: dict[str, list[Mapping[str, Any]]] = {}
+    for call in calls:
+        calls_by_key.setdefault(_key(call), []).append(call)
+    for receipt in receipts:
+        key = _key(receipt)
+        bucket = calls_by_key.get(key)
+        if not key or not bucket:
+            unpaired_receipts += 1
+            continue
+        call = bucket.pop(0)
+        duration = _num(call.get("duration_ms"))
+        output = _num(receipt.get("output_tokens"))
+        if duration is None:
+            joined_ms = None  # duration unknown poisons the denominator
+            continue
+        if output is None:
+            unpaired_receipts += 1
+            continue
+        joined_tokens += int(output)
+        if joined_ms is not None:
+            joined_ms += float(duration)
+    unpaired_calls = sum(len(bucket) for bucket in calls_by_key.values())
+    if unpaired_receipts or unpaired_calls or joined_ms is None or joined_ms <= 0:
+        return {
+            "effective_output_tokens_per_s": None,
+            "unpaired_receipts": unpaired_receipts,
+            "unpaired_calls": unpaired_calls,
+            "joined": False,
+        }
+    return {
+        "effective_output_tokens_per_s": joined_tokens / (joined_ms / 1000.0),
+        "unpaired_receipts": 0,
+        "unpaired_calls": 0,
+        "joined": True,
+    }
 
 
 def cohort_report(
@@ -546,7 +585,14 @@ def cohort_report(
         },
         "all_attempt_spend": {"usage": usage, "llm": llm},
         "per_accepted_unit": _per_accepted_block(accepted, accepted_raw, denominator, pricebook),
-        "latency": {"decode_output_tokens_per_s": _decode_rate(usage, llm)},
+        "latency": {
+            # C07: the ONLY rate is identity-joined and honestly named —
+            # effective output rate over the SAME calls' durations; the old
+            # count-matched division is retired.
+            "effective_output_tokens_per_s": effective_output_rate(
+                _rows(attempt.get("receipts")), _rows(attempt.get("llm_calls"))
+            )["effective_output_tokens_per_s"],
+        },
         "honesty": {
             "denominator": (
                 f"{denominator} accepted units (explicit operator verdict); "
