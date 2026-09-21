@@ -1741,7 +1741,6 @@ class TestCommandReceiptsC10:
         """C10: .forge/commands.tsv (argv<TAB>exit<TAB>report rows) lands in
         the meta's observed_execution — proof a command RAN, which the
         declared profile can never claim."""
-        import json as _json
 
         monkeypatch.chdir(tmp_path)
         (tmp_path / "forge-output").mkdir()
