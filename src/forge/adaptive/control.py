@@ -8,7 +8,10 @@ to reach the model. This module makes each control invariant executable:
 - CTL-04 — every command is a mailbox record with an idempotency key (a
   redelivery must not spend another iteration or grant another
   approval), a strictly increasing per-work sequence, and the state
-  ladder ``received -> authorized -> applied -> checkpointed``.
+  ladder ``received -> authorized -> applied -> checkpointed`` (the
+  durable Postgres mailbox refines the middle leg into NXT-12's
+  ``dispatching -> vendor_accepted | outcome_unknown`` rungs — see
+  :mod:`forge.adaptive.mailbox_db`).
   Concurrency control is compare-and-set: a command whose expected plan
   revision / execution epoch no longer matches EXPIRES instead of
   applying against the wrong state.
@@ -42,13 +45,15 @@ the last durable state, not a half-applied one.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Final, Literal
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from forge.adaptive.models import ChangeProposal, ControlCommand
 
 __all__ = [
     "Mailbox",
+    "MailboxSurface",
     "PauseState",
     "cancel_generation_applies",
     "classify_instruction",
@@ -59,6 +64,7 @@ __all__ = [
     "new_execution_epoch",
     "new_publication_epoch",
     "promote_to_proposal",
+    "recorded_pause",
     "request_pause",
     "resume_check",
     "send_interrupt",
@@ -67,6 +73,41 @@ __all__ = [
 #: The states a command passes through on the happy path. ``rejected`` and
 #: ``expired`` are exits, never rungs — the ladder only climbs.
 _LADDER: Final = ("received", "authorized", "applied", "checkpointed")
+
+
+@runtime_checkable
+class MailboxSurface(Protocol):
+    """The mailbox contract the control plane codes against (CTL-04).
+
+    :class:`Mailbox` (this module) is the in-memory reference
+    implementation — tests and reasoning. The durable implementation is
+    :class:`forge.adaptive.mailbox_db.PostgresMailbox`: the same surface
+    as awaitables (production I/O is async), with the coarse in-memory
+    ``apply`` refined into the NXT-12 delivery rungs
+    (``dispatch -> vendor_accepted | outcome_unknown -> observe``) — the
+    split that keeps "intended to send" distinguishable from "the agent
+    applied it". Both satisfy this protocol's names, arguments and
+    semantics, so a caller typed against ``MailboxSurface`` can be moved
+    from either implementation to the other without touching its logic.
+    """
+
+    def submit(self, command: ControlCommand) -> tuple[ControlCommand, bool]: ...
+
+    def authorize(
+        self, command_id: str, actor_scopes: dict[str, tuple[str, ...]]
+    ) -> ControlCommand: ...
+
+    def apply(
+        self,
+        command_id: str,
+        *,
+        current_plan_revision: int,
+        current_execution_epoch: int,
+    ) -> ControlCommand: ...
+
+    def checkpoint(self, command_id: str) -> ControlCommand: ...
+
+    def pending(self, work_id: str) -> list[ControlCommand]: ...
 
 
 class Mailbox:
@@ -297,6 +338,36 @@ def new_publication_epoch(state: PauseState) -> PauseState:
     not merely that a UI changes state.
     """
     return replace(state, publication_epoch=state.publication_epoch + 1)
+
+
+def recorded_pause(
+    state: PauseState,
+    command: ControlCommand,
+    submit: Callable[[ControlCommand], tuple[ControlCommand, bool]],
+) -> tuple[PauseState, ControlCommand, bool]:
+    """NXT-09's dedup-first pause: the command row is durable FIRST.
+
+    ``submit`` runs BEFORE any pause-state mutation. A redelivered pause
+    (same work-scoped idempotency key) is refused by the mailbox with
+    ``created=False`` and the state comes back UNCHANGED — the
+    publication epoch is not bumped a second time and nothing is
+    re-recorded (the old order — fence the epoch, then discover the
+    duplicate at submit — bumped the fence on a redelivery, spending a
+    generation the command never earned). Only a NEW command row
+    (``created=True``) sets ``pause_requested`` and bumps the fence; the
+    caller persists the returned state and then sends the interrupt
+    (:func:`send_interrupt`) — CTL-05's order preserved.
+
+    Works over any :class:`MailboxSurface` submit — the in-memory
+    reference mailbox synchronously, the durable Postgres mailbox
+    through the same shape (its ``submit`` is awaitable, so the async
+    caller awaits it and applies the same ``created`` gate before
+    fencing).
+    """
+    stored, created = submit(command)
+    if not created:
+        return state, stored, False
+    return new_publication_epoch(request_pause(state)), stored, True
 
 
 def resume_check(

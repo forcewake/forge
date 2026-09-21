@@ -32,8 +32,7 @@ from forge.adaptive.control import (
     Mailbox,
     PauseState,
     classify_instruction,
-    new_publication_epoch,
-    request_pause,
+    recorded_pause,
     send_interrupt,
 )
 from forge.adaptive.discovery import DiscoveryRun
@@ -130,24 +129,32 @@ class OperatorControlService:
         return self.mailbox.submit(command)
 
     def pause(self, work_id: str, actor: str, idempotency_key: str) -> PauseState:
-        """CTL-05: pause_requested FIRST, then the fence, then interrupt."""
-        state = self.pause_states.get(work_id, PauseState(work_id=work_id, publication_epoch=0))
-        requested = request_pause(state)
-        fenced = new_publication_epoch(requested)
-        self.pause_states[work_id] = fenced
-        self.mailbox.submit(
-            ControlCommand(
-                schema="forge.proposal.control-command/1",
-                command_id=f"cmd-{uuid.uuid4().hex[:12]}",
-                work_id=work_id,
-                sequence=len(self.mailbox.commands) + 1,
-                kind="pause",
-                actor_ref=actor,
-                actor_origin="server_authenticated_human",
-                idempotency_key=idempotency_key,
-                status="received",
-            )
+        """CTL-05 + NXT-09: the durable command row FIRST, then the fence.
+
+        ``recorded_pause`` submits the command BEFORE any state mutation:
+        a redelivered pause (same idempotency key) is refused with the
+        pause state UNCHANGED — the publication epoch is not bumped a
+        second time. Only a NEW command row sets ``pause_requested``,
+        bumps the fence, and then the interrupt goes out (CTL-05's
+        ordering preserved: pause on record before the interrupt).
+        """
+        command = ControlCommand(
+            schema="forge.proposal.control-command/1",
+            command_id=f"cmd-{uuid.uuid4().hex[:12]}",
+            work_id=work_id,
+            sequence=len(self.mailbox.commands) + 1,
+            kind="pause",
+            actor_ref=actor,
+            actor_origin="server_authenticated_human",
+            idempotency_key=idempotency_key,
+            status="received",
         )
+        fenced, _stored, _created = recorded_pause(
+            self.pause_states.get(work_id, PauseState(work_id=work_id, publication_epoch=0)),
+            command,
+            self.mailbox.submit,
+        )
+        self.pause_states[work_id] = fenced
         return send_interrupt(fenced)
 
     def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:

@@ -214,7 +214,24 @@ class ControlCommand(_Contract):
     expected_plan_revision: int | None = None
     expected_execution_epoch: int | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
-    status: Literal["received", "authorized", "applied", "checkpointed", "rejected", "expired"]
+    #: The state ladder. ``received -> authorized -> applied ->
+    #: checkpointed`` is the coarse in-memory run of CTL-04; the durable
+    #: mailbox (NXT-12) refines the ``authorized -> applied`` leg into
+    #: ``dispatching`` (effect intended, correlation/epoch persisted),
+    #: ``vendor_accepted`` and ``outcome_unknown`` (the lost-response
+    #: window), so "intended to send" is never misread as "the agent
+    #: applied it". ``rejected`` / ``expired`` remain exits, never rungs.
+    status: Literal[
+        "received",
+        "authorized",
+        "dispatching",
+        "vendor_accepted",
+        "outcome_unknown",
+        "applied",
+        "checkpointed",
+        "rejected",
+        "expired",
+    ]
 
 
 class CandidateSetMember(_Contract):

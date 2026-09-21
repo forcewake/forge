@@ -17,6 +17,7 @@ import pytest
 
 from forge.adaptive.control import (
     Mailbox,
+    MailboxSurface,
     PauseState,
     cancel_generation_applies,
     classify_instruction,
@@ -27,11 +28,13 @@ from forge.adaptive.control import (
     new_execution_epoch,
     new_publication_epoch,
     promote_to_proposal,
+    recorded_pause,
     request_pause,
     resume_check,
     send_interrupt,
 )
 from forge.adaptive.models import ControlCommand
+from forge.adaptive.wiring import OperatorControlService
 
 SCOPES = {
     "server_authenticated_human": ("human:reviewer-17",),
@@ -250,6 +253,101 @@ class TestMailboxCompareAndSet:
         applied = mailbox.apply("cmd-1", current_plan_revision=99, current_execution_epoch=99)
 
         assert applied.status == "applied"
+
+
+class TestMailboxSurface:
+    """The seam contract: the control plane codes against the surface, so
+    the in-memory reference mailbox and the durable Postgres mailbox
+    (forge.adaptive.mailbox_db — the same names, awaited) are two
+    implementations of ONE protocol, not two APIs."""
+
+    def test_the_in_memory_mailbox_satisfies_the_surface(self):
+        assert isinstance(Mailbox(), MailboxSurface)
+
+    def test_the_surface_is_exactly_the_protocol_callers_use(self):
+        methods = {name for name in dir(MailboxSurface) if not name.startswith("_")}
+
+        assert methods == {"submit", "authorize", "apply", "checkpoint", "pending"}
+
+
+class TestRecordedPause:
+    """NXT-09's dedup-first pause ordering: the command row is durable
+    FIRST; only a NEW row (created=True) mutates pause_requested and bumps
+    the publication epoch. A redelivered pause leaves the state UNCHANGED
+    — the old order (fence the epoch, then discover the duplicate at
+    submit) spent a generation the redelivery never earned."""
+
+    def _pause_command(self, **overrides) -> ControlCommand:
+        return _command(idempotency_key="note:pause:1", **overrides)
+
+    def test_a_new_command_records_the_pause_and_bumps_the_fence(self):
+        mailbox = Mailbox()
+        state = PauseState(work_id="wp-demo-1")
+
+        fenced, stored, created = recorded_pause(state, self._pause_command(), mailbox.submit)
+
+        assert created is True
+        assert stored.status == "received"  # the row exists BEFORE the fence
+        assert fenced.pause_requested is True
+        assert fenced.publication_epoch == 1
+
+    def test_a_redelivered_pause_leaves_the_state_unchanged(self):
+        mailbox = Mailbox()
+        state = PauseState(work_id="wp-demo-1")
+        fenced, _, _ = recorded_pause(state, self._pause_command(), mailbox.submit)
+
+        again, stored, created = recorded_pause(
+            fenced,
+            self._pause_command(command_id="cmd-replayed", sequence=2),
+            mailbox.submit,
+        )
+
+        assert created is False
+        assert again is fenced  # identity: no epoch bump, nothing re-recorded
+        assert again.publication_epoch == 1
+        assert stored.command_id == "cmd-1"  # the winner's record, verbatim
+
+    def test_a_failed_submit_records_nothing(self):
+        """The submit runs BEFORE any state mutation — storage down means no
+        fence, no pause bookkeeping, nothing to roll back."""
+
+        class StorageDown:
+            def submit(self, command: ControlCommand) -> tuple[ControlCommand, bool]:
+                raise RuntimeError("database unavailable")
+
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            recorded_pause(
+                PauseState(work_id="wp-demo-1"), self._pause_command(), StorageDown().submit
+            )
+
+
+class TestOperatorControlServicePauseOrdering:
+    """The shipped pause path: dedup BEFORE the epoch mutation (the same
+    order recorded_pause imposes, whatever mailbox sits behind the seam)."""
+
+    def test_a_duplicate_pause_does_not_bump_the_epoch(self):
+        svc = OperatorControlService()
+
+        first = svc.pause("wp-1", "human:op", "note:1")
+        second = svc.pause("wp-1", "human:op", "note:1")
+
+        assert first.publication_epoch == 1
+        # The redelivery was refused by the mailbox BEFORE the fence —
+        # the epoch is not bumped a second time (NXT-09 acceptance).
+        assert second.publication_epoch == 1
+        assert svc.pause_states["wp-1"].publication_epoch == 1
+        pauses = [c for c in svc.mailbox.commands.values() if c.kind == "pause"]
+        assert len(pauses) == 1
+
+    def test_a_distinct_pause_bumps_the_epoch_once(self):
+        svc = OperatorControlService()
+
+        svc.pause("wp-1", "human:op", "note:1")
+        second = svc.pause("wp-1", "human:op", "note:2")
+
+        assert second.publication_epoch == 2
+        pauses = [c for c in svc.mailbox.commands.values() if c.kind == "pause"]
+        assert len(pauses) == 2
 
 
 class TestPauseOrdering:
