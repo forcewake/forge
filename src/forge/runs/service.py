@@ -39,7 +39,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -300,6 +300,105 @@ def _go_duplicate_body(run_id: str, status: str) -> str:
         f"consumed and the run is `{status}`. Nothing to do.\n\n"
         "*This is an automated message.*"
     )
+
+
+# NXT-01: the /go resolution outcome is TYPED, not a nullable run plus a
+# side-channel refusal string. The resolver below returns exactly one of
+# these; the consuming path discriminates once and then works with a plain
+# ``FlowRun`` — the "logically never None" branches the typechecker could
+# not see are now impossible by construction instead of by argument.
+@dataclass(frozen=True)
+class _ResolvedGo:
+    """The identifier narrowed to exactly one run of this project+issue."""
+
+    run: FlowRun
+
+
+@dataclass(frozen=True)
+class _RefusedGo:
+    """A /go answered with one operator-visible refusal note.
+
+    ``body`` is the already-composed reply (the ``_go_*_body`` builders);
+    ``run_id`` ties the journaled refusal to the run when one was found.
+    """
+
+    body: str
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _AdvanceGo:
+    """An accepted /go: advance this run via this backend.
+
+    Built inside the resolving session (the evidence read must precede the
+    commit that expires it) and consumed after it closes. ``resuming`` is
+    the ADR-0017 §3 crash-recovery leg — the gate was already consumed, so
+    no transition precedes the advance; ``status`` is the status the run
+    was found in (the resume log's honest "found X after a worker crash").
+    """
+
+    run_id: str
+    backend_name: str
+    resuming: bool = False
+    status: str = ""
+
+
+async def _resolve_go_run(
+    session: AsyncSession,
+    requested: str,
+    *,
+    project_id: int,
+    issue_iid: int | None,
+) -> _ResolvedGo | _RefusedGo:
+    """Narrow a ``/go`` identifier to exactly one run of this project+issue.
+
+    Provider, project and issue predicates are identical for every
+    identifier form (R03/A07 subject scoping): the full 32-hex id is
+    fetched directly and then checked against them; an ≥8-hex prefix is
+    resolved by a query that carries the same predicates in its WHERE. A
+    foreign run therefore reads as unknown, and a same-project run of a
+    different issue reads as wrong-issue — never silently adopted.
+    """
+    if len(requested) == 32:
+        run = await session.get(FlowRun, requested)
+        if run is None or run.provider != "gitlab" or run.project_id != project_id:
+            logger.info("/go references unknown run %s — ignoring", requested[:8])
+            return _RefusedGo(_go_unknown_run_body(requested))
+        if run.issue_iid != issue_iid:
+            logger.info("/go for run %s posted on a different issue — ignoring", run.id[:8])
+            return _RefusedGo(_go_wrong_issue_body(requested), run_id=run.id)
+        return _ResolvedGo(run)
+    # Short id (the plan heading shows the 8-char form): resolve by prefix
+    # among THIS issue's runs — provider/project/issue-scoped like every
+    # subject lookup (R03/A07). Ambiguous or unmatched is answered with the
+    # valid id forms, never silence.
+    matches = (
+        (
+            await session.execute(
+                select(FlowRun)
+                .where(
+                    FlowRun.provider == "gitlab",
+                    FlowRun.project_id == project_id,
+                    FlowRun.issue_iid == issue_iid,
+                    FlowRun.id.like(f"{requested}%"),
+                )
+                .order_by(FlowRun.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(matches) == 1:
+        return _ResolvedGo(matches[0])
+    if not matches:
+        logger.info("/go id %s matches no run on this issue — ignoring", requested[:8])
+        return _RefusedGo(_go_unknown_run_body(requested))
+    logger.info(
+        "/go prefix %s matches %d runs on this issue — ignoring",
+        requested[:8],
+        len(matches),
+    )
+    return _RefusedGo(_go_ambiguous_body(requested, [found.id for found in matches]))
 
 
 #: Repair-loop log budgets (ADR-0013: bounded repair context).
@@ -1924,162 +2023,138 @@ class RunService:
             return
         requested = match.group(1).lower()
         now = now or datetime.now(timezone.utc)
-        resuming = False
         # An ignored /go no longer returns silently: the refusal body is
         # composed inside the session but POSTED after it closes (the note
         # journal opens its own session — never nested under this one).
-        refusal_body: str | None = None
-        refusal_run_id: str | None = None
-
+        # NXT-01: the pass below ends in exactly one typed outcome — the
+        # refusal to journal, or the advance instruction — so no nullable
+        # run ever flows past the discrimination.
+        outcome: _RefusedGo | _AdvanceGo
         async with self._session_factory() as session:
             controller = Controller(session)
-            run: FlowRun | None = None
-            if len(requested) == 32:
-                run = await session.get(FlowRun, requested)
-                if run is None or run.provider != "gitlab" or run.project_id != project_id:
-                    logger.info("/go references unknown run %s — ignoring", requested[:8])
-                    refusal_body = _go_unknown_run_body(requested)
-                elif run.issue_iid != issue_iid:
-                    logger.info("/go for run %s posted on a different issue — ignoring", run.id[:8])
-                    refusal_body = _go_wrong_issue_body(requested)
-                    refusal_run_id = run.id
+            resolved = await _resolve_go_run(
+                session, requested, project_id=project_id, issue_iid=issue_iid
+            )
+            if isinstance(resolved, _RefusedGo):
+                outcome = resolved
             else:
-                # Short id (the plan heading shows the 8-char form): resolve
-                # by prefix among THIS issue's runs — provider/project/issue-
-                # scoped like every subject lookup (R03/A07). Ambiguous or
-                # unmatched is answered with the valid id forms, never
-                # silence.
-                matches = (
-                    (
-                        await session.execute(
-                            select(FlowRun)
-                            .where(
-                                FlowRun.provider == "gitlab",
-                                FlowRun.project_id == project_id,
-                                FlowRun.issue_iid == issue_iid,
-                                FlowRun.id.like(f"{requested}%"),
-                            )
-                            .order_by(FlowRun.created_at.desc())
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if len(matches) == 1:
-                    run = matches[0]
-                elif not matches:
-                    logger.info("/go id %s matches no run on this issue — ignoring", requested[:8])
-                    refusal_body = _go_unknown_run_body(requested)
-                else:
-                    logger.info(
-                        "/go prefix %s matches %d runs on this issue — ignoring",
-                        requested[:8],
-                        len(matches),
-                    )
-                    refusal_body = _go_ambiguous_body(requested, [found.id for found in matches])
-
-            if refusal_body is None:
-                run_id = run.id
+                run = resolved.run
                 if run.status in _RESUMABLE_ADVANCE_STATUSES:
                     # ADR-0017 §3: the gate is consumed and a crashed worker left
                     # the run mid-advance; the re-claimed command step is the
                     # recovery driver. The leg below looks for the
                     # already-existing effects before creating new ones.
-                    resuming = True
+                    outcome = _AdvanceGo(
+                        run_id=run.id,
+                        backend_name=(
+                            str((run.evidence or {}).get("backend") or "").strip()
+                            or self._backend_name()
+                        ),
+                        resuming=True,
+                        status=run.status,
+                    )
                 elif run.status != FlowStatus.WAITING_APPROVAL.value:
                     # Already advanced (or terminal) — duplicate /go delivery.
                     logger.info(
-                        "/go for run %s in status %s — ignoring duplicate", run_id[:8], run.status
+                        "/go for run %s in status %s — ignoring duplicate", run.id[:8], run.status
                     )
-                    refusal_body = _go_duplicate_body(run_id, run.status)
-                    refusal_run_id = run_id
+                    outcome = _RefusedGo(_go_duplicate_body(run.id, run.status), run_id=run.id)
                 elif author_username not in self._approvers():
                     # ADR-0009: authority comes from trusted configuration, not authorship.
                     logger.info(
                         "/go from @%s who is not in FORGE_APPROVERS — ignoring", author_username
                     )
-                    refusal_body = _go_not_approver_body(author_username)
-                    refusal_run_id = run_id
-
-            if refusal_body is None and not resuming:
-                gate = (
-                    (
-                        await session.execute(
-                            select(GateApproval)
-                            .where(GateApproval.flow_run_id == run.id)
-                            .order_by(GateApproval.id.desc())
+                    outcome = _RefusedGo(_go_not_approver_body(author_username), run_id=run.id)
+                else:
+                    gate = (
+                        (
+                            await session.execute(
+                                select(GateApproval)
+                                .where(GateApproval.flow_run_id == run.id)
+                                .order_by(GateApproval.id.desc())
+                            )
                         )
+                        .scalars()
+                        .first()
                     )
-                    .scalars()
-                    .first()
-                )
-                if gate is None:
-                    # F15 (ADR-0018 §2): decisions are created at plan publication —
-                    # a /go without a pending decision has nothing to consume.
-                    logger.info("No pending decision for run %s — ignoring /go", run_id[:8])
-                    return
-                if not is_valid(
-                    gate,
-                    now,
-                    plan_digest=run.plan_digest or "",
-                    base_sha=run.base_sha or "",
-                    policy_digest=self._policy_digest(),
-                    spec_digest=run.spec_digest,
-                ):
-                    logger.info("Decision for run %s is expired/invalid — ignoring /go", run_id[:8])
-                    return
-                # The decision was opened anonymously at plan publication; record
-                # who consumed it.
-                gate.approver_user_id = author_user_id
-                try:
-                    await consume_approval(session, gate.id, now)
-                except GateAlreadyConsumed:
-                    logger.info("Gate for run %s already consumed — ignoring", run_id[:8])
-                    refusal_body = _go_duplicate_body(run_id, run.status)
-                    refusal_run_id = run_id
+                    if gate is None:
+                        # F15 (ADR-0018 §2): decisions are created at plan
+                        # publication — a /go without a pending decision has
+                        # nothing to consume.
+                        logger.info("No pending decision for run %s — ignoring /go", run.id[:8])
+                        return
+                    if not is_valid(
+                        gate,
+                        now,
+                        plan_digest=run.plan_digest or "",
+                        base_sha=run.base_sha or "",
+                        policy_digest=self._policy_digest(),
+                        spec_digest=run.spec_digest,
+                    ):
+                        logger.info(
+                            "Decision for run %s is expired/invalid — ignoring /go", run.id[:8]
+                        )
+                        return
+                    # The decision was opened anonymously at plan publication;
+                    # record who consumed it.
+                    gate.approver_user_id = author_user_id
+                    try:
+                        await consume_approval(session, gate.id, now)
+                    except GateAlreadyConsumed:
+                        logger.info("Gate for run %s already consumed — ignoring", run.id[:8])
+                        outcome = _RefusedGo(_go_duplicate_body(run.id, run.status), run_id=run.id)
+                    else:
+                        # R04 (ADR-0018 §1): consuming the gate binds the run
+                        # to the executable RunSpec the pending decision froze
+                        # — the advance legs execute ONLY its digest-verified
+                        # content (frozen task text, plan, model route,
+                        # verification contract, budgets). A spec that no
+                        # longer matches this digest is blocked(spec_invalid),
+                        # never re-read from live settings.
+                        await controller.transition(
+                            run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
+                        )
+                        # ADR-0015: the backend frozen at run start decides the
+                        # advance leg. Read BEFORE the commit below expires the
+                        # ORM attributes.
+                        outcome = _AdvanceGo(
+                            run_id=run.id,
+                            backend_name=(
+                                str((run.evidence or {}).get("backend") or "").strip()
+                                or self._backend_name()
+                            ),
+                            status=run.status,
+                        )
+                        # Commit ONLY the accepted leg — a duplicate keeps the
+                        # original no-write semantics (the approver_user_id
+                        # touch above must not survive a refused consumption).
+                        await session.commit()
 
-            if refusal_body is None and not resuming:
-                # R04 (ADR-0018 §1): consuming the gate binds the run to the
-                # executable RunSpec the pending decision froze — the advance
-                # legs below execute ONLY its digest-verified content (frozen
-                # task text, plan, model route, verification contract,
-                # budgets). A spec that no longer matches this digest is
-                # blocked(spec_invalid), never re-read from live settings.
-                await controller.transition(
-                    run.id, FlowStatus.PROPOSING, reason=f"approved by @{author_username}"
-                )
-                # ADR-0015: the backend frozen at run start decides the advance leg.
-                backend_name = (
-                    str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
-                )
-                await session.commit()
-
-        if refusal_body is not None:
+        if isinstance(outcome, _RefusedGo):
             await self._post_go_refusal(
-                project_id, issue_iid, refusal_body, delivery_id, refusal_run_id
+                project_id, issue_iid, outcome.body, delivery_id, outcome.run_id
             )
             return
 
-        if resuming:
-            backend_name = str((run.evidence or {}).get("backend") or "").strip() or (
-                self._backend_name()
-            )
+        if outcome.resuming:
             logger.info(
                 "Run %s found %s after a worker crash — resuming the advance leg",
-                run_id[:8],
-                run.status,
+                outcome.run_id[:8],
+                outcome.status,
             )
-            if is_harness_backend(backend_name):
-                await self._advance_harness(project_id, run_id)
+            if is_harness_backend(outcome.backend_name):
+                await self._advance_harness(project_id, outcome.run_id)
             else:
-                await self._advance_proposal(project_id, run_id)
+                await self._advance_proposal(project_id, outcome.run_id)
             return
 
-        logger.info("Gate for run %s consumed by @%s — advancing", run_id[:8], author_username)
-        if is_harness_backend(backend_name):
-            await self._advance_harness(project_id, run_id)
+        logger.info(
+            "Gate for run %s consumed by @%s — advancing", outcome.run_id[:8], author_username
+        )
+        if is_harness_backend(outcome.backend_name):
+            await self._advance_harness(project_id, outcome.run_id)
         else:
-            await self._advance_proposal(project_id, run_id)
+            await self._advance_proposal(project_id, outcome.run_id)
 
     async def _post_go_refusal(
         self,

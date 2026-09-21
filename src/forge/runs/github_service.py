@@ -2991,7 +2991,17 @@ class GitHubRunService:
         return True
 
     async def evaluate_waiting_harness(self, now: datetime | None = None) -> None:
-        """One reconciler pass over every GitHub run parked in ``waiting_harness``."""
+        """One reconciler pass over THIS repository's ``waiting_harness`` runs.
+
+        NXT-31: the scan itself is repository-scoped. The outer worker pass
+        (:func:`evaluate_github_waiting_harness`) groups waiting runs by
+        repository and builds one bound service per repository — without
+        this predicate the bound scanner selected EVERY provider run and
+        service A could drive repository B's run through A's reader,
+        publisher and fallback. A run without a repository subject matches
+        no bound service and is left parked (it was previously processed by
+        whichever repo happened to tick — the very routing defect).
+        """
         now = now or datetime.now(timezone.utc)
         async with self._session_factory() as session:
             run_ids = (
@@ -3000,6 +3010,10 @@ class GitHubRunService:
                         select(FlowRun.id).where(
                             FlowRun.provider == "github",
                             FlowRun.status == FlowStatus.WAITING_HARNESS.value,
+                            # NXT-31 (B08): this service's adapters are bound
+                            # to ONE repository — the scan admits only that
+                            # repository's runs.
+                            FlowRun.github_repo_full_name == self._repo_full_name,
                         )
                     )
                 )
@@ -3016,6 +3030,15 @@ class GitHubRunService:
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
         """Poll one waiting_harness run through its journaled Actions handle.
 
+        NXT-31: the handler is repository-scoped BEFORE anything else — the
+        run's subject must equal the bound service's subject, and the check
+        precedes the spec load (which can write a ``blocked`` transition),
+        every provider call, publication and fallback. A foreign run passed
+        directly to this handler is refused without any repository read or
+        write; the same agreement is re-checked against the journaled
+        ActionsHandle below, so a wrong-repository handle can never route
+        artifacts into this repository.
+
         R17 (deadline-before-I/O): the FIRST operation of every evaluation is
         a local deadline/cancel check over the journaled handle — no provider
         call is made once the harness budget is spent, so a permanently
@@ -3027,17 +3050,27 @@ class GitHubRunService:
         R04/A02: the timeout is the ``harness_timeout`` frozen in the spec;
         a missing/tampered/legacy spec parks the run instead of guessing.
         """
-        spec = await self._spec_or_block(run_id)
-        if spec is None:
-            return
         async with self._session_factory() as session:
             run = await session.get(FlowRun, run_id)
             if run is None:
+                return
+            if run.provider != "github" or run.github_repo_full_name != self._repo_full_name:
+                logger.warning(
+                    "Actions harness reconcile refused run %s of %s — this service is bound "
+                    "to %s (NXT-31)",
+                    run_id[:8],
+                    run.github_repo_full_name or "<no subject>",
+                    self._repo_full_name,
+                )
                 return
             evidence = dict(run.evidence or {})
             project_id = run.project_id
             issue_number = run.issue_iid or 0
             cancel_requested = bool(run.cancel_requested)
+
+        spec = await self._spec_or_block(run_id)
+        if spec is None:
+            return
 
         if evidence.get("backend") and not is_harness_backend(str(evidence["backend"])):
             await self._to_terminal(
@@ -3051,6 +3084,19 @@ class GitHubRunService:
             )
             return
         handle = ActionsHandle.from_json(raw_handle)
+        handle_subject = f"{handle.owner}/{handle.repo}"
+        if handle_subject != self._repo_full_name:
+            # NXT-31: run subject and service subject agree, but the
+            # journaled handle points elsewhere — refuse before any poll,
+            # publication or fallback can act through the wrong adapter.
+            logger.warning(
+                "Actions harness reconcile refused run %s — its handle targets %s, not the "
+                "bound repository %s (NXT-31)",
+                run_id[:8],
+                handle_subject,
+                self._repo_full_name,
+            )
+            return
 
         # --- R17: local deadline / grant check BEFORE any provider I/O ----
         if cancel_requested:
