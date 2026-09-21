@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-09-21
+
+### Fixed + Added — the real-usage (e2e) pass over the interactive drivers
+
+PONG proved the wire; this pass proved the lane. The new `--e2e` mode
+of `scripts/driver_live_smoke.py` hands each driver a scratch repo
+with a FAILING test and the task *implement `add` so the tests pass,
+run pytest to verify* — the judge is pytest run by the smoke itself,
+never the agent's reply. All three drivers completed the task green
+(claude 25 s, codex 19 s, opencode 13 s; evidence:
+`docs/evaluation/2026-09-21-drivers/*-e2e.json`).
+
+The opencode lane reached green only after two LIVE-found driver fixes
+— exactly the defect class the wire smokes cannot see:
+
+- **The SSE reader was killed by its own wait machinery**: the
+  subscription awaited the reader through a cancellable observer
+  wrapper, and cancelling that observer raced a `CancelledError` into
+  the reader — the stream silently died after its first frame and
+  every turn limped home on transcript reconciliation. The reader task
+  now enters `asyncio.wait` directly (wait never cancels its
+  arguments); the observer helper is gone.
+- **`finish: "tool-calls"` is not turn completion**: intermediate
+  assistant messages of the agent loop carry non-terminal finish
+  values; reconciliation now treats only `stop`/`error` as terminal
+  (regression-pinned by a test that fails on the old behavior).
+- The complete live-observed v2 event vocabulary landed
+  (`session.reasoning.*`, `session.text.*`, `session.tool.*`,
+  `session.usage.updated`, `shell.*`, `session.inbox.*`, …) — the
+  unknown-vocabulary warning spam is gone.
+
+Docs: FAQ gains the interactive-drivers Q&A (what "live-verified"
+means, why steering cannot grant permissions, where the drivers run);
+the harnesses README now distinguishes the batch CI harnesses from
+the interactive drivers; the claude-sdk research doc carries its LIVE
+CONFIRMATION note; the evidence README records the e2e table and the
+two new defects.
+
+Suite 3855; ruff check + format clean.
+
 ## [0.22.0] - 2026-09-21
 
 ### Added — live verification of the real drivers + the evidence-backed DriverMatrix seed
