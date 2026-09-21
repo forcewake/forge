@@ -28,6 +28,7 @@ class _FakeGitlabClient:
 
     def __init__(self, file_content: str | None = None, raise_error: bool = False) -> None:
         self._raise = raise_error
+        self.calls = 0
         self._file = None
         if file_content is not None:
             self._file = {
@@ -39,6 +40,7 @@ class _FakeGitlabClient:
         return None
 
     async def get_file(self, *args: object, **kwargs: object) -> object:
+        self.calls += 1
         if self._raise:
             raise Exception("404 Not Found")
 
@@ -91,13 +93,13 @@ class TestLoadProjectConfig:
         config2 = await load_project_config(client, project_id=3)
         assert config1 is config2
         # Should only call API once due to cache
-        assert client.get_file.call_count == 1
+        assert client.calls == 1
 
     async def test_different_projects_not_cached_together(self):
         client = _make_gitlab_client(file_content="review_rules:\n  - Rule 1\n")
         await load_project_config(client, project_id=4)
         await load_project_config(client, project_id=5)
-        assert client.get_file.call_count == 2
+        assert client.calls == 2
 
     async def test_invalid_yaml_returns_defaults(self):
         client = _make_gitlab_client(file_content="not: a: valid: [[[")
