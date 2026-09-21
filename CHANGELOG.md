@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-09-21
+
+### Added — the adaptive runbook (OPS-08: recipes, control commands, recovery, credentials, decision record)
+
+The supported recipes and architecture/runbook handoff
+(`docs/operations/adaptive-runbook.md`):
+
+- The three permission tiers (read scope / write coordination /
+  production deployment — the last is always human).
+- The supported runtime profiles (claude-sdk-lane, codex-app-lane,
+  opencode-server-lane, checkpoint-restart) with their capability
+  differences; the DriverMatrix is fail-closed on unregistered
+  combinations.
+- The safe control-command table (/pause /resume /steer /answer
+  /amend /approve-revision) with what each does and does NOT do.
+- The lifecycle diagrams (DiscoveryRun, PlanRevision, WorkPackage).
+- Recovery procedures: cancelled-with-in-flight-effects (superseded,
+  never pretend-undone), failed WorkPackage children (saga recovery by
+  intents), expired artifacts (explicit recoverable state).
+- The credentials/data-flow chain (broker-owned refs; the coding agent
+  never receives forge credentials).
+- **The decision record for retaining the Postgres controller**: the
+  current controller already provides the primitives (CAS, durable
+  steps, fenced claims, publication intents, revival); a second
+  authoritative engine creates more migration work than benefit for the
+  first customer slice. Criteria for later Temporal evaluation:
+  sustained >50 concurrent active runs with lock contention, a
+  cross-process saga requirement, or a Temporal-native provider
+  integration.
+- Doctor additions: CapabilityMatrix/DriverMatrix/privileged_ok are
+  read-only and fail-closed.
+
 ## [0.19.0] - 2026-09-21
 
 ### Added — executed-evidence claims + the bounded design-partner pilot

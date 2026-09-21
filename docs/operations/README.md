@@ -11,6 +11,7 @@ Runbooks for running forge against a GitLab CE instance. Start with
 | [Token rotation](token-rotation.md) | Bot PAT, webhook secret, model keys — rotation clocks and no-lost-run order | Written (v0.1.0) |
 | [Audit and log retention](audit-retention.md) | What is kept where, retention defaults, pruning commands, no-secrets rule | Written (v0.1.0) |
 | [Delivery evaluation cohort](delivery-cohort.md) | The 14 bounded tasks (A17), the runner, receipt exports, per-ACCEPTED-unit economics and the honesty rules | Written (v0.11.0) |
+| [Adaptive runbook](adaptive-runbook.md) | The adaptive workflow: supported recipes, control commands, recovery, credentials, the Postgres-controller decision record | Written (v0.19.0) |
 
 ## Related material
 

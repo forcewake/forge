@@ -123,6 +123,7 @@ FINDING_MARKERS: dict[str, str] = {
     "OPS-EPIC": "usage_lineage",
     "WIRING": "DiscoveryService",
     "OPS-06": "TestEvidenceClasses",
+    "OPS-08": "Postgres controller",
     "OPS-07": "checks passed",
 }
 
