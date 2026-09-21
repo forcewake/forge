@@ -190,6 +190,10 @@ class LaneOutcome:
     usage: dict[str, Any] | None = None
     #: Setup/driver failure detail (audit only, truncated by the writer).
     error: str = ""
+    #: The agent's last visible text (bounded) — diagnosis for
+    #: completed-but-empty turns (LIVE-found: a 16 s "completed" turn
+    #: with no file changes needs its answer visible in the meta).
+    reply_excerpt: str | None = None
 
 
 def build_task(brief_text: str, issue_iid: str = "") -> str:
@@ -426,6 +430,21 @@ _CODEX_TOKEN_KEYS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _codex_last_agent_text(events: list[dict[str, Any]]) -> str | None:
+    """The last agentMessage delta text, bounded — turn diagnosis."""
+    text: str | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        params = event.get("params") or {}
+        item = params.get("item") or {}
+        if item.get("itemType") == "agentMessage" or params.get("itemType") == "agentMessage":
+            delta = item.get("delta") or params.get("delta")
+            if isinstance(delta, str) and delta.strip():
+                text = delta
+    return text[:400] if text else None
+
+
 def codex_usage_receipt(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The meta ``usage`` receipt from the LAST ``thread/tokenUsage/updated``.
 
@@ -526,6 +545,7 @@ async def drive_codex_lane(
             terminal_reason=reason,
             usage=codex_usage_receipt(client.events()),
             error=error,
+            reply_excerpt=_codex_last_agent_text(client.events()),
         )
     finally:
         await client.close()
@@ -735,6 +755,8 @@ def write_artifacts(
     }
     if outcome.error:
         meta["error"] = outcome.error[:500]
+    if getattr(outcome, "reply_excerpt", None):
+        meta["reply_excerpt"] = outcome.reply_excerpt
     meta_file = Path(meta_path)
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     meta_file.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
@@ -780,11 +802,7 @@ def _parse_driver_flag(argv: list[str]) -> str | None:
 def _lane_model(driver_key: str) -> str:
     """The meta ``model`` route per lane, from the dispatch env."""
     if driver_key == "codex":
-        return (
-            os.environ.get("FORGE_CODEX_MODEL")
-            or os.environ.get("CODEX_MODEL")
-            or ""
-        )
+        return os.environ.get("FORGE_CODEX_MODEL") or os.environ.get("CODEX_MODEL") or ""
     if driver_key == "opencode":
         return (
             os.environ.get("FORGE_OPENCODE_MODEL")
