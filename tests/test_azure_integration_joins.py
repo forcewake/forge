@@ -722,7 +722,6 @@ class TestLaneRecipeContractB04B05:
         env = {}
         for step in job["steps"]:
             env.update(step.get("env") or {})
-        text = TEMPLATE_PATH.read_text()
         for key in (
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
