@@ -86,7 +86,7 @@ def _authority_identity(
     if identity is None and callable(getattr(client, "identity", None)):
         # GitLab: project-scoped at call time — identity(project_id)
         try:
-            candidate = client.identity(project_id)  # type: ignore[call-arg]
+            candidate = client.identity(project_id)  # type: ignore[call-arg,attr-defined]
             if isinstance(candidate, RepositoryIdentity):
                 identity = candidate
         except TypeError:

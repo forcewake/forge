@@ -521,6 +521,26 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
 #: (d16f523 review) are deliberately absent: their fixes are not fully
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
+    # 05868e9 review (first slice — FND-01/FND-02 + the contracts
+    # substrate; the 64-story roadmap continues in the milestone)
+    FindingClosure(
+        finding="FND-01",
+        capability="project-config-scope",
+        level="contract_tested",
+        evidence=("tests/test_project_config.py", "src/forge/repository/identity.py"),
+    ),
+    FindingClosure(
+        finding="FND-02",
+        capability="publication-boundary",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="ADAPTIVE-CONTRACTS",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_adaptive_contracts.py",),
+    ),
     # 44cdae review (D01-D12, closed 2026-09-21 — the authority boundary
     # campaign)
     FindingClosure(

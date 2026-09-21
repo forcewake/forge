@@ -30,11 +30,11 @@ class _Contract(BaseModel):
     @field_validator("schema", check_fields=False)
     @classmethod
     def _schema_tag(cls, value: str) -> str:
-        expected = cls.model_fields["schema"].annotation  # type: ignore[index]
-        # Literal annotations arrive as Literal[...]; compare the sole member
-        if hasattr(expected, "__args__") and expected.__args__:
-            if value not in expected.__args__:
-                raise ValueError(f"schema must be {expected.__args__}, got {value!r}")
+        import typing
+
+        expected = typing.get_args(cls.model_fields["schema"].annotation)  # type: ignore[index]
+        if expected and value not in expected:
+            raise ValueError(f"schema must be one of {expected}, got {value!r}")
         return value
 
 
@@ -51,7 +51,7 @@ def _oid40(value: str) -> str:
 
 
 class PathScope(_Contract):
-    schema: Literal["forge.proposal.path-scope/1"] = "forge.proposal.path-scope/1"
+    schema: Literal["forge.proposal.path-scope/1"] = "forge.proposal.path-scope/1"  # type: ignore[assignment]
     repository_id: str = Field(min_length=1)
     paths: list[str] = Field(min_length=1)
 
@@ -59,7 +59,7 @@ class PathScope(_Contract):
 class WorkContract(_Contract):
     """WHAT must result and what is authorized — the approved object."""
 
-    schema: Literal["forge.proposal.work-contract/1"] = "forge.proposal.work-contract/1"
+    schema: Literal["forge.proposal.work-contract/1"] = "forge.proposal.work-contract/1"  # type: ignore[assignment]
     work_id: str = Field(min_length=1)
     contract_revision: int = Field(ge=1)
     objective: str = Field(min_length=1)
@@ -84,7 +84,7 @@ class WorkContract(_Contract):
 
 
 class Snapshot(_Contract):
-    schema: Literal["forge.proposal.snapshot/1"] = "forge.proposal.snapshot/1"
+    schema: Literal["forge.proposal.snapshot/1"] = "forge.proposal.snapshot/1"  # type: ignore[assignment]
     repository_id: str = Field(min_length=1)
     source_oid: str
     resolved_from: str = Field(min_length=1)
@@ -104,7 +104,7 @@ class Snapshot(_Contract):
 class SnapshotSet(_Contract):
     """The immutable read-only source set a plan revision binds to."""
 
-    schema: Literal["forge.proposal.snapshot-set/1"] = "forge.proposal.snapshot-set/1"
+    schema: Literal["forge.proposal.snapshot-set/1"] = "forge.proposal.snapshot-set/1"  # type: ignore[assignment]
     snapshot_set_id: str = Field(min_length=1)
     snapshots: list[Snapshot] = Field(min_length=1)
 
@@ -118,7 +118,7 @@ class SnapshotSet(_Contract):
 
 
 class PlanStep(_Contract):
-    schema: Literal["forge.proposal.plan-step/1"] = "forge.proposal.plan-step/1"
+    schema: Literal["forge.proposal.plan-step/1"] = "forge.proposal.plan-step/1"  # type: ignore[assignment]
     step_id: str = Field(min_length=1)
     objective: str = Field(min_length=1)
     write_repository_id: str | None = None
@@ -138,7 +138,7 @@ class PlanStep(_Contract):
 class PlanRevision(_Contract):
     """HOW to get there — replaceable without re-approving the contract."""
 
-    schema: Literal["forge.proposal.plan-revision/1"] = "forge.proposal.plan-revision/1"
+    schema: Literal["forge.proposal.plan-revision/1"] = "forge.proposal.plan-revision/1"  # type: ignore[assignment]
     plan_id: str = Field(min_length=1)
     work_id: str = Field(min_length=1)
     revision: int = Field(ge=1)
@@ -187,7 +187,7 @@ class PlanRevision(_Contract):
 class ChangeProposal(_Contract):
     """WHY the plan must change — the material-change human gate."""
 
-    schema: Literal["forge.proposal.change-proposal/1"] = "forge.proposal.change-proposal/1"
+    schema: Literal["forge.proposal.change-proposal/1"] = "forge.proposal.change-proposal/1"  # type: ignore[assignment]
     proposal_id: str = Field(min_length=1)
     work_id: str = Field(min_length=1)
     from_revision: int = Field(ge=1)
@@ -203,7 +203,7 @@ class ChangeProposal(_Contract):
 class ControlCommand(_Contract):
     """One durable mailbox record of human control."""
 
-    schema: Literal["forge.proposal.control-command/1"] = "forge.proposal.control-command/1"
+    schema: Literal["forge.proposal.control-command/1"] = "forge.proposal.control-command/1"  # type: ignore[assignment]
     command_id: str = Field(min_length=1)
     work_id: str = Field(min_length=1)
     sequence: int = Field(ge=1)
@@ -219,7 +219,7 @@ class ControlCommand(_Contract):
 
 class CandidateSetMember(_Contract):
     schema: Literal["forge.proposal.candidate-set-member/1"] = (
-        "forge.proposal.candidate-set-member/1"
+        "forge.proposal.candidate-set-member/1"  # type: ignore[assignment]
     )
     repository_id: str = Field(min_length=1)
     base_oid: str
@@ -231,7 +231,7 @@ class CandidateSetMember(_Contract):
 class CandidateSet(_Contract):
     """The unit of system verification — a result binds to THIS set."""
 
-    schema: Literal["forge.proposal.candidate-set/1"] = "forge.proposal.candidate-set/1"
+    schema: Literal["forge.proposal.candidate-set/1"] = "forge.proposal.candidate-set/1"  # type: ignore[assignment]
     work_id: str = Field(min_length=1)
     plan_revision: int = Field(ge=1)
     work_contract_digest: str
@@ -257,7 +257,7 @@ class CandidateSet(_Contract):
 class Checkpoint(_Contract):
     """The portable execution checkpoint (FND-05 substrate)."""
 
-    schema: Literal["forge.proposal.checkpoint/1"] = "forge.proposal.checkpoint/1"
+    schema: Literal["forge.proposal.checkpoint/1"] = "forge.proposal.checkpoint/1"  # type: ignore[assignment]
     checkpoint_id: str = Field(min_length=1)
     work_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)

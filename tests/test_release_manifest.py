@@ -105,6 +105,9 @@ FINDING_MARKERS: dict[str, str] = {
     "D10": "test_mutation_updated_at_deadline_restores_the_slide",
     "D11": "_publish_candidate_run_aware",
     "D12": "test_readme_status_matches_the_shipped_version",
+    "FND-01": "TestRepositoryIdentityContractFND01",
+    "FND-02": "TestFinalBoundaryFenceFND02",
+    "ADAPTIVE-CONTRACTS": "test_the_review_examples_parse_verbatim",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit

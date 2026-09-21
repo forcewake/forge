@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-21
+
+### Fixed — adaptive foundations (sixth review 05868e9 + customer plan: first slice)
+
+The customer plan's two headline gaps (planner without repository
+evidence; plan that cannot evolve under human control) become a 64-story
+roadmap — committed under `docs/roadmap/2026-09-21-adaptive/` — and this
+release lands its first slice: the two authority remainders and the
+typed contracts substrate everything else builds on.
+
+- **FND-01 — the public RepositoryIdentity contract**: adapters implement
+  ``identity()``; the authority cache keys on it (tenant + provider +
+  native repo + ref + path), never private-attribute probing. The real
+  ``AzureRepositoryReader`` (project/repo) previously fell into the
+  project-id fallback — two repositories of ONE Azure project could share
+  one policy entry. GitHub identity = API host + owner/repo; two hosts
+  with identical names never share. Regressions run the REAL reader
+  constructors over stub transports.
+- **FND-02 — the publication fence at the final native-effect boundary**:
+  ``publish_validated`` re-evaluates a pre-dispatch guard immediately
+  BEFORE the commit-API call — after the bridge's awaited reads and
+  branch setup — so a cancel landing during the publisher's own
+  operations yields zero native writes.
+- **The adaptive contracts substrate** (pydantic, extra-forbid, digest-
+  and vocabulary-guarded): WorkContract / PlanRevision / ChangeProposal /
+  ControlCommand / SnapshotSet / CandidateSet / Checkpoint — the review
+  package's own examples parse verbatim; corruption tests pin every
+  guard (write-inside-read, dependency resolution, closed states,
+  unique repositories, sha-shaped digests).
+
 ## [0.15.0] - 2026-09-21
 
 ### Fixed — authority boundary coherence (fifth external review 44cdae: all 12 findings closed — evidence in `python -m forge.release_manifest`)
