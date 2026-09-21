@@ -313,9 +313,7 @@ class TestPrompt:
             with pytest.raises(TimeoutError, match="session.execution"):
                 await driver.prompt("ses_1", "say hi")
 
-    async def test_tool_call_round_is_not_turn_completion(
-        self, httpx_mock: HTTPXMock
-    ):
+    async def test_tool_call_round_is_not_turn_completion(self, httpx_mock: HTTPXMock):
         """LIVE-found (e2e campaign): intermediate assistant messages
         carry finish="tool-calls" — reconciliation that treats ANY
         finish as completion declares the turn done after the model's

@@ -509,10 +509,7 @@ class OpenCodeDriverClient:
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            if (
-                message.get("type") == "assistant"
-                and message.get("finish") in _TERMINAL_FINISHES
-            ):
+            if message.get("type") == "assistant" and message.get("finish") in _TERMINAL_FINISHES:
                 message_id = message.get("id")
                 if isinstance(message_id, str):
                     completed.add(message_id)
