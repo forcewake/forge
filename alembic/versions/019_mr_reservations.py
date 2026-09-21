@@ -64,7 +64,11 @@ def upgrade() -> None:
         sa.UniqueConstraint("flow_run_id", "branch", name="uq_mr_reservation_run_branch"),
         sa.CheckConstraint("status IN ('open', 'confirmed')", name="ck_mr_reservation_status"),
     )
-    # Backfill confirmed reservations from succeeded journal rows.
+    # Backfill confirmed reservations from succeeded journal rows. NB:
+    # ``->>`` (not the ``?`` operator — that is jsonb-only and the
+    # action_log column is plain json; the canary caught this on a real
+    # Postgres), and a regex guard so a non-numeric mr_iid cannot fail
+    # the whole chain.
     bind = op.get_bind()
     bind.execute(
         sa.text(
@@ -75,7 +79,7 @@ def upgrade() -> None:
               FROM action_log a
              WHERE a.action_kind = '{_MR_KIND}'
                AND a.status = 'succeeded'
-               AND a.remote_result ? 'mr_iid'
+               AND a.remote_result ->> 'mr_iid' ~ '^[0-9]+$'
                AND a.correlation_id IS NOT NULL
              ORDER BY a.id
             ON CONFLICT DO NOTHING
