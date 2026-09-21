@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-21
+
+### Fixed — recovery/evidence/recipe coherence (third external review e53ffd2: all 15 findings closed — evidence in `python -m forge.release_manifest`)
+
+- **B01 — immutable verification deadlines**: the wait anchors to a persisted
+  verification_epoch {candidate_sha, started_at} (GitHub+Azure), never to
+  FlowRun.updated_at — every observation merges evidence and slid the deadline
+  forever (probe: 480 observations / 7200 simulated seconds, no timeout).
+- **B02 — authoritative CI evidence**: the newest RUN (run_number, id) is the
+  authoritative occurrence (run_attempt orders attempts WITHIN a run and must
+  never order across runs — an old rerun's success masked a newer failure);
+  observations group by workflow identity before the display-name merge.
+- **B03 — MR intent vs immutable attempts** (migration 019): mr_reservations
+  — the ONE-MR-per-run+branch logical intent, committed BEFORE provider I/O,
+  FOR UPDATE-serialized — separate from the action journal; the lost-response
+  window adopts via its OWN observation row (no InvalidActionTransition
+  deadlock); a failed MR-list read fails CLOSED (no create on an unknown
+  surface).
+- **B04 — the AzDO lane renders the brief ENFORCED**: the plan leg freezes the
+  BriefEnvelope, embeds the approved sections in the plan comment and
+  dispatches plan_note_id/envelope_digest/spec_digest (service, handle and
+  crash-re-dispatch); an edited comment/work item fails the lane closed — no
+  stale-brief fallback on the enforced path.
+- **B05 — the shipped AzDO recipe is dispatch-only for real**: explicit
+  `trigger: none` (its absence left the IMPLIED CI trigger queueing the lane
+  on every push); repair_context flows parameter→variable→env (the
+  $(repair_context) macro referenced an undefined variable); harness
+  credentials scope to the selected driver via conditional LANE_* variables.
+- **B06 — verification waivers freeze into the spec** at approval: a
+  post-approval global waiver flip cannot loosen an approved run (empty
+  frozen set = NO waivers — no settings fallback on v3+).
+- **B07 — required-mode verification**: a non-empty frozen required list with
+  no observed checks is a missing MANDATORY GATE (wait → deadline block),
+  never an unverified READY; an unreadable PR head surfaces
+  freshness_unknown in the evidence.
+- **B08 — repository-scoped recovery**: every repo-bound recovery scan
+  (revivals, attempt recovery, config blocks) selects only the bound
+  repository's runs — a provider-wide scan drove repo B's runs through repo
+  A's reader/client.
+- **B09 — honest cohort economics**: all-unknown durations/repairs are None
+  (never or-0); a receipt-less attempt makes the unit's exact cost unknown
+  with a priced LOWER BOUND (cost_exact=false); rates build only over
+  proven-matched populations.
+- **B10 — pass-1 evidence backfill**: the committed ledger/report carry the
+  known execution profile; usage stays honestly unknown — no zero-cost
+  claims.
+- **B11 — current-plan selection**: the task-aware harness selection compiles
+  against the CURRENT plan (the pre-plan compile only reserves the planning
+  budget) — a reused planner object can never leak a previous run's plan.
+- **B12 — ObservedExecution**: the candidate meta carries what the lane
+  ACTUALLY did (driver, exit, usage completeness, candidate-changed) — the
+  observed twin of the declared profile; allowed-but-unexecuted is never
+  executed.
+- **B13 — state-specific status comments**: the post-publish note says
+  "candidate published — verification pending" (not a premature ready);
+  the verified/unverified ready note follows verification + review.
+- **B14 — machine-validated finding coverage**: B01-B15 closures in the
+  release manifest with grep-verifiable markers; the suite runs
+  warning-clean (the aiosqlite worker-thread teardown artifact is
+  documented and narrowly ignored).
+- **B15 — recovery-scan boundary pinned by test**: provider services never
+  re-implement their own blocked-run scans; the shared dispatcher helpers
+  own them.
+
 ## [0.12.1] - 2026-09-20
 
 ### Fixed — live leg checks (2026-09-20: GitLab + GitHub + Azure DevOps driven end-to-end against real instances)

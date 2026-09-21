@@ -79,3 +79,22 @@ decisions because each one fixes a *guarantee*, not a bug site:
 Evidence: 25 consecutive green FI-suite runs after the fix (was ~1-in-2);
 commits e7b308a, 927021b, 22e855a, 82901e9, 5b2add4, 69e9799, 0acda79,
 2cbdf4e, 06b5554, b36d31f, d4c0ad1; issue #67.
+
+## Addendum (2026-09-21, review e53ffd2 — v0.13.0)
+
+The third review's findings land on the same invariant families; recorded
+here so the next reader finds ONE decision record:
+
+5. **Verification deadlines are per-candidate epochs** (B01/B07): persisted
+   `{candidate_sha, started_at}`; observations never move them; a frozen
+   non-empty required list makes absent checks a missing mandatory gate.
+6. **Authoritative evidence is the newest native occurrence** (B02): run
+   identity orders runs, attempt identity orders attempts within a run —
+   never the reverse; workflow identity (not display name) merges checks.
+7. **ReserveEffect before effect** (B03): `mr_reservations` (migration 019)
+   is the general shape — a committed, row-locked logical intent with an
+   immutable attempt journal beside it; the reviewer's LoadApprovedInput /
+   ReserveEffect / ReconcileEffect vocabulary names the same boundaries.
+8. **Bound adapters touch only their subject** (B08): every recovery scan is
+   repo/project-scoped; the dispatcher enumerations are the only
+   provider-wide reads (pinned by the B15 boundary test).

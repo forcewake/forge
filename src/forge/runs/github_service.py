@@ -563,8 +563,8 @@ class GitHubRunService:
             harness_selection = replace(
                 harness_selection,
                 budget_ceilings=self._budget_ceilings_of(budget_limits),
-                selection_reason=(
-                    f"{harness_selection.selection_reason} "
+                reason=(
+                    f"{harness_selection.reason} "
                     "(budget pinned to the pre-plan class — idempotent budget row)"
                 ).strip(),
             )
@@ -4317,7 +4317,7 @@ class GitHubRunService:
         return selection
 
     @staticmethod
-    def _budget_ceilings_of(limits) -> "HarnessSelection.budget_ceilings":
+    def _budget_ceilings_of(limits) -> "BudgetCeilings":
         from forge.runs.harness_selection import BudgetCeilings
 
         return BudgetCeilings(
