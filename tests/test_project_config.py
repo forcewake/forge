@@ -1,6 +1,4 @@
 import base64
-from unittest.mock import AsyncMock
-
 import pytest
 
 from forge.orchestrator.project_config import (
@@ -18,18 +16,42 @@ def _clear_cache():
     clear_cache()
 
 
+class _FakeGitlabClient:
+    """A typed double.
+
+    ``identity()`` is SYNC in production — the repository-identity
+    resolver calls it synchronously, so an AsyncMock made it a
+    never-awaited coroutine (16 RuntimeWarnings per run). The double
+    returns None (the not-adopted-contract path the resolver handles)
+    and keeps ``get_file`` async like the real client.
+    """
+
+    def __init__(self, file_content: str | None = None, raise_error: bool = False) -> None:
+        self._raise = raise_error
+        self._file = None
+        if file_content is not None:
+            self._file = {
+                "content": base64.b64encode(file_content.encode()).decode(),
+                "encoding": "base64",
+            }
+
+    def identity(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def get_file(self, *args: object, **kwargs: object) -> object:
+        if self._raise:
+            raise Exception("404 Not Found")
+
+        class _File:
+            content = self._file["content"] if self._file else ""
+            encoding = "base64"
+
+        return _File()
+
+
 def _make_gitlab_client(file_content: str | None = None, raise_error: bool = False):
-    """Create a mock GitLab client."""
-    client = AsyncMock()
-    if raise_error:
-        client.get_file.side_effect = Exception("404 Not Found")
-    elif file_content is not None:
-        encoded = base64.b64encode(file_content.encode()).decode()
-        file_obj = AsyncMock()
-        file_obj.content = encoded
-        file_obj.encoding = "base64"
-        client.get_file.return_value = file_obj
-    return client
+    """Create a typed fake GitLab client."""
+    return _FakeGitlabClient(file_content=file_content, raise_error=raise_error)
 
 
 class TestLoadProjectConfig:
