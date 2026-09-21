@@ -3064,8 +3064,6 @@ class TestMutationGuardsC11:
         run_id, candidate = await drive_to_waiting_ci(db, service, fake)
         fake.seed_workflow_runs([workflow_run(candidate, "tests", "skipped")])
 
-        real_epoch = gs.verification_epoch
-
         def sliding_epoch(evidence, sha, now):
             # MUTATION: pretend the epoch restarts every observation
             return {"candidate_sha": sha, "started_at": now.isoformat()}, True
