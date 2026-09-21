@@ -57,7 +57,39 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 300  # 5 minutes
 # config -> (config or None for confirmed-absent, content sha256, read ref, ts)
-_cache: dict[int, tuple[ProjectConfig | None, str, str, float]] = {}
+# D01: the key is the CANONICAL AUTHORITY IDENTITY — (provider-connection,
+# repository, ref, path) — never a bare project_id: one project id spans
+# several repositories (Azure repos of one project share it) and
+# independent providers can collide on the numeric id, so a project-id
+# cache crossed repository policies (review 44cdae D01, probe P01/P02).
+_cache: dict[tuple[str, str, str, str], tuple[ProjectConfig | None, str, str, float]] = {}
+
+
+def _authority_identity(
+    client: object,
+    project_id: int,
+    ref: str,
+) -> tuple[str, str, str, str]:
+    """The canonical cache identity of one authority read (D01).
+
+    Repository-bound readers (GitHub/Azure) contribute their bound
+    owner+repo; the GitLab client (project-scoped) contributes its base
+    URL + the project id. ``ref`` and the config path complete the key —
+    a different requested ref is a DIFFERENT authority snapshot, never a
+    cache hit (probe P02).
+    """
+    owner = getattr(client, "_owner", None)
+    repo = getattr(client, "_repo", None)
+    if isinstance(owner, str) and isinstance(repo, str) and owner and repo:
+        provider = type(client).__name__
+        authority = f"{owner}/{repo}"
+    else:
+        base = getattr(client, "base_url", None) or getattr(client, "_base_url", None)
+        base_text = base if isinstance(base, str) else ""
+        provider = type(client).__name__
+        authority = f"{base_text.rstrip('/')}/{int(project_id)}"
+    return (provider, authority, ref, CONFIG_FILE)
+
 
 #: The config path every provider reads (the config authority).
 CONFIG_FILE = ".forge.yml"
@@ -219,8 +251,14 @@ def _parse_project_config(content: str) -> ProjectConfig:
     data = yaml.safe_load(content)
     if not isinstance(data, dict):
         raise ValueError("expected a top-level mapping")
-    # Support both top-level and nested under "forge" key
-    forge_data = data.get("forge", data)
+    # Support both top-level and nested under "forge" key. D02: a PRESENT
+    # but non-mapping ``forge`` key (e.g. ``forge: []``) is INVALID — the
+    # old code raised AttributeError straight through the reader's typed
+    # error handling (probe P04).
+    forge_raw = data.get("forge", data)
+    if not isinstance(forge_raw, dict):
+        raise ValueError(f"'forge' must be a mapping, got {type(forge_raw).__name__}")
+    forge_data = forge_raw
     # Parse per-agent MCP server overrides
     mcp_raw = forge_data.get("mcp_servers")
     mcp_servers = None
@@ -234,12 +272,31 @@ def _parse_project_config(content: str) -> ProjectConfig:
 
     # v0.7 monorepo path scoping: `implement.paths` — the glob
     # allowlist every /implement run of this project is frozen with.
+    # D02: the nested structure is validated BEFORE normalization — a
+    # malformed shape is INVALID, never silently dropped into the empty
+    # list (empty list == whole repository; a string ``paths: "src/**"``
+    # used to widen a typo into UNRESTRICTED scope, probe P03).
     implement = forge_data.get("implement")
+    if implement is not None and not isinstance(implement, dict):
+        raise ValueError(f"'implement' must be a mapping, got {type(implement).__name__}")
     implement_paths: list[str] = []
     if isinstance(implement, dict):
-        raw_paths = implement.get("paths")
-        if isinstance(raw_paths, list):
-            implement_paths = [str(p) for p in raw_paths if str(p).strip()]
+        if "paths" in implement:
+            raw_paths = implement["paths"]
+            if raw_paths is None:
+                raise ValueError("'implement.paths' must be a list of globs, got null")
+            if not isinstance(raw_paths, list):
+                raise ValueError(
+                    "'implement.paths' must be a list of globs, got "
+                    f"{type(raw_paths).__name__} — a malformed path scope is invalid, "
+                    "never unrestricted"
+                )
+            for entry in raw_paths:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise ValueError(
+                        f"'implement.paths' entries must be non-empty strings, got {entry!r}"
+                    )
+            implement_paths = [p.strip() for p in raw_paths]
 
     return ProjectConfig(
         enabled_agents=forge_data.get("enabled_agents"),
@@ -297,7 +354,8 @@ async def read_project_config(
     caller cannot accidentally swallow a read failure into defaults.
     """
     now = time.monotonic()
-    cached = _cache.get(project_id)
+    cache_key = _authority_identity(client, project_id, ref)
+    cached = _cache.get(cache_key)
     if cached is not None:
         config, sha256, cached_ref, ts = cached
         if now - ts < _CACHE_TTL:
@@ -307,7 +365,7 @@ async def read_project_config(
 
     blob = await _read_config_blob(client, project_id, ref)
     if blob.confirmed_absent:
-        _cache[project_id] = (None, "", ref, now)
+        _cache[cache_key] = (None, "", ref, now)
         return ConfigReadResult.confirmed_absent(ref=ref)
     if not blob.usable:
         # forbidden / unavailable / incomplete — the R14 taxonomy: absence
@@ -317,7 +375,7 @@ async def read_project_config(
     if not blob.content.strip():
         # A content-empty file asserts nothing — the honest default
         # profile (identical semantics to absence, no phantom restrictions).
-        _cache[project_id] = (None, "", ref, now)
+        _cache[cache_key] = (None, "", ref, now)
         return ConfigReadResult.confirmed_absent(ref=ref, detail="config file is empty")
     try:
         config = _parse_project_config(blob.content)
@@ -328,7 +386,7 @@ async def read_project_config(
         return ConfigReadResult.invalid(ref=ref, detail=str(exc)[:300])
 
     logger.debug("Loaded %s for project %d", CONFIG_FILE, project_id)
-    _cache[project_id] = (config, blob.content_sha256, ref, now)
+    _cache[cache_key] = (config, blob.content_sha256, ref, now)
     return ConfigReadResult.valid(config, ref=ref, content_sha256=blob.content_sha256)
 
 

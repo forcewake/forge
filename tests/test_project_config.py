@@ -7,6 +7,7 @@ from forge.orchestrator.project_config import (
     ProjectConfig,
     clear_cache,
     load_project_config,
+    read_project_config,
 )
 
 
@@ -114,3 +115,135 @@ class TestImplementPaths:
         client = _make_gitlab_client(file_content=yaml_content)
         config = await load_project_config(client, project_id=23)
         assert config.implement_paths == []
+
+
+# ----------------------------------------------------------------------
+# D01: the cache key is the authority identity — repo, ref, path
+# ----------------------------------------------------------------------
+
+
+class TestCacheIdentityD01:
+    async def test_two_repositories_of_one_project_never_share_policy(self):
+        """Probe P01: same project id, different bound repositories — reader
+        B must be CALLED and see its own policy, never A's from cache."""
+
+        class ReaderStub:
+            def __init__(self, owner: str, repo: str, paths: list[str]) -> None:
+                self._owner, self._repo = owner, repo
+                self.calls = 0
+                self.paths = paths
+
+            async def read_blob(self, project_id, file_path, ref="HEAD"):
+                from forge.gitlab.blob_reads import BlobReadResult
+
+                self.calls += 1
+                content = "implement:\n  paths:\n" + "".join(f"    - '{p}'\n" for p in self.paths)
+                return BlobReadResult.found(content)
+
+        clear_cache()
+        reader_a = ReaderStub("org", "repo-a", ["src/a/**"])
+        reader_b = ReaderStub("org", "repo-b", ["src/b/**"])
+
+        result_a = await read_project_config(reader_a, 42, ref="main")
+        result_b = await read_project_config(reader_b, 42, ref="main")
+
+        assert result_a.config is not None and list(result_a.config.implement_paths) == ["src/a/**"]
+        assert result_b.config is not None and list(result_b.config.implement_paths) == ["src/b/**"]
+        assert reader_b.calls == 1  # actually read — no cross-repo cache hit
+
+    async def test_two_refs_of_one_repository_are_different_snapshots(self):
+        """Probe P02: a different requested ref is a different authority —
+        never a cache hit for the previous ref's policy."""
+
+        class ReaderStub:
+            def __init__(self) -> None:
+                self._owner, self._repo = "org", "repo"
+                self.by_ref: dict[str, str] = {}
+                self.calls: list[str] = []
+
+            async def read_blob(self, project_id, file_path, ref="HEAD"):
+                from forge.gitlab.blob_reads import BlobReadResult
+
+                self.calls.append(ref)
+                content = self.by_ref[ref]
+                return BlobReadResult.found(content)
+
+        clear_cache()
+        reader = ReaderStub()
+        reader.by_ref["main"] = "implement:\n  paths:\n    - 'src/**'\n"
+        reader.by_ref["deadbeef" * 5] = "implement:\n  paths:\n    - 'docs/**'\n"
+
+        first = await read_project_config(reader, 7, ref="main")
+        second = await read_project_config(reader, 7, ref="deadbeef" * 5)
+
+        assert list(first.config.implement_paths) == ["src/**"]
+        assert list(second.config.implement_paths) == ["docs/**"]
+        assert reader.calls == ["main", "deadbeef" * 5]
+
+    async def test_cached_absence_of_one_repo_does_not_mask_another(self):
+        class ReaderStub:
+            def __init__(self, owner: str, repo: str, found: bool) -> None:
+                self._owner, self._repo = owner, repo
+                self.found = found
+
+            async def read_blob(self, project_id, file_path, ref="HEAD"):
+                from forge.gitlab.blob_reads import BlobReadResult
+
+                if not self.found:
+                    return BlobReadResult.not_found("confirmed 404")
+                content = "implement:\n  paths:\n    - 'only/**'\n"
+                return BlobReadResult.found(content)
+
+        clear_cache()
+        absent = ReaderStub("org", "repo-x", found=False)
+        restricted = ReaderStub("org", "repo-y", found=True)
+
+        first = await read_project_config(absent, 42, ref="main")
+        second = await read_project_config(restricted, 42, ref="main")
+
+        assert first.status == "confirmed_absent"
+        assert second.config is not None and list(second.config.implement_paths) == ["only/**"]
+
+
+# ----------------------------------------------------------------------
+# D02: a malformed policy is INVALID — never silently unrestricted
+# ----------------------------------------------------------------------
+
+
+class TestStrictPolicySchemaD02:
+    async def test_a_string_paths_value_is_invalid_not_unrestricted(self):
+        """Probe P03: ``implement.paths: "src/**"`` (a string, not a list)
+        used to fall through to [] == whole repository. Now typed invalid."""
+        client = _make_gitlab_client(file_content='forge:\n  implement:\n    paths: "src/**"\n')
+        result = await read_project_config(client, 11, ref="main")
+        assert result.status == "invalid"
+        assert "implement.paths" in (result.detail or "")
+
+    async def test_a_non_mapping_forge_key_is_invalid_not_an_exception(self):
+        """Probe P04: ``forge: []`` used to raise AttributeError straight
+        through the typed reader. Now a typed invalid result."""
+        client = _make_gitlab_client(file_content="forge: []\n")
+        result = await read_project_config(client, 12, ref="main")
+        assert result.status == "invalid"
+
+    async def test_null_and_non_string_entries_are_invalid(self):
+        for bad in (
+            "implement:\n    paths: null\n",
+            "implement:\n    paths: [1, 2]\n",
+        ):
+            client = _make_gitlab_client(file_content="forge:\n  " + bad)
+            result = await read_project_config(client, 13, ref="main")
+            assert result.status == "invalid", bad
+
+    async def test_a_non_mapping_implement_key_is_invalid(self):
+        client = _make_gitlab_client(file_content="forge:\n  implement: 'nope'\n")
+        result = await read_project_config(client, 14, ref="main")
+        assert result.status == "invalid"
+
+    async def test_a_valid_list_still_parses(self):
+        client = _make_gitlab_client(
+            file_content="forge:\n  implement:\n    paths:\n      - 'src/**'\n      - 'docs/**'\n"
+        )
+        result = await read_project_config(client, 15, ref="main")
+        assert result.config is not None
+        assert list(result.config.implement_paths) == ["src/**", "docs/**"]

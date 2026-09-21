@@ -2447,6 +2447,20 @@ class GitHubRunService:
             model_route=spec.model_route,
             expected_head=expected_head,
         )
+
+        # D04: the propose above is a LONG paid operation — a cancel that
+        # landed during it revokes the grant, and the branch CAS checks the
+        # EXPECTED HEAD, not this run's right to write. Re-check the grant
+        # immediately before the native dispatch: cancel-before-dispatch
+        # forbids the write; a cancel AFTER dispatch stays the honest
+        # unknown/superseded path.
+        if await self._publication_revoked(run_id):
+            logger.warning(
+                "GitHub run %s cancelled DURING propose — publication refused (zero native writes)",
+                run_id[:8],
+            )
+            return
+
         outcome = await self._stack.flow.publish_changeset(
             owner=self._owner,
             repo=self._repo,
@@ -2456,6 +2470,10 @@ class GitHubRunService:
             base_branch=self._target_branch(),
             expected_head=expected_head or None,
             operation_key=intent.operation_key,
+            # D03: the FROZEN path scope reaches the commit boundary — the
+            # bridge's None default means whole-repository, which silently
+            # dropped the approved restriction on this production path.
+            allowed_paths=list(spec.allowed_paths or []),
         )
         await self._complete_intent_from_outcome(intent.id, outcome)
 
@@ -3583,6 +3601,8 @@ class GitHubRunService:
             base_branch=self._target_branch(),
             expected_head=bundle.attempt_base_oid,
             operation_key=intent.operation_key,
+            # D03: the frozen scope validates the harness candidate too.
+            allowed_paths=await self._read_spec_allowed_paths(run_id),
         )
         await self._complete_intent_from_outcome(intent.id, publish_outcome)
         if not publish_outcome.ok:
@@ -3604,6 +3624,23 @@ class GitHubRunService:
         await self._finish_harness_publish_leg(
             run_id, project_id, issue_number, publish_outcome, plan_digest, handle
         )
+
+    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
+        """The FROZEN path scope for a publication (D03) — digest-verified
+        spec read; a missing/legacy spec yields [] (the bridge then applies
+        its denylist only, the pre-D03 posture, loudly logged)."""
+        try:
+            spec = await self._load_executable_spec(run_id)
+        except Exception:
+            logger.warning(
+                "Run %s spec unreadable at publish — allowed_paths NOT enforced (legacy posture)",
+                run_id[:8],
+                exc_info=True,
+            )
+            return []
+        if spec is None:
+            return []
+        return list(spec.allowed_paths or [])
 
     async def _finish_harness_publish_leg(
         self,

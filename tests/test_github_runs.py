@@ -3077,3 +3077,101 @@ class TestMutationGuardsC11:
         assert run.status == FlowStatus.WAITING_CI.value, (
             "the sliding-deadline mutation no longer slides — the B01 regression lost its bite"
         )
+
+
+class TestFrozenScopeToPublisherD03:
+    """D03: the frozen path scope reaches the commit boundary — an
+    out-of-scope candidate publishes NOTHING (zero commits, zero PRs)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    async def test_an_out_of_scope_builtin_candidate_is_refused(self, db, fake):
+        fake.seed_repo(REPO, {".forge.yml": "implement:\n  paths:\n    - 'src/**'\n"})
+        fake.heads[REPO]["main"] = BASE_HEAD
+
+        class OutOfScopeStub(StubImplementer):
+            async def propose(self, run, issue_title, **kwargs):
+                from forge.repository.changeset import Change, ChangeSet, Operation
+
+                return ChangeSet(
+                    branch=f"forge/{run.issue_iid}/{run.id[:8]}",
+                    commit_message="out-of-scope proposal",
+                    changes=[
+                        Change(
+                            path="other/outside.py",
+                            operation=Operation.CREATE,
+                            content="print('out of scope')\n",
+                        )
+                    ],
+                )
+
+        service = make_service(db, fake, stack=make_stack(fake, implementer=OutOfScopeStub()))
+        run_id = await start(service)
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status in (FlowStatus.BLOCKED.value, FlowStatus.FAILED.value)
+        # the boundary refused BEFORE any native write
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
+
+
+class TestCancelDuringProposeD04:
+    """D04: a cancel landing DURING the paid propose forbids the native
+    write — the branch CAS checks the expected head, not the run's right
+    to publish. Zero commits/PRs after the cancel."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    async def test_cancel_during_propose_refuses_the_commit(self, db, fake):
+        from forge.durable.controller import Controller as C
+        from forge.durable import FlowRun as FR, FlowStatus as FS
+
+        class CancelMidPropose(StubImplementer):
+            def __init__(self, session_factory, target_run: str) -> None:
+                self._session_factory = session_factory
+                self._target = target_run
+
+            async def propose(self, run, issue_title, **kwargs):
+                # the operator cancels in a SEPARATE transaction while the
+                # propose is in flight
+                async with self._session_factory() as session:
+                    controller = C(session)
+                    await controller.transition(
+                        self._target, FS.CANCELLED, reason="operator cancel"
+                    )
+                    row = await session.get(FR, self._target)
+                    row.cancel_requested = True
+                    await session.commit()
+                return await StubImplementer.propose(self, run, issue_title, **kwargs)
+
+        class Factory:
+            def __init__(self) -> None:
+                self.inner: CancelMidPropose | None = None
+
+            # constructor tolerance for make_stack's default wiring
+            def __call__(self, *a, **k):
+                return self
+
+            async def propose(self, run, issue_title, **kwargs):
+                return await self.inner.propose(run, issue_title, **kwargs)
+
+        factory = Factory()
+        service = make_service(db, fake, stack=make_stack(fake, implementer=factory))
+        run_id = await start(service)
+        factory.inner = CancelMidPropose(db, run_id)
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.CANCELLED.value
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
