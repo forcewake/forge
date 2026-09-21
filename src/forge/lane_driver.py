@@ -783,7 +783,6 @@ def _lane_model(driver_key: str) -> str:
         return (
             os.environ.get("FORGE_CODEX_MODEL")
             or os.environ.get("CODEX_MODEL")
-            or os.environ.get("FORGE_HARNESS_MODEL")
             or ""
         )
     if driver_key == "opencode":

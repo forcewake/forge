@@ -117,8 +117,12 @@ forge-agent-codex-sdk:
     # the run, ephemeral scratch does not).
     - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
     # The model route: dispatched FORGE_CODEX_MODEL > dispatched CODEX_MODEL
-    # > dispatched FORGE_HARNESS_MODEL > the codex CLI default.
-    - export FORGE_CODEX_MODEL="${FORGE_CODEX_MODEL:-${CODEX_MODEL:-${FORGE_HARNESS_MODEL:-}}}"
+    # > the codex CLI default. FORGE_HARNESS_MODEL is DELIBERATELY not in
+    # the chain (LIVE-found 2026-09-21): it carries gateway-specific names
+    # (glm-*) the ChatGPT-plan codex backend cannot run — the turn then
+    # "completes" in seconds with no work. Codex defaults to its own model
+    # unless an explicit codex-valid name is dispatched.
+    - export FORGE_CODEX_MODEL="${FORGE_CODEX_MODEL:-${CODEX_MODEL:-}}"
     # The sandbox is the ephemeral CI container (ADR-0002): the driver
     # factory pins workspace-write + approvalPolicy never, so escalated
     # commands are denied by policy instead of blocking on a human.
