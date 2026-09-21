@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-21
+
+### Added — the full adaptive backlog substrate (all 62 remaining roadmap stories, eight epics)
+
+Ten parallel agents over disjoint scopes landed the complete typed
+substrate under `src/forge/adaptive/` — 20 modules, ~600 assertions:
+
+- **Foundation (FND-03..08)**: fail-closed typed read guards (a 403/
+  429/5xx/truncated read NEVER becomes create permission); capability
+  and credential profiles (discovery cannot select a write-enabled
+  profile; value-looking credential refs rejected; absent vs
+  explicitly-empty manifests distinguished); the content-addressed
+  artifact store (tenant-scoped, immutable, archive traversal/symlink
+  checks before extraction, WIP manifests with source OIDs);
+  DB-enforced dedup (insert-or-read with first-result-wins) and
+  independent publication/checkpoint/control epochs; compatibility
+  flags with safe drain and the no-invention migration rules; the
+  production-path invariant suite registry with performed/skipped
+  honesty.
+- **Discovery (DSC-01..08)**: the durable DiscoveryRun stage
+  (waiting_question releases the runner, resume keeps the evidence,
+  fast-path plans VISIBLY un-researched); read-only snapshot
+  workspaces with evidence-ref binding and credential stripping; the
+  bounded toolbox (read/list/grep/find_symbol/find_references —
+  unauthorized paths never leak even a NAME, truncation explicit and
+  pageable, completeness flags survive budget exhaustion); the project
+  map with vendor exclusion and commands-as-unvalidated-metadata; the
+  SystemManifest (declared/observed/inferred edges, cycles are legal
+  service graphs, Backstage owner is routing metadata never
+  authorization); bounded impact slices with stored omissions; bounded
+  probe requests with baseline-vs-environment failure classification.
+- **Planning (PLN-01..08)**: the revision classifier (tactical vs
+  material scope/contract/migration) with tactical application and
+  immutable revision events; CAS revision decisions (a stale epoch
+  refuses, a double-decide refuses); durable Questions with actor
+  scope, expiry, and parent routing; precise evidence invalidation
+  (superseded is MARKED, never deleted); stale-callback guards;
+  decision records that reject secret-looking values; fresh-session
+  briefs reconstructed from durable artifacts.
+- **Human control (CTL-01..08)**: the durable command mailbox
+  (idempotency-key dedup, strict sequences, the
+  received→authorized→applied→checkpointed ladder, CAS expiry to
+  never a wrong-state apply); pause as revoke-then-interrupt with
+  cooperative drain or the honest last-recoverable checkpoint on
+  timeout; resume from a confirmed checkpoint with a fresh epoch
+  (native session only for pinned interactive profiles, else durable
+  reconstruction); bounded steering that NEVER grants authority
+  (acceptance-policy changes rejected and routed to the revision
+  gate); the final cancel contract — cancellation generations across
+  every stage, accepted effects correlated-superseded, any restart
+  requires a NEW work command.
+- **Execution (EXE-01..08)**: the role-aware HarnessRuntime protocol
+  with a capability matrix (checkpoint-only never advertised
+  interactive); ClaudeSDK / Codex App / OpenCode adapters over
+  injected clients (steering bound to the active turn on Codex; BYOK
+  profiles gated by the DriverMatrix — unregistered combos fail at
+  onboarding); the outbound control channel (broker-owned token refs,
+  monotonic sequences); portable workspace checkpoints with
+  traversal-safe rehydration; the checkpoint-restart batch contract
+  (control applies at checkpoint boundaries, never mid-turn); tool/
+  egress isolation (the docker socket belongs to the trusted test
+  executor alone).
+- **Multi-repo work (MRP-01..05)**: WorkPackage with ONE writable
+  repository per child lane and read-only sibling context;
+  dependency phasing (a cycle raises 'phase the CHANGE, not the
+  architecture'); bounded parallelism; the explicit publication saga
+  (partially_published, recovery by intents, NO pretend rollback);
+  CandidateSet freezing (one candidate change invalidates the
+  integration-result binding).
+- **Verification (VER-01..08)**: lane separation (the trusted
+  executor, never the coding agent's environment); focused dependency
+  recipes; HTTP/message contract checks; DB upgrade plans from
+  data-bearing baselines; the async failure catalog (crash between
+  commit and ack, redelivery, ordering); environments bound to set
+  digests; identity-based verification selectors with
+  never-throw freshness; evidence-aware review (implementation claims
+  are never their own proof); the ten-service seeded-hazard benchmark
+  (hazards visible, 10-read/1-write acceptance shape).
+- **Operations (OPS-01..05)**: plan quality measured before model
+  selection; end-to-end per-stage usage lineage (never conflated);
+  budget reports; ONE coherent status projection naming the single
+  next action; retention decisions (an unknown policy routes to
+  review); admission and error-budget capacity controls.
+
+Suite 3731; FI 8/8 on disposable Postgres; mypy at baseline.
+
 ## [0.16.0] - 2026-09-21
 
 ### Fixed — adaptive foundations (sixth review 05868e9 + customer plan: first slice)

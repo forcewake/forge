@@ -198,14 +198,14 @@ any target project's onboarding — read-only, exit code 0 means done.
 
 ## Status
 
-**v0.16.0** — three providers live-verified end-to-end, four harness
+**v0.17.0** — three providers live-verified end-to-end, four harness
 drivers with registry-checked credential recipes, task-aware selection,
 identity-preserving CI verification, reserved Draft-MR publication (one MR
 per run, proven under failure injection), frozen-spec dispatch on every
 provider, scoped MCP run surface, honest delivery-cohort economics,
 provider-neutral operator commands (`/retry`, `/status`, `/why-blocked`,
 `/reconcile`) with bounded auto-revive, images on GHCR
-(`ghcr.io/forcewake/forge:0.16.0`). 3111 tests;
+(`ghcr.io/forcewake/forge:0.17.0`). 3731 tests;
 failure-injection-proven durable core; mypy-clean over the typed core.
 **Pre-production**: expect breaking changes before 1.0. The
 [CHANGELOG](CHANGELOG.md) has the full history.
@@ -216,7 +216,7 @@ failure-injection-proven durable core; mypy-clean over the typed core.
 
 ```bash
 docker run -d --name forge -p 8420:8420 \
-  --env-file .env ghcr.io/forcewake/forge:0.16.0
+  --env-file .env ghcr.io/forcewake/forge:0.17.0
 # or from source:
 git clone https://github.com/forcewake/forge && cd forge
 uv sync && set -o pipefail && .venv/bin/python -m pytest -q

@@ -108,6 +108,19 @@ FINDING_MARKERS: dict[str, str] = {
     "FND-01": "TestRepositoryIdentityContractFND01",
     "FND-02": "TestFinalBoundaryFenceFND02",
     "ADAPTIVE-CONTRACTS": "test_the_review_examples_parse_verbatim",
+    "FND-03": "may_create",
+    "FND-04": "manifest_status",
+    "FND-05": "validate_archive",
+    "FND-06": "insert_or_read",
+    "FND-07": "drain_in_flight",
+    "FND-08": "performed_vs_skipped",
+    "DSC-EPIC": "SnapshotWorkspace",
+    "PLN-EPIC": "classify_revision",
+    "CTL-EPIC": "request_pause",
+    "EXE-EPIC": "CheckpointRestartRuntime",
+    "MRP-EPIC": "compile_dependencies",
+    "VER-EPIC": "evidence_aware_review",
+    "OPS-EPIC": "usage_lineage",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit
