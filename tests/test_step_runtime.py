@@ -198,9 +198,12 @@ class TestTransactionalIngress:
         assert runs[0].status == FlowStatus.WAITING_APPROVAL.value
         assert fake.notes, "plan comment posted"
 
-    async def test_go_note_schedules_step_without_run(self, app, client):
+    async def test_go_note_schedules_step_without_run(self, app, client, monkeypatch):
         """go/cancel steps bind their run at execution time — ingress persists
         the step with flow_run_id NULL in the same transaction as the inbox."""
+        # The unknown-run /go now posts a refusal NOTE instead of a silent
+        # no-op (LIVE-found UX fix) — the gitlab stub must exist for it.
+        stub_gitlab(monkeypatch)
         resp = await client.post(
             "/webhook",
             json=note_payload(f"@forge /go {'a' * 32}"),
@@ -213,7 +216,8 @@ class TestTransactionalIngress:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert len(steps) == 1
         assert steps[0].step_name == "go"
-        assert steps[0].status == "succeeded"  # unknown run: handler no-ops
+        # Unknown run: the handler's WORK is a refusal note, then it ends.
+        assert steps[0].status == "succeeded"
         assert steps[0].flow_run_id is None
 
     async def test_duplicate_note_id_is_deduplicated(self, app, client, monkeypatch):

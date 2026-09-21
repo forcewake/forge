@@ -10,11 +10,14 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   brief file the agent reads IS the prompt, and the per-CLI ``-p``
   invocation stays the short pointer :data:`forge.harnesses.prompt.TASK_PROMPT`;
 - it renders the per-driver invocation (claude-code | grok-build |
-  opencode | copilot)
+  opencode | copilot | codex-sdk-lane | opencode-sdk-lane)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
   ``docs/research/harness-interfaces.md``) — per-CLI FLAGS live here, the
-  PROMPT is shared;
+  PROMPT is shared; the two SDK-lane ids provision their CLI and hand
+  over to ``forge.lane_driver`` (the interactive driver twin of the
+  scripted ``-p`` calls — no prompt pointer, no event tee, the lane
+  runner writes the meta/usage receipts itself);
 - it runs the driver unattended (proposal-only: the agent is told to leave
   its changes in the working tree — it cannot commit or push, the lane has
   no write credential);
@@ -195,8 +198,20 @@ _CLAUDE_TOOL_RULES: tuple[str, ...] = (
 # Serialized ONLY at the render site via the explicit
 # ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules)) — never by literal
 # concatenation (A09).
-#: Drivers understood by this entry point (the shipped multi-harness set).
-DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
+#: The SDK-lane drivers: the agent is driven by ``forge.lane_driver``
+#: (the REAL interactive driver clients), not a scripted ``-p`` call —
+#: the rendered script only provisions the CLI and hands the lane over
+#: (the Actions/AzDO mirror of the codex/opencode GitLab sdk-lane
+#: templates).
+LANE_DRIVERS = ("codex-sdk-lane", "opencode-sdk-lane")
+
+#: The SCRIPTED drivers: a rendered one-shot CLI invocation with the
+#: shared ``-p`` prompt pointer and the tee'd event stream.
+SCRIPTED_DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
+
+#: Drivers understood by this entry point (the shipped multi-harness set):
+#: the scripted drivers above plus the SDK-lane drivers.
+DRIVERS = SCRIPTED_DRIVERS + LANE_DRIVERS
 
 #: R15 known-good driver CLI versions: an unpinned install rides the npm
 #: ``latest`` dist-tag, so a CLI release can silently change lane behavior
@@ -214,6 +229,14 @@ DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
     "opencode": "1.18.31",
     # npm registry latest at the R15 slice (2026-09-17).
     "copilot": "1.0.86",
+    # LIVE-verified 2026-09-21 (docs/research/codex-app-server.md LIVE
+    # CORRECTION + codex-live.json): the app-server wire the codex driver
+    # client speaks — the sandbox spellings and turn-completion semantics
+    # this lane depends on.
+    "codex-sdk-lane": "0.153.4",
+    # LIVE-verified 2026-09-21 (opencode-live.json: "opencode v2.0.10") —
+    # the serve wire layer the opencode driver client targets.
+    "opencode-sdk-lane": "2.0.10",
 }
 
 #: A version/dist-tag token safe to splice into an npm install spec
@@ -671,12 +694,35 @@ def render_driver_script(
       "Copilot Requests" permission); no parseable usage receipt, unknown
       stays unknown.
 
-    The ``-p`` prompt is the shared SHORT pointer (:data:`TASK_PROMPT`) —
-    the brief file at *brief_path* carries the whole contract. The script
-    streams the driver's normalized event log into the job log AND tees it
-    to *events_file*; ``pipefail`` keeps the driver's exit code so a
-    nonzero agent exit classifies the run as failed WITHOUT aborting the
-    audit trail (the workflow uploads artifacts ``if: always()``).
+    The SDK-lane drivers (:data:`LANE_DRIVERS`) render no ``-p``
+    invocation at all — the agent is driven by forge's own interactive
+    lane runner, so the script only provisions the CLI and hands over
+    (the npm preamble + version echo still apply; MCP servers are NOT
+    consumed on this path — the driver clients provision none):
+
+    - ``codex-sdk-lane`` — npm ``@openai/codex`` (the lane runner spawns
+      ``codex app-server``); the OPTIONAL provider-native ChatGPT-login
+      blob (``FORGE_CODEX_AUTH`` → ``~/.codex/auth.json``, the grok
+      lane's posture) beside the inherited ``OPENAI_API_KEY`` /
+      ``CODEX_API_KEY`` env; model routed via ``CODEX_MODEL``, the
+      sandbox is the workspace-write + approvalPolicy-never recipe the
+      driver factory pins.
+    - ``opencode-sdk-lane`` — npm ``opencode-ai``; the mechanical
+      commit/push deny + headless-hang allows ride via
+      ``OPENCODE_CONFIG_CONTENT`` (the serve child reads it), permission
+      prompts are answered ``once`` (LIVE-found: ``reject`` starves every
+      tool call in a task lane), and a ``provider/model`` route splits
+      into ``OPENCODE_PROVIDER_ID``/``OPENCODE_MODEL_ID``.
+
+    For the scripted drivers, the ``-p`` prompt is the shared SHORT
+    pointer (:data:`TASK_PROMPT`) — the brief file at *brief_path*
+    carries the whole contract. The script streams the driver's
+    normalized event log into the job log AND tees it to *events_file*;
+    ``pipefail`` keeps the driver's exit code so a nonzero agent exit
+    classifies the run as failed WITHOUT aborting the audit trail (the
+    workflow uploads artifacts ``if: always()``). The SDK lanes need no
+    tee — ``forge.lane_driver`` writes the meta + usage receipts itself,
+    and a nonzero exit classifies the run exactly the same way.
     """
     quoted_prompt = shlex.quote(TASK_PROMPT)
     events = shlex.quote(events_file)
@@ -908,6 +954,89 @@ def render_driver_script(
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )
         return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
+
+    if driver == "codex-sdk-lane":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            f"  {_npm_pin('@openai/codex', pins['codex-sdk-lane'])} && break\n"
+            '  echo "npm install of codex failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
+            "codex --version\n"
+        )
+        credential = (
+            "# OPTIONAL provider-native credential: the ChatGPT-login auth\n"
+            "# blob (OAuth tokens cannot ride an API-key env). Guarded: an\n"
+            "# unauthenticated lane still runs and reports its own failure.\n"
+            "mkdir -p ~/.codex\n"
+            'if [ -n "$FORGE_CODEX_AUTH" ]; then\n'
+            '  printf "%s" "$FORGE_CODEX_AUTH" > ~/.codex/auth.json\n'
+            "  chmod 600 ~/.codex/auth.json\n"
+            "fi\n"
+        )
+        model_export = f"export CODEX_MODEL={shlex.quote(model)}\n" if model else ""
+        # The SDK lane's "invocation" is forge's own lane runner (EXE-02):
+        # it spawns `codex app-server` (auth inherited from the ambient
+        # env), drives ONE thread to turn/completed and writes the meta +
+        # usage receipts itself — no -p prompt, no event tee, the runner's
+        # nonzero exit classifies the run through the same .forge/exit.
+        invocation = (
+            f'{model_export}export CODEX_CWD="$PWD"\npython -m forge.lane_driver --driver codex'
+        )
+        return preamble + credential + invocation
+
+    if driver == "opencode-sdk-lane":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            f"  {_npm_pin('opencode-ai', pins['opencode-sdk-lane'])} && break\n"
+            '  echo "npm install of opencode failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "# R15: the resolved CLI version lands in the job log — pin\n"
+            "# drift is visible, never silent.\n"
+            "opencode --version\n"
+        )
+        permission_config = json.dumps(
+            {
+                "permission": {
+                    "bash": {
+                        "git commit *": "deny",
+                        "git push *": "deny",
+                        "*": "allow",
+                    },
+                    # "ask"-by-default keys hang a headless run (R5).
+                    "external_directory": "allow",
+                    "doom_loop": "allow",
+                },
+            }
+        )
+        # A "provider/model" route splits; a bare model is the model id
+        # (the provider stays whatever the ambient env configured).
+        if model and "/" in model:
+            provider_id, _, model_id = model.partition("/")
+            model_exports = (
+                f"export OPENCODE_PROVIDER_ID={shlex.quote(provider_id)}\n" if provider_id else ""
+            ) + (f"export OPENCODE_MODEL_ID={shlex.quote(model_id)}\n" if model_id else "")
+        elif model:
+            model_exports = f"export OPENCODE_MODEL_ID={shlex.quote(model)}\n"
+        else:
+            model_exports = ""
+        # The lane runner spawns the serve process itself (lane-local,
+        # loopback, password-pinned); the config-injection env rides the
+        # ambient environment INTO that child (the spawner merges it), so
+        # the mechanical deny reaches the server.
+        invocation = (
+            f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
+            f"{model_exports}"
+            'export OPENCODE_SERVE_CWD="$PWD"\n'
+            # LIVE-found: the factory default "reject" starves every tool
+            # call in a task lane — "once" grants per request.
+            'export OPENCODE_PERMISSION_RESPONSE="${OPENCODE_PERMISSION_RESPONSE:-once}"\n'
+            "python -m forge.lane_driver --driver opencode"
+        )
+        return preamble + invocation
 
     raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
 
@@ -1505,14 +1634,18 @@ def main(argv: list[str] | None = None) -> int:
     status = "completed" if completed.returncode == 0 else "failed"
 
     # The usage receipt comes from the tee'd event log, never from a
-    # harness claim outside it.
+    # harness claim outside it — EXCEPT on the SDK lanes, where the lane
+    # runner already wrote .forge/usage.json from the driver client's own
+    # receipts: that file is the authority and is never clobbered with a
+    # zeroed parse of an event log the lane runner never wrote.
     usage = None
     events_path = Path(args.events_file)
-    if events_path.is_file():
-        usage = parse_usage(driver, events_path.read_text(errors="replace"))
-    usage_path = Path(args.usage_file)
-    usage_path.parent.mkdir(parents=True, exist_ok=True)
-    usage_path.write_text(json.dumps(usage, indent=2, sort_keys=True) + "\n")
+    if driver not in LANE_DRIVERS:
+        if events_path.is_file():
+            usage = parse_usage(driver, events_path.read_text(errors="replace"))
+        usage_path = Path(args.usage_file)
+        usage_path.parent.mkdir(parents=True, exist_ok=True)
+        usage_path.write_text(json.dumps(usage, indent=2, sort_keys=True) + "\n")
 
     exit_file.parent.mkdir(parents=True, exist_ok=True)
     exit_file.write_text(status + "\n")

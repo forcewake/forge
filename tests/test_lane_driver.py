@@ -1,16 +1,27 @@
-"""claude-sdk-lane tests (EXE-02): the runner-side entry over the sdk seam.
+"""lane_driver tests (EXE-02): the runner-side entry over the sdk seams.
 
-The lane entry (``python -m forge.lane_driver``) drives the REAL
-:class:`~forge.adaptive.drivers.claude_sdk.ClaudeSDKDriverClient` — the
-``claude-agent-sdk`` package is not installed here (CI installs no vendor
-packages), so these contract tests fake the SDK MODULE exactly the way
-``tests/test_adaptive_driver_claude_sdk.py`` does and run the lane through
-the real client built by :func:`claude_sdk_client_from_env` (via the
-``sdk=`` seam): the brief becomes the ONE task, the turn is poll-drained
-to its ResultMessage, and the batch lane's ``.forge/`` artifact contract
-comes out the other end — meta (driver id ``claude-sdk-lane``, exit
-classification, usage receipt) + usage.json, with unknown usage staying
-unknown, never zero.
+The lane entry (``python -m forge.lane_driver [--driver claude|codex|opencode]``)
+drives the REAL interactive driver clients:
+
+- the claude lane over the REAL
+  :class:`~forge.adaptive.drivers.claude_sdk.ClaudeSDKDriverClient` — the
+  ``claude-agent-sdk`` package is not installed here (CI installs no vendor
+  packages), so these contract tests fake the SDK MODULE exactly the way
+  ``tests/test_adaptive_driver_claude_sdk.py`` does and run the lane through
+  the real client built by :func:`claude_sdk_client_from_env` (via the
+  ``sdk=`` seam);
+- the codex lane (``CodexAppDriverClient``, ``codex app-server`` over
+  stdio) and the opencode lane (``OpenCodeServer`` spawner +
+  ``OpenCodeDriverClient`` over HTTP) through fakes installed at the
+  MODULE SEAM (``lane_driver.codex_app_client_from_env`` /
+  ``opencode_server_from_env`` / ``opencode_client_from_env``) — no
+  subprocess, no server, no network, ever.
+
+For every lane: the brief becomes the ONE task, the turn is driven to its
+terminal verdict bounded by the budget, and the batch lane's ``.forge/``
+artifact contract comes out the other end — meta (the lane's driver id,
+exit classification, usage receipt) + usage.json, with unknown usage
+staying unknown, never zero.
 """
 
 from __future__ import annotations
@@ -509,6 +520,534 @@ class TestBudgetBounded:
 
 
 # ---------------------------------------------------------------------------
+# The codex lane (CodexAppDriverClient faked at the module seam)
+# ---------------------------------------------------------------------------
+
+
+THREAD_ID = "thr_fake"
+
+
+def _codex_turn(status: str, *, error: dict | None = None) -> dict:
+    turn: dict = {"id": "turn_1", "status": status}
+    if error is not None:
+        turn["error"] = error
+    return {"method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": turn}}
+
+
+class FakeCodexLaneClient:
+    """Stand-in for :class:`CodexAppDriverClient` at the lane seam.
+
+    ``events()`` is the non-consuming buffer read the real client offers;
+    the turn verdict (and usage) frames are preloaded. ``interrupt``
+    mirrors the real contract: completion keys off the appended
+    turn/completed notification — the fakes that produce one append it
+    here, a silent fake leaves the lane's grace poll empty-handed.
+    """
+
+    def __init__(
+        self, events: list[dict] | None = None, *, interrupt_events: list[dict] | None = None
+    ):
+        self._events = list(events or [])
+        self._interrupt_events = list(interrupt_events or [])
+        self.tasks: list[str] = []
+        self.interrupt_calls = 0
+        self.closed = False
+
+    async def start_thread(self, task: str) -> str:
+        self.tasks.append(task)
+        return THREAD_ID
+
+    def events(self) -> list[dict]:
+        return [dict(event) for event in self._events]
+
+    async def interrupt(self, thread_id: str) -> None:
+        self.interrupt_calls += 1
+        self._events.extend(dict(event) for event in self._interrupt_events)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def codex_lane_env(lane_env, monkeypatch):
+    monkeypatch.setenv("FORGE_CODEX_MODEL", "gpt-5.3")
+    return lane_env
+
+
+def install_codex_client(monkeypatch, client: FakeCodexLaneClient) -> FakeCodexLaneClient:
+    monkeypatch.setattr(lane_driver, "codex_app_client_from_env", lambda: client)
+    return client
+
+
+class TestCodexLane:
+    def test_completed_turn_writes_the_lane_contract_and_exits_zero(
+        self, codex_lane_env, monkeypatch, capsys
+    ):
+        client = install_codex_client(
+            monkeypatch,
+            FakeCodexLaneClient(
+                events=[
+                    {
+                        "method": "thread/tokenUsage/updated",
+                        "params": {"inputTokens": 90, "cachedInputTokens": 30, "outputTokens": 45},
+                    },
+                    _codex_turn("completed"),
+                ]
+            ),
+        )
+
+        assert main(["--driver", "codex"]) == 0
+
+        meta = read_meta(codex_lane_env)
+        assert meta["driver"] == "codex-sdk-lane"
+        assert meta["attempt_base"] == ATTEMPT_BASE
+        assert meta["model"] == "gpt-5.3"
+        assert meta["exit"] == "completed"
+        assert meta["terminal_reason"] == "completed"
+        receipt = meta["usage"]
+        assert receipt["input_tokens"] == 90
+        assert receipt["cached_input_tokens"] == 30
+        assert receipt["output_tokens"] == 45
+        assert receipt["driver"] == "codex-sdk-lane"
+        assert receipt["completeness"] == "aggregate"
+        assert receipt["source"] == "codex-app-server"
+        assert read_usage(codex_lane_env) == receipt
+        assert "lane_driver: codex-sdk-lane exit=completed reason=completed" in (
+            capsys.readouterr().err
+        )
+        assert client.closed
+
+    def test_the_brief_becomes_the_one_task(self, codex_lane_env, monkeypatch):
+        client = install_codex_client(
+            monkeypatch, FakeCodexLaneClient(events=[_codex_turn("completed")])
+        )
+
+        main(["--driver", "codex"])
+
+        (task,) = client.tasks
+        assert "PLAN: modernize the orders service" in task
+        assert "issue #42" in task
+        assert task.rstrip().endswith(NO_COMMIT_ADDENDUM)
+
+    def test_the_env_dispatch_selects_the_lane_without_a_flag(self, codex_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_DRIVER", "codex")
+        install_codex_client(monkeypatch, FakeCodexLaneClient(events=[_codex_turn("completed")]))
+
+        assert main() == 0
+
+        assert read_meta(codex_lane_env)["driver"] == "codex-sdk-lane"
+
+    def test_failed_turn_is_nonzero_with_the_vendor_status_and_error(
+        self, codex_lane_env, monkeypatch
+    ):
+        install_codex_client(
+            monkeypatch,
+            FakeCodexLaneClient(
+                events=[_codex_turn("failed", error={"message": "UsageLimitExceeded: quota"})]
+            ),
+        )
+
+        assert main(["--driver", "codex"]) == 1
+
+        meta = read_meta(codex_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "failed"
+        assert "UsageLimitExceeded" in meta["error"]
+
+    def test_a_turn_without_usage_leaves_the_receipt_unknown(self, codex_lane_env, monkeypatch):
+        install_codex_client(monkeypatch, FakeCodexLaneClient(events=[_codex_turn("completed")]))
+
+        assert main(["--driver", "codex"]) == 0
+
+        assert read_meta(codex_lane_env)["usage"] is None
+        assert read_usage(codex_lane_env) is None
+
+    def test_budget_expiry_interrupts_and_honors_the_interrupted_verdict(
+        self, codex_lane_env, monkeypatch
+    ):
+        # §5.3: completion keys off turn/completed(interrupted) — the lane
+        # records the vendor's status, not its own timeout.
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.5")
+        client = install_codex_client(
+            monkeypatch, FakeCodexLaneClient(interrupt_events=[_codex_turn("interrupted")])
+        )
+
+        assert main(["--driver", "codex"]) == 1
+
+        meta = read_meta(codex_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "interrupted"
+        assert client.interrupt_calls == 1
+        assert client.closed
+
+    def test_a_silent_interrupt_ends_as_budget_exceeded(self, codex_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.05")
+        client = install_codex_client(monkeypatch, FakeCodexLaneClient())
+
+        assert main(["--driver", "codex"]) == 1
+
+        meta = read_meta(codex_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "budget_exceeded"
+        assert client.interrupt_calls == 1
+
+    def test_another_threads_completion_is_never_taken(self, codex_lane_env, monkeypatch):
+        install_codex_client(
+            monkeypatch,
+            FakeCodexLaneClient(
+                events=[
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": "thr_other",
+                            "turn": {"id": "t9", "status": "completed"},
+                        },
+                    }
+                ],
+                interrupt_events=[],
+            ),
+        )
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.05")
+
+        assert main(["--driver", "codex"]) == 1
+
+        assert read_meta(codex_lane_env)["terminal_reason"] == "budget_exceeded"
+
+
+class TestCodexClassification:
+    def test_completed_requires_the_completed_status(self):
+        assert lane_driver.classify_codex_turn(_codex_turn("completed")["params"]) == (
+            "completed",
+            "completed",
+            "",
+        )
+
+    def test_interrupted_and_failed_carry_the_vendor_status(self):
+        assert lane_driver.classify_codex_turn(_codex_turn("interrupted")["params"])[:2] == (
+            "failed",
+            "interrupted",
+        )
+        failed = lane_driver.classify_codex_turn(
+            _codex_turn("failed", error={"message": "boom"})["params"]
+        )
+        assert failed == ("failed", "failed", "boom")
+
+    def test_a_statusless_frame_never_guesses_success(self):
+        assert lane_driver.classify_codex_turn({"turn": {}}) == (
+            "failed",
+            "turn_end_unobserved",
+            "",
+        )
+
+    def test_usage_receipt_tolerates_both_vendor_spellings(self):
+        camel = lane_driver.codex_usage_receipt(
+            [
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {"inputTokens": 5, "outputTokens": 6},
+                },
+                {
+                    "method": "thread/tokenUsage/updated",
+                    "params": {"usage": {"input_tokens": 90, "output_tokens": 45}},
+                },
+            ]
+        )
+        assert camel["input_tokens"] == 90  # the LAST update wins, never a sum
+        assert camel["output_tokens"] == 45
+
+    def test_usage_receipt_stays_none_without_the_event(self):
+        assert lane_driver.codex_usage_receipt([_codex_turn("completed")]) is None
+        assert lane_driver.codex_usage_receipt([]) is None
+        # Malformed counters are dropped, never clamped.
+        assert (
+            lane_driver.codex_usage_receipt(
+                [{"method": "thread/tokenUsage/updated", "params": {"inputTokens": -1}}]
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# The opencode lane (OpenCodeServer + OpenCodeDriverClient faked at the
+# module seam — no serve process, no HTTP, no network)
+# ---------------------------------------------------------------------------
+
+
+SESSION_ID = "ses_fake"
+
+
+def _opencode_event(event_type: str, data: dict | None = None) -> dict:
+    return {"id": None, "type": event_type, "data": {"sessionID": SESSION_ID, **(data or {})}}
+
+
+class FakeOpenCodeServer:
+    """Stand-in for :class:`OpenCodeServer` (the async context manager)."""
+
+    def __init__(self) -> None:
+        self.url = "http://127.0.0.1:45678"
+        self.password = "lane-pw"  # noqa: S105 - fixture
+        self.stopped = False
+
+    async def __aenter__(self) -> FakeOpenCodeServer:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.stopped = True
+
+
+class FakeOpenCodeLaneClient:
+    """Stand-in for :class:`OpenCodeDriverClient` at the lane seam."""
+
+    def __init__(self, events: list[dict] | None = None, *, timeout: bool = False):
+        self._events = list(events or [])
+        self.timeout = timeout
+        self.tasks: list[str] = []
+        self.aclosed = False
+
+    async def start_session(self, task: str) -> str:
+        self.tasks.append(task)
+        if self.timeout:
+            raise TimeoutError(
+                f"opencode session {SESSION_ID} did not reach "
+                "session.execution.succeeded/failed within 0.05s"
+            )
+        return SESSION_ID
+
+    async def events(self, session_id: str) -> list[dict]:
+        return [dict(event) for event in self._events]
+
+    async def aclose(self) -> None:
+        self.aclosed = True
+
+
+@pytest.fixture
+def opencode_lane_env(lane_env, monkeypatch):
+    monkeypatch.setenv("FORGE_OPENCODE_MODEL", "glm-5.3-flash")
+    monkeypatch.setenv("OPENCODE_PROVIDER_ID", "zai")
+    monkeypatch.setenv("OPENCODE_PROVIDER_API_KEY", "sk-zai-test")
+    return lane_env
+
+
+def install_opencode(monkeypatch, client: FakeOpenCodeLaneClient, server=None):
+    server = server or FakeOpenCodeServer()
+    captured: dict = {}
+
+    def fake_factory(provider_key=None, *, env=None):
+        captured["provider_key"] = provider_key
+        captured["env"] = dict(env or {})
+        return client
+
+    monkeypatch.setattr(lane_driver, "opencode_server_from_env", lambda env=None: server)
+    monkeypatch.setattr(lane_driver, "opencode_client_from_env", fake_factory)
+    return server, captured
+
+
+class TestOpenCodeLane:
+    def test_succeeded_turn_writes_the_lane_contract_and_exits_zero(
+        self, opencode_lane_env, monkeypatch, capsys
+    ):
+        client = FakeOpenCodeLaneClient(
+            events=[
+                _opencode_event("session.usage.updated", {"input": 33, "output": 21}),
+                _opencode_event("session.execution.succeeded"),
+            ]
+        )
+        server, _captured = install_opencode(monkeypatch, client)
+
+        assert main(["--driver", "opencode"]) == 0
+
+        meta = read_meta(opencode_lane_env)
+        assert meta["driver"] == "opencode-sdk-lane"
+        assert meta["attempt_base"] == ATTEMPT_BASE
+        assert meta["model"] == "glm-5.3-flash"
+        assert meta["exit"] == "completed"
+        assert meta["terminal_reason"] == "session.execution.succeeded"
+        receipt = meta["usage"]
+        assert receipt["input_tokens"] == 33
+        assert receipt["output_tokens"] == 21
+        # No cost API: the receipt is honest about what it does not know.
+        assert receipt["completeness"] == "unknown"
+        assert receipt["source"] == "session.usage.updated"
+        assert "total_cost_usd" not in receipt
+        assert read_usage(opencode_lane_env) == receipt
+        assert "lane_driver: opencode-sdk-lane exit=completed" in capsys.readouterr().err
+        assert server.stopped
+        assert client.aclosed
+
+    def test_the_brief_becomes_the_one_task(self, opencode_lane_env, monkeypatch):
+        client = FakeOpenCodeLaneClient(events=[_opencode_event("session.execution.succeeded")])
+        install_opencode(monkeypatch, client)
+
+        main(["--driver", "opencode"])
+
+        (task,) = client.tasks
+        assert "PLAN: modernize the orders service" in task
+        assert "issue #42" in task
+        assert task.rstrip().endswith(NO_COMMIT_ADDENDUM)
+
+    def test_the_env_dispatch_selects_the_lane_without_a_flag(self, opencode_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_DRIVER", "opencode")
+        install_opencode(
+            monkeypatch,
+            FakeOpenCodeLaneClient(events=[_opencode_event("session.execution.succeeded")]),
+        )
+
+        assert main() == 0
+
+        assert read_meta(opencode_lane_env)["driver"] == "opencode-sdk-lane"
+
+    def test_failed_turn_is_nonzero_with_the_vendor_verdict(self, opencode_lane_env, monkeypatch):
+        install_opencode(
+            monkeypatch, FakeOpenCodeLaneClient([_opencode_event("session.execution.failed")])
+        )
+
+        assert main(["--driver", "opencode"]) == 1
+
+        meta = read_meta(opencode_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "session.execution.failed"
+
+    def test_usage_stays_unknown_without_the_usage_event(self, opencode_lane_env, monkeypatch):
+        install_opencode(
+            monkeypatch, FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")])
+        )
+
+        assert main(["--driver", "opencode"]) == 0
+
+        assert read_meta(opencode_lane_env)["usage"] is None
+        assert read_usage(opencode_lane_env) is None
+
+    def test_budget_timeout_classifies_budget_exceeded_and_tears_down(
+        self, opencode_lane_env, monkeypatch
+    ):
+        # start_session yields the session id only at turn completion — a
+        # timed-out turn cannot be aborted by id; the server teardown
+        # bounds the orphaned turn (the honest outcome, never a guess).
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        client = FakeOpenCodeLaneClient(timeout=True)
+        server, _captured = install_opencode(monkeypatch, client)
+
+        assert main(["--driver", "opencode"]) == 1
+
+        meta = read_meta(opencode_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "budget_exceeded"
+        assert server.stopped
+        assert client.aclosed
+
+    def test_the_client_env_pins_the_server_and_the_lane_posture(
+        self, opencode_lane_env, monkeypatch
+    ):
+        server, captured = install_opencode(
+            monkeypatch, FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")])
+        )
+
+        main(["--driver", "opencode"])
+
+        client_env = captured["env"]
+        assert client_env["OPENCODE_SERVER_URL"] == server.url
+        assert client_env["OPENCODE_SERVER_PASSWORD"] == server.password
+        # LIVE-found: the factory default "reject" starves tools — the lane
+        # defaults to "once" unless the operator said otherwise.
+        assert client_env["OPENCODE_PERMISSION_RESPONSE"] == "once"
+        assert client_env["OPENCODE_PROVIDER_ID"] == "zai"
+        assert captured["provider_key"] == "sk-zai-test"
+        # The client's own turn-wait budget IS the lane budget.
+        assert client_env["OPENCODE_PROMPT_TIMEOUT"] == "1800.0"
+
+    def test_an_explicit_permission_response_override_wins(self, opencode_lane_env, monkeypatch):
+        monkeypatch.setenv("OPENCODE_PERMISSION_RESPONSE", "reject")
+        _server, captured = install_opencode(
+            monkeypatch, FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")])
+        )
+
+        main(["--driver", "opencode"])
+
+        assert captured["env"]["OPENCODE_PERMISSION_RESPONSE"] == "reject"
+
+    def test_the_transcript_fallback_classifies_when_the_stream_was_uncovered(
+        self, opencode_lane_env, monkeypatch
+    ):
+        install_opencode(
+            monkeypatch,
+            FakeOpenCodeLaneClient(
+                [
+                    {
+                        "id": None,
+                        "type": "transcript.reconciled",
+                        "data": {
+                            "sessionID": SESSION_ID,
+                            "messages": [
+                                {"id": "m1", "type": "assistant", "finish": "tool-calls"},
+                                {"id": "m2", "type": "assistant", "finish": "stop"},
+                            ],
+                        },
+                    }
+                ]
+            ),
+        )
+
+        assert main(["--driver", "opencode"]) == 0
+
+        meta = read_meta(opencode_lane_env)
+        assert meta["exit"] == "completed"
+        assert meta["terminal_reason"] == "transcript.stop"
+
+
+class TestOpenCodeClassification:
+    def test_the_last_verdict_for_the_session_wins(self):
+        events = [
+            _opencode_event("session.execution.failed"),
+            _opencode_event("session.execution.succeeded"),
+            # another session's verdict is never taken
+            {"type": "session.execution.failed", "data": {"sessionID": "ses_other"}},
+        ]
+        assert lane_driver.classify_opencode_events(events, SESSION_ID) == (
+            "completed",
+            "session.execution.succeeded",
+        )
+
+    def test_an_error_finish_in_the_transcript_classifies_failed(self):
+        events = [
+            {
+                "type": "transcript.reconciled",
+                "data": {
+                    "sessionID": SESSION_ID,
+                    "messages": [{"type": "assistant", "finish": "error"}],
+                },
+            }
+        ]
+        assert lane_driver.classify_opencode_events(events, SESSION_ID) == (
+            "failed",
+            "transcript.error",
+        )
+
+    def test_nothing_observable_stays_unobserved(self):
+        assert lane_driver.classify_opencode_events([], SESSION_ID) == (
+            "failed",
+            "turn_end_unobserved",
+        )
+
+    def test_usage_receipt_reads_nested_token_shapes_and_stays_unknown(self):
+        receipt = lane_driver.opencode_usage_receipt(
+            [_opencode_event("session.usage.updated", {"tokens": {"inputTokens": 8, "output": 9}})]
+        )
+        assert receipt["input_tokens"] == 8
+        assert receipt["output_tokens"] == 9
+        assert receipt["completeness"] == "unknown"
+        assert lane_driver.opencode_usage_receipt([]) is None
+        assert (
+            lane_driver.opencode_usage_receipt(
+                [_opencode_event("session.usage.updated", {"context": "no tokens here"})]
+            )
+            is None
+        )
+
+
+# ---------------------------------------------------------------------------
 # Registration + the lane template contract
 # ---------------------------------------------------------------------------
 
@@ -530,6 +1069,31 @@ class TestLaneRegistration:
 
     def test_the_lane_driver_constant_matches_the_registered_id(self):
         assert lane_driver.LANE_DRIVER_ID == "claude-sdk-lane"
+
+    def test_the_codex_and_opencode_lane_constants_are_their_registered_ids(self):
+        # The meta ``driver`` ids for the two new SDK lanes, keyed by the
+        # ``--driver`` / ``FORGE_LANE_DRIVER`` short key. The
+        # SHIPPED_DRIVERS / DRIVER_CREDENTIAL_VARS registration rides with
+        # the harness_selection + workflow arms (their exact-set pins in
+        # test_harness_selection / test_templates stay green unchanged
+        # until that registration lands beside them).
+        assert lane_driver.CODEX_LANE_DRIVER_ID == "codex-sdk-lane"
+        assert lane_driver.OPENCODE_LANE_DRIVER_ID == "opencode-sdk-lane"
+        assert lane_driver.LANE_DRIVER_IDS == {
+            "claude": "claude-sdk-lane",
+            "codex": "codex-sdk-lane",
+            "opencode": "opencode-sdk-lane",
+        }
+
+    def test_an_unknown_driver_fails_closed_but_still_writes_the_meta(self, lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_DRIVER", "warp")
+
+        assert main() == 1
+
+        meta = read_meta(lane_env)
+        assert meta["driver"] == "warp"
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "unknown_driver"
 
 
 class TestLaneTemplate:
@@ -583,3 +1147,160 @@ class TestLaneTemplate:
 
         assert "python -m forge.lane_driver" in text
         assert '|| FORGE_DRIVER_EXIT="failed"' in text
+
+
+# ---------------------------------------------------------------------------
+# The codex + opencode lane templates (the claude-sdk-lane skeleton with
+# their own driver ids and CLI preambles)
+# ---------------------------------------------------------------------------
+
+CODEX_TEMPLATE = (
+    Path(__file__).resolve().parent.parent / "ci" / "templates" / "codex-sdk-lane.gitlab-ci.yml"
+)
+OPENCODE_TEMPLATE = (
+    Path(__file__).resolve().parent.parent / "ci" / "templates" / "opencode-sdk-lane.gitlab-ci.yml"
+)
+
+SDK_LANE_TEMPLATES = {
+    CODEX_TEMPLATE: ("codex-sdk-lane", "codex"),
+    OPENCODE_TEMPLATE: ("opencode-sdk-lane", "opencode"),
+}
+
+
+@pytest.mark.parametrize("template", list(SDK_LANE_TEMPLATES), ids=["codex", "opencode"])
+class TestSdkLaneTemplates:
+    def _text(self, template: Path) -> str:
+        return template.read_text()
+
+    def test_rules_filter_on_the_run_id_and_the_lane_driver(self, template):
+        driver_id, _key = SDK_LANE_TEMPLATES[template]
+        doc = yaml.safe_load(template.read_text())
+        assert doc["forge-agent"]["rules"] == [
+            {
+                "if": (
+                    '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" '
+                    f'|| $FORGE_HARNESS_DRIVER == "{driver_id}")'
+                )
+            }
+        ]
+
+    def test_the_template_registers_the_shipped_lane_id(self, template):
+        # The id the rules filter on IS the lane_driver meta's driver id —
+        # the worker dispatches what the lane reports.
+        driver_id, _key = SDK_LANE_TEMPLATES[template]
+        assert driver_id in lane_driver.LANE_DRIVER_IDS.values()
+
+    def test_the_brief_is_written_into_the_repo_never_tmp(self, template):
+        text = self._text(template)
+
+        assert "printf '%s\\n' \"$FORGE_PLAN\" > .forge/brief.md" in text
+        assert not any("/tmp" in line and "brief" in line for line in text.splitlines())
+
+    def test_the_lane_installs_forge_interactive_and_runs_the_lane_driver(self, template):
+        text = self._text(template)
+        _driver_id, key = SDK_LANE_TEMPLATES[template]
+
+        assert "forge[interactive]" in text
+        assert "git+https://github.com/forcewake/forge@${FORGE_LANE_REF}" in text
+        assert 'FORGE_LANE_REF: "main"' in text
+        assert "uv python install 3.13" in text
+        assert "python -m forge.lane_driver --driver " + key in text
+
+    def test_the_cli_installs_over_npm_with_retries(self, template):
+        text = self._text(template)
+
+        assert "npm install -g --no-fund --no-audit" in text
+        assert "for attempt in 1 2 3" in text
+        assert "--version" in text
+
+    def test_the_candidate_contract_is_byte_compatible_with_the_batch_lane(self, template):
+        text = self._text(template)
+        doc = yaml.safe_load(template.read_text())["forge-agent"]
+
+        assert 'git checkout --detach "$FORGE_ATTEMPT_BASE"' in text
+        assert (
+            'git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" '
+            "> .forge/candidate.diff" in text
+        )
+        assert "git remote set-url --push origin FORBIDDEN" in text
+        assert 'echo ".forge/" >> .git/info/exclude' in text
+        assert set(doc["artifacts"]["paths"]) == {
+            ".forge/candidate.diff",
+            ".forge/candidate.meta.json",
+        }
+        assert doc["artifacts"]["when"] == "always"
+        # The claude CLI's root-in-sandbox escape hatch is irrelevant here
+        # — these lanes run no vendor TUI that checks it.
+        assert "IS_SANDBOX" not in text
+
+    def test_a_nonzero_driver_exit_never_aborts_the_audit_trail(self, template):
+        text = self._text(template)
+        driver_id, _key = SDK_LANE_TEMPLATES[template]
+
+        assert '|| FORGE_DRIVER_EXIT="failed"' in text
+        # The defensive meta floor names THIS lane's driver id.
+        assert f'\\"driver\\": \\"{driver_id}\\"' in text
+
+    def test_the_agent_is_told_not_to_commit_or_push(self, template):
+        assert "Do NOT commit and do NOT push" in self._text(template)
+
+
+class TestCodexLaneTemplateDetails:
+    def test_the_cli_is_openai_codex_over_npm(self):
+        text = CODEX_TEMPLATE.read_text()
+
+        assert '"@openai/codex@${FORGE_CODEX_VERSION:-latest}"' in text
+        assert "codex --version" in text
+
+    def test_the_optional_provider_native_auth_lands_owner_only(self):
+        text = CODEX_TEMPLATE.read_text()
+
+        assert 'if [ -n "$FORGE_CODEX_AUTH" ]; then' in text
+        assert 'printf "%s" "$FORGE_CODEX_AUTH" > ~/.codex/auth.json' in text
+        assert "chmod 600 ~/.codex/auth.json" in text
+
+    def test_the_model_route_and_cwd_exports(self):
+        text = CODEX_TEMPLATE.read_text()
+
+        assert "export FORGE_CODEX_MODEL=" in text
+        assert 'export CODEX_CWD="$PWD"' in text
+
+
+class TestOpenCodeLaneTemplateDetails:
+    def test_the_cli_is_opencode_ai_over_npm(self):
+        text = OPENCODE_TEMPLATE.read_text()
+
+        assert '"opencode-ai@${FORGE_OPENCODE_VERSION:-latest}"' in text
+        assert "opencode --version" in text
+
+    def test_the_mechanical_deny_rides_the_serve_config(self):
+        text = OPENCODE_TEMPLATE.read_text()
+
+        assert '"git commit *": "deny"' in text
+        assert '"git push *": "deny"' in text
+        assert '"external_directory": "allow"' in text
+        assert '"doom_loop": "allow"' in text
+
+    def test_permission_prompts_are_answered_once(self):
+        # LIVE-found: "reject" (the factory default) starves every tool
+        # call in a task lane.
+        text = OPENCODE_TEMPLATE.read_text()
+
+        assert 'OPENCODE_PERMISSION_RESPONSE: "once"' in text
+
+    def test_the_zai_provider_route_is_configured(self):
+        text = OPENCODE_TEMPLATE.read_text()
+
+        assert 'OPENCODE_PROVIDER_ID: "zai"' in text
+        assert "{env:ZAI_API_KEY}" in text
+
+    def test_the_lane_spawns_its_own_server_no_manual_serve(self):
+        # The template only puts the CLI on PATH — lane_driver owns the
+        # OpenCodeServer lifecycle; no manual port or serve management (the
+        # header comment may NAME the spawned command, a script line never
+        # runs it).
+        text = OPENCODE_TEMPLATE.read_text()
+
+        assert not any(line.lstrip().startswith("opencode serve") for line in text.splitlines())
+        assert 'export OPENCODE_SERVE_CWD="$PWD"' in text
+        assert "export FORGE_OPENCODE_MODEL=" in text

@@ -350,6 +350,159 @@ class TestGate:
         assert len(FakeWriter.instances) == 1
 
 
+class TestGoIdFormsAndRefusalNotes:
+    """LIVE 2026-09-21: /go must accept the 8-char prefix the plan heading
+    shows, and every ignore path must ANSWER the operator instead of
+    silently succeeding — rate-limited to one reply per note id."""
+
+    async def test_go_by_short_prefix_advances(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id[:8]}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_CI.value
+        async with db() as session:
+            (gate,) = (await session.execute(select(GateApproval))).scalars().all()
+        assert gate.consumed_at is not None  # the short form consumed the real gate
+        assert gate.approver_user_id == 11
+
+    async def test_go_by_longer_prefix_advances(self, service, db):
+        run_id = await start_issue_run(service)
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id[:12]}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+    async def test_go_by_full_id_still_advances(self, service, db):
+        run_id = await start_issue_run(service)
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", ISSUE_IID, author_user_id=11
+        )
+
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+    async def test_go_unknown_prefix_replies_with_valid_forms(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []  # drop the plan note — only the reply remains
+
+        await service.handle_command_note(
+            PROJECT_ID, "@forge /go e31fbae7", "alice", ISSUE_IID, delivery_id="note-1"
+        )
+
+        (note,) = note_bodies(fake_gitlab)
+        assert "e31fbae7" in note
+        assert "32-hex" in note  # names the valid id forms
+        # Nothing was consumed or advanced.
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+        async with db() as session:
+            (gate,) = (await session.execute(select(GateApproval))).scalars().all()
+        assert gate.consumed_at is None
+
+    async def test_go_unknown_full_id_replies(self, service, fake_gitlab, db):
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {uuid4().hex}", "alice", ISSUE_IID, delivery_id="note-2"
+        )
+
+        # No plan note was posted (no run) — the refusal is the only note.
+        (note,) = note_bodies(fake_gitlab)
+        assert "32-hex" in note
+
+    async def test_go_ambiguous_prefix_replies_with_candidates(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+        # A dead twin sharing the 8-char prefix: the prefix is ambiguous.
+        twin = run_id[:8] + "deadbeef" * 3
+        async with db() as session:
+            session.add(
+                FlowRun(
+                    id=twin,
+                    project_id=PROJECT_ID,
+                    issue_iid=ISSUE_IID,
+                    provider="gitlab",
+                    status=FlowStatus.FAILED.value,
+                )
+            )
+            await session.commit()
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id[:8]}", "alice", ISSUE_IID, delivery_id="note-3"
+        )
+
+        (note,) = note_bodies(fake_gitlab)
+        assert "matches 2 runs" in note
+        assert run_id in note and twin in note  # both FULL ids listed
+        # Ambiguity advances nothing.
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+
+    async def test_non_approver_go_gets_a_note_and_stays_gated(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id[:8]}", "mallory", ISSUE_IID, delivery_id="note-4"
+        )
+
+        (note,) = note_bodies(fake_gitlab)
+        assert "mallory" in note and "approver" in note.lower()
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        async with db() as session:
+            (gate,) = (await session.execute(select(GateApproval))).scalars().all()
+        assert gate.consumed_at is None
+
+    async def test_go_on_wrong_issue_gets_a_note(self, service, fake_gitlab, db):
+        run_id = await start_issue_run(service)
+        fake_gitlab.notes = []
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {run_id}", "alice", 99, delivery_id="note-5"
+        )
+
+        (note,) = note_bodies(fake_gitlab)
+        assert "different issue" in note
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+
+    async def test_duplicate_go_is_a_no_op_and_replies_once_per_note_id(
+        self, service, fake_gitlab, db
+    ):
+        run_id = await start_issue_run(service)
+        note = f"@forge /go {run_id}"
+
+        await service.handle_command_note(
+            PROJECT_ID, note, "alice", ISSUE_IID, author_user_id=11, delivery_id="note-6"
+        )
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+
+        # The same note redelivered twice: a no-op for the run, and exactly
+        # ONE duplicate reply — one reply per note id.
+        await service.handle_command_note(
+            PROJECT_ID, note, "alice", ISSUE_IID, author_user_id=11, delivery_id="note-6"
+        )
+        await service.handle_command_note(
+            PROJECT_ID, note, "alice", ISSUE_IID, author_user_id=11, delivery_id="note-6"
+        )
+
+        duplicates = [body for body in note_bodies(fake_gitlab) if "duplicate" in body]
+        assert len(duplicates) == 1
+        assert run_id[:8] in duplicates[0]
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_CI.value
+        assert len(fake_gitlab.merge_requests) == 1  # no second advance
+        assert len(FakeWriter.instances) == 1
+
+        # A DIFFERENT note id earns its own single reply — the limit is per note.
+        await service.handle_command_note(
+            PROJECT_ID, note, "alice", ISSUE_IID, author_user_id=11, delivery_id="note-7"
+        )
+        duplicates = [body for body in note_bodies(fake_gitlab) if "duplicate" in body]
+        assert len(duplicates) == 2
+
+
 class TestAdvanceFailures:
     async def test_changeset_violations_block_the_run(self, db, fake_gitlab, monkeypatch):
         import forge.runs.service as service_module

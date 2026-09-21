@@ -41,11 +41,51 @@ tokens and cost come ONLY from the drained ``ResultMessage``
 (``usage`` / ``total_cost_usd`` / ``model_usage`` where present);
 anything absent stays absent — unknown is never zero. No receipt fields
 are fabricated from anywhere else.
+
+The SAME contract now drives two more REAL interactive clients
+(``--driver codex | opencode``, or ``FORGE_LANE_DRIVER``; ``claude``
+stays the default and its path is unchanged):
+
+- ``codex`` — :class:`forge.adaptive.drivers.codex_app.CodexAppDriverClient`
+  (built via :func:`codex_app_client_from_env`; the spawned ``codex
+  app-server`` inherits auth from ``~/.codex/auth.json`` or
+  ``OPENAI_API_KEY``/``CODEX_API_KEY``). ``start_thread`` answers at turn
+  ACCEPTANCE, so the lane poll-watches the client's buffered notifications
+  for the thread's ``turn/completed`` (status ``completed`` → exit
+  completed; ``interrupted``/``failed`` → failed, the vendor status rides
+  the meta) and takes usage from the LAST ``thread/tokenUsage/updated``.
+- ``opencode`` — a lane-local ``opencode serve`` spawned by
+  :class:`forge.adaptive.drivers.opencode_serve.OpenCodeServer` plus the
+  real HTTP client (:func:`opencode_client_from_env` with the spawner's
+  loopback URL + pinned password merged over the ambient env; the
+  zai-coding-plan-style route is ``OPENCODE_PROVIDER_ID`` /
+  ``OPENCODE_MODEL_ID``, the generic BYOK provider key is
+  ``OPENCODE_PROVIDER_API_KEY``). The client waits the turn inside
+  ``start_session``; the lane then reads the buffered
+  ``session.execution.succeeded|failed`` verdict (transcript-reconciled
+  assistant messages as the fallback when the event stream was
+  uncovered). There is no cost API: a receipt built from
+  ``session.usage.updated`` tokens (when the event was seen) carries
+  ``completeness: "unknown"`` — input/output at best, never a fabricated
+  cost, and no event means no receipt at all. Permission prompts are
+  answered ``once`` (LIVE-found: the factory default ``reject`` starves
+  every tool call in a task lane).
+
+Both lanes keep the claude lane's budget doctrine: one overall
+``FORGE_LANE_BUDGET_SECONDS`` wall clock; on expiry the running turn is
+interrupted (codex ``turn/interrupt`` — opencode's timed-out
+``start_session`` never yields the session id, so the serve teardown
+bounds the orphaned turn), a short grace window still honors the
+vendor's own terminal verdict, and only a turn that produces nothing at
+all ends as ``budget_exceeded``. The process exits nonzero and the
+reason rides the meta, exactly like the claude path.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import functools
 from dataclasses import dataclass
 import json
 import os
@@ -58,15 +98,30 @@ from forge.adaptive.drivers.claude_sdk import (
     ClaudeSDKDriverClient,
     claude_sdk_client_from_env,
 )
+from forge.adaptive.drivers.codex_app import (
+    CodexAppError,
+    codex_app_client_from_env,
+)
+from forge.adaptive.drivers.opencode import opencode_client_from_env
+from forge.adaptive.drivers.opencode_serve import opencode_server_from_env
 
 __all__ = [
+    "CODEX_LANE_DRIVER_ID",
     "LANE_DRIVER_ID",
+    "LANE_DRIVER_IDS",
     "NO_COMMIT_ADDENDUM",
+    "OPENCODE_LANE_DRIVER_ID",
     "LaneOutcome",
     "build_task",
+    "classify_codex_turn",
+    "classify_opencode_events",
     "classify_result",
+    "codex_usage_receipt",
+    "drive_codex_lane",
     "drive_lane",
     "main",
+    "opencode_usage_receipt",
+    "run_opencode_lane",
     "usage_receipt",
     "write_artifacts",
 ]
@@ -75,6 +130,22 @@ __all__ = [
 #: (:data:`forge.runs.harness_selection.SHIPPED_DRIVERS`) — the id the
 #: worker dispatches as ``FORGE_HARNESS_DRIVER`` and the meta's ``driver``.
 LANE_DRIVER_ID = "claude-sdk-lane"
+
+#: The codex lane's registered harness id — the codex twin of
+#: :data:`LANE_DRIVER_ID` (one GitLab template, one driver id, same meta).
+CODEX_LANE_DRIVER_ID = "codex-sdk-lane"
+
+#: The opencode lane's registered harness id.
+OPENCODE_LANE_DRIVER_ID = "opencode-sdk-lane"
+
+#: ``--driver`` key → registered harness id (the meta ``driver`` and the
+#: template filter value). The worker dispatches the id; the lane takes
+#: the short key on the CLI.
+LANE_DRIVER_IDS: dict[str, str] = {
+    "claude": LANE_DRIVER_ID,
+    "codex": CODEX_LANE_DRIVER_ID,
+    "opencode": OPENCODE_LANE_DRIVER_ID,
+}
 
 #: The brief file the lane job writes (``$FORGE_PLAN``) and the agent
 #: works from. In-repo control directory, never /tmp.
@@ -281,6 +352,361 @@ async def drive_lane(
         await client.close(session_id)
 
 
+# ---------------------------------------------------------------------------
+# The codex lane (CodexAppDriverClient over ``codex app-server`` stdio)
+# ---------------------------------------------------------------------------
+
+
+def _last_codex_turn_completed(events: list[dict[str, Any]], thread_id: str) -> dict | None:
+    """Params of the LAST ``turn/completed`` for *thread_id*, or None.
+
+    §7.1: turn events carry ``threadId`` context; a frame that names a
+    DIFFERENT thread is skipped (the client only tracks its own threads,
+    but the lane never assumes it is the only one on the connection).
+    """
+    found: dict | None = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("method") != "turn/completed":
+            continue
+        params = event.get("params")
+        params = params if isinstance(params, dict) else {}
+        owner = params.get("threadId")
+        if owner not in (None, thread_id):
+            continue
+        found = params
+    return found
+
+
+def classify_codex_turn(params: dict | None) -> tuple[str, str, str]:
+    """(exit classification, terminal reason, error detail) for a
+    ``turn/completed``.
+
+    The LIVE-verified statuses are ``completed`` / ``interrupted`` /
+    ``failed`` (docs/research/codex-app-server.md §7.1 + the 0.153.4
+    correction): only ``completed`` exits clean; the vendor status itself
+    rides the meta as the reason; a frame without a status is classified
+    from what it DID carry, never guessed.
+    """
+    turn = params.get("turn") if isinstance(params, dict) else None
+    turn = turn if isinstance(turn, dict) else {}
+    status = str(turn.get("status") or "").strip()
+    error = ""
+    err = turn.get("error")
+    if isinstance(err, dict):
+        error = str(err.get("message") or "")
+    if status == "completed":
+        return "completed", "completed", error
+    if status:
+        return "failed", status, error
+    return "failed", "turn_end_unobserved", error
+
+
+def _int_counter(value: Any) -> int | None:
+    """A non-negative int receipt value; anything else is dropped."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+#: ``thread/tokenUsage/updated`` counter spellings → meta receipt keys,
+#: first hit per category (the payload shape is not in the research doc —
+#: both the camelCase and snake_case vendor spellings are accepted, and
+#: nothing else is guessed).
+_CODEX_TOKEN_KEYS: tuple[tuple[str, str], ...] = (
+    ("inputTokens", "input_tokens"),
+    ("input_tokens", "input_tokens"),
+    ("cachedInputTokens", "cached_input_tokens"),
+    ("cacheReadInputTokens", "cached_input_tokens"),
+    ("cached_input_tokens", "cached_input_tokens"),
+    ("cacheCreationInputTokens", "cache_write_tokens"),
+    ("cacheWriteInputTokens", "cache_write_tokens"),
+    ("cache_write_tokens", "cache_write_tokens"),
+    ("outputTokens", "output_tokens"),
+    ("output_tokens", "output_tokens"),
+)
+
+
+def codex_usage_receipt(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The meta ``usage`` receipt from the LAST ``thread/tokenUsage/updated``.
+
+    The event is a per-thread running aggregate, so the last one seen
+    wins (never a sum — summing a running total double-counts). The
+    counters may ride the params directly or one dict deep; anything
+    unparseable is dropped and a stream without the event yields None —
+    unknown stays unknown, never zero.
+    """
+    params: dict | None = None
+    for event in events:
+        if isinstance(event, dict) and event.get("method") == "thread/tokenUsage/updated":
+            raw = event.get("params")
+            params = raw if isinstance(raw, dict) else {}
+    if params is None:
+        return None
+    receipt: dict[str, Any] = {}
+    # The counters may ride the params directly or one dict deep (shape
+    # unverified) — every nesting is scanned, first key hit per category.
+    for nested in (params, params.get("usage"), params.get("tokenUsage")):
+        if not isinstance(nested, dict):
+            continue
+        for vendor_key, meta_key in _CODEX_TOKEN_KEYS:
+            if meta_key in receipt:
+                continue
+            token = _int_counter(nested.get(vendor_key))
+            if token is not None:
+                receipt[meta_key] = token
+    if not receipt:
+        return None
+    receipt["driver"] = CODEX_LANE_DRIVER_ID
+    receipt["completeness"] = "aggregate"
+    receipt["source"] = "codex-app-server"
+    return receipt
+
+
+async def _poll_codex_completion(
+    client: Any,
+    thread_id: str,
+    *,
+    deadline: float,
+    poll_s: float,
+) -> dict | None:
+    """Poll the client's buffered notifications for the thread's
+    ``turn/completed`` (``events()`` re-reads the whole buffer — it does
+    not consume — so every poll re-scans cheaply and keeps the LAST
+    verdict)."""
+    loop = asyncio.get_running_loop()
+    while True:
+        params = _last_codex_turn_completed(client.events(), thread_id)
+        if params is not None or loop.time() >= deadline:
+            return params
+        await asyncio.sleep(poll_s)
+
+
+async def drive_codex_lane(
+    client: Any,
+    *,
+    task: str,
+    budget_s: float,
+    grace_s: float = _DEFAULT_GRACE_S,
+    poll_s: float = _POLL_INTERVAL_S,
+) -> LaneOutcome:
+    """Drive ONE codex thread to its ``turn/completed``, bounded.
+
+    ``start_thread(task)`` returns at turn ACCEPTANCE (LIVE-verified:
+    the ``turn/start`` response is not the turn result), so the lane
+    watches the notification buffer until the thread's verdict. On budget
+    expiry the turn is interrupted — completion keyed off the vendor's
+    ``turn/completed(interrupted)`` notification, never the method
+    response (§5.3) — and a short grace window still honors that verdict;
+    only a turn that produces no verdict at all ends ``budget_exceeded``.
+    The client connection is ALWAYS closed (teardown is bounded inside
+    the driver, so no path out of here hangs the lane).
+    """
+    thread_id = await client.start_thread(task)
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget_s
+        params = await _poll_codex_completion(client, thread_id, deadline=deadline, poll_s=poll_s)
+        if params is None:
+            try:
+                await asyncio.wait_for(client.interrupt(thread_id), timeout=grace_s)
+            except TimeoutError:
+                pass  # the grace poll below is the turn's last chance
+            except CodexAppError:
+                # e.g. the turn ended by itself at the deadline — the
+                # buffered verdict (if any) decides, never the error.
+                pass
+            params = await _poll_codex_completion(
+                client, thread_id, deadline=loop.time() + grace_s, poll_s=poll_s
+            )
+            if params is None:
+                return LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
+        exit_status, reason, error = classify_codex_turn(params)
+        return LaneOutcome(
+            exit_status=exit_status,
+            terminal_reason=reason,
+            usage=codex_usage_receipt(client.events()),
+            error=error,
+        )
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# The opencode lane (lane-local ``opencode serve`` + the real HTTP client)
+# ---------------------------------------------------------------------------
+
+#: The v2.0.10 turn verdicts (LIVE-verified — opencode.py LIVE CORRECTION).
+_OPENCODE_TURN_DONE_EVENT_TYPES = ("session.execution.succeeded", "session.execution.failed")
+
+
+def _opencode_event_data(event: Any) -> dict[str, Any]:
+    data = event.get("data") if isinstance(event, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def _opencode_verdict_seen(events: list[dict[str, Any]], session_id: str) -> bool:
+    """Whether the buffered stream already carries a classifiable verdict:
+    the session's ``session.execution.*`` event, or (when the stream was
+    uncovered) a terminally-finished assistant message in a reconciled
+    transcript."""
+    if any(
+        isinstance(event, dict)
+        and event.get("type") in _OPENCODE_TURN_DONE_EVENT_TYPES
+        and _opencode_event_data(event).get("sessionID") == session_id
+        for event in events
+    ):
+        return True
+    return classify_opencode_events(events, session_id)[1] != "turn_end_unobserved"
+
+
+def classify_opencode_events(events: list[dict[str, Any]], session_id: str) -> tuple[str, str]:
+    """(exit classification, terminal reason) from the session's events.
+
+    The buffered ``session.execution.succeeded|failed`` verdict wins (last
+    one for the session). Without it — the SSE stream was uncovered and
+    completion was reconciled from the transcript — the LAST terminal
+    assistant message decides: ``finish: "stop"`` completed,
+    ``"error"`` failed (the interrupted turn ends ``error`` with empty
+    content; there is no dedicated interrupted value). Nothing observable
+    at all stays honestly unobserved.
+    """
+    verdict = ""
+    for event in events:
+        if (
+            isinstance(event, dict)
+            and event.get("type") in _OPENCODE_TURN_DONE_EVENT_TYPES
+            and _opencode_event_data(event).get("sessionID") == session_id
+        ):
+            verdict = str(event.get("type"))
+    if verdict == "session.execution.succeeded":
+        return "completed", "session.execution.succeeded"
+    if verdict == "session.execution.failed":
+        return "failed", "session.execution.failed"
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "transcript.reconciled":
+            continue
+        messages = _opencode_event_data(event).get("messages")
+        for message in reversed(messages if isinstance(messages, list) else []):
+            if not isinstance(message, dict) or message.get("type") != "assistant":
+                continue
+            finish = message.get("finish")
+            if finish == "stop":
+                return "completed", "transcript.stop"
+            if finish == "error":
+                return "failed", "transcript.error"
+    return "failed", "turn_end_unobserved"
+
+
+#: ``session.usage.updated`` token spellings → meta receipt keys, first hit
+#: per category (input/output only — there is no cost API to read).
+_OPENCODE_TOKEN_KEYS: tuple[tuple[str, str], ...] = (
+    ("input", "input_tokens"),
+    ("inputTokens", "input_tokens"),
+    ("input_tokens", "input_tokens"),
+    ("output", "output_tokens"),
+    ("outputTokens", "output_tokens"),
+    ("output_tokens", "output_tokens"),
+)
+
+
+def opencode_usage_receipt(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The meta ``usage`` receipt from ``session.usage.updated``, if seen.
+
+    opencode serves no cost API and the event may never fire (or may miss
+    tool rounds) — the receipt is completeness ``unknown`` by doctrine:
+    input/output tokens at best, never a fabricated cost, and no event
+    means no receipt at all (None, not a zeroed dict).
+    """
+    data: dict[str, Any] | None = None
+    for event in events:
+        if isinstance(event, dict) and event.get("type") == "session.usage.updated":
+            data = _opencode_event_data(event)
+    if data is None:
+        return None
+    sources: list[Any] = [data, data.get("tokens"), data.get("usage")]
+    receipt: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for vendor_key, meta_key in _OPENCODE_TOKEN_KEYS:
+            if meta_key in receipt:
+                continue
+            token = _int_counter(source.get(vendor_key))
+            if token is not None:
+                receipt[meta_key] = token
+    if not receipt:
+        return None
+    receipt["driver"] = OPENCODE_LANE_DRIVER_ID
+    receipt["completeness"] = "unknown"
+    receipt["source"] = "session.usage.updated"
+    return receipt
+
+
+async def run_opencode_lane(
+    *,
+    task: str,
+    budget_s: float,
+    grace_s: float = _DEFAULT_GRACE_S,
+    poll_s: float = _POLL_INTERVAL_S,
+    env: dict[str, str] | None = None,
+) -> LaneOutcome:
+    """Spawn the lane-local server, drive ONE task, classify + receipt.
+
+    The server (:class:`OpenCodeServer`) is lane-owned: loopback-bound,
+    password-pinned by the spawner, torn down deterministically. The
+    client factory env merges the spawner's URL/password over the ambient
+    environment — ``OPENCODE_PROVIDER_ID`` / ``OPENCODE_MODEL_ID`` (and
+    the generic BYOK ``OPENCODE_PROVIDER_API_KEY``) ride ambient — with
+    two lane decisions: permission prompts are answered ``once``
+    (LIVE-found: the factory default ``reject`` starves every tool call
+    in a task lane) and the client's own turn-wait budget IS the lane
+    budget. ``start_session`` returns only at turn completion, so a
+    timed-out turn never yields its session id — there is nothing to
+    abort by id, and the server teardown bounds the orphaned turn; that
+    case is recorded honestly as ``budget_exceeded``.
+    """
+    source = os.environ if env is None else env
+    server = opencode_server_from_env(env=source)
+    async with server:
+        client_env = {
+            **source,
+            "OPENCODE_SERVER_URL": server.url,
+            "OPENCODE_SERVER_PASSWORD": server.password,
+            "OPENCODE_SESSION_DIRECTORY": source.get("OPENCODE_SESSION_DIRECTORY") or os.getcwd(),
+            "OPENCODE_PERMISSION_RESPONSE": source.get("OPENCODE_PERMISSION_RESPONSE") or "once",
+            "OPENCODE_PROMPT_TIMEOUT": str(budget_s),
+        }
+        client = opencode_client_from_env(
+            source.get("OPENCODE_PROVIDER_API_KEY") or None, env=client_env
+        )
+        try:
+            try:
+                # Belt over the client's own budget: even an
+                # operator-overridden OPENCODE_PROMPT_TIMEOUT can never
+                # unbind the lane.
+                session_id = await asyncio.wait_for(
+                    client.start_session(task), timeout=budget_s + grace_s
+                )
+            except TimeoutError:
+                return LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + grace_s
+            events: list[dict[str, Any]] = []
+            while True:
+                events = await client.events(session_id)
+                if _opencode_verdict_seen(events, session_id) or loop.time() >= deadline:
+                    break
+                await asyncio.sleep(poll_s)
+            exit_status, reason = classify_opencode_events(events, session_id)
+            return LaneOutcome(
+                exit_status=exit_status,
+                terminal_reason=reason,
+                usage=opencode_usage_receipt(events),
+            )
+        finally:
+            await client.aclose()
+
+
 def write_artifacts(
     outcome: LaneOutcome,
     *,
@@ -288,6 +714,7 @@ def write_artifacts(
     model: str,
     meta_path: str = _META_PATH,
     usage_path: str = _USAGE_PATH,
+    driver_id: str = LANE_DRIVER_ID,
 ) -> dict[str, Any]:
     """Write the batch lane's meta + usage contract for *outcome*.
 
@@ -295,11 +722,12 @@ def write_artifacts(
     (``attempt_base`` / ``driver`` / ``model`` / ``exit`` / ``usage``),
     plus the additive ``terminal_reason`` audit field; ``.forge/usage.json``
     carries the same receipt beside it (the batch lane's layout). Unknown
-    usage stays ``null`` — never a zeroed dict.
+    usage stays ``null`` — never a zeroed dict. *driver_id* is the lane's
+    registered harness id (:data:`LANE_DRIVER_IDS` value).
     """
     meta: dict[str, Any] = {
         "attempt_base": str(attempt_base or ""),
-        "driver": LANE_DRIVER_ID,
+        "driver": str(driver_id or LANE_DRIVER_ID),
         "model": str(model or ""),
         "exit": outcome.exit_status,
         "terminal_reason": outcome.terminal_reason,
@@ -334,25 +762,78 @@ def _env_seconds(name: str, default: float) -> float:
     return value
 
 
-def main(*, sdk: ModuleType | None = None) -> int:
+def _parse_driver_flag(argv: list[str]) -> str | None:
+    """The ``--driver`` CLI key (claude | codex | opencode), or None."""
+    parser = argparse.ArgumentParser(
+        prog="python -m forge.lane_driver",
+        description="Drive ONE interactive-driver lane turn (EXE-02).",
+    )
+    parser.add_argument(
+        "--driver",
+        default=None,
+        choices=tuple(LANE_DRIVER_IDS),
+        help="lane driver key (default: $FORGE_LANE_DRIVER, else claude)",
+    )
+    return parser.parse_args(argv).driver
+
+
+def _lane_model(driver_key: str) -> str:
+    """The meta ``model`` route per lane, from the dispatch env."""
+    if driver_key == "codex":
+        return (
+            os.environ.get("FORGE_CODEX_MODEL")
+            or os.environ.get("CODEX_MODEL")
+            or os.environ.get("FORGE_HARNESS_MODEL")
+            or ""
+        )
+    if driver_key == "opencode":
+        return (
+            os.environ.get("FORGE_OPENCODE_MODEL")
+            or os.environ.get("OPENCODE_MODEL_ID")
+            or os.environ.get("FORGE_HARNESS_MODEL")
+            or ""
+        )
+    return os.environ.get("FORGE_CLAUDE_MODEL") or os.environ.get("FORGE_HARNESS_MODEL") or ""
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    sdk: ModuleType | None = None,
+) -> int:
     """Entry point: brief → ONE driven turn → the candidate meta contract.
 
-    *sdk* is the test seam (:func:`claude_sdk_client_from_env` accepts the
-    module stand-in); the lane job runs with no argument and the real
-    import-guarded package. Every failure path still writes the meta (the
-    template uploads ``when: always``; the worker classifies from it) and
-    returns nonzero — the process exit mirrors the batch lane's claude
-    exit: 0 only for a cleanly completed turn.
+    *argv* is parsed only when passed (the ``__main__`` entry hands it
+    ``sys.argv[1:]``; in-process callers and the tests dispatch via
+    ``FORGE_LANE_DRIVER`` instead). *sdk* is the claude test seam
+    (:func:`claude_sdk_client_from_env` accepts the module stand-in); the
+    lane job runs with no argument and the real import-guarded package.
+    Every failure path still writes the meta (the template uploads
+    ``when: always``; the worker classifies from it) and returns nonzero —
+    the process exit mirrors the batch lane's claude exit: 0 only for a
+    cleanly completed turn.
     """
+    flag_driver = _parse_driver_flag(argv) if argv is not None else None
+    driver_key = (
+        flag_driver or os.environ.get("FORGE_LANE_DRIVER") or ""
+    ).strip().lower() or "claude"
+    driver_id = LANE_DRIVER_IDS.get(driver_key, driver_key)
+
     brief_path = Path(os.environ.get("FORGE_BRIEF") or _BRIEF_PATH)
     attempt_base = os.environ.get("FORGE_ATTEMPT_BASE", "")
-    model = os.environ.get("FORGE_CLAUDE_MODEL") or os.environ.get("FORGE_HARNESS_MODEL") or ""
+    model = _lane_model(driver_key)
 
     def _fail(reason: str, detail: str = "") -> int:
         outcome = LaneOutcome(exit_status="failed", terminal_reason=reason, error=detail)
-        write_artifacts(outcome, attempt_base=attempt_base, model=model)
+        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
         print(f"lane_driver: {reason}" + (f" ({detail})" if detail else ""), file=sys.stderr)
         return 1
+
+    if driver_key not in LANE_DRIVER_IDS:
+        return _fail(
+            "unknown_driver",
+            f"{driver_key!r} (expected one of {', '.join(sorted(LANE_DRIVER_IDS))})",
+        )
 
     if not brief_path.is_file():
         return _fail("brief_missing", f"brief file {str(brief_path)!r} is missing")
@@ -361,34 +842,54 @@ def main(*, sdk: ModuleType | None = None) -> int:
         budget_s = _env_seconds("FORGE_LANE_BUDGET_SECONDS", _DEFAULT_BUDGET_S)
         grace_s = _env_seconds("FORGE_LANE_GRACE_SECONDS", _DEFAULT_GRACE_S)
         poll_s = _env_seconds("FORGE_LANE_POLL_SECONDS", _POLL_INTERVAL_S)
-        # Ambient env carries the gateway (ANTHROPIC_BASE_URL/AUTH_TOKEN),
-        # FORGE_CLAUDE_MODEL, FORGE_CLAUDE_CWD=repo and IS_SANDBOX; the
-        # factory owns every knob and its fail-closed parsing.
-        client = claude_sdk_client_from_env(sdk=sdk)
         task = build_task(
             brief_path.read_text(errors="replace"),
             os.environ.get("FORGE_ISSUE_IID", ""),
         )
-    except (RuntimeError, ValueError) as exc:
-        # RuntimeError here is the driver's actionable missing-SDK hint.
-        reason = "sdk_missing" if "claude-agent-sdk" in str(exc) else "driver_setup_error"
-        return _fail(reason, str(exc))
+    except ValueError as exc:
+        return _fail("driver_setup_error", str(exc))
+
+    if driver_key == "claude":
+        try:
+            # Ambient env carries the gateway (ANTHROPIC_BASE_URL/AUTH_TOKEN),
+            # FORGE_CLAUDE_MODEL, FORGE_CLAUDE_CWD=repo and IS_SANDBOX; the
+            # factory owns every knob and its fail-closed parsing.
+            client = claude_sdk_client_from_env(sdk=sdk)
+        except (RuntimeError, ValueError) as exc:
+            # RuntimeError here is the driver's actionable missing-SDK hint.
+            reason = "sdk_missing" if "claude-agent-sdk" in str(exc) else "driver_setup_error"
+            return _fail(reason, str(exc))
+        drive = functools.partial(
+            drive_lane, client, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+        )
+    elif driver_key == "codex":
+        # Ambient env carries CODEX_BINARY/CODEX_CWD/CODEX_MODEL and the
+        # inherited auth (~/.codex/auth.json or OPENAI_API_KEY/CODEX_API_KEY).
+        try:
+            client = codex_app_client_from_env()
+        except (RuntimeError, ValueError) as exc:
+            return _fail("driver_setup_error", str(exc))
+        drive = functools.partial(
+            drive_codex_lane, client, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+        )
+    else:  # opencode — the server + client are built inside the coroutine
+        # (the spawner owns the loopback listener's lifetime).
+        drive = functools.partial(
+            run_opencode_lane, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+        )
 
     try:
-        outcome = asyncio.run(
-            drive_lane(client, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s)
-        )
+        outcome = asyncio.run(drive())
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
-    write_artifacts(outcome, attempt_base=attempt_base, model=model)
+    write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
     print(
-        f"lane_driver: {LANE_DRIVER_ID} exit={outcome.exit_status} "
-        f"reason={outcome.terminal_reason}",
+        f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,
     )
     return 0 if outcome.exit_status == "completed" else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

@@ -112,6 +112,11 @@ jobs:
       ${{ if eq(parameters.driver, 'claude-sdk-lane') }}:
         LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
         LANE_ANTHROPIC_BASE_URL: $(ANTHROPIC_BASE_URL)
+      ${{ if eq(parameters.driver, 'codex-sdk-lane') }}:
+        LANE_OPENAI_API_KEY: $(OPENAI_API_KEY)
+        LANE_CODEX_API_KEY: $(CODEX_API_KEY)
+      ${{ if eq(parameters.driver, 'opencode-sdk-lane') }}:
+        LANE_ZAI_API_KEY: $(ZAI_API_KEY)
       ${{ if eq(parameters.driver, 'grok-build') }}:
         LANE_FORGE_GROK_AUTH: $(FORGE_GROK_AUTH)
       ${{ if eq(parameters.driver, 'opencode') }}:

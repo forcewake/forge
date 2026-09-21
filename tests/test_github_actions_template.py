@@ -297,7 +297,9 @@ class TestDriverCredentialGating:
         assert "COPILOT_GITHUB_TOKEN" in MIRROR.read_text()
         assert "XAI_API_KEY" not in MIRROR.read_text()
         assert template_lines == mirror_lines
-        assert len(template_lines) == 6  # 3 anthropic + zai + grok + copilot
+        assert (
+            len(template_lines) == 9
+        )  # 3 anthropic + zai + grok + copilot + 3 codex + opencode-sdk
 
 
 # ----------------------------------------------------------------------

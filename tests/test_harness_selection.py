@@ -241,16 +241,18 @@ class TestValidatePreference:
         """The builtin lane dispatches no harness — only the id set binds."""
         validate_preference(["grok-build"], None)
 
-    def test_shipped_driver_set_is_the_five_lanes(self):
-        # The four scripted harness templates plus the EXE-02 interactive
-        # claude-sdk-lane (the Claude Agent SDK driver — same credential
-        # recipe as claude-code, same candidate contract).
+    def test_shipped_driver_set_is_the_seven_lanes(self):
+        # The four scripted harness templates plus the three EXE-02
+        # interactive SDK lanes (claude/codex/opencode — same candidate
+        # contract; the agent is driven by forge.lane_driver).
         assert SHIPPED_DRIVERS == {
             "claude-code",
             "grok-build",
             "opencode",
             "copilot",
             "claude-sdk-lane",
+            "codex-sdk-lane",
+            "opencode-sdk-lane",
         }
 
     def test_the_sdk_lane_shares_the_claude_code_credential_recipe(self):
@@ -266,6 +268,23 @@ class TestValidatePreference:
         assert (
             DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"]
             == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"]
+        )
+
+    def test_codex_and_opencode_sdk_lanes_have_their_own_recipes(self):
+        from forge.runs.harness_selection import (
+            DRIVER_CREDENTIAL_VARS,
+            DRIVER_OPTIONAL_CREDENTIAL_VARS,
+        )
+
+        # codex: ambient API-key auth; the ChatGPT-login blob is the
+        # optional surface the template lands as ~/.codex/auth.json.
+        assert DRIVER_CREDENTIAL_VARS["codex-sdk-lane"] == ("OPENAI_API_KEY", "CODEX_API_KEY")
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["codex-sdk-lane"] == ("FORGE_CODEX_AUTH",)
+        # opencode: the SAME ambient key the batch opencode lane consumes;
+        # the generic BYOK PUT surface is optional.
+        assert DRIVER_CREDENTIAL_VARS["opencode-sdk-lane"] == ("ZAI_API_KEY",)
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["opencode-sdk-lane"] == (
+            "OPENCODE_PROVIDER_API_KEY",
         )
 
 

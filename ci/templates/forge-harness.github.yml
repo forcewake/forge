@@ -33,7 +33,7 @@ on:
         required: true
         type: string
       driver:
-        description: "harness driver: claude-code | grok-build | opencode | copilot | claude-sdk-lane"
+        description: "harness driver: claude-code | grok-build | opencode | copilot | claude-sdk-lane | codex-sdk-lane | opencode-sdk-lane"
         required: true
         type: string
       model:
@@ -234,11 +234,17 @@ jobs:
           #   claude-sdk-lane: the same ANTHROPIC_* gateway recipe (EXE-02)
           #   grok-build: FORGE_GROK_AUTH (full ~/.grok/auth.json contents)
           #   opencode: ZAI_API_KEY
+          #   codex-sdk-lane: OPENAI_API_KEY/CODEX_API_KEY (+ FORGE_CODEX_AUTH
+          #     — the optional ChatGPT-login blob)
+          #   opencode-sdk-lane: the same ZAI_API_KEY the batch lane uses
           #   copilot: COPILOT_GITHUB_TOKEN
           ANTHROPIC_API_KEY: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_API_KEY || '' }}
           ANTHROPIC_AUTH_TOKEN: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
           ANTHROPIC_BASE_URL: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_BASE_URL || '' }}
-          ZAI_API_KEY: ${{ inputs.driver == 'opencode' && secrets.ZAI_API_KEY || '' }}
+          ZAI_API_KEY: ${{ (inputs.driver == 'opencode' || inputs.driver == 'opencode-sdk-lane') && secrets.ZAI_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ inputs.driver == 'codex-sdk-lane' && secrets.OPENAI_API_KEY || '' }}
+          CODEX_API_KEY: ${{ inputs.driver == 'codex-sdk-lane' && secrets.CODEX_API_KEY || '' }}
+          FORGE_CODEX_AUTH: ${{ inputs.driver == 'codex-sdk-lane' && secrets.FORGE_CODEX_AUTH || '' }}
           FORGE_GROK_AUTH: ${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}
           COPILOT_GITHUB_TOKEN: ${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
           # R15: per-driver CLI version pins (JSON object driver → version;

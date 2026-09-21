@@ -240,11 +240,67 @@ _CI_ACTIVE_STATUSES = frozenset(
     {"created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"}
 )
 
-#: ``/go <run-id>`` — full 32-hex run id as posted in the plan comment.
-_GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{32})\b")
+#: ``/go <run-id>`` — the full 32-hex run id from the plan footer OR an
+#: unambiguous prefix of at least 8 hex chars (the plan heading shows the
+#: 8-char form; LIVE 2026-09-21: operators typing the short form fell
+#: through the old ``{32}``-only regex and the note was silently ignored).
+_GO_RE = re.compile(r"/go\s+([0-9a-fA-F]{8,32})\b")
 _CANCEL_RE = re.compile(r"/cancel(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
 #: ``/retry [run-id]`` — bare retries the issue's latest failed/blocked run.
 _RETRY_RE = re.compile(r"/retry(?:\s+([0-9a-f]{8,32})\b)?", re.IGNORECASE)
+
+#: The journaled kind of a /go refusal reply (one per ignored /go note).
+_GO_REFUSAL_KIND = "go_refusal_note"
+
+
+def _go_unknown_run_body(requested: str) -> str:
+    """The reply to a /go id that matches no run on this issue.
+
+    Names BOTH valid id forms so the operator can self-serve: the full id
+    (the plan footer's copy-paste command) and the ≥8-hex unambiguous
+    prefix (the plan heading's short form).
+    """
+    return (
+        f"`/go {requested}` matched no run on this issue. Valid forms: the full "
+        "32-hex run id (`@forge /go <run-id>`, as in the plan footer) or an "
+        "unambiguous prefix of at least 8 hex characters (the plan heading's "
+        f"short id).\n\n*This is an automated message.*"
+    )
+
+
+def _go_ambiguous_body(requested: str, candidate_ids: list[str]) -> str:
+    """The reply to a /go prefix matching more than one run: list them."""
+    listed = "\n".join(f"- `{run_id}`" for run_id in candidate_ids)
+    return (
+        f"`/go {requested}` matches {len(candidate_ids)} runs on this issue — the "
+        f"prefix is ambiguous. Use the full id:\n\n{listed}\n\n"
+        "*This is an automated message.*"
+    )
+
+
+def _go_wrong_issue_body(requested: str) -> str:
+    return (
+        f"`/go {requested[:8]}` targets a run planned on a different issue — each run "
+        "is approved on the issue it was planned on (`/status` here shows this "
+        "issue's runs).\n\n*This is an automated message.*"
+    )
+
+
+def _go_not_approver_body(author: str) -> str:
+    return (
+        f"`/go` from @{author} was ignored — gate approval is restricted to the "
+        "configured approvers (FORGE_APPROVERS). The run stays at its "
+        "gate.\n\n*This is an automated message.*"
+    )
+
+
+def _go_duplicate_body(run_id: str, status: str) -> str:
+    return (
+        f"`/go` for run `{run_id[:8]}` is a duplicate — the gate was already "
+        f"consumed and the run is `{status}`. Nothing to do.\n\n"
+        "*This is an automated message.*"
+    )
+
 
 #: Repair-loop log budgets (ADR-0013: bounded repair context).
 REPAIR_LOG_PER_JOB_CHARS = 4000
@@ -1846,49 +1902,106 @@ class RunService:
         issue_iid: int | None,
         author_user_id: int = 0,
         now: datetime | None = None,
+        delivery_id: str | None = None,
     ) -> None:
         """``@forge /go <run-id>``: validate + consume the gate, then advance.
 
+        The run id is the full 32-hex id from the plan footer OR an
+        unambiguous ≥8-hex prefix (the plan heading's short form — LIVE
+        2026-09-21: the short form used to miss the regex and the note was
+        ignored silently, with the step even recording "succeeded"). Every
+        ignore path now answers the operator with one journaled note,
+        rate-limited to ONE reply per note id (a bot reply storm would be
+        worse than silence).
+
         Idempotent: a re-delivered note finds the run already out of
-        ``waiting_approval`` or the gate already consumed — both ignore.
+        ``waiting_approval`` or the gate already consumed — both ignore (with
+        a one-line duplicate reply); the gate consumption logic itself is
+        unchanged.
         """
         match = _GO_RE.search(note_text or "")
         if match is None:
             return
-        run_id = match.group(1).lower()
+        requested = match.group(1).lower()
         now = now or datetime.now(timezone.utc)
         resuming = False
+        # An ignored /go no longer returns silently: the refusal body is
+        # composed inside the session but POSTED after it closes (the note
+        # journal opens its own session — never nested under this one).
+        refusal_body: str | None = None
+        refusal_run_id: str | None = None
 
         async with self._session_factory() as session:
             controller = Controller(session)
-            run = await session.get(FlowRun, run_id)
-            if run is None or run.project_id != project_id:
-                logger.info("/go references unknown run %s — ignoring", run_id[:8])
-                return
-            if run.issue_iid != issue_iid:
-                logger.info("/go for run %s posted on a different issue — ignoring", run_id[:8])
-                return
-            if run.status in _RESUMABLE_ADVANCE_STATUSES:
-                # ADR-0017 §3: the gate is consumed and a crashed worker left
-                # the run mid-advance; the re-claimed command step is the
-                # recovery driver. The leg below looks for the
-                # already-existing effects before creating new ones.
-                resuming = True
-            elif run.status != FlowStatus.WAITING_APPROVAL.value:
-                # Already advanced (or terminal) — duplicate /go delivery.
-                logger.info(
-                    "/go for run %s in status %s — ignoring duplicate", run_id[:8], run.status
+            run: FlowRun | None = None
+            if len(requested) == 32:
+                run = await session.get(FlowRun, requested)
+                if run is None or run.provider != "gitlab" or run.project_id != project_id:
+                    logger.info("/go references unknown run %s — ignoring", requested[:8])
+                    refusal_body = _go_unknown_run_body(requested)
+                elif run.issue_iid != issue_iid:
+                    logger.info("/go for run %s posted on a different issue — ignoring", run.id[:8])
+                    refusal_body = _go_wrong_issue_body(requested)
+                    refusal_run_id = run.id
+            else:
+                # Short id (the plan heading shows the 8-char form): resolve
+                # by prefix among THIS issue's runs — provider/project/issue-
+                # scoped like every subject lookup (R03/A07). Ambiguous or
+                # unmatched is answered with the valid id forms, never
+                # silence.
+                matches = (
+                    (
+                        await session.execute(
+                            select(FlowRun)
+                            .where(
+                                FlowRun.provider == "gitlab",
+                                FlowRun.project_id == project_id,
+                                FlowRun.issue_iid == issue_iid,
+                                FlowRun.id.like(f"{requested}%"),
+                            )
+                            .order_by(FlowRun.created_at.desc())
+                        )
+                    )
+                    .scalars()
+                    .all()
                 )
-                return
+                if len(matches) == 1:
+                    run = matches[0]
+                elif not matches:
+                    logger.info("/go id %s matches no run on this issue — ignoring", requested[:8])
+                    refusal_body = _go_unknown_run_body(requested)
+                else:
+                    logger.info(
+                        "/go prefix %s matches %d runs on this issue — ignoring",
+                        requested[:8],
+                        len(matches),
+                    )
+                    refusal_body = _go_ambiguous_body(requested, [found.id for found in matches])
 
-            if not resuming:
-                # ADR-0009: authority comes from trusted configuration, not authorship.
-                if author_username not in self._approvers():
+            if refusal_body is None:
+                run_id = run.id
+                if run.status in _RESUMABLE_ADVANCE_STATUSES:
+                    # ADR-0017 §3: the gate is consumed and a crashed worker left
+                    # the run mid-advance; the re-claimed command step is the
+                    # recovery driver. The leg below looks for the
+                    # already-existing effects before creating new ones.
+                    resuming = True
+                elif run.status != FlowStatus.WAITING_APPROVAL.value:
+                    # Already advanced (or terminal) — duplicate /go delivery.
+                    logger.info(
+                        "/go for run %s in status %s — ignoring duplicate", run_id[:8], run.status
+                    )
+                    refusal_body = _go_duplicate_body(run_id, run.status)
+                    refusal_run_id = run_id
+                elif author_username not in self._approvers():
+                    # ADR-0009: authority comes from trusted configuration, not authorship.
                     logger.info(
                         "/go from @%s who is not in FORGE_APPROVERS — ignoring", author_username
                     )
-                    return
+                    refusal_body = _go_not_approver_body(author_username)
+                    refusal_run_id = run_id
 
+            if refusal_body is None and not resuming:
                 gate = (
                     (
                         await session.execute(
@@ -1922,8 +2035,10 @@ class RunService:
                     await consume_approval(session, gate.id, now)
                 except GateAlreadyConsumed:
                     logger.info("Gate for run %s already consumed — ignoring", run_id[:8])
-                    return
+                    refusal_body = _go_duplicate_body(run_id, run.status)
+                    refusal_run_id = run_id
 
+            if refusal_body is None and not resuming:
                 # R04 (ADR-0018 §1): consuming the gate binds the run to the
                 # executable RunSpec the pending decision froze — the advance
                 # legs below execute ONLY its digest-verified content (frozen
@@ -1938,6 +2053,12 @@ class RunService:
                     str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
                 )
                 await session.commit()
+
+        if refusal_body is not None:
+            await self._post_go_refusal(
+                project_id, issue_iid, refusal_body, delivery_id, refusal_run_id
+            )
+            return
 
         if resuming:
             backend_name = str((run.evidence or {}).get("backend") or "").strip() or (
@@ -1960,6 +2081,68 @@ class RunService:
         else:
             await self._advance_proposal(project_id, run_id)
 
+    async def _post_go_refusal(
+        self,
+        project_id: int,
+        issue_iid: int | None,
+        body: str,
+        delivery_id: str | None,
+        run_id: str | None,
+    ) -> None:
+        """Post one operator-visible /go refusal note — at most one per note id.
+
+        The reply is journaled like every external write (intent first,
+        outcome second). Rate limit: the refusal row carries the note's
+        delivery identity in ``idempotency_key`` (the /retry A11 pattern),
+        so a redelivered webhook earns exactly ONE reply — the gateway
+        inbox dedup already collapses most redeliveries; this is the
+        belt-and-braces that keeps a reply storm impossible. Direct
+        invocations without a delivery id keep the pre-dedup behavior (a
+        reply per call), mirroring ``retry_delivery_key``'s contract.
+        """
+        if issue_iid is None:
+            return
+        key = f"go-note:{delivery_id}" if delivery_id else None
+        if key is not None and await self._go_refusal_delivered(key):
+            return
+        async with self._session_factory() as session:
+            action = ActionLog(
+                flow_run_id=run_id,
+                action_kind=_GO_REFUSAL_KIND,
+                correlation_id=f"issue-{issue_iid}",
+                idempotency_key=key,
+                status="requested",
+            )
+            session.add(action)
+            await session.commit()
+            action_id = action.id
+        try:
+            note = await self._gitlab.create_issue_note(project_id, issue_iid, body)
+        except httpx.HTTPError as exc:
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            raise
+        await self._complete_action(action_id, "succeeded", {"note_id": note.get("id")})
+
+    async def _go_refusal_delivered(self, key: str) -> bool:
+        """Whether this note id already earned its one refusal reply."""
+        async with self._session_factory() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog.id)
+                        .where(
+                            ActionLog.action_kind == _GO_REFUSAL_KIND,
+                            ActionLog.idempotency_key == key,
+                            ActionLog.status == "succeeded",
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return row is not None
+
     async def run_command(self, metadata: dict[str, Any]) -> None:
         """Dispatch a ``run_command`` task produced by the gateway router."""
         command = metadata.get("command")
@@ -1981,6 +2164,9 @@ class RunService:
                 metadata.get("author_username", ""),
                 metadata.get("issue_iid"),
                 author_user_id=int(metadata.get("author_user_id") or 0),
+                # The note id is the delivery identity — it rate-limits the
+                # refusal reply to one per note (A11 pattern, like /retry).
+                delivery_id=str(metadata.get("note_id") or "") or None,
             )
         elif command == "cancel":
             await self.handle_cancel_note(

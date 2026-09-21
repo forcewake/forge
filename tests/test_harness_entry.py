@@ -20,6 +20,8 @@ import pytest
 from forge.harness_entry import (
     DEFAULT_DRIVER_VERSIONS,
     DRIVERS,
+    LANE_DRIVERS,
+    SCRIPTED_DRIVERS,
     _CLAUDE_TOOL_RULES,
     emit_candidate_meta,
     fetch_workitem,
@@ -104,8 +106,10 @@ class TestRenderOpencode:
 class TestRenderCommon:
     def test_every_driver_keeps_the_audit_trail_streaming(self):
         """The event log is tee'd so a failed driver still leaves its stream
-        for the artifact step (the workflow uploads ``if: always()``)."""
-        for driver in DRIVERS:
+        for the artifact step (the workflow uploads ``if: always()``) —
+        for the SCRIPTED drivers; the SDK lanes write their own receipts
+        via forge.lane_driver (no event log to tee)."""
+        for driver in SCRIPTED_DRIVERS:
             script = render_driver_script(driver, "m", BRIEF)
             assert ".forge/events.jsonl" in script
             assert "tee -a" in script
@@ -117,13 +121,82 @@ class TestRenderCommon:
     def test_the_prompt_is_the_short_shared_pointer(self):
         """The quality lives in the brief file; the -p prompt only points at
         it (forge.harnesses.prompt.TASK_PROMPT), identically for every
-        driver."""
+        SCRIPTED driver — the SDK lanes carry no prompt pointer at all
+        (the lane runner inlines the brief as the ONE task)."""
         from forge.harnesses.prompt import TASK_PROMPT
 
-        for driver in DRIVERS:
+        for driver in SCRIPTED_DRIVERS:
             script = render_driver_script(driver, "m", BRIEF)
             assert shlex.quote(TASK_PROMPT) in script
             assert "brief.md" in script  # the pointer names the brief
+
+
+class TestRenderSdkLanes:
+    """The EXE-02 SDK-lane drivers: the rendered script provisions the CLI
+    and hands over to forge's own lane runner — the Actions/AzDO mirror of
+    the codex/opencode GitLab sdk-lane templates."""
+
+    def test_both_lanes_hand_over_to_the_lane_runner(self):
+        for driver, key in (("codex-sdk-lane", "codex"), ("opencode-sdk-lane", "opencode")):
+            script = render_driver_script(driver, "m", BRIEF)
+            assert "python -m forge.lane_driver --driver " + key in script, driver
+            # No scripted invocation, no prompt pointer, no event tee —
+            # the lane runner's meta/usage artifacts ARE the audit trail.
+            assert "TASK_PROMPT" not in script
+            assert "tee -a" not in script
+            assert "$FORGE_FILTER_PIPE" not in script
+
+    def test_codex_lane_routes_the_model_and_the_sandbox_recipe(self):
+        script = render_driver_script("codex-sdk-lane", "gpt-5.3", BRIEF)
+
+        assert "export CODEX_MODEL=gpt-5.3" in script
+        assert 'export CODEX_CWD="$PWD"' in script
+        # The OPTIONAL provider-native credential (the ChatGPT-login blob),
+        # guarded exactly like the grok lane's subscription auth.
+        assert 'if [ -n "$FORGE_CODEX_AUTH" ]; then' in script
+        assert 'printf "%s" "$FORGE_CODEX_AUTH" > ~/.codex/auth.json' in script
+        assert "chmod 600 ~/.codex/auth.json" in script
+
+    def test_codex_lane_omits_the_model_export_when_unrouted(self):
+        assert "CODEX_MODEL" not in render_driver_script("codex-sdk-lane", "", BRIEF)
+
+    def test_opencode_lane_carries_the_mechanical_deny_and_once_permission(self):
+        script = render_driver_script("opencode-sdk-lane", "", BRIEF)
+
+        assert '"git commit *": "deny"' in script
+        assert '"git push *": "deny"' in script
+        assert '"external_directory": "allow"' in script
+        assert '"doom_loop": "allow"' in script
+        # The config-injection env rides the ambient environment into the
+        # lane-spawned serve child (the spawner merges os.environ).
+        assert "export OPENCODE_CONFIG_CONTENT=" in script
+        # LIVE-found: reject starves every tool call in a task lane.
+        assert 'export OPENCODE_PERMISSION_RESPONSE="${OPENCODE_PERMISSION_RESPONSE:-once}"' in (
+            script
+        )
+        assert 'export OPENCODE_SERVE_CWD="$PWD"' in script
+
+    def test_opencode_lane_splits_a_provider_slash_model_route(self):
+        script = render_driver_script("opencode-sdk-lane", "zai/glm-5.3-flash", BRIEF)
+
+        assert "export OPENCODE_PROVIDER_ID=zai" in script
+        assert "export OPENCODE_MODEL_ID=glm-5.3-flash" in script
+
+    def test_opencode_lane_keeps_a_bare_model_as_the_model_id(self):
+        script = render_driver_script("opencode-sdk-lane", "glm-5.3-flash", BRIEF)
+
+        assert "export OPENCODE_MODEL_ID=glm-5.3-flash" in script
+        assert "OPENCODE_PROVIDER_ID" not in script
+
+    def test_mcp_servers_are_not_consumed_on_the_sdk_lanes(self):
+        servers = {"context7": {"type": "http", "url": "https://mcp.example.com/mcp"}}
+        for driver in LANE_DRIVERS:
+            assert "context7" not in render_driver_script(driver, "m", BRIEF, mcp_servers=servers)
+
+    def test_the_sdk_lane_ids_are_the_registered_lane_driver_ids(self):
+        from forge.lane_driver import LANE_DRIVER_IDS
+
+        assert LANE_DRIVERS == (LANE_DRIVER_IDS["codex"], LANE_DRIVER_IDS["opencode"])
 
 
 # ----------------------------------------------------------------------
@@ -137,6 +210,8 @@ _PACKAGES = {
     "grok-build": ("@xai-official/grok", "grok"),
     "opencode": ("opencode-ai", "opencode"),
     "copilot": ("@github/copilot", "copilot"),
+    "codex-sdk-lane": ("@openai/codex", "codex"),
+    "opencode-sdk-lane": ("opencode-ai", "opencode"),
 }
 
 
@@ -1435,6 +1510,27 @@ class TestMain:
         assert rc == 0
         assert (lane / ".forge" / "exit").read_text().strip() == "completed"
 
+    def test_sdk_lane_exit_classifies_and_keeps_the_lane_usage_receipt(self, lane, monkeypatch):
+        """The SDK lanes' "driver" is forge.lane_driver: its nonzero exit
+        classifies the run failed (through the same .forge/exit contract),
+        and the usage receipt IT wrote is never clobbered by a zeroed
+        parse of an event log nothing tee'd into."""
+        script = (
+            "printf '%s\\n' "
+            '\'{"input_tokens": 11, "output_tokens": 7, "driver": "codex-sdk-lane", '
+            '"completeness": "unknown", "source": "session.usage.updated"}\' '
+            "> .forge/usage.json\n"
+            "exit 1\n"
+        )
+
+        rc = run_main(lane, monkeypatch, script, driver="codex-sdk-lane", brief=BRIEF)
+
+        assert rc == 0  # the lane's audit trail outranks the step's color
+        assert (lane / ".forge" / "exit").read_text().strip() == "failed"
+        usage = json.loads((lane / ".forge" / "usage.json").read_text())
+        assert usage["input_tokens"] == 11
+        assert usage["completeness"] == "unknown"
+
 
 # ----------------------------------------------------------------------
 # Minimal lane credentials in the rendered scripts (R15): the grok lane
@@ -1464,10 +1560,22 @@ class TestGrokLaneCredential:
             ("opencode", ("FORGE_GROK_AUTH", "COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
             ("copilot", ("FORGE_GROK_AUTH", "XAI_API_KEY")),
             ("grok-build", ("COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
+            ("codex-sdk-lane", ("FORGE_GROK_AUTH", "COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
+            ("opencode-sdk-lane", ("FORGE_GROK_AUTH", "COPILOT_GITHUB_TOKEN", "XAI_API_KEY")),
         ):
             script = render_driver_script(driver, "m", BRIEF)
             for name in forbidden:
                 assert name not in script, (driver, name)
+
+    def test_the_sdk_lanes_own_credentials_are_guarded_or_absent(self):
+        """codex-sdk-lane consumes ONLY its own optional auth blob; the
+        opencode lane consumes no credential at all in the rendered script
+        (the provider key rides the ambient env into the lane runner)."""
+        codex = render_driver_script("codex-sdk-lane", "m", BRIEF)
+        assert 'if [ -n "$FORGE_CODEX_AUTH" ]; then' in codex
+        opencode = render_driver_script("opencode-sdk-lane", "m", BRIEF)
+        for name in ("FORGE_CODEX_AUTH", "ZAI_API_KEY", "OPENCODE_PROVIDER_API_KEY"):
+            assert name not in opencode, name
 
 
 class TestDriverVersionWiring:

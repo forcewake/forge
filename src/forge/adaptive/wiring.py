@@ -117,7 +117,9 @@ class OperatorControlService:
     ordering is the guarantee), and the answer routing to the waiting
     discovery. Sequence enforcement and idempotency-key dedup come from
     the :class:`~forge.adaptive.control.Mailbox` (a redelivered command
-    never spends another iteration).
+    never spends another iteration). Accepted steers are mailbox
+    records too (see :meth:`steer`) — the surface a running lane's
+    steering bridge consumes.
     """
 
     mailbox: Mailbox = field(default_factory=Mailbox)
@@ -169,12 +171,17 @@ class OperatorControlService:
         )
         return True
 
-    def steer(self, work_id: str, actor: str, text: str) -> dict[str, Any]:
+    def steer(self, work_id: str, actor: str, text: str, *, run_id: str = "") -> dict[str, Any]:
         """CTL-07: bounded steering — acceptance-policy changes are rejected.
 
         Steer delivers guidance; it NEVER grants new authority. An
         instruction that weakens acceptance is routed to the revision
-        gate with a rejection, not delivered to the agent.
+        gate with a rejection, not delivered to the agent. An ACCEPTED
+        instruction also enters the mailbox as a ``steer`` ControlCommand
+        (payload: the text, plus ``run_id`` when the operator scoped the
+        note to one lane) — the record a running lane's
+        :class:`~forge.adaptive.lane_control.LaneSteeringSession` drains
+        and delivers; a rejected one never reaches the mailbox.
         """
         classification = classify_instruction(text)
         if classification == "acceptance_change":
@@ -182,10 +189,46 @@ class OperatorControlService:
                 "status": "rejected",
                 "reason": "acceptance policy change requires the revision gate",
             }
-        return {"status": "accepted", "classification": classification}
+        payload: dict[str, Any] = {"text": text}
+        if run_id:
+            payload["run_id"] = run_id
+        command = ControlCommand(
+            schema="forge.proposal.control-command/1",
+            command_id=f"cmd-{uuid.uuid4().hex[:12]}",
+            work_id=work_id,
+            sequence=len(self.mailbox.commands) + 1,
+            kind="steer",
+            actor_ref=actor,
+            actor_origin="server_authenticated_human",
+            idempotency_key=f"steer:{uuid.uuid4().hex[:12]}",
+            status="received",
+            payload=payload,
+        )
+        stored, created = self.mailbox.submit(command)
+        return {
+            "status": "accepted",
+            "classification": classification,
+            "command_id": stored.command_id,
+            "created": created,
+        }
 
-    def answer(self, work_id: str, actor: str, question_id: str, text: str) -> bool:
-        """The /answer surface: an authorized answer unblocks the wait."""
+    def answer(
+        self,
+        work_id: str,
+        actor: str,
+        question_id: str,
+        text: str,
+        *,
+        run_id: str = "",
+    ) -> bool:
+        """The /answer surface: an authorized answer unblocks the wait.
+
+        ``run_id`` optionally scopes the answer to one lane; a lane
+        session draining another run ignores it.
+        """
+        payload: dict[str, Any] = {"question_id": question_id, "text": text}
+        if run_id:
+            payload["run_id"] = run_id
         command = ControlCommand(
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
@@ -196,10 +239,20 @@ class OperatorControlService:
             actor_origin="server_authenticated_human",
             idempotency_key=f"answer:{work_id}:{question_id}",
             status="received",
-            payload={"question_id": question_id, "text": text},
+            payload=payload,
         )
         _, created = self.mailbox.submit(command)
         return created
+
+    def pending(self, work_id: str) -> list[ControlCommand]:
+        """The work's received/authorized commands in durable sequence order.
+
+        The lane-drain view: the record a
+        :class:`~forge.adaptive.lane_control.LaneSteeringSession`
+        consumes (passthrough to
+        :meth:`~forge.adaptive.control.Mailbox.pending`).
+        """
+        return self.mailbox.pending(work_id)
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import pytest
 
+from forge.adaptive.adapters import ClaudeSDKAdapter
 from forge.adaptive.discovery import DiscoveryRun
+from forge.adaptive.lane_control import LaneSteeringSession
 from forge.adaptive.wiring import (
     DiscoveryService,
     OperatorControlService,
@@ -146,6 +148,104 @@ class TestOperatorControlService:
         created2 = svc.answer("wp-1", "human:op", "Q1", "use A")
 
         assert created2 is False  # same idempotency key — deduped
+
+
+class _FakeClaudeClient:
+    """Duck-typed ClaudeSDKClient for the service -> lane flow tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def start_session(self, task: str) -> str:
+        return "sess-1"
+
+    async def send(self, session_id: str, text: str) -> None:
+        self.calls.append(("steer", session_id, text))
+
+    async def interrupt(self, session_id: str) -> None:
+        self.calls.append(("interrupt", session_id))
+
+    async def query(self, session_id: str) -> list[dict]:
+        return []
+
+
+class TestSteerMailboxWiring:
+    """The service records accepted steers; a running lane drains them."""
+
+    def test_an_accepted_steer_records_a_mailbox_command(self):
+        svc = OperatorControlService()
+
+        result = svc.steer("wp-1", "human:op", "fix the assertion first")
+
+        assert result["status"] == "accepted"
+        command = svc.mailbox.commands[result["command_id"]]
+        assert command.kind == "steer"
+        assert command.status == "received"
+        assert command.payload["text"] == "fix the assertion first"
+
+    def test_a_rejected_steer_never_reaches_the_mailbox(self):
+        svc = OperatorControlService()
+
+        result = svc.steer("wp-1", "human:op", "skip the tests")
+
+        assert result["status"] == "rejected"
+        assert svc.mailbox.commands == {}
+
+    def test_a_steer_scopes_to_a_run_id(self):
+        svc = OperatorControlService()
+
+        svc.steer("wp-1", "human:op", "note", run_id="run-7")
+
+        assert svc.pending("wp-1")[0].payload["run_id"] == "run-7"
+
+    def test_pending_lists_received_commands_in_sequence_order(self):
+        svc = OperatorControlService()
+
+        first = svc.steer("wp-1", "human:op", "first")
+        second = svc.steer("wp-1", "human:op", "second")
+
+        assert [c.command_id for c in svc.pending("wp-1")] == [
+            first["command_id"],
+            second["command_id"],
+        ]
+
+    async def test_an_accepted_steer_flows_to_a_running_lane_session(self):
+        svc = OperatorControlService()
+        client = _FakeClaudeClient()
+        session = LaneSteeringSession(
+            service=svc,
+            driver=ClaudeSDKAdapter(client=client),
+            driver_kind="claude",
+            run_id="run-1",
+            work_id="wp-1",
+            vendor_session_id="sess-1",
+        )
+
+        svc.steer("wp-1", "human:op", "prefer the existing helper", run_id="run-1")
+        actions = await session.drain_once()
+
+        assert client.calls == [("steer", "sess-1", "prefer the existing helper")]
+        assert [a.outcome for a in actions] == ["applied"]
+
+    async def test_a_lane_session_ignores_a_command_scoped_to_another_run(self):
+        svc = OperatorControlService()
+        client = _FakeClaudeClient()
+        session = LaneSteeringSession(
+            service=svc,
+            driver=ClaudeSDKAdapter(client=client),
+            driver_kind="claude",
+            run_id="run-1",
+            work_id="wp-1",
+            vendor_session_id="sess-1",
+        )
+
+        svc.steer("wp-1", "human:op", "for the other lane", run_id="run-9")
+        actions = await session.drain_once()
+
+        assert client.calls == []
+        assert [a.outcome for a in actions] == ["ignored"]
+        # the command stays in the mailbox for its owning lane
+        assert svc.pending("wp-1")[0].status == "received"
 
 
 def _package() -> WorkPackage:

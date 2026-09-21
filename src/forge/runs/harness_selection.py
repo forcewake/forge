@@ -56,7 +56,15 @@ __all__ = [
 #: additionally caps everything by ``available_lanes``, so an unshipped id
 #: can never be selected even if a caller passes it as a lane.
 SHIPPED_DRIVERS: frozenset[str] = frozenset(
-    {"claude-code", "grok-build", "opencode", "copilot", "claude-sdk-lane"}
+    {
+        "claude-code",
+        "grok-build",
+        "opencode",
+        "copilot",
+        "claude-sdk-lane",
+        "codex-sdk-lane",
+        "opencode-sdk-lane",
+    }
 )
 
 #: The driver selected when no explicit one is configured (ADR-0015: the bare
@@ -79,6 +87,15 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "grok-build": ("FORGE_GROK_AUTH",),
     "opencode": ("ZAI_API_KEY",),
     "copilot": ("COPILOT_GITHUB_TOKEN",),
+    # codex-sdk-lane: the app-server child inherits ambient env and reads
+    # OPENAI_API_KEY/CODEX_API_KEY; the ChatGPT-login blob rides the
+    # optional FORGE_CODEX_AUTH surface (templates land it as
+    # ~/.codex/auth.json when present).
+    "codex-sdk-lane": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+    # opencode-sdk-lane: the lane-local serve config consumes the SAME
+    # ambient key the batch opencode lane uses; the generic BYOK surface
+    # (PUT /api/auth/:id) is optional.
+    "opencode-sdk-lane": ("ZAI_API_KEY",),
 }
 
 #: OPTIONAL per-driver credential surfaces (C03): a recipe may map them
@@ -88,6 +105,8 @@ DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_API_KEY",),
     # Same optional surface as the batch claude-code lane.
     "claude-sdk-lane": ("ANTHROPIC_API_KEY",),
+    "codex-sdk-lane": ("FORGE_CODEX_AUTH",),
+    "opencode-sdk-lane": ("OPENCODE_PROVIDER_API_KEY",),
 }
 
 #: A version/dist-tag token in a pinned chain entry (``driver@version``):
