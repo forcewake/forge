@@ -419,7 +419,11 @@ class CITharnessBackend:
         except GitLabAPIError:
             return None
         for job in jobs:
-            if job.name == HARNESS_JOB_NAME:
+            # Prefix match: every SDK-lane template names its job
+            # forge-agent-<driver> (LIVE-found: one shared name meant
+            # GitLab's last-include-wins silently REPLACED the other
+            # lanes' jobs — a repo including all three ran only one).
+            if job.name.startswith(HARNESS_JOB_NAME):
                 return job.id
         return None
 
@@ -468,7 +472,7 @@ class CITharnessBackend:
             return None
         wanted_id = data.get("job_id")
         for job in jobs:
-            if job.id == wanted_id or job.name == HARNESS_JOB_NAME:
+            if job.id == wanted_id or job.name.startswith(HARNESS_JOB_NAME):
                 return job
         return None
 

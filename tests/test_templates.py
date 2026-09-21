@@ -50,11 +50,25 @@ def template_text(request) -> str:
     return (TEMPLATES_DIR / request.param).read_text()
 
 
+def _lane_job(parsed: dict) -> tuple[str, dict]:
+    """The lane job (name, body) — exactly one ``forge-agent*`` job.
+
+    LIVE-found: every SDK-lane template names its job
+    ``forge-agent-<driver>`` — a SHARED name meant GitLab's
+    last-include-wins silently replaced the other lanes' jobs in repos
+    including several templates.
+    """
+    keys = [key for key in parsed if key.startswith("forge-agent")]
+    assert len(keys) == 1, f"expected exactly one forge-agent* job, got {keys}"
+    return keys[0], parsed[keys[0]]
+
+
 @pytest.fixture(params=HARNESS_TEMPLATES)
 def template_doc(request) -> dict:
     parsed = yaml.safe_load((TEMPLATES_DIR / request.param).read_text())
-    assert isinstance(parsed, dict) and "forge-agent" in parsed
-    return parsed["forge-agent"]
+    assert isinstance(parsed, dict)
+    _, body = _lane_job(parsed)
+    return body
 
 
 class TestNoWriteCapability:

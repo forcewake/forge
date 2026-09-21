@@ -112,6 +112,21 @@ def seed_job(
     return job_id
 
 
+def seed_prefixed_lane_job(
+    fake_gitlab: FakeGitLab,
+    pipeline_id: int,
+    *,
+    status: str,
+    job_id: int = 556,
+) -> int:
+    """A per-driver lane job (LIVE-found naming: the SDK lanes name
+    their jobs forge-agent-<driver> so GitLab's last-include-wins
+    cannot silently replace one lane with another)."""
+    job = {"id": job_id, "name": "forge-agent-codex-sdk", "status": status}
+    fake_gitlab.set_pipeline_jobs(pipeline_id, [job])
+    return job_id
+
+
 class TestStart:
     async def test_ensures_branch_and_creates_pipeline_with_run_variables(self, fake_gitlab, db):
         backend = make_backend(fake_gitlab, db)
@@ -141,6 +156,17 @@ class TestStart:
             "FORGE_HARNESS_DRIVER": "claude-code",  # ADR-0023 §7 template filter
             "FORGE_ATTEMPT_BASE": BASE_SHA,  # ADR-0016 §4: frozen attempt base
         }
+
+    async def test_discovers_a_prefixed_lane_job(self, fake_gitlab, db):
+        """LIVE-found: SDK-lane jobs are named forge-agent-<driver>; the
+        discovery matches by PREFIX so all three lanes are found."""
+        backend = make_backend(fake_gitlab, db)
+        run = make_run()
+        handle = await backend.start(run, "Add a widget", "widgets", "PLAN TEXT")
+        data = json.loads(handle)
+        seed_prefixed_lane_job(fake_gitlab, data["pipeline_id"], status="running")
+        rediscovered = await backend._discover_job_id(PROJECT_ID, data["pipeline_id"])
+        assert rediscovered is not None
 
 
 class TestPoll:

@@ -44,7 +44,7 @@
 # forge downloads the artifacts and publishes via the trusted publisher;
 # claims in the trace are never trusted.
 
-forge-agent:
+forge-agent-claude-sdk:
   image: node:22-bookworm
   timeout: 30m
   rules:
