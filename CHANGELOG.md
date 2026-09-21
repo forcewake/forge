@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-09-21
+
+### Added — live verification of the real drivers + the evidence-backed DriverMatrix seed
+
+All three interactive drivers ran against the real vendor binaries
+(`scripts/driver_live_smoke.py`, evidence in
+`docs/evaluation/2026-09-21-drivers/`) — and live testing found what
+contract tests could not:
+
+- **claude-sdk: 4/4 green** (session start, completed turn, steering
+  follow-up, interrupt) over the z.ai Anthropic gateway with
+  claude-agent-sdk 0.2.157.
+- **codex-app: 5/5 green** (thread, completed turn, mid-flight steer
+  via `expectedTurnId`, interrupt → `interrupted`) against codex-cli
+  0.153.4. LIVE-found and fixed: the sandbox variant enums are
+  ASYMMETRIC (`thread/start` wants kebab-case `workspace-write`,
+  `turn/start` `sandboxPolicy.type` wants camelCase `workspaceWrite`);
+  `_wire_sandbox` normalizes either spelling and emits per-surface.
+  Recorded: `turn/start` responds at turn acceptance, completion is
+  the `turn/completed` notification.
+- **opencode-server: 4/4 green after a full wire-layer rewrite** —
+  v2.0.10 is a different API than researched: routes under `/api`,
+  `prompt_async` gone (the prompt route is non-blocking; completion is
+  SSE `session.execution.succeeded|failed`), MANDATORY model
+  selection (`POST /api/session/{id}/model` with
+  `{model: {providerID, id}}`), flat `type`+`data` event frames,
+  abort became `interrupt`. The research doc carries the full LIVE
+  CORRECTION.
+- **`OpenCodeServer` spawner** — lane-local `opencode serve`
+  lifecycle: probe-socket port pick, `/doc` readiness, a
+  spawner-generated server password (v2.0.10 always enforces one and
+  prints a random one to stdout a DEVNULL lane loses), SIGTERM→SIGKILL
+  teardown.
+- **`live_registrations.seed_live_matrix()`** — the EXE-07 seed: three
+  live-verified (sdk × provider_route × credential_mode) combos, each
+  citing its evidence JSON; seeding REFUSES an entry whose evidence is
+  missing or whose recorded run failed. The runbook documents the
+  table and the re-verification command.
+- `opencode_client_from_env` now raises `TypeError` on an env dict
+  passed positionally (LIVE-found: it silently dialed the default
+  port).
+
+Suite 3854 (+26); ruff check + format clean.
+
 ## [0.21.0] - 2026-09-21
 
 ### Added — REAL interactive-driver clients (claude-sdk, codex-app, opencode-server)
