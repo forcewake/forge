@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-09-21
+
+### Added — executed-evidence claims + the bounded design-partner pilot
+
+- **OPS-06 — executed-evidence release claims**: per-check evidence
+  classes (executed / skipped / unsupported / not_run / unknown) with
+  run ids, URLs, and head SHAs from the Actions checks of the pinned
+  commit. A boot canary is explicitly NOT SDLC e2e evidence;
+  ``may_claim`` requires release-specific EXECUTED evidence for any
+  promoted customer capability; README version/image/test-count
+  generated from one source.
+- **OPS-07 — the bounded pilot**: ONE fully-instrumented task through
+  the live lab: task → plan → approved spec → GitLab CI harness lane
+  (claude-code/glm-5.3-flash) → candidate SHA → native verification
+  (positive proof, tested_oid == candidate) → readonly review (ok) →
+  ready_for_human → human acceptance (merge). Wall clock 3m25s; agent
+  spend \$0.25; 9 turns. Evidence:
+  `docs/evaluation/2026-09-21-adaptive-pilot/`.
+- **Two live-found defects fixed during the pilot**: the GitLab
+  template's brief was at /tmp (outside the claude sandbox — DENIED on
+  Read); the lab image didn't COPY alembic/ (migration 019 invisible,
+  MR creation died with UndefinedTableError).
+
 ## [0.18.0] - 2026-09-21
 
 ### Added — the adaptive service wiring (the substrate meets the production seams)

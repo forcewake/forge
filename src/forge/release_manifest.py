@@ -522,6 +522,18 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
     FindingClosure(
+        finding="OPS-06",
+        capability="release-artifact-canary",
+        level="contract_tested",
+        evidence=("tests/test_adaptive_executed_evidence.py",),
+    ),
+    FindingClosure(
+        finding="OPS-07",
+        capability="real-provider-e2e",
+        level="live_canary_tested",
+        evidence=("docs/evaluation/2026-09-21-adaptive-pilot/pilot-v2-result.json",),
+    ),
+    FindingClosure(
         finding="WIRING",
         capability="runs/spec-freeze",
         level="contract_tested",

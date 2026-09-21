@@ -122,6 +122,8 @@ FINDING_MARKERS: dict[str, str] = {
     "VER-EPIC": "evidence_aware_review",
     "OPS-EPIC": "usage_lineage",
     "WIRING": "DiscoveryService",
+    "OPS-06": "TestEvidenceClasses",
+    "OPS-07": "checks passed",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit
