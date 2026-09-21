@@ -46,18 +46,32 @@ class RepositoryIdentity:
         return f"{self.provider}:{self.native_id}@{self.tenant}"
 
 
-def repository_identity(reader: object) -> RepositoryIdentity | None:
+def repository_identity(reader: object, project_id: int | None = None) -> RepositoryIdentity | None:
     """The reader's canonical identity via its PUBLIC ``identity()``.
 
     Adapters implement ``identity() -> RepositoryIdentity``; this resolver
     never probes private attributes (the 44cdae helper's failure mode).
+    Repository-bound readers take no arguments; project-scoped clients
+    (GitLab) take the project id — passed through when given, and a
+    TypeError from the no-arg probe of a project-scoped client is the
+    signal to retry qualified (never a crash).
     ``None`` = the adapter has not adopted the contract yet — the caller
     must fall back to a FULLY QUALIFIED legacy key (type + repr-stable
     fields), never a bare project id.
     """
     method = getattr(reader, "identity", None)
-    if callable(method):
+    if not callable(method):
+        return None
+    try:
         identity = method()
-        if isinstance(identity, RepositoryIdentity):
-            return identity
+    except TypeError:
+        # project-scoped signature — retry with the project id
+        if project_id is None:
+            return None
+        try:
+            identity = method(project_id)
+        except TypeError:
+            return None
+    if isinstance(identity, RepositoryIdentity):
+        return identity
     return None

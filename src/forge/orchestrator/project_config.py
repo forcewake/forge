@@ -80,17 +80,9 @@ def _authority_identity(
     the project-id fallback and could share one policy entry — the first
     remaining defect of the 05868e9 review).
     """
-    from forge.repository.identity import RepositoryIdentity, repository_identity
+    from forge.repository.identity import repository_identity
 
-    identity = repository_identity(client)
-    if identity is None and callable(getattr(client, "identity", None)):
-        # GitLab: project-scoped at call time — identity(project_id)
-        try:
-            candidate = client.identity(project_id)  # type: ignore[call-arg,attr-defined]
-            if isinstance(candidate, RepositoryIdentity):
-                identity = candidate
-        except TypeError:
-            identity = None
+    identity = repository_identity(client, project_id)
     if identity is not None:
         return identity.cache_key(ref, CONFIG_FILE)
     # Legacy adapter without the contract: fully-qualified type+repr+project
