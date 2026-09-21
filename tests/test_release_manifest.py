@@ -92,7 +92,19 @@ FINDING_MARKERS: dict[str, str] = {
     "C09": "downgrade 019->018 refused",
     "C10": "TestCommandReceiptsC10",
     "C11": "TestMutationGuardsC11",
-    "C12": "v0.13.0",
+    "C12": "test_readme_status_matches_the_shipped_version",
+    "D01": "TestCacheIdentityD01",
+    "D02": "TestStrictPolicySchemaD02",
+    "D03": "TestFrozenScopeToPublisherD03",
+    "D04": "TestCancelDuringProposeD04",
+    "D05": "test_a_moved_target_never_moves_the_branch_base",
+    "D06": "TestManifestEmptinessD06",
+    "D07": "test_the_cohort_rate_sums_all_attempts_not_the_last",
+    "D08": "receipts_producer",
+    "D09": "ambiguous_check_identity",
+    "D10": "test_mutation_updated_at_deadline_restores_the_slide",
+    "D11": "_publish_candidate_run_aware",
+    "D12": "test_readme_status_matches_the_shipped_version",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit
@@ -339,3 +351,32 @@ def test_readme_guarantee_levels_reference_the_manifest_levels() -> None:
     assert "forge.release_manifest" in section, (
         "the guarantee legend must point at the machine-readable manifest"
     )
+
+
+# ----------------------------------------------------------------------
+# D12: README version/test-count claims track the release (no manual drift)
+# ----------------------------------------------------------------------
+
+
+def test_readme_status_matches_the_shipped_version() -> None:
+    """D12: the README status line names the CURRENT version, its image
+    tag and a test count that exists — a new user must not install a
+    release predating the fixes the docs describe (found stale at 0.11.0
+    AND 0.13.0 in consecutive reviews)."""
+    import re
+
+    from forge import __version__
+
+    text = _read("README.md")
+    assert f"**v{__version__}**" in text, "README status header is not the shipped version"
+    assert f"ghcr.io/forcewake/forge:{__version__}" in text, "image tag drifted"
+    counts = re.findall(r"(\d{4}) tests", text)
+    assert counts, "README names no test count"
+    assert all(int(n) >= 3000 for n in counts), "test count is from an ancient release"
+
+
+def test_readme_quick_start_pulls_the_current_tag() -> None:
+    from forge import __version__
+
+    text = _read("README.md")
+    assert f"ghcr.io/forcewake/forge:{__version__}" in text.split("## Quick start")[1]

@@ -1122,6 +1122,9 @@ def emit_candidate_meta(
                 # C10: the trusted wrapper's receipts — one TSV row per
                 # executed command: argv_head<TAB>exit<TAB>report_file.
                 commands=_load_command_receipts(Path(".forge/commands.tsv")),
+                # D08: workspace-file receipts are SELF-REPORTED (the agent
+                # can write that file) — telemetry, never gate evidence.
+                receipts_producer="self_reported",
             )
         ),
     }

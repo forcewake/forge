@@ -477,7 +477,13 @@ def effective_output_rate(
     """
 
     def _key(record: Mapping[str, Any]) -> str:
-        return str(record.get("attempt_id") or record.get("attempt") or "")
+        # D07: the join key is the FULL identity — run + attempt — when the
+        # records carry it (the cohort-level flattening adds it); a bare
+        # attempt label alone does not prove two records are the same call
+        # population across different runs.
+        run = str(record.get("run_id") or "")
+        attempt = str(record.get("attempt_id") or record.get("attempt") or "")
+        return f"{run}/{attempt}" if run else attempt
 
     joined_tokens = 0
     joined_ms: float | None = 0.0
@@ -518,6 +524,35 @@ def effective_output_rate(
         "unpaired_calls": 0,
         "joined": True,
     }
+
+
+def _flatten_receipts(attempts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Every attempt's receipts, each stamped with its run+attempt identity
+    (D07: the join key survives the cohort-level flattening)."""
+    flat: list[dict[str, Any]] = []
+    for attempt in attempts:
+        run_id = str(attempt.get("run_id") or "")
+        attempt_id = str(attempt.get("attempt_id") or "")
+        for receipt in _rows(attempt.get("receipts")):
+            row = dict(receipt)
+            row.setdefault("run_id", run_id)
+            row.setdefault("attempt_id", attempt_id)
+            flat.append(row)
+    return flat
+
+
+def _flatten_calls(attempts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Every attempt's llm calls, identity-stamped like the receipts."""
+    flat: list[dict[str, Any]] = []
+    for attempt in attempts:
+        run_id = str(attempt.get("run_id") or "")
+        attempt_id = str(attempt.get("attempt_id") or "")
+        for call in _rows(attempt.get("llm_calls")):
+            row = dict(call)
+            row.setdefault("run_id", run_id)
+            row.setdefault("attempt", attempt_id)
+            flat.append(row)
+    return flat
 
 
 def cohort_report(
@@ -586,11 +621,14 @@ def cohort_report(
         "all_attempt_spend": {"usage": usage, "llm": llm},
         "per_accepted_unit": _per_accepted_block(accepted, accepted_raw, denominator, pricebook),
         "latency": {
-            # C07: the ONLY rate is identity-joined and honestly named —
-            # effective output rate over the SAME calls' durations; the old
-            # count-matched division is retired.
+            # C07/D07: the ONLY rate is identity-joined and honestly named,
+            # and it is a RATIO OF SUMS over the WHOLE cohort population —
+            # every attempt's receipts paired with every attempt's calls
+            # under full run+attempt identity (the old form divided the
+            # LAST attempt's numbers alone — order-dependent, and crashed
+            # on an empty cohort).
             "effective_output_tokens_per_s": effective_output_rate(
-                _rows(attempt.get("receipts")), _rows(attempt.get("llm_calls"))
+                _flatten_receipts(raw_attempts), _flatten_calls(raw_attempts)
             )["effective_output_tokens_per_s"],
         },
         "honesty": {

@@ -3618,7 +3618,7 @@ class GitHubRunService:
         run_id: str,
         *,
         issue_number: int,
-        changeset: object,
+        changeset: "ChangeSet",
         expected_head: str | None,
         operation_key: str | None,
     ) -> "GitHubPublishOutcome":
@@ -3649,23 +3649,6 @@ class GitHubRunService:
             operation_key=operation_key,
             allowed_paths=allowed_paths,
         )
-
-    async def _read_spec_allowed_paths(self, run_id: str) -> list[str]:
-        """The FROZEN path scope for a publication (D03) — digest-verified
-        spec read; a missing/legacy spec yields [] (the bridge then applies
-        its denylist only, the pre-D03 posture, loudly logged)."""
-        try:
-            spec = await self._load_executable_spec(run_id)
-        except Exception:
-            logger.warning(
-                "Run %s spec unreadable at publish — allowed_paths NOT enforced (legacy posture)",
-                run_id[:8],
-                exc_info=True,
-            )
-            return []
-        if spec is None:
-            return []
-        return list(spec.allowed_paths or [])
 
     async def _finish_harness_publish_leg(
         self,

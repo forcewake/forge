@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-09-21
+
+### Fixed — authority boundary coherence (fifth external review 44cdae: all 12 findings closed — evidence in `python -m forge.release_manifest`)
+
+- **D01 — config cache identity**: the project-config cache keys on the
+  canonical authority identity (provider class, repository, requested ref,
+  path) — two repositories of one project (or two refs of one repository)
+  no longer cross policies through the cache; cached absence of one repo
+  never masks another's restrictions.
+- **D02 — strict policy schema**: `implement.paths: "src/**"` (a string)
+  used to fall through to `[]` == whole repository, widening a typo into
+  UNRESTRICTED scope; `forge: []` raised AttributeError through the typed
+  reader. Both are typed invalid now — malformed never means "allow more".
+- **D03 — the frozen scope reaches the commit boundary**: both GitHub
+  publish sites pass the spec's allowed_paths; an out-of-scope candidate
+  results in ZERO commits and ZERO PRs (service-bound regression,
+  mutation-verified).
+- **D04 — cancel-before-dispatch forbids the write**: the publication
+  grant is re-checked immediately before the native dispatch — a cancel
+  landing during the paid propose refuses the commit (the branch CAS
+  checks the expected head, not the run's right to publish).
+- **D05 — factory branches from the attempt OID**: a moved main no longer
+  shifts the execution context past the approval (target_branch stays the
+  MR destination).
+- **D06 — a declared manifest, even empty, is the boundary**: unset
+  manifests keep the legacy default; an explicit {'drivers': []} allows
+  no driver (callers widen only None).
+- **D07 — the cohort rate is a ratio of sums** over the whole joined
+  population (run+attempt identity survives the flattening) — the old
+  form divided the LAST attempt's numbers (order-dependent; crashed on
+  an empty cohort).
+- **D08 — receipts provenance**: workspace-file command receipts are
+  stamped `self_reported` — telemetry, never wrapper-observed proof.
+- **D09/D11** — agree-collision semantics documented (D09 development
+  note); `_publish_candidate_run_aware` is the run-aware publication
+  entry — the only way the service publishes, loading approved policy by
+  run identity with the grant re-check inline.
+- **D10 — mutation guards run baseline-then-mutant** on identical traces.
+- **D12 — README version/test-count/image tracked by tests** (found stale
+  at 0.11.0 AND 0.13.0 in consecutive reviews; now CI-enforced).
+
 ## [0.14.0] - 2026-09-21
 
 ### Fixed — contract hand-off coherence (fourth external review 7f0139e: all 12 findings closed — evidence in `python -m forge.release_manifest`)

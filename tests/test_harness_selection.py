@@ -931,7 +931,6 @@ class TestManifestEmptinessD06:
         """D06: {'version': 1, 'drivers': []} is a DECLARED boundary —
         no driver is available; the compiler raises on any configured
         driver rather than silently defaulting."""
-        import pytest as _pytest
 
         from forge.runs.harness_selection import resolve_available_drivers
 

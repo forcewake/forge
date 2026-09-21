@@ -915,3 +915,57 @@ def test_effective_rate_requires_identity_joined_populations() -> None:
         {"attempt": "p:2", "duration_ms": 5000},
     ]
     assert aggregate.effective_output_rate(receipts, calls)["effective_output_tokens_per_s"] is None
+
+
+# ----------------------------------------------------------------------
+# D07: the cohort rate is a ratio of sums over the WHOLE population
+# ----------------------------------------------------------------------
+
+
+def _ledger_with_attempts(attempts: list[dict]) -> dict:
+    return {
+        "schema": "forge.cohort.ledger/2",
+        "repo": "a/b",
+        "units": {
+            "CU-R": {
+                "unit_id": "CU-R",
+                "axis": "create",
+                "title": "t",
+                "acceptance": {
+                    "verdict": "accepted",
+                    "decided_by": "h",
+                    "decided_at": "x",
+                    "notes": "",
+                },
+                "attempts": attempts,
+            }
+        },
+    }
+
+
+def test_the_cohort_rate_sums_all_attempts_not_the_last() -> None:
+    """D07 (probe P05): attempt A 100 tokens/1s, attempt B 10 tokens/1s —
+    the cohort rate is (100+10)/(1+1)=55, order-independent; the old form
+    returned the LAST attempt's rate (10 or 100 by ordering)."""
+
+    def attempt(run_id: str, tokens: int, ms: int) -> dict:
+        return {
+            "run_id": run_id,
+            "receipts": [{"attempt_id": "1", "run_id": run_id, "output_tokens": tokens}],
+            "llm_calls": [{"attempt": "1", "run_id": run_id, "duration_ms": ms, "status": "ok"}],
+        }
+
+    ab = _ledger_with_attempts([attempt("r1", 100, 1000), attempt("r2", 10, 1000)])
+    ba = _ledger_with_attempts([attempt("r2", 10, 1000), attempt("r1", 100, 1000)])
+    rate_ab = aggregate.cohort_report(ab)["latency"]["effective_output_tokens_per_s"]
+    rate_ba = aggregate.cohort_report(ba)["latency"]["effective_output_tokens_per_s"]
+    assert rate_ab == pytest.approx(55.0)
+    assert rate_ba == pytest.approx(55.0)  # order-independent
+
+
+def test_an_empty_cohort_report_has_no_rate_and_no_crash() -> None:
+    """D07 (probe P06): zero attempts — undefined rate, valid report."""
+    report = aggregate.cohort_report(
+        {"schema": "forge.cohort.ledger/2", "repo": "a/b", "units": {}}
+    )
+    assert report["latency"]["effective_output_tokens_per_s"] is None

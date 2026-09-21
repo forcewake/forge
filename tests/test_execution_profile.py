@@ -571,3 +571,13 @@ def test_observed_execution_carries_command_receipts() -> None:
     # no receipts → no claims
     blank = observed_execution()
     assert blank.commands == ()
+
+
+def test_workspace_receipts_are_stamped_self_reported() -> None:
+    """D08: provenance rides the record — workspace-file receipts are
+    self_reported telemetry, never wrapper-observed proof."""
+    from forge.runs.execution_profile import observed_execution
+
+    record = observed_execution(driver="claude-code", receipts_producer="self_reported")
+    assert record.receipts_producer == "self_reported"
+    assert observed_execution().receipts_producer == ""  # absent = unknown

@@ -421,6 +421,11 @@ class ObservedExecution:
     candidate_changed: bool | None = None
     # C10: the trusted wrapper's command receipts — (argv_head, exit, report).
     commands: tuple[tuple[str, int, str], ...] = ()
+    # D08: the receipts' PROVENANCE — who wrote them. ``wrapper_observed``
+    # rows come from a trusted channel; ``self_reported`` rows lived in the
+    # agent-writable workspace (telemetry, never gate evidence). Absent =
+    # unknown, treated self_reported.
+    receipts_producer: str = ""
     observed_at: str = ""
 
 
@@ -431,6 +436,7 @@ def observed_execution(
     usage_completeness: str = "unknown",
     candidate_changed: bool | None = None,
     commands: Sequence[tuple[str, int, str]] = (),
+    receipts_producer: str = "",
     now: Any = None,
 ) -> ObservedExecution:
     """Build the observed record (ISO timestamp default: wall clock).
@@ -448,6 +454,7 @@ def observed_execution(
         usage_completeness=str(usage_completeness or "unknown"),
         candidate_changed=candidate_changed,
         commands=tuple((str(c[0]), int(c[1]), str(c[2])) for c in commands),
+        receipts_producer=str(receipts_producer or ""),
         observed_at=stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp),
     )
 

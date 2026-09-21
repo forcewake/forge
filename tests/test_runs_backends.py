@@ -532,7 +532,7 @@ class TestBackendStartSpecC05:
         assert branch_call[1][2] == "b" * 40
 
     async def test_legacy_caller_keeps_the_settings_fallback(self, db, fake_gitlab):
-        from forge.runs.backends import CITharnessBackend
+        pass
 
     async def test_a_moved_target_never_moves_the_branch_base(self, db, fake_gitlab):
         """D05 (probe P07): approval was for SHA-A, main moved to SHA-B —

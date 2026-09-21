@@ -521,6 +521,80 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
 #: (d16f523 review) are deliberately absent: their fixes are not fully
 #: verifiable in-tree, and absence here means "not claimed".
 FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
+    # 44cdae review (D01-D12, closed 2026-09-21 — the authority boundary
+    # campaign)
+    FindingClosure(
+        finding="D01",
+        capability="project-config-scope",
+        level="contract_tested",
+        evidence=("tests/test_project_config.py",),
+    ),
+    FindingClosure(
+        finding="D02",
+        capability="project-config-scope",
+        level="contract_tested",
+        evidence=("tests/test_project_config.py",),
+    ),
+    FindingClosure(
+        finding="D03",
+        capability="publication-boundary",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="D04",
+        capability="publication-boundary",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="D05",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("tests/test_runs_backends.py",),
+    ),
+    FindingClosure(
+        finding="D06",
+        capability="harness-selection",
+        level="contract_tested",
+        evidence=("tests/test_harness_selection.py",),
+    ),
+    FindingClosure(
+        finding="D07",
+        capability="cohort-economics",
+        level="contract_tested",
+        evidence=("tests/test_cohort_runner.py",),
+    ),
+    FindingClosure(
+        finding="D08",
+        capability="runs/spec-freeze",
+        level="contract_tested",
+        evidence=("src/forge/harness_entry.py", "tests/test_execution_profile.py"),
+    ),
+    FindingClosure(
+        finding="D09",
+        capability="runs/verification-contract",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="D10",
+        capability="durable-failure-injection",
+        level="contract_tested",
+        evidence=("tests/test_github_runs.py",),
+    ),
+    FindingClosure(
+        finding="D11",
+        capability="publication-boundary",
+        level="contract_tested",
+        evidence=("src/forge/runs/github_service.py", "tests/test_github_runs.py"),
+    ),
+    FindingClosure(
+        finding="D12",
+        capability="release-artifact-canary",
+        level="contract_tested",
+        evidence=("tests/test_release_manifest.py",),
+    ),
     # 7f0139e review (C01-C12, closed 2026-09-21 — the contract hand-off
     # campaign; each closure carries its composed regression)
     FindingClosure(
@@ -593,7 +667,7 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
         finding="C12",
         capability="release-artifact-canary",
         level="contract_tested",
-        evidence=("README.md",),
+        evidence=("tests/test_release_manifest.py",),
     ),
     # e53ffd2 review (B01-B15, closed 2026-09-21 — every finding carries its
     # composed regression on a production service path; B14's own coverage
