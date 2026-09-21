@@ -39,12 +39,18 @@ import yaml
 
 import forge.adaptive.drivers.claude_sdk as claude_sdk_module
 import forge.lane_driver as lane_driver
+from forge.adaptive.wiring import OperatorControlService
 from forge.lane_driver import (
     LANE_DRIVER_ID,
     NO_COMMIT_ADDENDUM,
+    STEERING_ENV,
     build_task,
     classify_result,
+    drive_codex_lane,
+    drive_lane,
     main,
+    run_opencode_lane,
+    steering_enabled,
     usage_receipt,
 )
 
@@ -1319,3 +1325,226 @@ class TestOpenCodeLaneTemplateDetails:
         assert not any(line.lstrip().startswith("opencode serve") for line in text.splitlines())
         assert 'export OPENCODE_SERVE_CWD="$PWD"' in text
         assert "export FORGE_OPENCODE_MODEL=" in text
+
+
+# ---------------------------------------------------------------------------
+# The steering attach (NXT-11) — the driven turn + the concurrent mailbox
+# drain, over the SAME client object, gated by FORGE_STEERING_ENABLED
+# ---------------------------------------------------------------------------
+
+
+class TestSteeringGate:
+    def test_the_flag_defaults_off_and_parses_only_truthy_spellings(self):
+        assert steering_enabled({}) is False
+        assert steering_enabled({STEERING_ENV: "0"}) is False
+        assert steering_enabled({STEERING_ENV: "off"}) is False
+        assert steering_enabled({STEERING_ENV: "yes please"}) is False  # fails CLOSED
+        for value in ("1", "true", "YES", " On "):
+            assert steering_enabled({STEERING_ENV: value}) is True
+
+    def test_main_without_the_flag_writes_no_steering_journal(self, lane_env):
+        assert main(sdk=FakeSDK(CompletedTurnClient).module) == 0
+
+        assert "steering_journal" not in read_meta(lane_env)
+
+    def test_main_with_the_flag_carries_the_honest_empty_journal(self, lane_env, monkeypatch):
+        # Attached, nothing routed: the lane-local mailbox is empty until
+        # NXT-10's remote leg lands — the journal SAYS that (an empty list),
+        # it never fabricates activity.
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-7")
+
+        assert main(sdk=FakeSDK(CompletedTurnClient).module) == 0
+
+        assert read_meta(lane_env)["steering_journal"] == []
+
+    def test_the_flag_without_any_lane_identity_stays_detached(self, lane_env, monkeypatch):
+        monkeypatch.setenv(STEERING_ENV, "1")
+        # no FORGE_RUN_ID / FORGE_WORK_ID: nothing to scope a mailbox to —
+        # the lane runs the old path rather than attaching under a guess
+
+        assert main(sdk=FakeSDK(CompletedTurnClient).module) == 0
+
+        assert "steering_journal" not in read_meta(lane_env)
+
+
+class SteerableLaneClient:
+    """Duck-types BOTH surfaces the claude lane needs at once: the lane's
+    own client contract (start/query/interrupt/close) and the steering
+    adapter's ClaudeSDKClient protocol (send/interrupt/query) — ONE object,
+    the SAME-client rule the bridge documents. The turn's ResultMessage
+    appears only once a steer has landed, so the concurrent drain is proven
+    deterministically: the lane cannot finish before the mailbox won."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.steered = asyncio.Event()
+
+    async def start_session(self, task: str) -> str:
+        self.calls.append(("start_session", task))
+        return "sess-1"
+
+    async def send(self, session_id: str, text: str) -> None:
+        self.calls.append(("steer", session_id, text))
+        self.steered.set()  # the turn ends only after the guidance landed
+
+    async def interrupt(self, session_id: str) -> None:
+        self.calls.append(("interrupt", session_id))
+
+    async def query(self, session_id: str) -> list[dict]:
+        if self.steered.is_set():
+            return [{"is_error": False, "num_turns": 2, "terminal_reason": "completed"}]
+        return []
+
+    async def close(self, session_id: str) -> None:
+        self.calls.append(("close", session_id))
+
+
+class TestClaudeLaneSteering:
+    async def test_the_lane_binds_attaches_and_journals_a_mid_turn_steer(self, monkeypatch):
+        monkeypatch.setenv("FORGE_RUN_ID", "run-1")
+        monkeypatch.setenv("FORGE_WORK_ID", "wp-1")
+        control = OperatorControlService()
+        control.steer("wp-1", "human:op", "tighten the retry bounds", run_id="run-1")
+        client = SteerableLaneClient()
+
+        outcome = await drive_lane(
+            client, task="do the thing", budget_s=5.0, poll_s=0.01, control=control
+        )
+
+        # the turn could only complete THROUGH the drained steer — the
+        # mailbox consumer ran concurrently with the driven turn
+        assert outcome.exit_status == "completed"
+        assert ("steer", "sess-1", "tighten the retry bounds") in client.calls
+        assert client.calls[0] == ("start_session", "do the thing")
+        assert client.calls[-1] == ("close", "sess-1")  # detached, then closed
+        (entry,) = outcome.steering_journal or []
+        assert entry["kind"] == "steer"
+        assert entry["outcome"] == "applied"
+        assert entry["delivery"] == "application_observed"
+        assert entry["detail"]["mailbox_status"] == "checkpointed"
+
+    async def test_without_control_the_lane_runs_the_old_path(self):
+        client = SteerableLaneClient()
+
+        outcome = await drive_lane(
+            client, task="do the thing", budget_s=0.2, grace_s=0.05, poll_s=0.01
+        )
+
+        # no session, no drain task: nothing steered the turn, so it ends
+        # bounded — and the outcome carries no journal at all
+        assert outcome.terminal_reason == "budget_exceeded"
+        assert outcome.steering_journal is None
+        assert ("interrupt", "sess-1") in client.calls
+        assert client.calls[-1] == ("close", "sess-1")
+
+
+class SteerableCodexClient:
+    """``start_thread`` answers at turn ACCEPTANCE; the ``turn/completed``
+    frame is appended only when a steer lands on the ACTIVE turn — the
+    lane's notification poll and the bridge's drain interleave without
+    competing for the (non-consuming) buffer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self._events: list[dict] = []
+
+    async def start_thread(self, task: str) -> str:
+        self.calls.append(("start_thread", task))
+        return THREAD_ID
+
+    def events(self) -> list[dict]:
+        return [dict(event) for event in self._events]
+
+    async def steer_active_turn(self, thread_id: str, text: str) -> None:
+        self.calls.append(("steer_active_turn", thread_id, text))
+        self._events.append(_codex_turn("completed"))
+
+    async def send_turn(self, thread_id: str, text: str) -> None:
+        self.calls.append(("send_turn", thread_id, text))
+
+    async def interrupt(self, thread_id: str) -> None:
+        self.calls.append(("interrupt", thread_id))
+
+    async def close(self) -> None:
+        self.calls.append(("close",))
+
+
+class TestCodexLaneSteering:
+    async def test_the_thread_binds_at_acceptance_and_steers_the_active_turn(self, monkeypatch):
+        monkeypatch.setenv("FORGE_RUN_ID", "run-1")
+        monkeypatch.setenv("FORGE_WORK_ID", "wp-1")
+        control = OperatorControlService()
+        control.steer("wp-1", "human:op", "use the fixture factory", run_id="run-1")
+        client = SteerableCodexClient()
+
+        outcome = await drive_codex_lane(
+            client, task="do the thing", budget_s=5.0, poll_s=0.01, control=control
+        )
+
+        assert outcome.exit_status == "completed"
+        assert ("steer_active_turn", THREAD_ID, "use the fixture factory") in client.calls
+        assert client.calls[-1] == ("close",)
+        (entry,) = outcome.steering_journal or []
+        assert entry["outcome"] == "applied"
+        assert entry["delivery"] == "application_observed"
+
+    async def test_without_control_the_codex_lane_runs_the_old_path(self):
+        client = SteerableCodexClient()  # never steered → never completes
+
+        outcome = await drive_codex_lane(
+            client, task="do the thing", budget_s=0.2, grace_s=0.05, poll_s=0.01
+        )
+
+        assert outcome.terminal_reason == "budget_exceeded"
+        assert outcome.steering_journal is None
+        assert ("interrupt", THREAD_ID) in client.calls
+
+
+class TestOpenCodeLaneSteering:
+    async def test_the_session_binds_at_completion_and_journals_the_refusal(
+        self, opencode_lane_env, monkeypatch
+    ):
+        # The opencode client yields the session id only AT completion —
+        # the attach binds there, and a queued mid-turn steer is honestly
+        # refused (the profile has no live_input), never guessed at.
+        control = OperatorControlService()
+        control.steer("wp-1", "human:op", "look at the parser next", run_id="run-1")
+        client = FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")])
+        install_opencode(monkeypatch, client)
+
+        outcome = await run_opencode_lane(
+            task="do the thing",
+            budget_s=5.0,
+            poll_s=0.01,
+            env={
+                "FORGE_RUN_ID": "run-1",
+                "FORGE_WORK_ID": "wp-1",
+                "OPENCODE_PROVIDER_ID": "zai",
+                "OPENCODE_MODEL_ID": "glm-5.3-flash",
+            },
+            control=control,
+        )
+
+        assert outcome.exit_status == "completed"
+        (entry,) = outcome.steering_journal or []
+        assert entry["kind"] == "steer"
+        assert entry["outcome"] == "refused"
+        assert "live_input" in entry["reason"]
+        assert entry["delivery"] == ""  # no vendor call was ever attempted
+
+    async def test_without_control_the_opencode_lane_runs_the_old_path(
+        self, opencode_lane_env, monkeypatch
+    ):
+        control_free_client = FakeOpenCodeLaneClient([_opencode_event("session.execution.failed")])
+        install_opencode(monkeypatch, control_free_client)
+
+        outcome = await run_opencode_lane(
+            task="do the thing",
+            budget_s=5.0,
+            poll_s=0.01,
+            env={"OPENCODE_PROVIDER_ID": "zai"},
+        )
+
+        assert outcome.exit_status == "failed"
+        assert outcome.steering_journal is None

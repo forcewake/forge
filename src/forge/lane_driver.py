@@ -79,6 +79,21 @@ bounds the orphaned turn), a short grace window still honors the
 vendor's own terminal verdict, and only a turn that produces nothing at
 all ends as ``budget_exceeded``. The process exits nonzero and the
 reason rides the meta, exactly like the claude path.
+
+NXT-11 — the steering bridge is attached to the lane lifecycle. With
+``FORGE_STEERING_ENABLED`` truthy (default OFF — an honest rollout: the
+ingress does not route adaptive commands yet, so ON is a structural
+no-op against the lane-local mailbox), each driven turn runs one
+:class:`forge.adaptive.lane_control.LaneSteeringSession` over the SAME
+client object the lane drives: the vendor session/thread id is bound
+the moment it exists (claude: right after ``start_session``; codex:
+after ``start_thread`` answers at turn acceptance; opencode: after
+``start_session`` returns at turn completion — the only id-existence
+point that lane has), the bounded mailbox drain runs CONCURRENTLY with
+the turn (the bridge's async-context seam), and the append-only
+``steering_journal`` rides the meta beside the usage receipt. A lane
+with steering disabled runs byte-for-byte the old path — no session, no
+drain task, no journal key.
 """
 
 from __future__ import annotations
@@ -86,7 +101,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 import sys
@@ -94,6 +110,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from forge.adaptive.adapters import (
+    ClaudeSDKAdapter,
+    CodexAppAdapter,
+    OpenCodeAdapter,
+)
 from forge.adaptive.drivers.claude_sdk import (
     ClaudeSDKDriverClient,
     claude_sdk_client_from_env,
@@ -104,6 +125,8 @@ from forge.adaptive.drivers.codex_app import (
 )
 from forge.adaptive.drivers.opencode import opencode_client_from_env
 from forge.adaptive.drivers.opencode_serve import opencode_server_from_env
+from forge.adaptive.lane_control import LaneSteeringSession
+from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "CODEX_LANE_DRIVER_ID",
@@ -111,6 +134,7 @@ __all__ = [
     "LANE_DRIVER_IDS",
     "NO_COMMIT_ADDENDUM",
     "OPENCODE_LANE_DRIVER_ID",
+    "STEERING_ENV",
     "LaneOutcome",
     "build_task",
     "classify_codex_turn",
@@ -122,6 +146,8 @@ __all__ = [
     "main",
     "opencode_usage_receipt",
     "run_opencode_lane",
+    "steering_enabled",
+    "steering_service_from_env",
     "usage_receipt",
     "write_artifacts",
 ]
@@ -174,6 +200,89 @@ NO_COMMIT_ADDENDUM = (
     "your changes in the working tree for collection."
 )
 
+# ---------------------------------------------------------------------------
+# The steering attach (NXT-11) — the driven turn + the control consumer
+# ---------------------------------------------------------------------------
+
+#: The honest-rollout switch for the lane-side steering consumer. Default
+#: OFF: the ingress does not route adaptive commands yet, so enabling it
+#: buys the drain loop against a lane-local (in-memory) mailbox and an
+#: empty journal — structural wiring, honestly inert until NXT-10's
+#: remote leg lands. Truthy spellings are the same closed set the driver
+#: factories use for their booleans; anything else fails CLOSED (off).
+STEERING_ENV = "FORGE_STEERING_ENABLED"
+_STEERING_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+#: driver key -> the adapter that wraps the SAME client object the lane
+#: drives (the pairing rule the bridge checks at construction).
+_STEERING_ADAPTERS: dict[str, type] = {
+    "claude": ClaudeSDKAdapter,
+    "codex": CodexAppAdapter,
+    "opencode": OpenCodeAdapter,
+}
+
+
+def steering_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``FORGE_STEERING_ENABLED`` is truthy in *env* (default: off)."""
+    source = os.environ if env is None else env
+    return source.get(STEERING_ENV, "").strip().lower() in _STEERING_TRUTHY
+
+
+def steering_service_from_env(
+    env: Mapping[str, str] | None = None,
+) -> OperatorControlService | None:
+    """The lane-local control consumer when steering is enabled, else None.
+
+    This slice consumes the in-memory mailbox through the existing wiring
+    (:class:`~forge.adaptive.wiring.OperatorControlService` — the same
+    ``MailboxSurface`` protocol the durable PostgresMailbox implements),
+    because the authenticated remote consumer is NXT-10's leg, not this
+    one. The lane process never receives control-plane credentials; when
+    the durable leg lands, this factory is the single seam that swaps.
+    """
+    if not steering_enabled(env):
+        return None
+    return OperatorControlService()
+
+
+def _steering_session(
+    control: OperatorControlService | None,
+    *,
+    driver_key: str,
+    client: Any,
+    env: Mapping[str, str] | None = None,
+) -> LaneSteeringSession | None:
+    """Build the lane's steering session over the SAME client the lane drives.
+
+    Identity comes from the dispatch env: ``FORGE_RUN_ID`` (always set by
+    the lane templates' rules — it scopes run-scoped commands) and
+    ``FORGE_WORK_ID``, falling back to the run id until the dispatch
+    template carries a distinct work id (integration note: the control
+    plane books commands per work; align ``FORGE_WORK_ID`` with it before
+    the flag goes ON outside tests). No usable work id at all → None:
+    a mailbox with nothing to scope to stays honestly detached rather
+    than attached under a guessed key.
+    """
+    if control is None:
+        return None
+    source = os.environ if env is None else env
+    run_id = (source.get("FORGE_RUN_ID") or "").strip()
+    work_id = (source.get("FORGE_WORK_ID") or run_id).strip()
+    if not work_id:
+        return None
+    return LaneSteeringSession(
+        service=control,
+        driver=_STEERING_ADAPTERS[driver_key](client=client),
+        driver_kind=driver_key,  # type: ignore[arg-type]  (keyed by LANE_DRIVER_IDS)
+        run_id=run_id,
+        work_id=work_id,
+    )
+
+
+def _steering_journal(steering: LaneSteeringSession) -> list[dict[str, Any]]:
+    """The session's append-only journal as the meta's ``steering_journal``."""
+    return [asdict(action) for action in steering.journal]
+
 
 @dataclass(frozen=True)
 class LaneOutcome:
@@ -194,6 +303,10 @@ class LaneOutcome:
     #: completed-but-empty turns (LIVE-found: a 16 s "completed" turn
     #: with no file changes needs its answer visible in the meta).
     reply_excerpt: str | None = None
+    #: The steering bridge's append-only journal (NXT-11) — carried into
+    #: the meta as ``steering_journal`` ONLY when the lane ran with
+    #: steering attached; None (key absent) when the gate was off.
+    steering_journal: list[dict[str, Any]] | None = None
 
 
 def build_task(brief_text: str, issue_iid: str = "") -> str:
@@ -322,6 +435,7 @@ async def drive_lane(
     budget_s: float,
     grace_s: float = _DEFAULT_GRACE_S,
     poll_s: float = _POLL_INTERVAL_S,
+    control: OperatorControlService | None = None,
 ) -> LaneOutcome:
     """Drive the ONE task to its terminal ResultMessage, bounded.
 
@@ -333,9 +447,19 @@ async def drive_lane(
     that produces nothing at all ends as ``budget_exceeded``. The session
     is ALWAYS closed: teardown is bounded inside the driver, so no path
     out of here hangs the lane.
+
+    NXT-11: with *control* supplied, one
+    :class:`~forge.adaptive.lane_control.LaneSteeringSession` rides the
+    SAME client — bound to the session id the moment ``start_session``
+    answers, its bounded mailbox drain running CONCURRENTLY with the
+    turn (the async-context seam), its journal returned on the outcome.
     """
     session_id = await client.start_session(task)
-    try:
+    steering = _steering_session(control, driver_key="claude", client=client)
+    if steering is not None:
+        steering.bind(session_id)
+
+    async def _turn() -> LaneOutcome:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget_s
         result = await _drain_until_result(client, session_id, deadline=deadline, poll_s=poll_s)
@@ -352,8 +476,18 @@ async def drive_lane(
             terminal_reason=reason,
             usage=usage_receipt(result),
         )
+
+    try:
+        if steering is None:
+            outcome = await _turn()
+        else:
+            async with steering.attach(poll_interval=poll_s):
+                outcome = await _turn()
     finally:
         await client.close(session_id)
+    if steering is not None:
+        outcome = replace(outcome, steering_journal=_steering_journal(steering))
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +641,7 @@ async def drive_codex_lane(
     budget_s: float,
     grace_s: float = _DEFAULT_GRACE_S,
     poll_s: float = _POLL_INTERVAL_S,
+    control: OperatorControlService | None = None,
 ) -> LaneOutcome:
     """Drive ONE codex thread to its ``turn/completed``, bounded.
 
@@ -519,9 +654,20 @@ async def drive_codex_lane(
     only a turn that produces no verdict at all ends ``budget_exceeded``.
     The client connection is ALWAYS closed (teardown is bounded inside
     the driver, so no path out of here hangs the lane).
+
+    NXT-11: with *control* supplied, the steering session binds the
+    thread id at acceptance (the vendor id's existence point — commands
+    arriving earlier are refused by the bridge, never guessed at) and
+    drains CONCURRENTLY with the poll loop. The notification buffer is a
+    non-consuming re-read, so the bridge's vendor calls never compete
+    with the lane's own drain for the event stream.
     """
     thread_id = await client.start_thread(task)
-    try:
+    steering = _steering_session(control, driver_key="codex", client=client)
+    if steering is not None:
+        steering.bind(thread_id)
+
+    async def _turn() -> LaneOutcome:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + budget_s
         params = await _poll_codex_completion(client, thread_id, deadline=deadline, poll_s=poll_s)
@@ -547,8 +693,18 @@ async def drive_codex_lane(
             error=error,
             reply_excerpt=_codex_last_agent_text(client.events()),
         )
+
+    try:
+        if steering is None:
+            outcome = await _turn()
+        else:
+            async with steering.attach(poll_interval=poll_s):
+                outcome = await _turn()
     finally:
         await client.close()
+    if steering is not None:
+        outcome = replace(outcome, steering_journal=_steering_journal(steering))
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +825,7 @@ async def run_opencode_lane(
     grace_s: float = _DEFAULT_GRACE_S,
     poll_s: float = _POLL_INTERVAL_S,
     env: dict[str, str] | None = None,
+    control: OperatorControlService | None = None,
 ) -> LaneOutcome:
     """Spawn the lane-local server, drive ONE task, classify + receipt.
 
@@ -684,8 +841,16 @@ async def run_opencode_lane(
     timed-out turn never yields its session id — there is nothing to
     abort by id, and the server teardown bounds the orphaned turn; that
     case is recorded honestly as ``budget_exceeded``.
+
+    NXT-11: the opencode client yields the vendor session id only AT
+    turn completion, so with *control* supplied the steering session
+    binds there — before the events poll, the one poll loop this lane
+    has — and the drain runs beside it. Mid-turn steering is honestly
+    absent on this profile (no ``live_input``): the attached bridge
+    journals the refusals rather than guessing a capability.
     """
     source = os.environ if env is None else env
+    steering: LaneSteeringSession | None = None
     server = opencode_server_from_env(env=source)
     async with server:
         client_env = {
@@ -708,23 +873,41 @@ async def run_opencode_lane(
                     client.start_session(task), timeout=budget_s + grace_s
                 )
             except TimeoutError:
-                return LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + grace_s
-            events: list[dict[str, Any]] = []
-            while True:
-                events = await client.events(session_id)
-                if _opencode_verdict_seen(events, session_id) or loop.time() >= deadline:
-                    break
-                await asyncio.sleep(poll_s)
-            exit_status, reason = classify_opencode_events(events, session_id)
-            return LaneOutcome(
-                exit_status=exit_status,
-                terminal_reason=reason,
-                usage=opencode_usage_receipt(events),
-            )
+                outcome = LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
+            else:
+                steering = _steering_session(
+                    control, driver_key="opencode", client=client, env=source
+                )
+                if steering is not None:
+                    # the id-existence point for this vendor: the turn is
+                    # already complete — bind, then drain beside the poll.
+                    steering.bind(session_id)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + grace_s
+
+                async def _poll_events() -> list[dict[str, Any]]:
+                    while True:
+                        events = await client.events(session_id)
+                        if _opencode_verdict_seen(events, session_id) or loop.time() >= deadline:
+                            return events
+                        await asyncio.sleep(poll_s)
+
+                if steering is None:
+                    events = await _poll_events()
+                else:
+                    async with steering.attach(poll_interval=poll_s):
+                        events = await _poll_events()
+                exit_status, reason = classify_opencode_events(events, session_id)
+                outcome = LaneOutcome(
+                    exit_status=exit_status,
+                    terminal_reason=reason,
+                    usage=opencode_usage_receipt(events),
+                )
         finally:
             await client.aclose()
+    if steering is not None:
+        outcome = replace(outcome, steering_journal=_steering_journal(steering))
+    return outcome
 
 
 def write_artifacts(
@@ -757,6 +940,11 @@ def write_artifacts(
         meta["error"] = outcome.error[:500]
     if getattr(outcome, "reply_excerpt", None):
         meta["reply_excerpt"] = outcome.reply_excerpt
+    if outcome.steering_journal is not None:
+        # NXT-11: the steering bridge's append-only evidence — present
+        # ONLY when the lane ran with the bridge attached (empty list =
+        # attached, nothing arrived; absent = the gate was off).
+        meta["steering_journal"] = outcome.steering_journal
     meta_file = Path(meta_path)
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     meta_file.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
@@ -866,6 +1054,10 @@ def main(
     except ValueError as exc:
         return _fail("driver_setup_error", str(exc))
 
+    # NXT-11: the lane-local control consumer, honestly OFF unless the
+    # dispatch env turned it on (see steering_service_from_env).
+    control = steering_service_from_env()
+
     if driver_key == "claude":
         try:
             # Ambient env carries the gateway (ANTHROPIC_BASE_URL/AUTH_TOKEN),
@@ -877,7 +1069,13 @@ def main(
             reason = "sdk_missing" if "claude-agent-sdk" in str(exc) else "driver_setup_error"
             return _fail(reason, str(exc))
         drive = functools.partial(
-            drive_lane, client, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+            drive_lane,
+            client,
+            task=task,
+            budget_s=budget_s,
+            grace_s=grace_s,
+            poll_s=poll_s,
+            control=control,
         )
     elif driver_key == "codex":
         # Ambient env carries CODEX_BINARY/CODEX_CWD/CODEX_MODEL and the
@@ -887,12 +1085,23 @@ def main(
         except (RuntimeError, ValueError) as exc:
             return _fail("driver_setup_error", str(exc))
         drive = functools.partial(
-            drive_codex_lane, client, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+            drive_codex_lane,
+            client,
+            task=task,
+            budget_s=budget_s,
+            grace_s=grace_s,
+            poll_s=poll_s,
+            control=control,
         )
     else:  # opencode — the server + client are built inside the coroutine
         # (the spawner owns the loopback listener's lifetime).
         drive = functools.partial(
-            run_opencode_lane, task=task, budget_s=budget_s, grace_s=grace_s, poll_s=poll_s
+            run_opencode_lane,
+            task=task,
+            budget_s=budget_s,
+            grace_s=grace_s,
+            poll_s=poll_s,
+            control=control,
         )
 
     try:

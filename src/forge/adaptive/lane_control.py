@@ -46,11 +46,39 @@ the bridge can carry a permission, flag, or configuration argument, so
 no command can alter what the lane is allowed to DO (EXE-06).
 
 Every handled command is journaled as an append-only
-:class:`SteeringAction` (applied / refused / ignored / error) — the
-lane's evidence, distinct from the mailbox ladder the control plane
-owns. Applied commands climb the ladder through the REAL
-:class:`~forge.adaptive.control.Mailbox` gates (authorize → CAS apply →
-checkpoint), so a spent command can never re-apply.
+:class:`SteeringAction` (applied / refused / ignored / error /
+delivery_unknown) — the lane's evidence, distinct from the mailbox
+ladder the control plane owns. Applied commands climb the ladder
+through the REAL :class:`~forge.adaptive.control.Mailbox` gates
+(authorize → CAS apply → checkpoint), so a spent command can never
+re-apply.
+
+NXT-12 — intent before effect. The old order marked a command spent
+BEFORE the awaited vendor effect, so a crash or a lost response in the
+window silently ate the instruction. Every vendor-carrying command now
+walks a recorded delivery ladder (:class:`DeliveryRecord`):
+``dispatching`` (the intent — on record BEFORE the await) →
+``vendor_accepted`` → ``application_observed`` on success, or
+``outcome_unknown`` on TimeoutError/ConnectionError — the lost-response
+window, NEVER silently retried: the command has left ``pending()`` and
+the drain's handled-set refuses redelivery until a reconciler probes.
+``uncertain_commands()`` is the reconciler's view;
+``delivery_unknown`` is the honest TERMINAL state a probe that cannot
+decide closes with (:meth:`mark_delivery_unknown`). The in-memory
+mailbox's coarse ``applied`` rung is the INTENT rung here (the durable
+mailbox's ``dispatching`` — see :mod:`forge.adaptive.mailbox_db`);
+``checkpointed`` remains the application-observed book.
+
+NXT-11 — the lane lifecycle. :mod:`forge.lane_driver` now attaches one
+session per driven turn (``FORGE_STEERING_ENABLED``, default OFF this
+slice): bind the vendor session id once it exists, run the bounded
+mailbox drain CONCURRENTLY with the turn (the async-context seam), and
+carry the journal into the lane's meta as ``steering_journal``.
+
+NXT-14 (first half) — urgent pause never waits behind queued slow
+guidance: within one drain cycle the interrupt-class commands are
+applied first (sequence order still rules inside each class and between
+ordinary commands).
 """
 
 from __future__ import annotations
@@ -79,6 +107,9 @@ from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "DEFAULT_POLL_INTERVAL_S",
+    "DELIVERY_STATES",
+    "DeliveryRecord",
+    "INTERRUPT_KINDS",
     "LANE_CONTROL_SURFACE",
     "LaneSteeringSession",
     "RESUME_NOTICE",
@@ -131,6 +162,55 @@ _NOT_STEERING: Final[dict[str, str]] = {
 #: own drain poll — no busy loop between mailbox checks).
 DEFAULT_POLL_INTERVAL_S: Final = 0.25
 
+#: The interrupt-class commands — applied FIRST within a drain cycle so
+#: an urgent pause never waits behind queued slow guidance (NXT-14's
+#: first half: a mid-turn ``send`` can sit behind a drain timeout, so
+#: head-of-line blocking must not delay the interrupt).
+INTERRUPT_KINDS: Final = frozenset({"pause"})
+
+#: NXT-12's delivery ladder around every vendor call: the intent is
+#: recorded at ``dispatching`` BEFORE the await; a clean vendor return
+#: reaches ``vendor_accepted`` and then — once the mailbox checkpoint
+#: books the application — ``application_observed``; a lost response
+#: (TimeoutError / ConnectionError) parks at ``outcome_unknown`` for the
+#: reconciler, and ``delivery_unknown`` is the honest TERMINAL state a
+#: probe that cannot decide closes with. Never in this tuple: "applied"
+#: — application is OBSERVED, never assumed from an intent.
+DELIVERY_STATES: Final = (
+    "dispatching",
+    "vendor_accepted",
+    "outcome_unknown",
+    "application_observed",
+    "delivery_unknown",
+)
+
+DeliveryState = Literal[
+    "dispatching",
+    "vendor_accepted",
+    "outcome_unknown",
+    "application_observed",
+    "delivery_unknown",
+]
+
+
+@dataclass(frozen=True)
+class DeliveryRecord:
+    """One command's journey through :data:`DELIVERY_STATES` (NXT-12).
+
+    The vendor correlation this record carries (the vendor session id +
+    the execution epoch the dispatch ran under) is what a recovery pass
+    probes — ``outcome_unknown`` is a question this record makes
+    answerable, not a shrug.
+    """
+
+    command_id: str
+    kind: str
+    sequence: int
+    state: DeliveryState
+    vendor_session_id: str
+    execution_epoch: int
+    note: str = ""
+
 
 @dataclass(frozen=True)
 class SteeringAction:
@@ -138,15 +218,24 @@ class SteeringAction:
 
     ``outcome`` is one of ``applied`` (the mapping ran), ``refused``
     (a guard or the mailbox gate said no — ``reason`` says which),
-    ``ignored`` (the command targets a different run), or ``error``
-    (the vendor effect raised — the command has SPENT in the ladder,
-    and the journal is the record the reconciler reads).
+    ``ignored`` (the command targets a different run), ``error`` (the
+    vendor effect raised decisively — the command has SPENT in the
+    ladder, and the journal is the record the reconciler reads), or
+    ``delivery_unknown`` (the vendor response was LOST — timeout /
+    connection reset / cancelled mid-dispatch: distinct from both
+    refusal and error, never silently retried without a probe).
+
+    ``delivery`` is the :data:`DELIVERY_STATES` rung the command's
+    effect ended on — ``""`` when no vendor-carrying effect ran
+    (refused / ignored). The intent-vs-outcome pair IS NXT-12's journal
+    extension: one row says what was INTENDED and what was OBSERVED.
     """
 
     command_id: str
     kind: str
-    outcome: Literal["applied", "refused", "ignored", "error"]
+    outcome: Literal["applied", "refused", "ignored", "error", "delivery_unknown"]
     sequence: int
+    delivery: str = ""
     reason: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
 
@@ -169,8 +258,9 @@ class LaneSteeringSession:
             await the_agent_turn()
         evidence = steer.journal
 
-    Or through :meth:`attach` — the documented lane_driver seam (see its
-    docstring for the exact future integration).
+    Or through :meth:`attach` — the lane_driver seam (LIVE since
+    NXT-11: ``forge.lane_driver`` binds, attaches, and carries the
+    journal into the lane meta; see :meth:`attach` for the exact shape).
 
     The lane keeps its OWN :class:`~forge.adaptive.control.PauseState`
     (the execution-side view; the service's is the control-plane view)
@@ -236,6 +326,8 @@ class LaneSteeringSession:
         self._queued: list[str] = []
         self._journal: list[SteeringAction] = []
         self._handled: dict[str, str] = {}
+        self._delivery: dict[str, DeliveryRecord] = {}
+        self._closing = False
         self._loop_task: asyncio.Task[None] | None = None
 
     # -- the async-context surface ------------------------------------------
@@ -250,24 +342,30 @@ class LaneSteeringSession:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # The closing flag arms the teardown guard: the final drain below
+        # still CONSUMES late commands, but it can never start a NEW resume
+        # turn into a lane that is packing up (NXT-11's teardown hazard) —
+        # a resume seen now is refused for the next lane epoch / reconciler.
+        self._closing = True
         # One final synchronous pass: a command submitted while the turn
         # was ending is still consumed and journaled, never dropped.
         await self.drain_once()
 
     def attach(self, poll_interval: float = DEFAULT_POLL_INTERVAL_S) -> LaneSteeringSession:
-        """The lane_driver integration seam (lane_driver.py itself is NOT touched).
+        """The lane_driver integration seam (LIVE since NXT-11).
 
-        A future ``forge.lane_driver`` turn would run this bridge
-        alongside its ONE driven turn — ``start_session``, then the
-        poll-drain loop, then ``close`` — with the SAME client object
-        the lane already drives::
+        :mod:`forge.lane_driver` runs this bridge alongside each driven
+        turn — ``start_session`` / ``start_thread``, ``bind`` the vendor
+        id, the poll-drain loop via the async context, then ``close`` —
+        with the SAME client object the lane already drives (gated by
+        ``FORGE_STEERING_ENABLED``, default OFF)::
 
             steering = LaneSteeringSession(
                 service=control_service,           # the run's OperatorControlService
                 driver=ClaudeSDKAdapter(client),   # the SAME client the lane drives
                 driver_kind="claude",
                 run_id=os.environ["FORGE_RUN_ID"],
-                work_id=os.environ["FORGE_WORK_ID"],
+                work_id=os.environ.get("FORGE_WORK_ID") or os.environ["FORGE_RUN_ID"],
             )
             session_id = await client.start_session(task)
             steering.bind(session_id)              # the vendor id exists only now
@@ -304,9 +402,19 @@ class LaneSteeringSession:
         refused or ignored stays in the mailbox at its current rung for
         the control plane's reconciler — only APPLIED commands climb to
         ``checkpointed`` and leave the pending view.
+
+        Ordering within one cycle is pause-first (NXT-14's first half):
+        :data:`INTERRUPT_KINDS` commands are applied before queued slow
+        guidance, so an urgent pause never head-of-line blocks behind a
+        steer. Sequence order still rules inside each class and between
+        ordinary commands (CTL-07).
         """
         actions: list[SteeringAction] = []
-        for command in self.service.mailbox.pending(self.work_id):
+        pending = self.service.mailbox.pending(self.work_id)
+        ordered = sorted(
+            pending, key=lambda command: (command.kind not in INTERRUPT_KINDS, command.sequence)
+        )
+        for command in ordered:
             if command.command_id in self._handled:
                 continue
             action = await self._apply(command)
@@ -321,6 +429,56 @@ class LaneSteeringSession:
     def journal(self) -> list[SteeringAction]:
         """The append-only action journal (a copy — evidence is not editable)."""
         return list(self._journal)
+
+    def delivery_state(self, command_id: str) -> str:
+        """The command's :data:`DELIVERY_STATES` rung, or ``""`` if never dispatched."""
+        record = self._delivery.get(command_id)
+        return record.state if record is not None else ""
+
+    def uncertain_commands(self) -> list[DeliveryRecord]:
+        """The commands whose vendor-effect outcome is UNPROVEN (NXT-12).
+
+        Every record here sits at ``outcome_unknown`` — the request may
+        or may not have landed. This is the reconciler's worklist: probe
+        the recorded vendor correlation before ANY retry, and when no
+        probe can decide, close the command with
+        :meth:`mark_delivery_unknown` (the honest terminal state). The
+        drain itself never redelivers them.
+        """
+        return sorted(
+            (record for record in self._delivery.values() if record.state == "outcome_unknown"),
+            key=lambda record: record.sequence,
+        )
+
+    def mark_delivery_unknown(self, command_id: str, note: str = "") -> DeliveryRecord:
+        """Close an ``outcome_unknown`` command as ``delivery_unknown``.
+
+        The reconciler's honest give-up: the probe could not decide, so
+        the record SAYS unknown — it never rounds up to applied (an
+        unproven effect) and never down to refused (a decision nobody
+        made). Terminal: only an ``outcome_unknown`` command may be
+        closed this way; anything else raises (a decided command cannot
+        be un-decided).
+        """
+        record = self._delivery.get(command_id)
+        if record is None:
+            raise KeyError(f"unknown command_id {command_id!r} — nothing was dispatched")
+        if record.state != "outcome_unknown":
+            raise ValueError(
+                f"command {command_id!r} is {record.state!r}; only an "
+                "outcome_unknown command can be closed as delivery_unknown"
+            )
+        closed = DeliveryRecord(
+            command_id=record.command_id,
+            kind=record.kind,
+            sequence=record.sequence,
+            state="delivery_unknown",
+            vendor_session_id=record.vendor_session_id,
+            execution_epoch=record.execution_epoch,
+            note=note or record.note,
+        )
+        self._delivery[command_id] = closed
+        return closed
 
     @property
     def pause_state(self) -> PauseState:
@@ -378,35 +536,128 @@ class LaneSteeringSession:
     ) -> SteeringAction:
         """Gate one command through the mailbox ladder, run the effect, journal.
 
-        The ladder order is the review's: the CAS apply gates the EFFECT
-        (a command written against a stale world expires before any
-        vendor call), the effect runs at ``applied``, and
-        ``checkpoint`` records that the action reached the durable
-        journal. An effect that raises leaves the command spent at
-        ``applied`` with an ``error`` action — the honest record, never
-        a silent retry.
+        NXT-12's intent-before-effect order. The ladder walk first: the
+        CAS apply gates the EFFECT (a command written against a stale
+        world expires before any vendor call). Then the dispatch INTENT
+        is recorded at ``dispatching`` — BEFORE the await — so a crash
+        or a lost response in the window leaves an honest record, never
+        an ``applied`` claim the bridge cannot support. Outcomes:
+
+        - clean return → ``vendor_accepted``, then the mailbox
+          ``checkpoint`` books the application → ``application_observed``
+          (the journal row carries the intent-vs-outcome pair);
+        - TimeoutError / ConnectionError → ``outcome_unknown`` and the
+          action outcome ``delivery_unknown`` — the request may or may
+          not have landed. The command has left ``pending()`` (the
+          coarse mailbox sits at its intent rung) and the handled-set
+          bars the drain from redelivering it: NEVER a silent retry —
+          :meth:`uncertain_commands` hands it to a probing reconciler;
+        - cancellation between intent and effect → the same unknown
+          booking, journaled in place (the drain cannot finish), then
+          the cancellation propagates;
+        - any other exception → ``error`` — the adapter contract: a
+          decisive raise means the call did NOT go through (transport
+          uncertainty arrives as Timeout/ConnectionError), so the rung
+          stays ``dispatching`` and the journal row is the spent record.
         """
         ok, gate = self._gate(command)
         if not ok:
             return self._refused(command, gate)
         enriched = dict(detail)
+        self._record_intent(command)
         try:
             await effect(enriched)
+        except asyncio.CancelledError:
+            # The crash-between-intent-and-effect window, in-process:
+            # teardown or a bounding wait_for cancelled the dispatch.
+            # The effect's fate is unproven — book it, journal it (the
+            # drain loop unwinds past its own append), and re-raise.
+            self._mark_delivery(
+                command,
+                "outcome_unknown",
+                "cancelled between intent and vendor effect — probe before any retry",
+            )
+            cancelled = SteeringAction(
+                command_id=command.command_id,
+                kind=command.kind,
+                outcome="delivery_unknown",
+                sequence=command.sequence,
+                delivery="outcome_unknown",
+                reason="dispatch cancelled mid-flight — the vendor effect's fate is unproven",
+            )
+            self._journal.append(cancelled)
+            self._handled[command.command_id] = cancelled.outcome
+            raise
+        except (TimeoutError, ConnectionError) as exc:
+            self._mark_delivery(
+                command,
+                "outcome_unknown",
+                f"vendor response lost ({exc!r}) — reconcile before any retry",
+            )
+            return SteeringAction(
+                command_id=command.command_id,
+                kind=command.kind,
+                outcome="delivery_unknown",
+                sequence=command.sequence,
+                delivery="outcome_unknown",
+                reason=(
+                    f"vendor response lost: {exc!r} — the effect may or may not "
+                    "have landed; a probe must decide, never a blind retry"
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 — journal the failure, keep the loop alive
             return SteeringAction(
                 command_id=command.command_id,
                 kind=command.kind,
                 outcome="error",
                 sequence=command.sequence,
+                delivery="dispatching",
                 reason=f"vendor effect failed: {exc}",
             )
+        self._mark_delivery(command, "vendor_accepted", "the vendor took the effect")
         status = self._checkpoint(command)
+        self._mark_delivery(command, "application_observed", f"mailbox status: {status}")
         return SteeringAction(
             command_id=command.command_id,
             kind=command.kind,
             outcome="applied",
             sequence=command.sequence,
+            delivery="application_observed",
             detail={**enriched, "mailbox_status": status},
+        )
+
+    def _record_intent(self, command: ControlCommand) -> None:
+        """Put the dispatch intent on record BEFORE the vendor call.
+
+        The vendor correlation (session id + execution epoch) travels
+        with the record — the pair a recovery pass probes. Over the
+        in-memory mailbox the coarse ``applied`` rung IS this intent
+        (the durable mailbox names it ``dispatching``).
+        """
+        self._delivery[command.command_id] = DeliveryRecord(
+            command_id=command.command_id,
+            kind=command.kind,
+            sequence=command.sequence,
+            state="dispatching",
+            vendor_session_id=self.vendor_session_id,
+            execution_epoch=self.execution_epoch,
+            note="effect intended — recorded before the vendor call",
+        )
+
+    def _mark_delivery(self, command: ControlCommand, state: DeliveryState, note: str) -> None:
+        """Advance the command's delivery record to *state*."""
+        record = self._delivery.get(command.command_id)
+        if record is None:  # unreachable: _record_intent precedes every effect
+            self._record_intent(command)
+            record = self._delivery[command.command_id]
+        self._delivery[command.command_id] = DeliveryRecord(
+            command_id=record.command_id,
+            kind=record.kind,
+            sequence=record.sequence,
+            state=state,
+            vendor_session_id=record.vendor_session_id,
+            execution_epoch=record.execution_epoch,
+            note=note,
         )
 
     # -- the four safe mappings ----------------------------------------------
@@ -435,6 +686,12 @@ class LaneSteeringSession:
         return await self._run(command, effect=effect, detail={})
 
     async def _do_resume(self, command: ControlCommand) -> SteeringAction:
+        if self._closing:
+            return self._refused(
+                command,
+                "the lane is closing — a resume turn belongs to the next lane "
+                "epoch or the reconciler, never to teardown",
+            )
         if not self._pause.pause_requested:
             return self._refused(command, "nothing to resume: the lane is not paused")
         ok, why = resume_check(

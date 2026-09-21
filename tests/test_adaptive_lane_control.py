@@ -708,3 +708,267 @@ class TestPermissionPosture:
                 params = set(inspect.signature(method).parameters) - {"self"}
                 # a vendor id and, at most, text: no permission can ride along
                 assert params <= {"session_id", "thread_id", "text"}, (kind, name)
+
+
+# -- NXT-12: the delivery ladder (intent before effect) ------------------------
+
+
+class TestDeliveryLadder:
+    async def test_the_intent_is_on_record_before_the_vendor_call(self):
+        svc = OperatorControlService()
+        probes: list[str] = []
+
+        class Probing(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                # mid-vendor-call probe: the dispatch intent PRECEDES the send
+                probes.append(steering.delivery_state("cmd-1"))
+                self.calls.append(("steer", session_id, text))
+
+        client = Probing()
+        steering = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
+
+        actions = await steering.drain_once()
+
+        assert probes == ["dispatching"]
+        assert actions[0].outcome == "applied"
+        assert actions[0].delivery == "application_observed"
+        assert steering.delivery_state("cmd-1") == "application_observed"
+        assert actions[0].detail["mailbox_status"] == "checkpointed"
+
+    async def test_a_timeout_is_outcome_unknown_never_applied(self):
+        svc = OperatorControlService()
+
+        class Lagging(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                self.calls.append(("steer", session_id, text))
+                raise TimeoutError("claude gateway did not answer in 30s")
+
+        client = Lagging()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))
+
+        actions = await session.drain_once()
+
+        assert actions[0].outcome == "delivery_unknown"
+        assert actions[0].delivery == "outcome_unknown"
+        assert "probe" in actions[0].reason or "reconcile" in actions[0].reason
+        assert session.delivery_state("cmd-1") == "outcome_unknown"
+        # NEVER applied: the coarse mailbox sits at its intent rung
+        # ("applied" ≙ the durable ladder's dispatching), checkpoint never ran
+        assert svc.mailbox.commands["cmd-1"].status == "applied"
+        assert svc.mailbox.commands["cmd-1"].status != "checkpointed"
+        # and the command has left pending(): the drain cannot re-send it
+        assert svc.pending("wp-1") == []
+
+    async def test_a_connection_error_is_uncertain_delivery(self):
+        svc = OperatorControlService()
+
+        class Dropping(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                self.calls.append(("steer", session_id, text))
+                raise ConnectionError("connection reset mid-request")
+
+        client = Dropping()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "dropped note"}))
+
+        actions = await session.drain_once()
+
+        assert actions[0].outcome == "delivery_unknown"
+        assert session.delivery_state("cmd-1") == "outcome_unknown"
+
+    async def test_an_uncertain_command_is_never_silently_retried(self):
+        svc = OperatorControlService()
+
+        class OnceLagging(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                self.calls.append(("steer", session_id, text))
+                raise TimeoutError("first attempt lost")
+
+        client = OnceLagging()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "uncertain"}))
+
+        first = await session.drain_once()
+        second = await session.drain_once()
+
+        assert first[0].outcome == "delivery_unknown"
+        assert second == []  # redelivery is barred: a probe must decide, not a retry
+        assert len(client.calls) == 1
+
+    async def test_a_definitive_vendor_error_is_error_not_uncertain(self):
+        svc = OperatorControlService()
+
+        class Refusing(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                self.calls.append(("steer", session_id, text))
+                raise RuntimeError("session is not connected")
+
+        client = Refusing()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "doomed"}))
+
+        actions = await session.drain_once()
+
+        # a decisive adapter raise is a KNOWN failure — distinct from the
+        # lost-response window, never surfaced to the reconciler as uncertain
+        assert actions[0].outcome == "error"
+        assert actions[0].delivery == "dispatching"
+        assert session.uncertain_commands() == []
+
+    async def test_uncertain_commands_expose_the_reconciler_view(self):
+        svc = OperatorControlService()
+
+        class Lagging(FakeCodexClient):
+            async def steer_active_turn(self, thread_id: str, text: str) -> None:
+                self.calls.append(("steer_active_turn", thread_id, text))
+                raise TimeoutError("codex turn steer lost its response")
+
+        client = Lagging()
+        session = _session(svc, "codex", client, vendor="th-9")
+        _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
+
+        await session.drain_once()
+
+        (record,) = session.uncertain_commands()
+        assert record.command_id == "cmd-1"
+        assert record.kind == "steer"
+        assert record.sequence == 1
+        assert record.state == "outcome_unknown"
+        assert record.vendor_session_id == "th-9"
+        assert record.execution_epoch == 1  # the correlation a recovery pass probes
+        assert "reconcile" in record.note or "lost" in record.note
+
+    async def test_mark_delivery_unknown_is_the_honest_terminal_close(self):
+        svc = OperatorControlService()
+
+        class Lagging(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                raise TimeoutError("no answer")
+
+        session = _session(svc, "claude", Lagging())
+        _submit(svc, _cmd("steer", 1, payload={"text": "gone"}))
+        await session.drain_once()
+
+        closed = session.mark_delivery_unknown("cmd-1", "probe found no session evidence")
+
+        assert closed.state == "delivery_unknown"
+        assert session.delivery_state("cmd-1") == "delivery_unknown"
+        assert session.uncertain_commands() == []  # decided-as-unknown: off the worklist
+        # terminal: a decided command cannot be un-decided
+        with pytest.raises(ValueError, match="only an outcome_unknown command"):
+            session.mark_delivery_unknown("cmd-1")
+        with pytest.raises(KeyError):
+            session.mark_delivery_unknown("cmd-never-dispatched")
+
+    async def test_a_crash_between_intent_and_effect_books_outcome_unknown(self):
+        svc = OperatorControlService()
+
+        class Hanging(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                self.calls.append(("steer", session_id, text))
+                await asyncio.sleep(3600)  # the dispatch never completes
+
+        client = Hanging()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "in flight"}))
+
+        # the process-death window, in-process: the bounding wait cancels the
+        # dispatch between the intent record and the vendor's answer
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(session.drain_once(), timeout=0.05)
+
+        assert session.delivery_state("cmd-1") == "outcome_unknown"
+        assert svc.mailbox.commands["cmd-1"].status == "applied"  # intent rung
+        assert svc.mailbox.commands["cmd-1"].status != "checkpointed"  # never applied
+        # the journal carries the crash-window record even though the drain
+        # itself unwound — evidence survives the cancellation
+        assert session.journal[-1].outcome == "delivery_unknown"
+        assert session.journal[-1].delivery == "outcome_unknown"
+        assert (session.uncertain_commands()[0].command_id) == "cmd-1"
+
+
+# -- NXT-14 (first half): pause priority within a drain cycle ------------------
+
+
+class TestPausePriorityDrain:
+    async def test_pause_preempts_queued_slow_guidance(self):
+        svc = OperatorControlService()
+        timeline: list[str] = []
+
+        class SlowSteer(FakeClaudeClient):
+            async def send(self, session_id: str, text: str) -> None:
+                timeline.append("steer-start")
+                await asyncio.sleep(0.05)  # a guidance send can sit behind a drain timeout
+                timeline.append("steer-end")
+                self.calls.append(("steer", session_id, text))
+
+        client = SlowSteer()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))  # sequenced FIRST
+        _submit(svc, _cmd("pause", 2))  # ...but urgent
+
+        actions = await session.drain_once()
+
+        # the interrupt never waited behind the slow steer: the steer's
+        # mid-turn send never even started — it queued for the resume turn
+        assert timeline == []
+        assert client.calls == [("interrupt", "sess-1")]
+        assert [a.kind for a in actions] == ["pause", "steer"]
+        assert actions[1].detail["queued_for_resume"] is True
+        assert session.queued_guidance == ["slow note"]
+        assert session.pause_state.pause_requested is True
+
+    async def test_resume_does_not_jump_the_queue(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client)
+        _submit(svc, _cmd("steer", 1, payload={"text": "ordinary note"}))
+        _submit(svc, _cmd("pause", 2))
+        _submit(svc, _cmd("resume", 3))
+
+        actions = await session.drain_once()
+
+        # pause first (interrupt class), then steer→queue, then resume LAST —
+        # the resume turn must run after the guidance it delivers has queued
+        assert [a.kind for a in actions] == ["pause", "steer", "resume"]
+        assert client.calls == [
+            ("interrupt", "sess-1"),
+            ("steer", "sess-1", "ordinary note"),
+        ]
+
+
+# -- NXT-11: the teardown guard ------------------------------------------------
+
+
+class TestTeardownGuard:
+    async def test_the_final_drain_never_starts_a_resume_turn(self):
+        svc = OperatorControlService()
+        client = FakeCodexClient()
+        session = _session(svc, "codex", client, vendor="th-1", poll_interval=5.0)
+        _submit(svc, _cmd("pause", 1))
+        await session.drain_once()  # paused: a resume would otherwise be eligible
+        _submit(svc, _cmd("resume", 2))  # seen only by the final drain
+
+        async with session:
+            pass  # the turn ends here
+
+        # teardown consumed the late command but refused to START a new turn
+        assert client.calls == [("interrupt", "th-1")]
+        last = session.journal[-1]
+        assert last.outcome == "refused"
+        assert "closing" in last.reason
+        assert svc.mailbox.commands["cmd-2"].status == "received"  # left for the reconciler
+
+    async def test_the_final_drain_still_consumes_a_late_steer(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client, poll_interval=5.0)
+        _submit(svc, _cmd("steer", 1, payload={"text": "last word"}))
+
+        async with session:
+            pass
+
+        assert client.calls == [("steer", "sess-1", "last word")]
+        assert [a.outcome for a in session.journal] == ["applied"]
