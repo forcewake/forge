@@ -468,7 +468,9 @@ def test_token_classes_stay_separate_and_the_only_rate_is_decode() -> None:
         aggregate.TOKEN_CLASSES
     )
     # 200+150+50... output known = 1000 over 18s of llm activity (2+3+4+1+8)
-    assert report["latency"]["decode_output_tokens_per_s"] == pytest.approx(1000 / 18)
+    # B09: receipt tokens (2 receipts) over llm-call durations (5 calls) is
+    # an UNMATCHED population pair — no proven join, no rate.
+    assert report["latency"]["decode_output_tokens_per_s"] is None
     assert report["all_attempt_spend"]["llm"]["llm_active_s"] == pytest.approx(18.0)
     assert "total_tokens" not in json.dumps(report["all_attempt_spend"]["usage"])
 
@@ -815,3 +817,79 @@ def test_cancel_unit_stamps_the_in_flight_row(tmp_path: Path) -> None:
     assert rows[-1]["terminal_status"] == "cancelled"  # the in-flight row
     assert rows[-1]["run_id"] == "live"
     assert rows[0]["terminal_status"] != "cancelled"  # history untouched
+
+
+# ----------------------------------------------------------------------
+# B09: unknown stays unknown in the cohort economics
+# ----------------------------------------------------------------------
+
+
+def test_all_unknown_durations_are_none_not_zero() -> None:
+    calls = [{"status": "ok", "first_token_ms": 12}, {"status": "ok"}]  # no duration_ms
+    agg = aggregate.aggregate_llm_calls(calls)
+    assert agg["llm_active_s"] is None  # unknown activity, not 0.0
+
+    merged = aggregate.merge_llm([agg, agg])
+    assert merged["llm_active_s"] is None  # a known-0 merge cannot dilute it
+
+
+def test_partially_priced_unit_costs_report_a_lower_bound_not_a_mean() -> None:
+    """B09: attempt 1 priced $1, attempt 2 receipt-less → exact cost is
+    UNKNOWN; the report carries a known lower bound and cost_exact=False,
+    never the priced subtotal as the unit's cost."""
+    unit = {
+        "unit_id": "CU-X",
+        "axis": "create",
+        "title": "t",
+        "acceptance": {"verdict": "accepted", "decided_by": "h", "decided_at": "x", "notes": ""},
+        "attempts": [
+            {
+                "receipts": [
+                    {
+                        "model": "test-model",
+                        "input_tokens": 1000,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 0,
+                    }
+                ]
+            },
+            {"receipts": []},  # export missing — spend UNKNOWN
+        ],
+    }
+    pricebook = {
+        "test-model": {
+            "input_tokens": 1.0,
+            "cached_input_tokens": 0.0,
+            "cache_write_tokens": 0.0,
+            "output_tokens": 0.0,
+        }
+    }
+    report = aggregate.cohort_report(
+        {
+            "schema": "forge.cohort.ledger/2",
+            "repo": "a/b",
+            "units": {"CU-X": unit},
+        },
+        pricebook=pricebook,
+    )
+    per = report["per_accepted_unit"]
+    assert per["cost_usd_mean"] is None  # exact unknown
+    assert per["cost_exact"] is False
+    assert per["cost_known_units"] == 0
+    assert per["cost_lower_bound_usd_mean"] == pytest.approx(0.001)
+
+
+def test_decode_rate_requires_matched_populations() -> None:
+    """B09: receipt tokens over llm-call durations is only a rate when the
+    populations match — fewer receipts than calls means no proven join."""
+    usage = {
+        "token_classes": {"output_tokens": 1000},
+        "receipt_count": 1,
+        "unknown_counts": {},
+    }
+    llm = {"call_count": 3, "failed_calls": 0, "llm_active_s": 10.0, "ttft": {}}
+    assert aggregate._decode_rate(usage, llm) is None  # 1 receipt over 3 calls
+
+    matched = dict(usage, receipt_count=3)
+    assert aggregate._decode_rate(matched, llm) == pytest.approx(100.0)

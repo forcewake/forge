@@ -501,11 +501,13 @@ class TestGo:
 
         # The evidence comment carries the PR link, the candidate sha and the
         # verification note (no required checks enforced yet — E3b wires that).
-        evidence_notes = [body for body in comments(fake) if "ready for human review" in body]
+        evidence_notes = [
+            body for body in comments(fake) if "candidate published" in body
+        ]  # B13: not ready yet — verification pending
         assert len(evidence_notes) == 1
         assert pr["html_url"] in evidence_notes[0]
         assert pr["head"]["sha"] in evidence_notes[0]
-        assert "Actions checks" in evidence_notes[0]
+        assert "verification pending" in evidence_notes[0]  # B13: no premature ready claim
 
         # R02: the ready reason says unverified — no CI exists on the repo.
         assert "unverified" in (run.status_reason or "")

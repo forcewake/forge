@@ -94,6 +94,7 @@ credentials — the lane runs forge's CODE, never forge's state.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -1056,7 +1057,11 @@ def emit_candidate_meta(
     # Imported lazily: the profile module is pure stdlib, but importing it
     # initializes the forge.runs package — never worth paying on the
     # driver-run path, only here, in the emit step.
-    from forge.runs.execution_profile import BOOTSTRAP_STATUS_FAILED, BOOTSTRAP_STATUS_OK
+    from forge.runs.execution_profile import (
+        BOOTSTRAP_STATUS_FAILED,
+        BOOTSTRAP_STATUS_OK,
+        observed_execution,
+    )
 
     exit_path = Path(exit_file)
     exit_status = (
@@ -1081,6 +1086,19 @@ def emit_candidate_meta(
         "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
         "usage": _load_json_object(Path(usage_file)),
         "profile_digest": str(profile_digest or "").strip().lower(),
+        # B12: the OBSERVED execution — what this lane actually did. The
+        # declared profile (digest above) is allowance/expectation; a
+        # command being allowed is not evidence it ran. Additive v2 field.
+        "observed_execution": asdict(
+            observed_execution(
+                driver=driver,
+                exit_status=exit_status,
+                usage_completeness=(
+                    (_load_json_object(Path(usage_file)) or {}).get("completeness") or "unknown"
+                ),
+                candidate_changed=len(diff_bytes) > 0,
+            )
+        ),
     }
     output = Path(meta_file)
     output.parent.mkdir(parents=True, exist_ok=True)

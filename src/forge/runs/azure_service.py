@@ -812,6 +812,10 @@ class AzureRunService:
             )
             raise
 
+        # B11: recompile the selection against the CURRENT plan (the
+        # planner's ``last_plan`` is THIS plan) — a reused planner can
+        # never leak a previous run's plan into this decision.
+        harness_selection = self._compile_harness_selection()
         digest = plan_digest_of(plan)
         # The task snapshot digest freezes the STRIPPED description:
         # System.Description is HTML, and the #29 edit handler
@@ -2566,7 +2570,7 @@ class AzureRunService:
         await self._post_journaled_comment(
             project_id,
             issue_number,
-            self._evidence_comment(outcome, plan_digest),
+            self._candidate_comment(outcome, plan_digest),
             run_id,
             "post_evidence_note",
         )
@@ -3584,7 +3588,7 @@ class AzureRunService:
         await self._post_journaled_comment(
             project_id,
             issue_number,
-            self._evidence_comment(publish_outcome, plan_digest),
+            self._candidate_comment(publish_outcome, plan_digest),
             run_id,
             "post_evidence_note",
         )
@@ -4451,15 +4455,17 @@ class AzureRunService:
         )
 
     @staticmethod
-    def _evidence_comment(outcome: AzurePublishOutcome, plan_digest: str) -> str:
+    def _candidate_comment(outcome: AzurePublishOutcome, plan_digest: str) -> str:
+        """B13: the post-publish status projection — verification PENDING;
+        the ready-for-human note follows after verification + review."""
         pr_url = outcome.pr_url or "(PR url unavailable)"
         return (
-            "## Forge run ready for human review\n\n"
+            "## Forge candidate published\n\n"
             f"- **Pull request:** {pr_url}\n"
             f"- **Candidate commit:** `{outcome.commit_oid}`\n"
             f"- **Plan digest:** `{plan_digest}`\n"
-            f"- **Verification:** {_VERIFICATION_NOTE}\n\n"
-            "Merging is a human decision — forge never merges.\n\n"
+            "- **Status:** verification pending — an update follows with the "
+            "verification evidence and the review\n\n"
             "*This is an automated message.*"
         )
 

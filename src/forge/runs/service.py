@@ -651,6 +651,10 @@ class RunService:
                 else:
                     await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
                 raise
+            # B11: recompile the selection against the CURRENT plan (the
+            # planner's ``last_plan`` is THIS plan) — a reused planner can
+            # never leak a previous run's plan into this decision.
+            harness_selection = self._compile_harness_selection()
             digest = plan_digest_of(plan)
             task_digest = task_digest_of(issue_title, issue_description)
             # R07 CHECKPOINT FIRST: the paid plan result becomes durable

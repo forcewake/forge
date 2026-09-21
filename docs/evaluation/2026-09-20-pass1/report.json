@@ -4,9 +4,11 @@
   "ledger_schema": "forge.cohort.ledger/1",
   "repo": "forcewake/forge-lab-gh",
   "profile": {
-    "driver": "",
-    "model": "",
-    "budget_class": ""
+    "driver": "claude-code",
+    "model": "glm-5.3-flash",
+    "budget_class": "standard",
+    "backfilled_at": "2026-09-21",
+    "backfill_note": "profile backfilled post-pass from the lab run configuration (B10); usage exports were NOT recoverable \u2014 every attempt keeps export_attached=false and the report carries unknown spend, never zero"
   },
   "counts": {
     "units": 14,
@@ -39,7 +41,7 @@
     "llm": {
       "call_count": 0,
       "failed_calls": 0,
-      "llm_active_s": 0.0,
+      "llm_active_s": null,
       "ttft": {
         "p50_ms": null,
         "p95_ms": null,
@@ -56,10 +58,10 @@
       "cache_write_tokens": null,
       "output_tokens": null
     },
-    "llm_active_s_per_unit": 0.0,
+    "llm_active_s_per_unit": null,
     "wall_s_mean": 1282.5,
     "wall_known_units": 14,
-    "repairs_per_unit": 0.0
+    "repairs_per_unit": null
   },
   "latency": {
     "decode_output_tokens_per_s": null
@@ -102,7 +104,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -139,7 +141,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -180,7 +182,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -225,7 +227,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -262,7 +264,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -303,7 +305,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -348,7 +350,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -385,7 +387,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -430,7 +432,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -467,7 +469,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -512,7 +514,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -549,7 +551,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -594,7 +596,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -631,7 +633,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -676,7 +678,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -713,7 +715,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -758,7 +760,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -795,7 +797,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -840,7 +842,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -877,7 +879,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -922,7 +924,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -959,7 +961,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1004,7 +1006,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -1041,7 +1043,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1086,7 +1088,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -1123,7 +1125,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1168,7 +1170,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -1205,7 +1207,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1250,7 +1252,7 @@
       "llm": {
         "call_count": 0,
         "failed_calls": 0,
-        "llm_active_s": 0.0,
+        "llm_active_s": null,
         "ttft": {
           "p50_ms": null,
           "p95_ms": null,
@@ -1287,7 +1289,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1329,7 +1331,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,
@@ -1371,7 +1373,7 @@
           "llm": {
             "call_count": 0,
             "failed_calls": 0,
-            "llm_active_s": 0.0,
+            "llm_active_s": null,
             "ttft": {
               "p50_ms": null,
               "p95_ms": null,

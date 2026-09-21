@@ -186,7 +186,11 @@ def aggregate_llm_calls(calls: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     rows without one count into ``ttft.unknown_calls`` — never as zero.
     """
     durations = [_num(call.get("duration_ms")) for call in calls]
-    active_s = (sum_known(durations) or 0) / 1000.0
+    known_duration_total = sum_known(durations)
+    # B09: ALL-unknown durations are UNKNOWN activity (None), never 0.0;
+    # a known-and-unknown mix keeps the known sum (a lower bound the
+    # unknown_counts already flag).
+    active_s = None if known_duration_total is None else known_duration_total / 1000.0
     first_tokens = [_num(call.get("first_token_ms")) for call in calls]
     known_ttft = [float(value) for value in first_tokens if value is not None]
     failed = sum(1 for call in calls if str(call.get("status") or "ok") != "ok")
@@ -228,10 +232,15 @@ def merge_llm(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     cohort-wide TTFT percentile is needed, as :func:`cohort_report` does)."""
     known = sum(int(_mapping(part.get("ttft")).get("known_calls") or 0) for part in parts)
     unknown = sum(int(_mapping(part.get("ttft")).get("unknown_calls") or 0) for part in parts)
+    # B09: ALL-unknown propagates as None (never 0); any known part keeps
+    # the known sum.
+    active = [part.get("llm_active_s") for part in parts]
+    known_active = [float(v) for v in active if v is not None]
+    merged_active = sum(known_active) if known_active else None
     return {
         "call_count": sum(int(part.get("call_count") or 0) for part in parts),
         "failed_calls": sum(int(part.get("failed_calls") or 0) for part in parts),
-        "llm_active_s": sum(float(part.get("llm_active_s") or 0.0) for part in parts),
+        "llm_active_s": merged_active,
         "ttft": {"p50_ms": None, "p95_ms": None, "known_calls": known, "unknown_calls": unknown},
     }
 
@@ -354,7 +363,13 @@ def _unit_cost_usd(unit: Mapping[str, Any], pricebook: Mapping[str, Any]) -> flo
     total = 0.0
     priced_any = False
     for attempt in _rows(unit.get("attempts")):
-        for receipt in _rows(attempt.get("receipts")):
+        receipts = _rows(attempt.get("receipts"))
+        if not receipts:
+            # B09: an attempt with NO receipts has UNKNOWN spend — its
+            # absence must not read as free (the priced siblings are only
+            # a lower bound, reported as such upstream).
+            return None
+        for receipt in receipts:
             cost = receipt_cost_usd(receipt, pricebook)
             if cost is None:
                 return None
@@ -398,33 +413,71 @@ def _per_accepted_block(
     for token_class in TOKEN_CLASSES:
         known = usage["token_classes"][token_class]
         per_class[token_class] = known / denominator if known is not None else None
-    repairs_known = sum_known([_num(unit.get("repairs")) for unit in accepted]) or 0
+    repairs_known = sum_known([_num(unit.get("repairs")) for unit in accepted])
     block: dict[str, Any] = {
         "denominator": denominator,
         "token_classes_per_unit": per_class,
-        "llm_active_s_per_unit": llm["llm_active_s"] / denominator,
+        # B09: unknown activity/repairs propagate as None — never zero.
+        "llm_active_s_per_unit": (
+            None if llm["llm_active_s"] is None else llm["llm_active_s"] / denominator
+        ),
         "wall_s_mean": _mean(walls),
         "wall_known_units": len(walls),
-        "repairs_per_unit": repairs_known / denominator,
+        "repairs_per_unit": None if repairs_known is None else repairs_known / denominator,
     }
     if pricebook is not None:
-        costs = [
-            cost
-            for cost in (_unit_cost_usd(unit, pricebook) for unit in accepted_raw)
-            if cost is not None
+        per_unit_costs = [_unit_cost_usd(unit, pricebook) for unit in accepted_raw]
+
+        def _lower_bound(unit: Mapping[str, Any]) -> float | None:
+            """B09: the priced receipts' sum even when other attempts are
+            receipt-less — the KNOWN part of an unknown-exact unit."""
+            total: float | None = None
+            for attempt in _rows(unit.get("attempts")):
+                for receipt in _rows(attempt.get("receipts")):
+                    cost = receipt_cost_usd(receipt, pricebook)
+                    if cost is None:
+                        continue
+                    total = (total or 0.0) + cost
+            return total
+
+        costs = [cost for cost in per_unit_costs if cost is not None]
+        bounds = [
+            bound
+            for bound in (
+                cost if cost is not None else _lower_bound(unit)
+                for cost, unit in zip(per_unit_costs, accepted_raw, strict=True)
+            )
+            if bound is not None
         ]
-        block["cost_usd_mean"] = _mean(costs)
+        # B09: a unit with unpriced attempts has UNKNOWN exact cost — the
+        # priced ones are a LOWER BOUND, never the mean (a receipt-less
+        # attempt is missing spend, not free spend).
+        block["cost_usd_mean"] = _mean(costs) if len(costs) == len(per_unit_costs) else None
         block["cost_known_units"] = len(costs)
+        block["cost_lower_bound_usd_mean"] = _mean(bounds)
+        block["cost_exact"] = len(costs) == len(per_unit_costs)
     return block
 
 
 def _decode_rate(usage: Mapping[str, Any], llm: Mapping[str, Any]) -> float | None:
-    """Known output tokens over known active seconds — the ONLY rate built."""
+    """Known output tokens over known active seconds — the ONLY rate built.
+
+    B09: the numerator (receipt tokens) and denominator (llm_calls
+    durations) come from DIFFERENT measurement populations; dividing them
+    without a proven join produces a number that is neither population's
+    rate. The rate is built ONLY when both sides are known AND the
+    populations match (every call has a receipt-sourced duration —
+    receipt_count covers the whole call population)."""
     output = _mapping(usage.get("token_classes")).get("output_tokens")
     output = output if isinstance(output, int) else None
-    active = float(llm.get("llm_active_s") or 0.0)
-    if output is None or active <= 0:
+    active_raw = llm.get("llm_active_s")
+    if output is None or active_raw is None:
         return None
+    active = float(active_raw)
+    calls = int(llm.get("call_count") or 0)
+    receipts = int(usage.get("receipt_count") or 0)
+    if active <= 0 or (calls and receipts and receipts < calls):
+        return None  # unmatched populations — no rate, with the reason riding the block
     return output / active
 
 

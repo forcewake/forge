@@ -400,6 +400,49 @@ def _extract_toolchain_pins(lock_text: str) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
+class ObservedExecution:
+    """What the lane ACTUALLY did (B12) — the honest twin of the DECLARED
+    :class:`ExecutionProfile`.
+
+    The declared profile describes ALLOWANCE and EXPECTATION (allowed
+    commands, pinned toolchain, CI contract); this record carries the
+    observed facts of ONE execution: the driver invoked, its exit status,
+    whether usage numbers arrived, and whether any candidate changed. A
+    command being ALLOWED is not evidence it RAN — the two vocabularies
+    never merge ("allowed but unexecuted pytest is not executed"; "CI
+    mentioning make is not the lane running make").
+    """
+
+    schema_version: int = 1
+    driver: str = ""
+    exit_status: str = "unknown"
+    usage_completeness: str = "unknown"
+    candidate_changed: bool | None = None
+    observed_at: str = ""
+
+
+def observed_execution(
+    *,
+    driver: str = "",
+    exit_status: str = "unknown",
+    usage_completeness: str = "unknown",
+    candidate_changed: bool | None = None,
+    now: Any = None,
+) -> ObservedExecution:
+    """Build the observed record (ISO timestamp default: wall clock)."""
+    from datetime import datetime, timezone
+
+    stamp = now if now is not None else datetime.now(timezone.utc)
+    return ObservedExecution(
+        driver=str(driver or ""),
+        exit_status=str(exit_status or "unknown"),
+        usage_completeness=str(usage_completeness or "unknown"),
+        candidate_changed=candidate_changed,
+        observed_at=stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp),
+    )
+
+
+@dataclass(frozen=True)
 class ExecutionProfile:
     """The versioned execution contract of one target repo on the lane (A18).
 

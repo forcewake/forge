@@ -974,11 +974,13 @@ class TestGoBuiltin:
         # The evidence comment carries the PR link, the candidate sha and the
         # branch-policy verification note (YAML pr: triggers are ignored on
         # Azure Repos — Build validation is the contract's enforcement point).
-        evidence_notes = [body for body in comments(fake) if "ready for human review" in body]
+        evidence_notes = [
+            body for body in comments(fake) if "candidate published" in body
+        ]  # B13: not ready yet — verification pending
         assert len(evidence_notes) == 1
         assert pr["_links"]["web"]["href"] in evidence_notes[0]
         assert fake.heads[branch] in evidence_notes[0]
-        assert "Build validation" in evidence_notes[0]
+        assert "verification pending" in evidence_notes[0]  # B13: state-specific
 
         # R02: no review ran yet — the verification gate owns the next step.
         assert reviewer.calls == []

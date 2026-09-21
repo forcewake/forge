@@ -481,7 +481,7 @@ class TestReconcile:
         assert evidence["published_candidate"]["harness_workflow"] == WORKFLOW
         assert evidence["published_candidate"]["actions_run_id"] == 501
 
-        evidence_notes = [body for body in comments(fake) if "ready for human review" in body]
+        evidence_notes = [body for body in comments(fake) if "candidate published" in body]  # B13
         assert len(evidence_notes) == 1
         (review,) = reviewer.calls
         assert review["candidate_sha"] == pr["head"]["sha"]

@@ -533,6 +533,7 @@ class GitHubRunService:
                 path_scope=path_scope or None,
             )
         except (LLMError, LLMResponseError) as exc:
+            # (planning failure handling unchanged below)
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
             await self._post_journaled_note(
                 project_id,
@@ -543,6 +544,30 @@ class GitHubRunService:
                 "planning_failed",
             )
             raise
+
+        # B11: the task-aware selection reads the CURRENT plan — the
+        # pre-plan selection above only reserved the planning budget; the
+        # planner's proposal (its ``last_plan`` is THIS plan now) is
+        # compiled into the frozen selection below, so a reused planner
+        # object can never leak a PREVIOUS run's plan into this decision.
+        harness_selection = self._compile_harness_selection()
+        if (
+            budget_limits is not None
+            and harness_selection.budget_ceilings != self._budget_ceilings_of(budget_limits)
+        ):
+            # B11: the pre-plan budget row froze its limits at open time
+            # (idempotent by run). A proposal-driven class change must not
+            # freeze a spec whose ceilings the open budget cannot enforce —
+            # the selection keeps the planner's choice, its ENFORCEABLE
+            # ceilings stay the opened ones, and the pin is loud.
+            harness_selection = replace(
+                harness_selection,
+                budget_ceilings=self._budget_ceilings_of(budget_limits),
+                selection_reason=(
+                    f"{harness_selection.selection_reason} "
+                    "(budget pinned to the pre-plan class — idempotent budget row)"
+                ).strip(),
+            )
 
         digest = plan_digest_of(plan)
         task_digest = task_digest_of(issue_title, issue_description)
@@ -2577,7 +2602,7 @@ class GitHubRunService:
         await self._post_journaled_note(
             project_id,
             issue_number,
-            self._evidence_comment(outcome, plan_digest),
+            self._candidate_comment(outcome, plan_digest),
             run_id,
             "post_evidence_note",
         )
@@ -3627,7 +3652,7 @@ class GitHubRunService:
         await self._post_journaled_note(
             project_id,
             issue_number,
-            self._evidence_comment(publish_outcome, plan_digest),
+            self._candidate_comment(publish_outcome, plan_digest),
             run_id,
             "post_evidence_note",
         )
@@ -4291,6 +4316,16 @@ class GitHubRunService:
             )
         return selection
 
+    @staticmethod
+    def _budget_ceilings_of(limits) -> "HarnessSelection.budget_ceilings":
+        from forge.runs.harness_selection import BudgetCeilings
+
+        return BudgetCeilings(
+            max_calls=limits.max_calls,
+            max_tokens=limits.max_tokens,
+            wallclock_s=limits.wallclock_s,
+        )
+
     def _planner_harness_proposal(self) -> dict | None:
         """R31: the planner's optional harness proposal, leniently read.
 
@@ -4667,15 +4702,19 @@ class GitHubRunService:
         )
 
     @staticmethod
-    def _evidence_comment(outcome, plan_digest: str) -> str:
+    def _candidate_comment(outcome, plan_digest: str) -> str:
+        """B13: the post-publish status projection — the candidate is
+        published and verification is PENDING; the run is NOT ready for
+        human review yet (the verified/unverified ready note follows after
+        verification + review)."""
         pr_url = outcome.pr_url or "(PR url unavailable)"
         return (
-            "## Forge run ready for human review\n\n"
+            "## Forge candidate published\n\n"
             f"- **Pull request:** {pr_url}\n"
             f"- **Candidate commit:** `{outcome.commit_oid}`\n"
             f"- **Plan digest:** `{plan_digest}`\n"
-            f"- **Verification:** {_VERIFICATION_NOTE}\n\n"
-            "Merging is a human decision — forge never merges.\n\n"
+            "- **Status:** verification pending — an update follows with the "
+            "verification evidence and the review\n\n"
             "*This is an automated message.*"
         )
 
