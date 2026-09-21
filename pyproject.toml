@@ -43,6 +43,12 @@ postgres = ["asyncpg==0.31.0"]
 mysql = ["aiomysql==0.3.2"]
 # GitHub source adapter (ADR-0019): RS256 JWT signing needs the crypto extra.
 github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
+# Real interactive-driver clients (forge.adaptive.drivers). Only the Claude
+# lane needs a vendor package — >=0.2.118 is the first release whose aborted
+# turns emit ResultMessage.terminal_reason (interrupt-keyed completion, see
+# docs/research/claude-sdk-python.md §7.2). Codex rides stdlib asyncio;
+# OpenCode rides the httpx core dependency.
+interactive = ["claude-agent-sdk>=0.2.118"]
 
 [build-system]
 requires = ["hatchling"]

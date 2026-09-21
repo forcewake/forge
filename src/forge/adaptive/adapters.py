@@ -29,10 +29,12 @@ module makes that architecture executable as small, testable contracts:
   docker socket belongs to the TRUSTED TEST EXECUTOR only, never the
   coding agent.
 
-Every adapter takes an injected, Protocol-shaped client — no SDK
-import. That is the point: the CONTRACT (naming, capabilities, lane) is
-testable and pinnable without any vendor package, and a fake in tests
-is the same duck type the real SDK shim will present.
+Every adapter takes an injected, Protocol-shaped client. The CONTRACT
+(naming, capabilities, lane) is testable and pinnable without any vendor
+package — and the REAL clients that satisfy these Protocols now live in
+:mod:`forge.adaptive.drivers` (claude_sdk / codex_app / opencode,
+research-verified against the vendor surfaces), so a fake in tests and
+the production client present the same duck type to this module.
 """
 
 from __future__ import annotations
