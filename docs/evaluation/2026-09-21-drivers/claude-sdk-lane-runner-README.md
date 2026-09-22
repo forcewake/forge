@@ -19,3 +19,14 @@ Operational notes (found live): `/go` needs the FULL 32-char run id
 run's attempt base freezes the repo's CI config at planning time (a
 broken lab .gitlab-ci.yml inherited into the factory branch = pipeline
 with zero jobs).
+
+## GitHub-side full cycle (2026-09-22, run 240b9129 — PR #85)
+
+issue #84 → /implement → LIVE DISCOVERY (plan cites "evidence ev-4/ev-5",
+farewell() found at line 5) → /go <8-char prefix> → GitHub Actions
+claude-sdk-lane job (npm claude-code@2.1.273 + pip claude-agent-sdk +
+python -m forge.lane_driver --driver claude) → candidate → Draft PR #85.
+Live-found en route (all fixed): #154 eternal-preflight (broad handler +
+honest /go-while-preflight reply); GitHub /go prefix resolution; the
+claude-sdk-lane harness_entry arm + its SDK install (the bootstrap's
+forge install carries no extras).
