@@ -632,7 +632,6 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
     report carries ok=False + failures) — the lane runs the turn on the
     base, never silently pretends the WIP landed.
     """
-    import json as _json
 
     url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
     token = (os.environ.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
@@ -667,7 +666,11 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
             else "?",
         }
     except Exception as exc:  # noqa: BLE001 — the report, never a crash
-        return {"restored": False, "failures": [f"checkpoint download failed: {exc}"], "files_restored": 0}
+        return {
+            "restored": False,
+            "failures": [f"checkpoint download failed: {exc}"],
+            "files_restored": 0,
+        }
 
 
 async def drive_lane(
@@ -1425,7 +1428,9 @@ def main(
     # Wave D: a pending resume + a stored checkpoint restores the WIP
     # before the turn — the agent continues from the previous runner's files.
     resume_report: dict[str, Any] | None = None
-    work_id_for_resume = (os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or "").strip()
+    work_id_for_resume = (
+        os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or ""
+    ).strip()
     if work_id_for_resume and steering_enabled():
         resume_report = _maybe_restore_wip(work_id_for_resume)
 
