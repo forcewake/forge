@@ -31,25 +31,48 @@ into one "just publish everything" step:
   separate, narrower reuse fingerprint (the dependencies an evidence
   record claims to cover), so a plan-revision bump alone — historical
   provenance — never invalidates a world that did not change.
+- Coordination itself is DURABLE (NXT-23): the
+  :class:`WorkPackageState` record persists inside the PARENT run's
+  evidence blob with one outbox row per transition, and ONE coordinated
+  package per parent run. Every child start commits its intent
+  (idempotency key ``wp-start:<pkg>:<item>:<phase>``) BEFORE the
+  factory call, so both crash windows — died before creating the child,
+  died after the child existed but before the link was saved — replay
+  to exactly ONE child. Phases advance only on PROVEN outcomes (a
+  typed :class:`PhaseAdvanceRefused` carries what is awaited and what
+  failed), and an outcome whose tested world differs from the package's
+  active world proves nothing.
 
-Pure stdlib + the pydantic contract models; no provider I/O here.
+Stdlib + the pydantic contract models + the durable FlowRun/Outbox
+tables; still no provider I/O here — the child-run factory is an
+injected seam.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.adaptive.models import CandidateSet, CandidateSetMember
+from forge.durable import FlowRun, Outbox
 
 __all__ = [
     "APPLICABILITY_SCHEMA",
     "TESTED_WORLD_SCHEMA",
+    "WORKPACKAGE_STATE_SCHEMA",
+    "OutcomeApplication",
+    "PhaseAdvanceRefused",
     "SagaState",
     "WorkItemRef",
     "WorkPackage",
+    "WorkPackageCoordinator",
+    "WorkPackageStateError",
     "applicability_digest",
     "baseline_members",
     "bound_phases",
@@ -57,6 +80,7 @@ __all__ = [
     "freeze_candidate_set",
     "identity_changed",
     "lane_assignment",
+    "read_workpackage_state",
     "recovery_targets",
     "saga_outcomes",
     "tested_world_digest",
@@ -338,6 +362,8 @@ def freeze_candidate_set(
     contract_bundle_digest: str | None = None,
     test_bundle_digest: str | None = None,
     environment_profile_digest: str | None = None,
+    environment_pins: "Mapping[str, str] | None" = None,
+    policy_refs: "Iterable[str] | None" = None,
 ) -> CandidateSet:
     """Freeze per-repo candidates into the unit of system verification (MRP-05).
 
@@ -365,7 +391,7 @@ def freeze_candidate_set(
         )
         for repository_id, spec in sorted(per_repo.items())
     ]
-    return CandidateSet(
+    candidates = CandidateSet(
         work_id=work_id,
         plan_revision=plan_revision,
         work_contract_digest=contract_digest,
@@ -374,6 +400,15 @@ def freeze_candidate_set(
         test_bundle_digest=test_bundle_digest,
         environment_profile_digest=environment_profile_digest,
     )
+    if environment_pins is not None or policy_refs is not None:
+        # NXT-22: persist the tested world AT FREEZE TIME — one frozen
+        # set records one world (re-freeze with different inputs refuses).
+        from forge.adaptive.verification_sets import freeze_verified_world
+
+        return freeze_verified_world(
+            candidates, environment_pins=environment_pins, policy_refs=policy_refs
+        )
+    return candidates
 
 
 def _canonical_digest(payload: object) -> str:
@@ -529,3 +564,580 @@ def baseline_members(candidate_set: CandidateSet) -> list[str]:
     other member.
     """
     return [member.repository_id for member in candidate_set.members if member.role == "baseline"]
+
+
+# ---------------------------------------------------------------------------
+# NXT-23: the DURABLE coordination layer — one persisted WorkPackageState
+# per parent run, intents before effects, proven phase advances.
+# ---------------------------------------------------------------------------
+
+#: Where the persisted state lives inside the parent run's evidence blob
+#: (the same runs/ pattern discovery_stage uses: the JSON is reassigned
+#: wholesale because in-place mutation of a JSON column is not tracked).
+_WORKPACKAGE_RECORD_KEY = "workpackage"
+
+#: The persisted state's schema discriminator (versioned like every
+#: domain tag: a breaking change to what the record covers bumps it).
+WORKPACKAGE_STATE_SCHEMA = "forge.workpackage.state/1"
+
+#: The outcome vocabulary a child lane may report. Closed on purpose:
+#: an unjudgeable report word is not an outcome.
+_OUTCOME_STATUSES = frozenset({"succeeded", "failed"})
+
+#: Anything that yields sessions — ``async_sessionmaker`` duck-types here
+#: (same alias shape as discovery_stage's SessionFactory).
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+#: The child-run factory seam: it creates (or, on replay, ADOPTS) one
+#: child lane and returns its run id. The call carries the item's id and
+#: repository, the REQUIRED ``writable`` keyword (the lane's mode is
+#: authorization, never a default the factory may guess), the
+#: idempotency ``intent_key`` the coordinator committed BEFORE the call,
+#: and the task ``brief``.
+ChildRunFactory = Callable[..., Awaitable[str]]
+
+
+class WorkPackageStateError(RuntimeError):
+    """A durable work-package coordination failure — LOUD on purpose.
+
+    The missing parent run, the second package aimed at a parent that
+    already coordinates one, the advance against a run that coordinates
+    nothing: all refuse with this type rather than coercing, defaulting
+    or quietly re-planning. Coordination state is authorization-shaped;
+    an incoherent request must never produce one.
+    """
+
+
+class PhaseAdvanceRefused(RuntimeError):
+    """Advance demands PROVEN outcomes; this is the typed refusal (NXT-23).
+
+    ``awaiting`` names the earlier-phase items that launched but never
+    reported (a silent child is NOT proof); ``failed`` names the items
+    whose recorded outcome failed — a failed predecessor blocks its
+    dependents' dispatch outright. The durable record is untouched: the
+    refusal is a reading of the evidence, not a transition of its own.
+    """
+
+    def __init__(self, awaiting: Iterable[str], failed: Iterable[str], message: str) -> None:
+        self.awaiting = tuple(awaiting)
+        self.failed = tuple(failed)
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class OutcomeApplication:
+    """The verdict of applying ONE child outcome to the durable record.
+
+    ``status`` is ``applied`` (the outcome is now the item's durable,
+    first-and-only outcome), ``duplicate`` (an identical redelivery —
+    no effect, by design) or ``rejected`` (unknown item, a reference
+    snapshot, a status outside the vocabulary, an outcome tested in a
+    different world than the package's active one, or a CONFLICTING
+    second outcome: the first recorded outcome stands). ``record`` is
+    the updated state for ``applied`` and the unchanged input otherwise.
+    """
+
+    status: str
+    reason: str
+    item_id: str
+    record: dict[str, Any]
+
+    @property
+    def applied(self) -> bool:
+        return self.status == "applied"
+
+
+async def read_workpackage_state(
+    session_factory: SessionFactory, parent_run_id: str
+) -> dict[str, Any] | None:
+    """The parent run's persisted :class:`WorkPackageState`, or ``None``.
+
+    A read-only view: this never writes, so any number of processes may
+    inspect the durable coordination record concurrently. The parent
+    run's ABSENCE is a loud error (the record cannot exist without its
+    run); a present run with no record simply coordinates nothing yet.
+    """
+    async with session_factory() as session:
+        run = await session.get(FlowRun, parent_run_id)
+        if run is None:
+            raise WorkPackageStateError(f"flow run {parent_run_id!r} not found")
+        record = (run.evidence or {}).get(_WORKPACKAGE_RECORD_KEY)
+        return dict(record) if isinstance(record, dict) else None
+
+
+async def _persist_workpackage_state(
+    session_factory: SessionFactory,
+    parent_run_id: str,
+    state: Mapping[str, Any],
+    *,
+    outbox_events: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Write the state and its outbox rows in ONE transaction.
+
+    Same shapes the runs services use: the ``FlowRun.evidence`` JSON is
+    replaced with a fresh dict (in-place mutation of a JSON column is
+    not change-tracked), and each outbox row lands in the same commit as
+    the transition it announces — a reader never sees the one without
+    the other.
+    """
+    async with session_factory() as session:
+        run = await session.get(FlowRun, parent_run_id)
+        if run is None:
+            raise WorkPackageStateError(f"flow run {parent_run_id!r} not found")
+        merged = dict(run.evidence or {})
+        merged[_WORKPACKAGE_RECORD_KEY] = dict(state)
+        run.evidence = merged
+        for event_type, payload in outbox_events:
+            session.add(Outbox(flow_run_id=parent_run_id, event_type=event_type, payload=payload))
+        await session.commit()
+
+
+def _unproven_items(state: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The earlier-phase items that have NOT proven themselves, split.
+
+    ``awaiting``: writer items at or before the current phase with no
+    ``succeeded`` outcome — launched-but-silent is not proof. ``failed``:
+    items whose recorded outcome failed. Reference snapshots prove out
+    by construction (they execute nothing) and appear in neither. The
+    current phase's own phase index is INCLUSIVE: advancing past phase
+    *n* requires phase *n* proven, and completing requires every phase.
+    """
+    children = state.get("children") or {}
+    current = int(state.get("current_phase") or 0)
+    awaiting: list[str] = []
+    failed: list[str] = []
+    for phase in (state.get("phases") or [])[: current + 1]:
+        for item_id in phase:
+            child = children.get(item_id) or {}
+            if str(child.get("kind") or "") == "reference_snapshot":
+                continue
+            status = str((child.get("outcome") or {}).get("status") or "")
+            if status == "failed":
+                failed.append(item_id)
+            elif status != "succeeded":
+                awaiting.append(item_id)
+    return tuple(awaiting), tuple(failed)
+
+
+class WorkPackageCoordinator:
+    """Drives ONE work package durably from its parent run (NXT-23).
+
+    The coordinator holds NO coordination state of its own: every public
+    entry (:meth:`start`, :meth:`advance`, :meth:`record_outcome`)
+    re-reads the durable record first, so a second process over the same
+    database ADOPTS what the first launched instead of duplicating it,
+    and a replayed start re-issues only the intents that never reached
+    ``launched``. The child-run factory is the injected provider seam;
+    the ``writable`` mode travels with every call as a REQUIRED keyword
+    because it is authorization, not a rendering choice.
+
+    Crash safety is the ordering, not a catch: the start intent
+    (idempotency key ``wp-start:<pkg>:<item>:<phase>``) is committed
+    BEFORE the factory call, so dying before the child exists replays
+    the intent, and dying after the child existed but before the link
+    was saved replays the SAME key — the factory adopts, and exactly
+    ONE child ever exists per intent.
+    """
+
+    def __init__(self, session_factory: SessionFactory, child_run_factory: ChildRunFactory) -> None:
+        self._session_factory = session_factory
+        self._child_run_factory = child_run_factory
+
+    async def start(
+        self,
+        package: WorkPackage,
+        *,
+        parent_run_id: str,
+        task_brief: str,
+        tested_world_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist the package for *parent_run_id* and dispatch phase 0.
+
+        One coordinated package per parent run: a replay with the SAME
+        package reconciles (launched children are adopted, intended ones
+        re-issued, snapshots already recorded are left alone), while a
+        DIFFERENT package is refused loudly. *tested_world_digest*, when
+        given, is the package's active world — outcomes from any other
+        world will later be rejected as unproven for this package.
+
+        Read-only items never reach the writer factory: they persist as
+        reference snapshots (the mode recorded, not dropped), because a
+        lane that executes nothing has nothing to launch.
+        """
+        violations = package.validate()
+        if violations:
+            raise ValueError(f"refusing to start an invalid package: {violations}")
+        state = await read_workpackage_state(self._session_factory, parent_run_id)
+        if state is None:
+            state = {
+                "schema": WORKPACKAGE_STATE_SCHEMA,
+                "package_id": package.package_id,
+                "parent_run_id": parent_run_id,
+                "objective": package.objective,
+                "task_brief": task_brief,
+                "phases": [list(ids) for ids in compile_dependencies(list(package.items))],
+                "current_phase": 0,
+                "state": "running",
+                "failed_item": "",
+                "tested_world_digest": tested_world_digest,
+                "children": {},
+            }
+            await _persist_workpackage_state(
+                self._session_factory,
+                parent_run_id,
+                state,
+                outbox_events=[
+                    (
+                        "workpackage.started",
+                        {
+                            "package_id": package.package_id,
+                            "parent_run_id": parent_run_id,
+                            "objective": package.objective,
+                            "phases": state["phases"],
+                            "tested_world_digest": tested_world_digest,
+                        },
+                    )
+                ],
+            )
+        elif str(state.get("package_id") or "") != package.package_id:
+            raise WorkPackageStateError(
+                f"parent run {parent_run_id!r} already coordinates work package "
+                f"{state.get('package_id')!r}; one coordinated package per parent run"
+            )
+        return await self._dispatch_phase(
+            parent_run_id, state, package, int(state.get("current_phase") or 0)
+        )
+
+    async def advance(self, parent_run_id: str, package: WorkPackage) -> dict[str, Any]:
+        """Move to the next phase — but only on PROVEN outcomes.
+
+        Every earlier-phase writer item must have recorded a
+        ``succeeded`` outcome (snapshots prove out by construction);
+        otherwise the typed :class:`PhaseAdvanceRefused` names what is
+        ``awaiting`` and what ``failed``, and the durable record does
+        not move. With proof: the current phase increments and the new
+        phase dispatches (intents before factory calls, snapshots for
+        read-only items); advancing out of the LAST phase completes the
+        package instead. Advancing a complete package refuses.
+        """
+        state = await self._require_state(parent_run_id)
+        if str(state.get("package_id") or "") != package.package_id:
+            raise WorkPackageStateError(
+                f"parent run {parent_run_id!r} coordinates {state.get('package_id')!r},"
+                f" not {package.package_id!r}"
+            )
+        if str(state.get("state") or "") == "complete":
+            raise PhaseAdvanceRefused(
+                (), (), f"work package {package.package_id!r} is already complete"
+            )
+        awaiting, failed = _unproven_items(state)
+        if awaiting or failed:
+            parts = []
+            if awaiting:
+                parts.append(f"awaiting proven outcomes from {list(awaiting)}")
+            if failed:
+                parts.append(f"failed items block their dependents: {list(failed)}")
+            raise PhaseAdvanceRefused(
+                awaiting,
+                failed,
+                f"work package {state.get('package_id')!r} refuses to advance: {'; '.join(parts)}",
+            )
+
+        phases = state.get("phases") or []
+        current = int(state.get("current_phase") or 0)
+        if current >= len(phases) - 1:
+            state["state"] = "complete"
+            await _persist_workpackage_state(
+                self._session_factory,
+                parent_run_id,
+                state,
+                outbox_events=[
+                    (
+                        "workpackage.complete",
+                        {"package_id": state.get("package_id"), "parent_run_id": parent_run_id},
+                    )
+                ],
+            )
+            return state
+
+        state["current_phase"] = current + 1
+        await _persist_workpackage_state(
+            self._session_factory,
+            parent_run_id,
+            state,
+            outbox_events=[
+                (
+                    "workpackage.phase_advanced",
+                    {
+                        "package_id": state.get("package_id"),
+                        "parent_run_id": parent_run_id,
+                        "from_phase": current,
+                        "to_phase": current + 1,
+                    },
+                )
+            ],
+        )
+        return await self._dispatch_phase(parent_run_id, state, package, current + 1)
+
+    async def record_outcome(
+        self,
+        parent_run_id: str,
+        item_id: str,
+        status: str,
+        *,
+        detail: str = "",
+        tested_world_digest: str | None = None,
+    ) -> OutcomeApplication:
+        """Record one child lane's outcome against the durable record.
+
+        The outcome vocabulary is closed (``succeeded``/``failed``) and
+        the item must be a launched-or-intended WRITER child: reference
+        snapshots execute nothing, so there is nothing to report for
+        them. When the package carries an active tested world, an
+        outcome from any OTHER world is rejected — the previous
+        revision's completion proves nothing about a world it did not
+        run in. The first recorded outcome stands: an identical
+        redelivery is a ``duplicate`` no-op, a conflicting one is
+        rejected. A ``failed`` outcome flips the package to ``failed``
+        in the same transaction that records it.
+        """
+        state = await self._require_state(parent_run_id)
+
+        def _rejected(reason: str) -> OutcomeApplication:
+            return OutcomeApplication("rejected", reason, item_id, state)
+
+        children = state.get("children") or {}
+        child = children.get(item_id)
+        if child is None:
+            return _rejected(f"unknown item {item_id!r}: no child of this work package")
+        if str(child.get("kind") or "") == "reference_snapshot":
+            return _rejected(
+                f"item {item_id!r} is a reference snapshot: it executes nothing,"
+                " so nothing can be reported for it"
+            )
+        if status not in _OUTCOME_STATUSES:
+            return _rejected(
+                f"unknown outcome status {status!r}; the vocabulary is {sorted(_OUTCOME_STATUSES)}"
+            )
+        active_world = state.get("tested_world_digest")
+        if active_world is not None and tested_world_digest != active_world:
+            return _rejected(
+                f"outcome for {item_id!r} was tested in a different world"
+                f" ({tested_world_digest!r} != the package's active {active_world!r});"
+                " it proves nothing about this package"
+            )
+        recorded = child.get("outcome") or None
+        if recorded is not None:
+            if (
+                str(recorded.get("status") or "") == status
+                and str(recorded.get("detail") or "") == detail
+            ):
+                return OutcomeApplication(
+                    "duplicate", "identical outcome already recorded", item_id, state
+                )
+            return _rejected(
+                f"item {item_id!r} already has a recorded outcome;"
+                " the first recorded outcome stands"
+            )
+
+        children[item_id] = {
+            **child,
+            "outcome": {
+                "status": status,
+                "detail": detail,
+                "tested_world_digest": tested_world_digest,
+            },
+        }
+        events: list[tuple[str, dict[str, Any]]] = [
+            (
+                "workpackage.outcome_recorded",
+                {
+                    "package_id": state.get("package_id"),
+                    "parent_run_id": parent_run_id,
+                    "item_id": item_id,
+                    "status": status,
+                },
+            )
+        ]
+        if status == "failed":
+            state["state"] = "failed"
+            state["failed_item"] = item_id
+            events.append(
+                (
+                    "workpackage.child_failed",
+                    {
+                        "package_id": state.get("package_id"),
+                        "parent_run_id": parent_run_id,
+                        "item_id": item_id,
+                        "detail": detail,
+                    },
+                )
+            )
+        await _persist_workpackage_state(
+            self._session_factory, parent_run_id, state, outbox_events=events
+        )
+        return OutcomeApplication("applied", "recorded", item_id, state)
+
+    async def _require_state(self, parent_run_id: str) -> dict[str, Any]:
+        """The parent run's durable state — or the loud refusal."""
+        state = await read_workpackage_state(self._session_factory, parent_run_id)
+        if state is None:
+            raise WorkPackageStateError(
+                f"parent run {parent_run_id!r} coordinates no work package; start one first"
+            )
+        return state
+
+    async def _dispatch_phase(
+        self,
+        parent_run_id: str,
+        state: dict[str, Any],
+        package: WorkPackage,
+        phase_index: int,
+    ) -> dict[str, Any]:
+        """Dispatch one phase's items against the durable record.
+
+        Writers whose durable link already says ``launched`` are adopted
+        untouched; writers whose intent is missing or still ``intended``
+        get the intent committed and (re-)issued through the factory;
+        read-only items persist as reference snapshots, once each. This
+        is the whole reconciliation story: idempotent per item, so a
+        replay converges without duplicating anything.
+        """
+        phases = state.get("phases") or []
+        if phase_index >= len(phases):
+            return state
+        items = {item.item_id: item for item in package.items}
+        brief = str(state.get("task_brief") or "")
+        for item_id in phases[phase_index]:
+            item = items.get(item_id)
+            if item is None:
+                continue
+            if not item.writable:
+                await self._record_reference_snapshot(parent_run_id, state, item, phase_index)
+                continue
+            await self._launch_child(parent_run_id, state, package, item, phase_index, brief)
+        return state
+
+    async def _record_reference_snapshot(
+        self,
+        parent_run_id: str,
+        state: dict[str, Any],
+        item: WorkItemRef,
+        phase_index: int,
+    ) -> None:
+        """Persist a read-only item as a reference snapshot, once."""
+        children = state.setdefault("children", {})
+        if item.item_id in children:
+            return
+        children[item.item_id] = {
+            "item_id": item.item_id,
+            "repository_id": item.repository_id,
+            "writable": False,
+            "kind": "reference_snapshot",
+            "phase": phase_index,
+            "child_run_id": "",
+        }
+        await _persist_workpackage_state(
+            self._session_factory,
+            parent_run_id,
+            state,
+            outbox_events=[
+                (
+                    "workpackage.reference_snapshot",
+                    {
+                        "package_id": state.get("package_id"),
+                        "parent_run_id": parent_run_id,
+                        "item_id": item.item_id,
+                        "repository_id": item.repository_id,
+                    },
+                )
+            ],
+        )
+
+    async def _launch_child(
+        self,
+        parent_run_id: str,
+        state: dict[str, Any],
+        package: WorkPackage,
+        item: WorkItemRef,
+        phase_index: int,
+        brief: str,
+    ) -> None:
+        """Commit the start intent, call the factory, commit the link.
+
+        Three durable steps in a fixed order: (1) the intent — the
+        idempotency key and the item's ``writable`` mode — committed
+        BEFORE any factory call, so the crash window opens with the
+        intent already on disk; (2) the factory call itself, which the
+        coordinator does NOT catch: a child that never came back leaves
+        the intent at ``intended`` for the replay to re-issue; (3) the
+        launched link, committed with the child run id the factory
+        returned. A child already recorded as ``launched`` is adopted
+        without a call — the second process never re-issues a link the
+        first one saved.
+        """
+        children = state.setdefault("children", {})
+        existing = children.get(item.item_id) or {}
+        if str(existing.get("intent_status") or "") == "launched":
+            return
+        intent_key = f"wp-start:{package.package_id}:{item.item_id}:{phase_index}"
+        children[item.item_id] = {
+            "item_id": item.item_id,
+            "repository_id": item.repository_id,
+            "writable": item.writable,
+            "kind": "child_run",
+            "phase": phase_index,
+            "intent_key": intent_key,
+            "intent_status": "intended",
+            "child_run_id": "",
+            "outcome": None,
+        }
+        await _persist_workpackage_state(
+            self._session_factory,
+            parent_run_id,
+            state,
+            outbox_events=[
+                (
+                    "workpackage.child_intent",
+                    {
+                        "package_id": package.package_id,
+                        "parent_run_id": parent_run_id,
+                        "item_id": item.item_id,
+                        "repository_id": item.repository_id,
+                        "writable": item.writable,
+                        "intent_key": intent_key,
+                        "phase": phase_index,
+                        "recovery": bool(existing),
+                    },
+                )
+            ],
+        )
+        child_run_id = await self._child_run_factory(
+            item.item_id,
+            item.repository_id,
+            writable=item.writable,
+            intent_key=intent_key,
+            brief=brief,
+        )
+        children[item.item_id] = {
+            **children[item.item_id],
+            "intent_status": "launched",
+            "child_run_id": child_run_id,
+        }
+        await _persist_workpackage_state(
+            self._session_factory,
+            parent_run_id,
+            state,
+            outbox_events=[
+                (
+                    "workpackage.child_launched",
+                    {
+                        "package_id": package.package_id,
+                        "parent_run_id": parent_run_id,
+                        "item_id": item.item_id,
+                        "child_run_id": child_run_id,
+                        "intent_key": intent_key,
+                    },
+                )
+            ],
+        )
