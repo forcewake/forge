@@ -125,7 +125,7 @@ import argparse
 import asyncio
 import contextlib
 import functools
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 import json
 import os
