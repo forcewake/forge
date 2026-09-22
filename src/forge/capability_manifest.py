@@ -183,14 +183,13 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
     ),
     Capability(
         name="operator-commands/adaptive",
-        tier="production_wiring",
+        tier="real_provider_scenario",
         entry_point=(
-            "forge.gateway.{router,github_webhook,azure_webhook} -> "
-            "forge.adaptive.command_router.ControlCommandRouter -> "
-            "forge.adaptive.wiring.OperatorControlService "
-            "(FORGE_ADAPTIVE_COMMANDS_ENABLED, default OFF)"
+            "adaptive_command_set() behind FORGE_ADAPTIVE_COMMANDS_ENABLED — "
+            "live /steer /pause /resume on forge-lab-gh (2026-09-22)"
         ),
         evidence=(
+            "docs/evaluation/2026-09-21-drivers/claude-sdk-lane-runner-README.md",
             "tests/test_adaptive_command_router.py",
             "tests/test_gateway_issue_lifecycle.py",
             "tests/test_github_webhook.py",
@@ -364,9 +363,16 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
     ),
     Capability(
         name="adaptive/pause-resume-checkpoint",
-        tier="domain_contract",
-        entry_point=None,
-        evidence=("tests/test_adaptive_control.py", "tests/test_adaptive_runtime.py"),
+        tier="real_provider_scenario",
+        entry_point=(
+            "drain_turn(cooperative=True, capture=) via LaneSteeringSession — "
+            "live /pause landed a verified 124-blob checkpoint (2026-09-22)"
+        ),
+        evidence=(
+            "docs/evaluation/2026-09-21-drivers/claude-sdk-lane-runner-README.md",
+            "tests/test_adaptive_control.py",
+            "tests/test_adaptive_checkpointing.py",
+        ),
         note="NXT-15..18: pause is now a REAL fence+checkpoint transaction "
         "(verified content-addressed WIP capture, honest partial/failed "
         "states, fresh-epoch resume with re-checked authorization; "
@@ -377,9 +383,12 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
     ),
     Capability(
         name="adaptive/steering-bridge",
-        tier="production_wiring",
+        tier="real_provider_scenario",
         entry_point="lane_driver steering attach (FORGE_STEERING_ENABLED, default OFF)",
-        evidence=("tests/test_adaptive_lane_control.py",),
+        evidence=(
+            "docs/evaluation/2026-09-21-drivers/claude-sdk-lane-runner-README.md",
+            "tests/test_adaptive_lane_control.py",
+        ),
         note="NXT-11: lane_driver ATTACHES the steering session on every lane "
         "behind FORGE_STEERING_ENABLED (default OFF; effect-intent ladder "
         "NXT-12: dispatching → vendor_accepted → application_observed, "

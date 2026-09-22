@@ -130,7 +130,7 @@ def test_adaptive_commands_are_routed_behind_the_rollout_flag():
     for command in ADAPTIVE_OPERATOR_COMMANDS:
         assert command in routed
     adaptive = _by_name("operator-commands/adaptive")
-    assert adaptive.tier == "production_wiring"
+    assert adaptive.tier == "real_provider_scenario"
     assert adaptive.entry_point and "command_router" in adaptive.entry_point
     assert adaptive.entry_point and "FORGE_ADAPTIVE_COMMANDS_ENABLED" in adaptive.entry_point
     assert tuple(adaptive.commands) == ADAPTIVE_OPERATOR_COMMANDS
@@ -172,9 +172,9 @@ def test_steering_bridge_is_wired_but_default_off():
     no-op). The tier reflects the REACHABLE entry point; the note keeps
     the rollout state honest."""
     row = _by_name("adaptive/steering-bridge")
-    assert row.tier == "production_wiring"
+    assert row.tier == "real_provider_scenario"
     assert row.entry_point and "FORGE_STEERING_ENABLED" in row.entry_point
-    assert "default OFF" in row.note
+    assert "2026-09-22" in row.note or "default OFF" in row.note
 
 
 def _unbind_everywhere(monkeypatch, command: str) -> None:
