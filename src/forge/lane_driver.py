@@ -618,6 +618,58 @@ async def _drain_until_result(
         await asyncio.sleep(poll_s)
 
 
+def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
+    """Wave D: restore WIP from the control-plane checkpoint BEFORE the turn.
+
+    When the durable mailbox holds a pending resume command AND the
+    control plane has a checkpoint for this work, the lane downloads the
+    verified checkpoint, restores the WIP into the checkout, and the
+    next turn continues from it — the file changes the previous runner
+    made are on disk before the agent starts.
+
+    Returns the restore report (evidence for the meta) or None when
+    there is nothing to resume from. A failed restore is RETURNED (the
+    report carries ok=False + failures) — the lane runs the turn on the
+    base, never silently pretends the WIP landed.
+    """
+    import json as _json
+
+    url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
+    token = (os.environ.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
+    if not url or not token:
+        return None
+    from pathlib import Path as _P
+
+    from forge.adaptive.artifact_store import ContentAddressedStore
+    from forge.adaptive.checkpoint_channel import LaneControlAPI, download_checkpoint
+    from forge.adaptive.checkpointing import restore_wip
+
+    try:
+        api = LaneControlAPI(base_url=url, work_token=token)
+        store_dir = _P(".forge/checkpoints")
+        store_dir.mkdir(parents=True, exist_ok=True)
+        store = ContentAddressedStore(root=store_dir, tenant=work_id)
+        downloaded = download_checkpoint(work_id, api, store)
+        report = restore_wip(
+            artifact_id=downloaded.manifest_id,
+            store=store,
+            target=_P.cwd(),
+            principal=work_id,
+        )
+        return {
+            "restored": report.ok,
+            "files_restored": len([f for f in report.files if f.outcome == "restored"])
+            if report.files
+            else 0,
+            "failures": list(report.failures[:5]) if report.failures else [],
+            "checkpoint_id": downloaded.checkpoint_id[:16] + "..."
+            if downloaded.checkpoint_id
+            else "?",
+        }
+    except Exception as exc:  # noqa: BLE001 — the report, never a crash
+        return {"restored": False, "failures": [f"checkpoint download failed: {exc}"], "files_restored": 0}
+
+
 async def drive_lane(
     client: ClaudeSDKDriverClient,
     *,
@@ -1370,12 +1422,34 @@ def main(
             control=control,
         )
 
+    # Wave D: a pending resume + a stored checkpoint restores the WIP
+    # before the turn — the agent continues from the previous runner's files.
+    resume_report: dict[str, Any] | None = None
+    work_id_for_resume = (os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or "").strip()
+    if work_id_for_resume and steering_enabled():
+        resume_report = _maybe_restore_wip(work_id_for_resume)
+
     try:
         outcome = asyncio.run(drive())
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
-    write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+    if resume_report is not None:
+        meta = write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+        # The restore report rides the meta as additive evidence (the
+        # lane-side steering sidecar already handles journal+episode).
+        meta_path = Path(os.environ.get("FORGE_META") or ".forge/candidate.meta.json")
+        if meta_path.is_file():
+            import json as _json
+
+            try:
+                existing = _json.loads(meta_path.read_text())
+                existing["wip_restore"] = resume_report
+                meta_path.write_text(_json.dumps(existing, indent=2, sort_keys=True) + "\n")
+            except (ValueError, OSError):
+                pass
+    else:
+        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
     print(
         f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,
