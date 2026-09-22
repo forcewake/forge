@@ -95,3 +95,19 @@ ladder home. /steer: all six rungs. /pause: verified checkpoint on the
 control plane (124 blobs, digest-verified). /resume: the durable
 checkpoint satisfies the gate; the resume command sits in the mailbox
 for the next lane epoch.
+
+## WAVE D COMPLETE — /retry → WIP restore → resume LIVE (2026-09-22, run 05778528)
+
+The FULL review chain, live on GitHub Actions:
+
+/implement → /go → agent works → /pause → interrupt ack 3ms → verified
+checkpoint (124 blobs, .git excluded — runner infra never WIP) → job
+completes (interrupted turn) → /retry (the checkpoint IS the work to
+retry from; the candidate-less gate now accepts a stored checkpoint) →
+a SECOND Actions runner starts → downloads the checkpoint via the
+lane-control API (work-scoped token) → RESTORES 12 WIP files into the
+checkout (digest-verified) → the agent continues from the previous
+runner's work → exit=completed.
+
+wip_restore in the meta: {"restored": true, "files_restored": 12,
+"failures": [], "artifact": "8c7ded1d..."}
