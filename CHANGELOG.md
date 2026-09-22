@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-09-23
+
+### Added — the 1ae5290 review COMPLETE + the copilot-sdk-lane
+
+All 30 review items closed (#155-#184, minus evaluation-scoped items).
+Suite 5128 (+320 from v0.28.0).
+
+**P2 wave 2 (M3+M4):**
+- R28-21: .NET 9 lane (digest-pinned SDK, TRX verification, the claude-
+  code agent riding the forge gateway on .NET)
+- R28-23: bounded admission (per-project/issue/user limits, typed
+  refusals, wired into start_run)
+- R28-25: project credential bindings (broker-ref, never values) +
+  exportable audit trail (credential-redacted JSON)
+
+**The copilot-sdk-lane** (from the research doc): a REAL interactive
+Copilot CLI harness over the `copilot --acp` JSON-RPC 2.0 protocol —
+session/new, streaming prompt, session/cancel with the #4561 cancel-
+ledger workaround (end_turn+ledger→interrupted), no mid-turn steer
+(protocol absence, next-turn input only), npm @github/copilot@1.0.86.
+
+**Live E2E on all three providers** (batch claude-code harness):
+- GitLab: MR !22 created, pipeline green
+- GitHub: PR #95 created, Actions green
+- Azure DevOps: pipeline 73 succeeded (live-found: AzDO /go short-id
+  prefix bug — filed)
+
 ## [0.28.0] - 2026-09-22
 
 ### Fixed — the 1ae5290 review M0+M1: checkpoint input security, exact resume, pause fence (14 items)
