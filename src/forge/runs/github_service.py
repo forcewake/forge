@@ -554,6 +554,15 @@ class GitHubRunService:
         except (LLMError, LLMResponseError, DiscoveryStageError) as exc:
             # (planning failure handling unchanged below)
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 — #154: a stuck preflight is worse
+            # LIVE-found (2026-09-22, forge-lab-gh): a ValueError from harness
+            # selection left the run in preflight FOREVER — the operator note
+            # said /go, the /go handler ignored preflight. Every planning-leg
+            # failure parks the run visibly; the operator restarts with
+            # /implement, never a silent deadlock.
+            logger.exception("GitHub run %s planning leg crashed unexpectedly", run_id[:8])
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_crashed: {exc}")
+            raise
             await self._post_journaled_note(
                 project_id,
                 issue_number,
@@ -810,6 +819,25 @@ class GitHubRunService:
                         run.status,
                     )
                     return
+            elif run.status == FlowStatus.PREFLIGHT.value:
+                # #154: planning is still running (or died — the broad
+                # handler above parks dead legs, but a worker crash can
+                # still leave preflight behind). The operator gets the
+                # truth, never a silent ignore that deadlocks the thread.
+                logger.info(
+                    "GitHub /go for run %s while still preflight — replying honestly",
+                    run_id[:8],
+                )
+                await self._post_journaled_note(
+                    project_id,
+                    issue_number,
+                    f"Run `{run_id[:8]}` is still **preflight** (planning has not "
+                    "finished — or its worker died). Wait for the plan, or cancel "
+                    f"and restart: `/cancel {run.id}` then `/implement`.",
+                    run_id,
+                    "go_while_preflight",
+                )
+                return
             elif run.status != FlowStatus.WAITING_APPROVAL.value:
                 # Already advanced (or terminal) — duplicate /go delivery.
                 logger.info(
