@@ -41,6 +41,7 @@ from forge.adaptive.command_router import (
     adaptive_command_set,
     parse_adaptive_command,
     reset_shared_control_service,
+    shared_control_service,
 )
 from forge.adaptive.wiring import OperatorControlService
 from forge.config import Settings
@@ -238,7 +239,7 @@ async def test_pause_records_a_work_scoped_mailbox_command(
     outcome = await router.handle(_gitlab_note("/pause"))
 
     assert outcome == {"status": "applied", "verb": "pause", "run_id": RUN_A}
-    (command,) = control.pending(RUN_A)
+    (command,) = await control.pending(RUN_A)
     assert command.kind == "pause"
     assert command.work_id == RUN_A
     assert command.actor_ref == "alice"
@@ -262,7 +263,7 @@ async def test_pause_short_id_resolves_like_go(router, session_factory, control)
     outcome = await router.handle(_gitlab_note(f"/pause {RUN_A[:9]}", note_id=5002))
 
     assert outcome["run_id"] == RUN_A
-    assert control.pending(RUN_A)[0].idempotency_key == f"adaptive:pause:{RUN_A}:5002"
+    assert (await control.pending(RUN_A))[0].idempotency_key == f"adaptive:pause:{RUN_A}:5002"
 
 
 async def test_ambiguous_prefix_is_refused_with_candidates(
@@ -274,7 +275,7 @@ async def test_ambiguous_prefix_is_refused_with_candidates(
     outcome = await router.handle(_gitlab_note(f"/pause {RUN_A[:8]}", note_id=5003))
 
     assert outcome["status"] == "refused"
-    assert control.pending(RUN_A) == []
+    assert await control.pending(RUN_A) == []
     body = posted.bodies[0]
     assert "ambiguous" in body
     assert RUN_A in body and RUN_B in body  # the candidate list names full ids
@@ -286,7 +287,7 @@ async def test_unknown_run_is_refused_with_candidates(router, session_factory, c
     outcome = await router.handle(_gitlab_note("/pause ffffffffffffffff", note_id=5004))
 
     assert outcome["status"] == "refused"
-    assert control.pending(RUN_A) == []
+    assert await control.pending(RUN_A) == []
     body = posted.bodies[0]
     assert "matched no run" in body
     assert RUN_A in body  # the issue's runs are listed as candidates
@@ -301,7 +302,7 @@ async def test_foreign_and_wrong_issue_targets_are_never_adopted(
 
     assert outcome["status"] == "refused"
     assert "different issue" in posted.bodies[0]
-    assert control.pending(RUN_OTHER_ISSUE) == []
+    assert await control.pending(RUN_OTHER_ISSUE) == []
 
 
 async def test_bare_command_targets_the_latest_active_run(router, session_factory, control, posted):
@@ -325,7 +326,7 @@ async def test_bare_command_without_any_active_run_is_refused_with_candidates(
     assert outcome["status"] == "refused"
     assert "no active run" in posted.bodies[0]
     assert RUN_B in posted.bodies[0]
-    assert control.pending(RUN_B) == []
+    assert await control.pending(RUN_B) == []
 
 
 async def test_non_approver_is_refused_with_a_note(router, session_factory, control, posted):
@@ -336,7 +337,7 @@ async def test_non_approver_is_refused_with_a_note(router, session_factory, cont
     assert outcome["status"] == "refused"
     assert "mallory" in posted.bodies[0]
     assert "configured approvers" in posted.bodies[0]
-    assert control.pending(RUN_A) == []
+    assert await control.pending(RUN_A) == []
     # The refusal is journaled like every reply (one per note id).
     rows = await _journal(session_factory)
     assert [row.status for row in rows] == ["succeeded"]
@@ -352,7 +353,7 @@ async def test_redelivery_is_a_deduplicated_noop(router, session_factory, contro
     assert first["status"] == "applied"
     assert second == {"status": "deduplicated"}
     assert len(posted.bodies) == 1
-    assert len(control.pending(RUN_A)) == 1
+    assert len(await control.pending(RUN_A)) == 1
 
 
 async def test_a_second_distinct_note_pauses_once_but_records_both_commands(
@@ -366,7 +367,7 @@ async def test_a_second_distinct_note_pauses_once_but_records_both_commands(
     await router.handle(_gitlab_note("/pause", note_id=5011))
 
     assert len(posted.bodies) == 2
-    kinds = [command.kind for command in control.pending(RUN_A)]
+    kinds = [command.kind for command in await control.pending(RUN_A)]
     assert kinds == ["pause", "pause"]
 
 
@@ -378,7 +379,7 @@ async def test_steer_records_payload_and_run_scoping(router, session_factory, co
     )
 
     assert outcome["status"] == "applied"
-    (command,) = control.pending(RUN_A)
+    (command,) = await control.pending(RUN_A)
     assert command.kind == "steer"
     assert command.payload["text"] == "fix the failing assertion first"
     assert command.payload["run_id"] == RUN_A
@@ -396,7 +397,7 @@ async def test_acceptance_weakening_steer_is_rejected_without_a_mailbox_command(
 
     assert outcome["status"] == "refused"
     assert "revision gate" in posted.bodies[0]
-    assert control.pending(RUN_A) == []
+    assert await control.pending(RUN_A) == []
 
 
 async def test_resume_refused_without_a_confirmed_checkpoint_then_applied(
@@ -429,7 +430,7 @@ async def test_answer_records_the_question_scoped_command(router, session_factor
     )
 
     assert outcome["status"] == "applied"
-    (command,) = control.pending(RUN_A)
+    (command,) = await control.pending(RUN_A)
     assert command.kind == "answer"
     assert command.payload["question_id"] == "q-3"
     assert command.payload["text"] == "use option B"
@@ -461,7 +462,7 @@ async def test_malformed_note_gets_a_usage_reply_not_silence(
 
     assert outcome["status"] == "refused"
     assert "could not be applied" in posted.bodies[0]
-    assert control.pending(RUN_A) == []
+    assert await control.pending(RUN_A) == []
 
 
 async def test_provider_scoped_approvers_apply_github_and_azure(session_factory, control, posted):
@@ -584,3 +585,45 @@ def test_azure_parse_gates_adaptive_verbs():
     assert command["adaptive_verb"] == "pause"
     assert command["provider"] == "azure_devops"
     assert command["issue_number"] == 142
+
+
+# ---------------------------------------------------------------------------
+# The shared-service factory hook — FORGE_CONTROL_MAILBOX mounts the durable mailbox
+# ---------------------------------------------------------------------------
+
+
+def test_shared_control_service_mounts_postgres_when_the_env_asks(monkeypatch, tmp_path):
+    """The one-line hook: shared_control_service() builds through
+    control_service_from_env, so FORGE_CONTROL_MAILBOX=postgres plus a
+    DATABASE_URL mounts the durable PostgresMailbox into the SAME
+    process-shared singleton the router reads."""
+    from forge.adaptive.mailbox_db import PostgresMailbox
+    from forge.adaptive.wiring import FORGE_CONTROL_MAILBOX_ENV
+
+    reset_shared_control_service()
+    monkeypatch.setenv(FORGE_CONTROL_MAILBOX_ENV, "postgres")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'control.db'}")
+    try:
+        service = shared_control_service()
+        assert isinstance(service.mailbox, PostgresMailbox)
+        assert service.surface is service.mailbox
+        # one lazily-built singleton: the second call returns the same mount
+        assert shared_control_service() is service
+    finally:
+        reset_shared_control_service()
+        monkeypatch.delenv(FORGE_CONTROL_MAILBOX_ENV, raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+
+def test_shared_control_service_stays_in_memory_without_the_flag(monkeypatch):
+    from forge.adaptive.control import Mailbox
+    from forge.adaptive.wiring import FORGE_CONTROL_MAILBOX_ENV
+
+    reset_shared_control_service()
+    monkeypatch.delenv(FORGE_CONTROL_MAILBOX_ENV, raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    try:
+        service = shared_control_service()
+        assert isinstance(service.mailbox, Mailbox)  # the honest default
+    finally:
+        reset_shared_control_service()

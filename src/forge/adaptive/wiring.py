@@ -22,27 +22,40 @@ path uses. Three wirings:
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 from forge.adaptive.control import (
     BroadcastCommand,
-    BroadcastMailbox,
     Mailbox,
     PauseState,
     classify_instruction,
-    recorded_pause,
+    recorded_pause_async,
     send_interrupt,
 )
 from forge.adaptive.discovery import DiscoveryRun
+from forge.adaptive.mailbox_bridge import AsyncMailboxSurface, control_surface_for
 from forge.adaptive.models import ControlCommand
 from forge.adaptive.workpackage import WorkPackage, compile_dependencies
 
+logger = logging.getLogger(__name__)
+
 ChildRunFactory = Callable[[str, str], Awaitable[str]]
 """async (item_id, repository_id) -> child run id — the provider seam."""
+
+#: The env var that mounts the durable Postgres control mailbox
+#: (``forge.adaptive.mailbox_db.PostgresMailbox``) behind the service.
+#: Default (unset / any other value): the in-memory reference mailbox —
+#: the flag-gated honest rollout; nothing changes until it is set.
+FORGE_CONTROL_MAILBOX_ENV: Final = "FORGE_CONTROL_MAILBOX"
+
+#: The one mounted spelling. Anything else (typo included) is memory.
+_CONTROL_MAILBOX_POSTGRES: Final = "postgres"
 
 
 def _now_iso() -> str:
@@ -117,28 +130,39 @@ class OperatorControlService:
     publication epoch closes BEFORE the interrupt is sent — CTL-05's
     ordering is the guarantee), and the answer routing to the waiting
     discovery. Sequence enforcement and idempotency-key dedup come from
-    the :class:`~forge.adaptive.control.Mailbox` (a redelivered command
-    never spends another iteration). Accepted steers are mailbox
-    records too (see :meth:`steer`) — the surface a running lane's
-    steering bridge consumes.
+    the mailbox (a redelivered command never spends another iteration).
+    Accepted steers are mailbox records too (see :meth:`steer`) — the
+    surface a running lane's steering bridge consumes.
+
+    The mailbox seam is :attr:`surface` — the unified ASYNC surface of
+    :mod:`forge.adaptive.mailbox_bridge`, satisfied verbatim by BOTH
+    implementations: the in-memory reference :class:`Mailbox` wrapped in
+    :class:`~forge.adaptive.mailbox_bridge.AsyncMailboxAdapter`, and the
+    durable :class:`~forge.adaptive.mailbox_db.PostgresMailbox` used
+    directly (mounted by :func:`control_service_from_env` behind
+    ``FORGE_CONTROL_MAILBOX=postgres``). Every method below awaits that
+    seam, so the same service code runs over either store. The
+    construction field :attr:`mailbox` stays the RAW implementation
+    object: over memory it remains the sync reference view the lane
+    steering bridge and the tests read (``mailbox.commands``,
+    ``mailbox.pending``); over Postgres it is the mailbox itself.
     """
 
-    mailbox: Mailbox = field(default_factory=Mailbox)
+    mailbox: Mailbox | AsyncMailboxSurface = field(default_factory=Mailbox)
     pause_states: dict[str, PauseState] = field(default_factory=dict)
-    #: The work-wide fan-out over the SAME mailbox (NXT-13): broadcast
-    #: parents share its sequence/dedup discipline; delivery is
-    #: per-recipient through :meth:`pending_for`. Built in
-    #: ``__post_init__`` so the two views can never drift apart.
-    broadcast_mailbox: BroadcastMailbox = field(init=False)
+    #: The unified async seam every service method awaits (CTL-04). Built
+    #: in ``__post_init__`` — the adapter over the in-memory mailbox, or
+    #: an already-async mailbox (PostgresMailbox) as itself.
+    surface: AsyncMailboxSurface = field(init=False)
 
     def __post_init__(self) -> None:
-        self.broadcast_mailbox = BroadcastMailbox(self.mailbox)
+        self.surface = control_surface_for(self.mailbox)
 
-    def submit(self, command: ControlCommand) -> tuple[ControlCommand, bool]:
+    async def submit(self, command: ControlCommand) -> tuple[ControlCommand, bool]:
         """Gateway entry: dedups by idempotency key, enforces sequences."""
-        return self.mailbox.submit(command)
+        return await self.surface.submit(command)
 
-    def pause(
+    async def pause(
         self,
         work_id: str,
         actor: str,
@@ -149,17 +173,18 @@ class OperatorControlService:
     ) -> PauseState | BroadcastCommand:
         """CTL-05 + NXT-09: the durable command row FIRST, then the fence.
 
-        ``recorded_pause`` submits the command BEFORE any state mutation:
-        a redelivered pause (same idempotency key) is refused with the
-        pause state UNCHANGED — the publication epoch is not bumped a
-        second time. Only a NEW command row sets ``pause_requested``,
-        bumps the fence, and then the interrupt goes out (CTL-05's
-        ordering preserved: pause on record before the interrupt).
+        ``recorded_pause_async`` submits the command BEFORE any state
+        mutation: a redelivered pause (same idempotency key) is refused
+        with the pause state UNCHANGED — the publication epoch is not
+        bumped a second time. Only a NEW command row sets
+        ``pause_requested``, bumps the fence, and then the interrupt goes
+        out (CTL-05's ordering preserved: pause on record before the
+        interrupt).
 
         ``work_scoped=True`` (NXT-13) fans the SAME parent intent out to
         a FIXED recipient set — the work's lanes, snapshotted by the
         caller at submission: the parent is one mailbox row, every lane
-        gets its own acknowledgement row through the broadcast mailbox,
+        gets its own acknowledgement row through the broadcast fan-out,
         and the returned :class:`BroadcastCommand` is the parent barrier
         (``completed`` only when EVERY lane acknowledged; uncertain lanes
         individually listed). The dedup-first gate is the same one: only
@@ -167,27 +192,27 @@ class OperatorControlService:
         (default) is unchanged.
         """
         if work_scoped:
-            return self._pause_work_scoped(work_id, actor, idempotency_key, recipients)
+            return await self._pause_work_scoped(work_id, actor, idempotency_key, recipients)
         command = ControlCommand(
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
             work_id=work_id,
-            sequence=len(self.mailbox.commands) + 1,
+            sequence=await self.surface.next_sequence(work_id),
             kind="pause",
             actor_ref=actor,
             actor_origin="server_authenticated_human",
             idempotency_key=idempotency_key,
             status="received",
         )
-        fenced, _stored, _created = recorded_pause(
+        fenced, _stored, _created = await recorded_pause_async(
             self.pause_states.get(work_id, PauseState(work_id=work_id, publication_epoch=0)),
             command,
-            self.mailbox.submit,
+            self.surface.submit,
         )
         self.pause_states[work_id] = fenced
         return send_interrupt(fenced)
 
-    def _pause_work_scoped(
+    async def _pause_work_scoped(
         self,
         work_id: str,
         actor: str,
@@ -196,17 +221,17 @@ class OperatorControlService:
     ) -> BroadcastCommand:
         """The work-wide pause: one parent row, per-lane acknowledgements.
 
-        The same ``recorded_pause`` gate wrapped around the broadcast
-        submit: a redelivered work-wide pause is refused by the parent
-        row's idempotency key BEFORE the epoch moves, and the frozen
-        recipient set of the WINNER is authoritative (a replay's lane
-        list is discarded with its other bytes).
+        The same ``recorded_pause_async`` gate wrapped around the
+        broadcast submit: a redelivered work-wide pause is refused by the
+        parent row's idempotency key BEFORE the epoch moves, and the
+        frozen recipient set of the WINNER is authoritative (a replay's
+        lane list is discarded with its other bytes).
         """
         command = ControlCommand(
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
             work_id=work_id,
-            sequence=len(self.mailbox.commands) + 1,
+            sequence=await self.surface.next_sequence(work_id),
             kind="pause",
             actor_ref=actor,
             actor_origin="server_authenticated_human",
@@ -215,14 +240,14 @@ class OperatorControlService:
         )
         captured: list[BroadcastCommand] = []
 
-        def _broadcast_submit(
+        async def _broadcast_submit(
             parent: ControlCommand,
         ) -> tuple[ControlCommand, bool]:
-            broadcast, created = self.broadcast_mailbox.submit(parent, tuple(recipients))
+            broadcast, created = await self.surface.submit_broadcast(parent, tuple(recipients))
             captured.append(broadcast)
             return broadcast.parent, created
 
-        fenced, _stored, created = recorded_pause(
+        fenced, _stored, created = await recorded_pause_async(
             self.pause_states.get(work_id, PauseState(work_id=work_id, publication_epoch=0)),
             command,
             _broadcast_submit,
@@ -231,51 +256,57 @@ class OperatorControlService:
             self.pause_states[work_id] = send_interrupt(fenced)
         return captured[0]
 
-    def acknowledge(self, command_id: str, recipient: str, *, note: str = "") -> BroadcastCommand:
+    async def acknowledge(
+        self, command_id: str, recipient: str, *, note: str = ""
+    ) -> BroadcastCommand:
         """One lane's acknowledgement of a work-wide command (NXT-13)."""
-        return self.broadcast_mailbox.acknowledge(command_id, recipient, note=note)
+        return await self.surface.acknowledge(command_id, recipient, note=note)
 
-    def mark_uncertain(self, command_id: str, recipient: str, note: str) -> BroadcastCommand:
+    async def mark_uncertain(self, command_id: str, recipient: str, note: str) -> BroadcastCommand:
         """Record a lane whose outcome could not be proven — visible, not guessed."""
-        return self.broadcast_mailbox.mark_uncertain(command_id, recipient, note)
+        return await self.surface.mark_uncertain(command_id, recipient, note)
 
-    def resolve_uncertain(
+    async def resolve_uncertain(
         self, command_id: str, recipient: str, *, note: str = ""
     ) -> BroadcastCommand:
         """Settle an uncertain lane with the evidence that later arrived."""
-        return self.broadcast_mailbox.resolve_uncertain(command_id, recipient, note=note)
+        return await self.surface.resolve_uncertain(command_id, recipient, note=note)
 
-    def pending_for(self, work_id: str, recipient: str) -> list[ControlCommand]:
+    async def pending_for(self, work_id: str, recipient: str) -> list[ControlCommand]:
         """The per-recipient lane view (NXT-13): the work's ordinary pending
         commands PLUS this recipient's still-pending broadcast views, in
         durable sequence order. One lane's consumption removes nothing
         from another lane's view."""
-        combined = self.mailbox.pending(work_id) + self.broadcast_mailbox.pending_for(
+        combined = await self.surface.pending(work_id) + await self.surface.pending_for(
             work_id, recipient
         )
         return sorted(combined, key=lambda command: command.sequence)
 
-    def broadcast(self, command_id: str) -> BroadcastCommand | None:
+    async def broadcast(self, command_id: str) -> BroadcastCommand | None:
         """The work-wide barrier state of one broadcast command."""
-        return self.broadcast_mailbox.broadcast(command_id)
+        return await self.surface.broadcast(command_id)
 
-    def fence_active(self, work_id: str) -> bool:
+    async def broadcasts(self, work_id: str) -> list[BroadcastCommand]:
+        """The work's broadcasts in sequence order (the operator's view)."""
+        return await self.surface.broadcasts(work_id)
+
+    async def fence_active(self, work_id: str) -> bool:
         """True while a work-wide pause awaits a lane decision — a child
         created during the pause must not start through the fence."""
-        return self.broadcast_mailbox.fence_active(work_id)
+        return await self.surface.fence_active(work_id)
 
-    def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:
+    async def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:
         """Resume only from a confirmed checkpoint (CTL-06)."""
         state = self.pause_states.get(work_id)
         if state is None or not state.checkpoint_captured:
             return False  # no confirmed checkpoint — resume refuses
         self.pause_states.pop(work_id, None)
-        self.mailbox.submit(
+        await self.surface.submit(
             ControlCommand(
                 schema="forge.proposal.control-command/1",
                 command_id=f"cmd-{uuid.uuid4().hex[:12]}",
                 work_id=work_id,
-                sequence=len(self.mailbox.commands) + 1,
+                sequence=await self.surface.next_sequence(work_id),
                 kind="resume",
                 actor_ref=actor,
                 actor_origin="server_authenticated_human",
@@ -285,7 +316,9 @@ class OperatorControlService:
         )
         return True
 
-    def steer(self, work_id: str, actor: str, text: str, *, run_id: str = "") -> dict[str, Any]:
+    async def steer(
+        self, work_id: str, actor: str, text: str, *, run_id: str = ""
+    ) -> dict[str, Any]:
         """CTL-07: bounded steering — acceptance-policy changes are rejected.
 
         Steer delivers guidance; it NEVER grants new authority. An
@@ -310,7 +343,7 @@ class OperatorControlService:
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
             work_id=work_id,
-            sequence=len(self.mailbox.commands) + 1,
+            sequence=await self.surface.next_sequence(work_id),
             kind="steer",
             actor_ref=actor,
             actor_origin="server_authenticated_human",
@@ -318,7 +351,7 @@ class OperatorControlService:
             status="received",
             payload=payload,
         )
-        stored, created = self.mailbox.submit(command)
+        stored, created = await self.surface.submit(command)
         return {
             "status": "accepted",
             "classification": classification,
@@ -326,7 +359,7 @@ class OperatorControlService:
             "created": created,
         }
 
-    def answer(
+    async def answer(
         self,
         work_id: str,
         actor: str,
@@ -347,7 +380,7 @@ class OperatorControlService:
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
             work_id=work_id,
-            sequence=len(self.mailbox.commands) + 1,
+            sequence=await self.surface.next_sequence(work_id),
             kind="answer",
             actor_ref=actor,
             actor_origin="server_authenticated_human",
@@ -355,18 +388,57 @@ class OperatorControlService:
             status="received",
             payload=payload,
         )
-        _, created = self.mailbox.submit(command)
+        _, created = await self.surface.submit(command)
         return created
 
-    def pending(self, work_id: str) -> list[ControlCommand]:
+    async def pending(self, work_id: str) -> list[ControlCommand]:
         """The work's received/authorized commands in durable sequence order.
 
         The lane-drain view: the record a
         :class:`~forge.adaptive.lane_control.LaneSteeringSession`
-        consumes (passthrough to
-        :meth:`~forge.adaptive.control.Mailbox.pending`).
+        consumes (the awaited passthrough to the mailbox surface).
         """
-        return self.mailbox.pending(work_id)
+        return await self.surface.pending(work_id)
+
+
+def control_service_from_env(
+    env: Mapping[str, str] | None = None,
+    session_factory: Any | None = None,
+) -> OperatorControlService:
+    """The control service with its mailbox mounted from the environment.
+
+    The flag-gated honest rollout (NXT-09/12's durable leg): with
+    ``FORGE_CONTROL_MAILBOX=postgres`` AND a session factory available —
+    passed in, or derived from ``DATABASE_URL`` exactly the way the app
+    builds its own (``forge.database.get_session_factory``, the cached
+    engine/pool the process already shares) — the service's mailbox is
+    the durable :class:`~forge.adaptive.mailbox_db.PostgresMailbox`.
+    Anything else (the default, a typo, no factory, no DATABASE_URL)
+    stays on the in-memory reference mailbox, with a WARNING when the
+    operator asked for postgres and did not get it — the flag never
+    silently degrades in the other direction.
+    """
+    source = os.environ if env is None else env
+    if str(source.get(FORGE_CONTROL_MAILBOX_ENV, "")).strip().lower() != (
+        _CONTROL_MAILBOX_POSTGRES
+    ):
+        return OperatorControlService()
+    factory = session_factory
+    if factory is None:
+        url = str(source.get("DATABASE_URL", "")).strip()
+        if url:
+            from forge.database import get_session_factory
+
+            factory = get_session_factory(url)
+    if factory is None:
+        logger.warning(
+            "FORGE_CONTROL_MAILBOX=postgres without a session factory or DATABASE_URL — "
+            "the control mailbox stays IN MEMORY; the flag did not take effect"
+        )
+        return OperatorControlService()
+    from forge.adaptive.mailbox_db import PostgresMailbox
+
+    return OperatorControlService(mailbox=PostgresMailbox(factory))
 
 
 # ---------------------------------------------------------------------------

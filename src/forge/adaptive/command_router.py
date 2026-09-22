@@ -51,7 +51,7 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from forge.adaptive.wiring import OperatorControlService
+from forge.adaptive.wiring import OperatorControlService, control_service_from_env
 from forge.durable.controller import TERMINAL_STATUSES
 from forge.durable.models import ActionLog, FlowRun
 from forge.runs.admission import approvers_for
@@ -347,18 +347,26 @@ async def _issue_runs(
 # ---------------------------------------------------------------------------
 
 #: The process-shared control service. The reference mailbox is in-memory
-#: (review §8; the durable swap is NXT-09/12's leg), so /pause and /resume
-#: arriving in different webhook deliveries must land on the SAME instance
-#: or the second would not see the first's state — hence one lazily-built
-#: process singleton, exactly how lane_driver mounts its steering service.
+#: by default; ``FORGE_CONTROL_MAILBOX=postgres`` mounts the durable
+#: PostgresMailbox (NXT-09/12) through :func:`control_service_from_env`
+#: — /pause and /resume arriving in different webhook deliveries must
+#: land on the SAME instance or the second would not see the first's
+#: state, hence one lazily-built process singleton, exactly how
+#: lane_driver mounts its steering service.
 _SHARED_CONTROL: OperatorControlService | None = None
 
 
 def shared_control_service() -> OperatorControlService:
-    """The lazily-constructed, process-shared operator control service."""
+    """The lazily-constructed, process-shared operator control service.
+
+    Built by :func:`forge.adaptive.wiring.control_service_from_env`: the
+    in-memory reference mailbox unless ``FORGE_CONTROL_MAILBOX=postgres``
+    mounts the durable one over a session factory (the caller's, or the
+    shared ``DATABASE_URL`` pool).
+    """
     global _SHARED_CONTROL
     if _SHARED_CONTROL is None:
-        _SHARED_CONTROL = OperatorControlService()
+        _SHARED_CONTROL = control_service_from_env()
     return _SHARED_CONTROL
 
 
@@ -418,21 +426,25 @@ class ControlCommandRouter:
         run_id = resolution.run_id
         applied = True
         if verb == "pause":
-            state = self.control.pause(run_id, author, self._idempotency_key(verb, note, run_id))
+            state = await self.control.pause(
+                run_id, author, self._idempotency_key(verb, note, run_id)
+            )
             body = _pause_applied_body(run_id, state.pause_status)
         elif verb == "resume":
-            resumed = self.control.resume(run_id, author, self._idempotency_key(verb, note, run_id))
+            resumed = await self.control.resume(
+                run_id, author, self._idempotency_key(verb, note, run_id)
+            )
             applied = resumed
             body = _resume_applied_body(run_id) if resumed else _resume_refused_body(run_id)
         elif verb == "steer":
-            outcome = self.control.steer(run_id, author, parsed.text, run_id=run_id)
+            outcome = await self.control.steer(run_id, author, parsed.text, run_id=run_id)
             if outcome.get("status") == "rejected":
                 applied = False
                 body = _steer_rejected_body(run_id)
             else:
                 body = _steer_accepted_body(run_id, str(outcome.get("classification") or "steer"))
         else:  # answer
-            created = self.control.answer(
+            created = await self.control.answer(
                 run_id, author, parsed.question_id, parsed.text, run_id=run_id
             )
             body = _answer_recorded_body(run_id, parsed.question_id, created)

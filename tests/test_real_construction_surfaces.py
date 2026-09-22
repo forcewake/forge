@@ -21,6 +21,10 @@ Surfaces covered:
   ``MailboxSurface`` protocol: the shared method surface parameter for
   parameter, the documented async refinement of the Postgres side, and
   the NXT-12 ladder that refines the coarse in-memory ``apply``;
+- ``AsyncMailboxAdapter`` and ``PostgresMailbox`` vs the UNIFIED
+  ``AsyncMailboxSurface`` protocol (mailbox_bridge): the same awaitable
+  signatures parameter for parameter on BOTH implementations — the seam
+  ``OperatorControlService`` awaits, whatever store backs it;
 - ``OperatorControlService`` vs the exact call shapes
   ``command_router.ControlCommandRouter.handle`` and
   ``lane_control.LaneSteeringSession`` issue (bind-level checks plus
@@ -60,6 +64,11 @@ from forge.adaptive.drivers import (
     claude_sdk_client_from_env,
     codex_app_client_from_env,
     opencode_client_from_env,
+)
+from forge.adaptive.mailbox_bridge import (
+    ASYNC_SURFACE_MEMBERS,
+    AsyncMailboxAdapter,
+    AsyncMailboxSurface,
 )
 from forge.adaptive.mailbox_db import PostgresMailbox
 from forge.adaptive.wiring import OperatorControlService
@@ -334,6 +343,63 @@ class TestMailboxSurface:
             await engine.dispose()
 
 
+class TestAsyncMailboxSurface:
+    """The UNIFIED async protocol the control service awaits: BOTH
+    implementations satisfy the SAME awaitable signatures, parameter for
+    parameter — the old "documented deliberate difference" (the durable
+    side async, the reference side sync) is gone; the service's seam no
+    longer knows which store backs it."""
+
+    def test_the_protocol_declares_exactly_the_known_surface(self):
+        # Catches unnoticed protocol growth: a new member nobody implements.
+        assert set(getattr(AsyncMailboxSurface, "__protocol_attrs__")) == ASYNC_SURFACE_MEMBERS
+        assert "apply" not in ASYNC_SURFACE_MEMBERS  # the memory-only coarse rung
+
+    def test_the_memory_adapter_matches_the_protocol_parameter_for_parameter(self):
+        adapter = AsyncMailboxAdapter()
+        assert isinstance(adapter, AsyncMailboxSurface)  # runtime-checkable presence check
+        for name in sorted(ASYNC_SURFACE_MEMBERS):
+            _assert_call_surface(
+                getattr(AsyncMailboxSurface, name),
+                getattr(type(adapter), name),
+                what=f"AsyncMailboxAdapter.{name}",
+            )
+        # the memory-only coarse rung the durable side refines away:
+        _binds(
+            AsyncMailboxAdapter.apply,
+            "cmd-1",
+            current_plan_revision=1,
+            current_execution_epoch=1,
+        )
+        assert not hasattr(PostgresMailbox, "apply")
+
+    async def test_the_durable_mailbox_matches_the_protocol_parameter_for_parameter(self):
+        engine = create_async_engine("sqlite+aiosqlite://")
+        try:
+            mailbox = PostgresMailbox(async_sessionmaker(engine, expire_on_commit=False))
+            assert isinstance(mailbox, AsyncMailboxSurface)
+            for name in sorted(ASYNC_SURFACE_MEMBERS):
+                real = getattr(type(mailbox), name)
+                _assert_call_surface(
+                    getattr(AsyncMailboxSurface, name),
+                    real,
+                    what=f"PostgresMailbox.{name}",
+                )
+                assert inspect.iscoroutinefunction(real), f"PostgresMailbox.{name} must await"
+        finally:
+            await engine.dispose()
+
+    def test_the_dispatch_picks_the_surface_once_at_construction(self):
+        from forge.adaptive.mailbox_bridge import control_surface_for
+
+        memory = control_surface_for(Mailbox())
+        assert isinstance(memory, AsyncMailboxAdapter)  # the sync reference is wrapped
+        durable = control_surface_for(
+            PostgresMailbox(async_sessionmaker(create_async_engine("sqlite+aiosqlite://")))
+        )
+        assert isinstance(durable, PostgresMailbox)  # an async mailbox IS the surface
+
+
 # ---------------------------------------------------------------------------
 # OperatorControlService vs its real consumers (command_router / lane_control)
 # ---------------------------------------------------------------------------
@@ -343,9 +409,11 @@ class TestOperatorControlServiceSurface:
     """The service still answers the calls its consumers actually issue.
 
     The shapes pinned here are the literal call sites: ``command_router.py``
-    ``ControlCommandRouter.handle`` (pause/resume/steer/answer) and
-    ``lane_control.py`` ``LaneSteeringSession.drain_once``
-    (``service.mailbox.pending(work_id)``).
+    ``ControlCommandRouter.handle`` (pause/resume/steer/answer — AWAITED
+    since the service's mailbox seam went async) and ``lane_control.py``
+    ``LaneSteeringSession.drain_once``
+    (``service.mailbox.pending(work_id)`` — the RAW sync reference view,
+    unchanged).
     """
 
     def test_constructs_with_no_arguments(self):
@@ -354,21 +422,29 @@ class TestOperatorControlServiceSurface:
         service = OperatorControlService()
         assert isinstance(service.mailbox, Mailbox)
 
-    def test_pause_accepts_the_router_call_shape_and_returns_pause_status(self):
+    def test_the_router_facing_methods_are_awaitables(self):
+        # ControlCommandRouter.handle awaits each of these — a sync method
+        # here would hand the router an unawaited coroutine.
+        for name in ("pause", "resume", "steer", "answer", "pending", "submit"):
+            assert inspect.iscoroutinefunction(getattr(OperatorControlService, name)), (
+                f"OperatorControlService.{name} must be a coroutine function"
+            )
+
+    async def test_pause_accepts_the_router_call_shape_and_returns_pause_status(self):
         service = OperatorControlService()
         _binds(OperatorControlService.pause, "run-1", "pavel", "adaptive:pause:run-1:n1")
-        state = service.pause("run-1", "pavel", "adaptive:pause:run-1:n1")
+        state = await service.pause("run-1", "pavel", "adaptive:pause:run-1:n1")
         assert hasattr(state, "pause_status")  # the router renders it verbatim
         # a redelivered pause fences the epoch exactly once (NXT-09)
-        service.pause("run-1", "pavel", "adaptive:pause:run-1:n1")
+        await service.pause("run-1", "pavel", "adaptive:pause:run-1:n1")
         assert service.pause_states["run-1"].publication_epoch == 1
 
-    def test_resume_accepts_the_router_call_shape_and_answers_a_bool(self):
+    async def test_resume_accepts_the_router_call_shape_and_answers_a_bool(self):
         _binds(OperatorControlService.resume, "run-1", "pavel", "adaptive:resume:run-1:n1")
         service = OperatorControlService()
-        assert service.resume("run-1", "pavel", "adaptive:resume:run-1:n1") is False
+        assert await service.resume("run-1", "pavel", "adaptive:resume:run-1:n1") is False
 
-    def test_steer_accepts_the_router_call_shape_and_answers_status_and_classification(self):
+    async def test_steer_accepts_the_router_call_shape_and_answers_status_and_classification(self):
         _binds(
             OperatorControlService.steer,
             "run-1",
@@ -377,13 +453,13 @@ class TestOperatorControlServiceSurface:
             run_id="run-1",
         )
         service = OperatorControlService()
-        outcome = service.steer("run-1", "pavel", "use the existing helper", run_id="run-1")
+        outcome = await service.steer("run-1", "pavel", "use the existing helper", run_id="run-1")
         assert outcome["status"] == "accepted"
         assert outcome["classification"] == "steer"
-        rejected = service.steer("run-1", "pavel", "skip the tests", run_id="run-1")
+        rejected = await service.steer("run-1", "pavel", "skip the tests", run_id="run-1")
         assert rejected["status"] == "rejected"  # the router's refusal branch
 
-    def test_answer_accepts_the_router_call_shape_and_answers_created(self):
+    async def test_answer_accepts_the_router_call_shape_and_answers_created(self):
         _binds(
             OperatorControlService.answer,
             "run-1",
@@ -393,16 +469,18 @@ class TestOperatorControlServiceSurface:
             run_id="run-1",
         )
         service = OperatorControlService()
-        assert service.answer("run-1", "pavel", "q-1", "postgres:16", run_id="run-1") is True
-        assert service.answer("run-1", "pavel", "q-1", "postgres:16", run_id="run-1") is False
+        assert await service.answer("run-1", "pavel", "q-1", "postgres:16", run_id="run-1") is True
+        assert await service.answer("run-1", "pavel", "q-1", "postgres:16", run_id="run-1") is False
 
-    def test_the_lane_bridge_attribute_path_still_works(self):
+    async def test_the_lane_bridge_attribute_path_still_works(self):
         # lane_control.LaneSteeringSession.drain_once issues
-        # self.service.mailbox.pending(self.work_id) — attribute + 1-arg call.
+        # self.service.mailbox.pending(self.work_id) — attribute + 1-arg call,
+        # SYNC: the raw in-memory reference view the mailbox field keeps.
         service = OperatorControlService()
-        service.steer("run-1", "pavel", "fix the assertion first")
+        await service.steer("run-1", "pavel", "fix the assertion first")
         _binds(type(service.mailbox).pending, "run-1")
-        pending = service.mailbox.pending("run-1")
+        assert not inspect.iscoroutinefunction(type(service.mailbox).pending)
+        pending = service.mailbox.pending("run-1")  # no loop, no await
         assert [command.kind for command in pending] == ["steer"]
 
 
@@ -453,11 +531,13 @@ class TestHarnessDriverRenderArms:
         assert LANE_DRIVER_IDS["opencode"] == "opencode-sdk-lane"
         assert LANE_DRIVER_IDS["codex"] in DRIVERS and LANE_DRIVER_IDS["opencode"] in DRIVERS
 
-    def test_drivers_and_shipped_drivers_agree_except_the_claude_lane(self):
-        # The claude lane renders through its own CI template
-        # (ci/templates/claude-sdk-lane.gitlab-ci.yml), not render_driver_script.
+    def test_drivers_and_shipped_drivers_agree(self):
+        # The claude lane renders through its own arm since the live
+        # claude-sdk-lane slice (harness_entry pins claude 2.1.273), so the
+        # closed vocabularies now agree exactly.
         assert set(DRIVERS) <= SHIPPED_DRIVERS
-        assert SHIPPED_DRIVERS - set(DRIVERS) == {"claude-sdk-lane"}
+        assert SHIPPED_DRIVERS - set(DRIVERS) == frozenset()
+        assert LANE_DRIVERS == ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane")
         assert LANE_DRIVER_IDS["claude"] == "claude-sdk-lane"
 
 

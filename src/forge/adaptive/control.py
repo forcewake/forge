@@ -57,7 +57,7 @@ the last durable state, not a half-applied one.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, runtime_checkable
 
@@ -69,6 +69,7 @@ __all__ = [
     "BroadcastMailbox",
     "BroadcastStatus",
     "CaptureResult",
+    "FENCE_KINDS",
     "Mailbox",
     "MailboxSurface",
     "PauseState",
@@ -85,6 +86,7 @@ __all__ = [
     "new_publication_epoch",
     "promote_to_proposal",
     "recorded_pause",
+    "recorded_pause_async",
     "request_pause",
     "resume_check",
     "send_interrupt",
@@ -296,6 +298,11 @@ BROADCAST_SCOPE: Final = "work"
 #: acknowledged must not be raced by a lane that started after the
 #: snapshot was taken.
 _FENCE_KINDS: Final = frozenset({"pause"})
+
+#: The public name for the fence kinds — the durable mailbox's
+#: ``fence_active`` reads the same closed set, so the in-memory scan and
+#: the SQL fence answer the SAME question.
+FENCE_KINDS: Final = _FENCE_KINDS
 
 #: The per-recipient acknowledgement ladder (NXT-13). Each recipient
 #: climbs INDEPENDENTLY: ``pending`` (the row exists, the lane has not
@@ -863,6 +870,30 @@ def recorded_pause(
     fencing).
     """
     stored, created = submit(command)
+    if not created:
+        return state, stored, False
+    return new_publication_epoch(request_pause(state)), stored, True
+
+
+async def recorded_pause_async(
+    state: PauseState,
+    command: ControlCommand,
+    submit: Callable[[ControlCommand], Awaitable[tuple[ControlCommand, bool]]],
+) -> tuple[PauseState, ControlCommand, bool]:
+    """The awaitable twin of :func:`recorded_pause` — the SAME NXT-09 gate.
+
+    The control service awaits its mailbox through the unified async
+    surface (:mod:`forge.adaptive.mailbox_bridge`) whatever backs it —
+    the in-memory adapter no less than the durable Postgres mailbox — so
+    the dedup-first gate needs an awaitable ``submit``: the row is
+    durable FIRST, a redelivery is refused with the state UNCHANGED (no
+    second epoch bump, nothing re-recorded), and only a NEW command row
+    (``created=True``) sets ``pause_requested`` and fences the epoch.
+    This twin exists because a sync callable cannot await, not because
+    the gate differs — every invariant of :func:`recorded_pause` holds
+    verbatim.
+    """
+    stored, created = await submit(command)
     if not created:
         return state, stored, False
     return new_publication_epoch(request_pause(state)), stored, True

@@ -999,8 +999,8 @@ class TestAnswerGate:
             q1, q2 = [q["question_id"] for q in excinfo.value.questions]
 
             service = OperatorControlService()
-            assert service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.") is True
-            drain = await record_answers(factory, RUN_ID, service.pending(RUN_ID))
+            assert await service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.") is True
+            drain = await record_answers(factory, RUN_ID, await service.pending(RUN_ID))
             assert drain.applied_count == 1
 
             with pytest.raises(QuestionsOutstanding) as again:
@@ -1031,9 +1031,9 @@ class TestAnswerGate:
         factory_b, engine_b = await _new_process(db)
         try:
             service = OperatorControlService()
-            service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.")
-            service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
-            drain = await record_answers(factory_b, RUN_ID, service.pending(RUN_ID))
+            await service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.")
+            await service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
+            drain = await record_answers(factory_b, RUN_ID, await service.pending(RUN_ID))
             assert drain.applied_count == 2
             assert drain.open_question_ids == ()
 
@@ -1085,8 +1085,8 @@ class TestAnswerGate:
             q1 = excinfo.value.questions[0]["question_id"]
 
             service = OperatorControlService()
-            service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
-            commands = service.pending(RUN_ID)
+            await service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
+            commands = await service.pending(RUN_ID)
             first = await record_answers(factory, RUN_ID, commands)
             assert first.applied_count == 1
             # the SAME command redelivered: duplicate, no second effect

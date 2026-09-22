@@ -32,6 +32,7 @@ from forge.adaptive.control import (
     new_publication_epoch,
     promote_to_proposal,
     recorded_pause,
+    recorded_pause_async,
     request_pause,
     resume_check,
     send_interrupt,
@@ -334,15 +335,61 @@ class TestRecordedPause:
             )
 
 
+class TestRecordedPauseAsync:
+    """The awaitable twin: the SAME NXT-09 gate over the async surface
+    (the service awaits its mailbox whatever backs it)."""
+
+    def _pause_command(self, **overrides) -> ControlCommand:
+        return _command(idempotency_key="note:pause:1", **overrides)
+
+    @staticmethod
+    def _async_submit_over(mailbox: Mailbox):
+        async def submit(command: ControlCommand) -> tuple[ControlCommand, bool]:
+            return mailbox.submit(command)
+
+        return submit
+
+    async def test_a_new_command_records_the_pause_and_bumps_the_fence(self):
+        mailbox = Mailbox()
+        state = PauseState(work_id="wp-demo-1")
+
+        fenced, stored, created = await recorded_pause_async(
+            state, self._pause_command(), self._async_submit_over(mailbox)
+        )
+
+        assert created is True
+        assert stored.status == "received"  # the row exists BEFORE the fence
+        assert fenced.pause_requested is True
+        assert fenced.publication_epoch == 1
+
+    async def test_a_redelivered_pause_leaves_the_state_unchanged(self):
+        mailbox = Mailbox()
+        state = PauseState(work_id="wp-demo-1")
+        fenced, _, _ = await recorded_pause_async(
+            state, self._pause_command(), self._async_submit_over(mailbox)
+        )
+
+        again, stored, created = await recorded_pause_async(
+            fenced,
+            self._pause_command(command_id="cmd-replayed", sequence=2),
+            self._async_submit_over(mailbox),
+        )
+
+        assert created is False
+        assert again is fenced  # identity: no epoch bump, nothing re-recorded
+        assert again.publication_epoch == 1
+        assert stored.command_id == "cmd-1"  # the winner's record, verbatim
+
+
 class TestOperatorControlServicePauseOrdering:
     """The shipped pause path: dedup BEFORE the epoch mutation (the same
     order recorded_pause imposes, whatever mailbox sits behind the seam)."""
 
-    def test_a_duplicate_pause_does_not_bump_the_epoch(self):
+    async def test_a_duplicate_pause_does_not_bump_the_epoch(self):
         svc = OperatorControlService()
 
-        first = svc.pause("wp-1", "human:op", "note:1")
-        second = svc.pause("wp-1", "human:op", "note:1")
+        first = await svc.pause("wp-1", "human:op", "note:1")
+        second = await svc.pause("wp-1", "human:op", "note:1")
 
         assert first.publication_epoch == 1
         # The redelivery was refused by the mailbox BEFORE the fence —
@@ -352,11 +399,11 @@ class TestOperatorControlServicePauseOrdering:
         pauses = [c for c in svc.mailbox.commands.values() if c.kind == "pause"]
         assert len(pauses) == 1
 
-    def test_a_distinct_pause_bumps_the_epoch_once(self):
+    async def test_a_distinct_pause_bumps_the_epoch_once(self):
         svc = OperatorControlService()
 
-        svc.pause("wp-1", "human:op", "note:1")
-        second = svc.pause("wp-1", "human:op", "note:2")
+        await svc.pause("wp-1", "human:op", "note:1")
+        second = await svc.pause("wp-1", "human:op", "note:2")
 
         assert second.publication_epoch == 2
         pauses = [c for c in svc.mailbox.commands.values() if c.kind == "pause"]
@@ -1018,10 +1065,10 @@ class TestOperatorControlServiceWorkScopedPause:
     """The shipped shape: pause(work_scoped=True, recipients=the work's
     lanes) — additive; the single-lane path is untouched."""
 
-    def test_a_work_wide_pause_fans_out_and_completes_on_every_ack(self):
+    async def test_a_work_wide_pause_fans_out_and_completes_on_every_ack(self):
         svc = OperatorControlService()
 
-        broadcast = svc.pause(
+        broadcast = await svc.pause(
             "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
         )
 
@@ -1033,85 +1080,182 @@ class TestOperatorControlServiceWorkScopedPause:
         assert svc.pause_states["wp-1"].publication_epoch == 1
         # both lanes see their own view through the per-recipient drain
         for lane in ("run-a", "run-b"):
-            view = svc.pending_for("wp-1", lane)
+            view = await svc.pending_for("wp-1", lane)
             assert [command.command_id for command in view] == [broadcast.command_id]
             assert view[0].payload["run_id"] == lane
 
-        svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
-        half = svc.broadcast(broadcast.command_id)
+        await svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        half = await svc.broadcast(broadcast.command_id)
         assert half.status == "pending"
-        assert svc.pending_for("wp-1", "run-a") == []  # its own view is consumed
-        assert len(svc.pending_for("wp-1", "run-b")) == 1  # the second lane still sees it
+        assert await svc.pending_for("wp-1", "run-a") == []  # its own view is consumed
+        assert len(await svc.pending_for("wp-1", "run-b")) == 1  # the second lane still sees it
 
-        svc.acknowledge(broadcast.command_id, "run-b", note="ckpt:bbb")
-        assert svc.broadcast(broadcast.command_id).status == "completed"
-        assert svc.fence_active("wp-1") is False
+        await svc.acknowledge(broadcast.command_id, "run-b", note="ckpt:bbb")
+        assert (await svc.broadcast(broadcast.command_id)).status == "completed"
+        assert await svc.fence_active("wp-1") is False
 
-    def test_a_duplicate_work_wide_pause_does_not_bump_the_epoch_or_refan(self):
+    async def test_a_duplicate_work_wide_pause_does_not_bump_the_epoch_or_refan(self):
         svc = OperatorControlService()
 
-        first = svc.pause(
+        first = await svc.pause(
             "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
         )
-        svc.acknowledge(first.command_id, "run-a", note="ckpt:aaa")
-        second = svc.pause(
+        await svc.acknowledge(first.command_id, "run-a", note="ckpt:aaa")
+        second = await svc.pause(
             "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
         )
 
         assert second.command_id == first.command_id  # the winner, verbatim
         assert svc.pause_states["wp-1"].publication_epoch == 1  # NOT bumped twice
         assert second.acknowledgement("run-a").status == "acknowledged"  # state kept
-        assert [b.command_id for b in svc.broadcast_mailbox.broadcasts("wp-1")] == [
-            first.command_id
-        ]
-        assert svc.fence_active("wp-1") is True  # run-b is still outstanding
+        assert [b.command_id for b in await svc.broadcasts("wp-1")] == [first.command_id]
+        assert await svc.fence_active("wp-1") is True  # run-b is still outstanding
 
-    def test_an_uncertain_lane_is_individually_visible_at_the_parent(self):
+    async def test_an_uncertain_lane_is_individually_visible_at_the_parent(self):
         svc = OperatorControlService()
-        broadcast = svc.pause(
+        broadcast = await svc.pause(
             "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
         )
 
-        svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
-        uncertain = svc.mark_uncertain(
+        await svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        uncertain = await svc.mark_uncertain(
             broadcast.command_id, "run-b", "runner died before acknowledgement"
         )
 
         assert uncertain.status == "completed_with_uncertain"
         assert uncertain.uncertain_recipients == ("run-b",)
-        assert svc.pending_for("wp-1", "run-b") == []  # it will not re-deliver blindly
+        assert await svc.pending_for("wp-1", "run-b") == []  # it will not re-deliver blindly
 
-    def test_work_scoped_requires_a_recipient_set(self):
+    async def test_work_scoped_requires_a_recipient_set(self):
         svc = OperatorControlService()
         with pytest.raises(ValueError, match="empty recipients"):
-            svc.pause("wp-1", "human:op", "note:wide-1", work_scoped=True)
+            await svc.pause("wp-1", "human:op", "note:wide-1", work_scoped=True)
 
-    def test_the_single_lane_pause_path_is_unchanged(self):
+    async def test_the_single_lane_pause_path_is_unchanged(self):
         """Back-compat: the default pause is still the CTL-05 single-lane
         command — a PauseState in, a PauseState out, one mailbox row."""
         svc = OperatorControlService()
 
-        state = svc.pause("wp-1", "human:op", "note:1")
+        state = await svc.pause("wp-1", "human:op", "note:1")
 
         assert isinstance(state, PauseState)
         assert state.pause_requested is True
         assert state.interrupt_sent is True
-        assert svc.fence_active("wp-1") is False  # no broadcast was created
-        assert svc.broadcast_mailbox.broadcasts("wp-1") == []
+        assert await svc.fence_active("wp-1") is False  # no broadcast was created
+        assert await svc.broadcasts("wp-1") == []
         assert len(svc.mailbox.pending("wp-1")) == 1  # the ordinary pause row
 
-    def test_pending_for_merges_the_lane_view_in_sequence_order(self):
+    async def test_pending_for_merges_the_lane_view_in_sequence_order(self):
         svc = OperatorControlService()
-        svc.steer("wp-1", "human:op", "fix the parser first")  # ordinary pending
-        broadcast = svc.pause(
+        await svc.steer("wp-1", "human:op", "fix the parser first")  # ordinary pending
+        broadcast = await svc.pause(
             "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a",)
         )
 
-        combined = svc.pending_for("wp-1", "run-a")
+        combined = await svc.pending_for("wp-1", "run-a")
 
         assert [command.command_id for command in combined] == [
             svc.mailbox.pending("wp-1")[0].command_id,
             broadcast.command_id,
         ]
         # a foreign lane sees the steer but never run-a's broadcast view
-        assert [command.kind for command in svc.pending_for("wp-1", "run-b")] == ["steer"]
+        assert [command.kind for command in await svc.pending_for("wp-1", "run-b")] == ["steer"]
+
+
+class TestAsyncSurfaceOverMemory:
+    """The unified async surface over the IN-MEMORY implementation: the
+    service's own surface round-trips submit -> pending -> the ladder ->
+    checkpoint without touching the raw sync mailbox (the durable twin
+    of the same flow lives in tests/test_adaptive_mailbox_db.py)."""
+
+    async def test_the_memory_surface_round_trips_submit_pending_checkpoint(self):
+        svc = OperatorControlService()
+        command = _command(kind="steer", payload={"text": "fix the parser first"})
+
+        stored, created = await svc.submit(command)
+        assert created is True
+        assert stored.status == "received"
+        assert [c.command_id for c in await svc.pending("wp-demo-1")] == ["cmd-1"]
+
+        authorized = await svc.surface.authorize("cmd-1", SCOPES)
+        assert authorized.status == "authorized"
+        applied = await svc.surface.apply(
+            "cmd-1", current_plan_revision=1, current_execution_epoch=1
+        )
+        assert applied.status == "applied"
+        checkpointed = await svc.surface.checkpoint("cmd-1")
+        assert checkpointed.status == "checkpointed"
+        assert await svc.pending("wp-demo-1") == []  # a spent command never re-delivers
+
+    async def test_a_redelivery_through_the_surface_spends_nothing(self):
+        svc = OperatorControlService()
+        await svc.submit(_command())
+
+        replayed, created = await svc.submit(
+            _command(command_id="cmd-replayed", sequence=2, status="checkpointed")
+        )
+
+        assert created is False
+        assert replayed.command_id == "cmd-1"
+        assert replayed.status == "received"  # the replay's bytes are discarded
+
+    async def test_next_sequence_is_per_work_not_per_process(self):
+        svc = OperatorControlService()
+
+        assert await svc.surface.next_sequence("wp-demo-1") == 1
+        await svc.submit(_command(work_id="wp-demo-1"))
+        assert await svc.surface.next_sequence("wp-demo-1") == 2
+        # a DIFFERENT work allocates from its own history:
+        assert await svc.surface.next_sequence("wp-other") == 1
+
+
+class TestControlServiceFromEnv:
+    """The flag-gated mount: FORGE_CONTROL_MAILBOX=postgres selects the
+    durable mailbox when a session factory is available; everything else
+    (default, typo, no factory) is the in-memory reference."""
+
+    def test_the_default_is_the_in_memory_mailbox(self):
+        from forge.adaptive.mailbox_bridge import AsyncMailboxAdapter
+        from forge.adaptive.mailbox_db import PostgresMailbox
+        from forge.adaptive.wiring import FORGE_CONTROL_MAILBOX_ENV, control_service_from_env
+
+        assert FORGE_CONTROL_MAILBOX_ENV == "FORGE_CONTROL_MAILBOX"
+        svc = control_service_from_env(env={})
+        assert isinstance(svc.mailbox, Mailbox)
+        assert isinstance(svc.surface, AsyncMailboxAdapter)
+        assert not isinstance(svc.mailbox, PostgresMailbox)
+
+    async def test_postgres_mounts_over_a_supplied_session_factory(self):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        from forge.adaptive.mailbox_db import PostgresMailbox
+        from forge.adaptive.wiring import control_service_from_env
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        try:
+            svc = control_service_from_env(
+                env={"FORGE_CONTROL_MAILBOX": "postgres"},
+                session_factory=async_sessionmaker(engine, expire_on_commit=False),
+            )
+            assert isinstance(svc.mailbox, PostgresMailbox)
+            assert svc.surface is svc.mailbox  # the durable mailbox IS the surface
+        finally:
+            await engine.dispose()
+
+    def test_postgres_without_any_factory_falls_back_to_memory(self, caplog):
+        from forge.adaptive.wiring import control_service_from_env
+
+        svc = control_service_from_env(env={"FORGE_CONTROL_MAILBOX": "postgres"})
+        assert isinstance(svc.mailbox, Mailbox)  # honest fallback, loudly said
+        assert any("did not take effect" in record.message for record in caplog.records)
+
+    def test_a_misspelled_mode_is_memory_not_postgres(self):
+        from forge.adaptive.wiring import control_service_from_env
+
+        svc = control_service_from_env(env={"FORGE_CONTROL_MAILBOX": "postgre"})
+        assert isinstance(svc.mailbox, Mailbox)

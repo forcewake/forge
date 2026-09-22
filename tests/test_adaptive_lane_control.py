@@ -127,8 +127,8 @@ def _cmd(
     )
 
 
-def _submit(service: OperatorControlService, command: ControlCommand) -> None:
-    _, created = service.submit(command)
+async def _submit(service: OperatorControlService, command: ControlCommand) -> None:
+    _, created = await service.submit(command)
     assert created
 
 
@@ -193,7 +193,7 @@ class TestPause:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
 
         actions = await session.drain_once()
 
@@ -207,8 +207,8 @@ class TestPause:
         svc = OperatorControlService()
         client = FakeCodexClient()
         session = _session(svc, "codex", client, vendor="th-1")
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("pause", 2))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 2))
 
         actions = await session.drain_once()
 
@@ -221,7 +221,7 @@ class TestPause:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, vendor="")
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
 
         actions = await session.drain_once()
 
@@ -239,7 +239,7 @@ class TestSteer:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "fix the assertion first"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "fix the assertion first"}))
 
         actions = await session.drain_once()
 
@@ -251,7 +251,7 @@ class TestSteer:
         svc = OperatorControlService()
         client = FakeCodexClient()
         session = _session(svc, "codex", client, vendor="th-1")
-        _submit(svc, _cmd("steer", 1, payload={"text": "tighten the retry bounds"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "tighten the retry bounds"}))
 
         await session.drain_once()
 
@@ -262,7 +262,7 @@ class TestSteer:
         svc = OperatorControlService()
         client = FakeOpenCodeClient()
         session = _session(svc, "opencode", client, vendor="oc-1")
-        _submit(svc, _cmd("steer", 1, payload={"text": "look at the parser next"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "look at the parser next"}))
 
         actions = await session.drain_once()
 
@@ -274,8 +274,8 @@ class TestSteer:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("steer", 2, payload={"text": "start from the tests"}))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "start from the tests"}))
 
         actions = await session.drain_once()
 
@@ -288,8 +288,8 @@ class TestSteer:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "first note"}))
-        _submit(svc, _cmd("steer", 2, payload={"text": "second note"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "first note"}))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "second note"}))
 
         await session.drain_once()
 
@@ -305,7 +305,7 @@ class TestAnswer:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("answer", 1, payload={"question_id": "Q1", "text": "use option A"}))
+        await _submit(svc, _cmd("answer", 1, payload={"question_id": "Q1", "text": "use option A"}))
 
         await session.drain_once()
 
@@ -317,8 +317,8 @@ class TestAnswer:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("answer", 2, payload={"question_id": "Q1", "text": "use option A"}))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("answer", 2, payload={"question_id": "Q1", "text": "use option A"}))
 
         await session.drain_once()
 
@@ -334,7 +334,7 @@ class TestResume:
         svc = OperatorControlService()
         client = FakeCodexClient()
         session = _session(svc, "codex", client, vendor="th-1")
-        _submit(svc, _cmd("resume", 1))
+        await _submit(svc, _cmd("resume", 1))
 
         actions = await session.drain_once()
 
@@ -346,9 +346,9 @@ class TestResume:
         svc = OperatorControlService()
         client = FakeCodexClient()
         session = _session(svc, "codex", client, vendor="th-1")
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("steer", 2, payload={"text": "start from the tests"}))
-        _submit(svc, _cmd("resume", 3))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "start from the tests"}))
+        await _submit(svc, _cmd("resume", 3))
 
         await session.drain_once()
 
@@ -363,8 +363,8 @@ class TestResume:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("resume", 2))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("resume", 2))
 
         await session.drain_once()
 
@@ -377,8 +377,8 @@ class TestResume:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, snapshot_available=False)
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("resume", 2))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("resume", 2))
 
         actions = await session.drain_once()
 
@@ -390,9 +390,9 @@ class TestResume:
         svc = OperatorControlService()
         client = FakeOpenCodeClient()
         session = _session(svc, "opencode", client, vendor="oc-1")
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("steer", 2, payload={"text": "check the migration first"}))
-        _submit(svc, _cmd("resume", 3))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "check the migration first"}))
+        await _submit(svc, _cmd("resume", 3))
 
         await session.drain_once()
 
@@ -410,7 +410,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("amend", 1, payload={"text": "use RabbitMQ instead"}))
+        await _submit(svc, _cmd("amend", 1, payload={"text": "use RabbitMQ instead"}))
 
         actions = await session.drain_once()
 
@@ -424,7 +424,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("approve-revision", 1))
+        await _submit(svc, _cmd("approve-revision", 1))
 
         actions = await session.drain_once()
 
@@ -436,7 +436,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "just skip the tests for now"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "just skip the tests for now"}))
 
         actions = await session.drain_once()
 
@@ -448,7 +448,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "do not introduce a new broker"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "do not introduce a new broker"}))
 
         actions = await session.drain_once()
 
@@ -460,7 +460,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "x" * (STEER_TEXT_CAP + 1)}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "x" * (STEER_TEXT_CAP + 1)}))
 
         actions = await session.drain_once()
 
@@ -472,7 +472,7 @@ class TestRefusals:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "   "}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "   "}))
 
         actions = await session.drain_once()
 
@@ -488,7 +488,7 @@ class TestIsolation:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, run_id="run-1")
-        _submit(svc, _cmd("steer", 1, payload={"text": "for the other lane"}, run_id="run-9"))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "for the other lane"}, run_id="run-9"))
 
         actions = await session.drain_once()
 
@@ -503,7 +503,7 @@ class TestIsolation:
         client_b = FakeClaudeClient()
         lane_a = _session(svc, "claude", client_a, run_id="run-1")
         lane_b = _session(svc, "claude", client_b, run_id="run-9")
-        _submit(svc, _cmd("steer", 1, payload={"text": "for lane B only"}, run_id="run-9"))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "for lane B only"}, run_id="run-9"))
 
         await lane_a.drain_once()
         await lane_b.drain_once()
@@ -515,7 +515,7 @@ class TestIsolation:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "unscoped note"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "unscoped note"}))
 
         await session.drain_once()
 
@@ -525,7 +525,7 @@ class TestIsolation:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, work_id="wp-1")
-        _submit(svc, _cmd("pause", 1, work_id="wp-2"))
+        await _submit(svc, _cmd("pause", 1, work_id="wp-2"))
 
         actions = await session.drain_once()
 
@@ -540,21 +540,21 @@ class TestLadderAndJournal:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "one delivery"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "one delivery"}))
 
         first = await session.drain_once()
         second = await session.drain_once()
 
         assert first[0].detail["mailbox_status"] == "checkpointed"
         assert svc.mailbox.commands["cmd-1"].status == "checkpointed"
-        assert svc.pending("wp-1") == []
+        assert await svc.pending("wp-1") == []
         assert second == []  # a spent command can never re-apply
 
     async def test_a_stale_epoch_command_expires_before_any_effect(self):
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, execution_epoch=1)
-        _submit(svc, _cmd("pause", 1, expected_execution_epoch=7))
+        await _submit(svc, _cmd("pause", 1, expected_execution_epoch=7))
 
         actions = await session.drain_once()
 
@@ -567,7 +567,7 @@ class TestLadderAndJournal:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, actor_scopes={})
-        _submit(svc, _cmd("steer", 1, payload={"text": "hello"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "hello"}))
 
         actions = await session.drain_once()
 
@@ -579,13 +579,13 @@ class TestLadderAndJournal:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("pause", 1))
-        _submit(svc, _cmd("steer", 2, payload={"text": "queued note"}))
-        _submit(svc, _cmd("resume", 3))
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "queued note"}))
+        await _submit(svc, _cmd("resume", 3))
 
         await session.drain_once()
         snapshot = session.journal
-        _submit(svc, _cmd("steer", 4, payload={"text": "late note"}))
+        await _submit(svc, _cmd("steer", 4, payload={"text": "late note"}))
         await session.drain_once()
 
         assert len(session.journal) == 4
@@ -611,7 +611,7 @@ class TestConcurrentDrain:
 
         session = _session(svc, "claude", TimedClient())
         async with session:
-            svc.steer("wp-1", "human:op", "mid-turn guidance", run_id="run-1")
+            await svc.steer("wp-1", "human:op", "mid-turn guidance", run_id="run-1")
             await asyncio.sleep(0.05)  # the agent turn runs...
             timeline.append(("turn-end", loop.time()))
 
@@ -653,7 +653,7 @@ class TestConcurrentDrain:
 
         async def late_submit() -> None:
             await asyncio.sleep(0.01)
-            svc.steer("wp-1", "human:op", "last word", run_id="run-1")
+            await svc.steer("wp-1", "human:op", "last word", run_id="run-1")
 
         async with session:
             await late_submit()  # submitted between the slow polls
@@ -678,8 +678,8 @@ class TestPermissionPosture:
             work = f"wp-{kind}"
             session = _session(svc, kind, client, vendor=vendors[kind], work_id=work)
             seq = _Seq()
-            _submit(svc, _cmd("pause", seq.next(), work_id=work, id_prefix=f"{kind}-"))
-            _submit(
+            await _submit(svc, _cmd("pause", seq.next(), work_id=work, id_prefix=f"{kind}-"))
+            await _submit(
                 svc,
                 _cmd(
                     "steer",
@@ -689,7 +689,7 @@ class TestPermissionPosture:
                     id_prefix=f"{kind}-",
                 ),
             )
-            _submit(svc, _cmd("resume", seq.next(), work_id=work, id_prefix=f"{kind}-"))
+            await _submit(svc, _cmd("resume", seq.next(), work_id=work, id_prefix=f"{kind}-"))
             await session.drain_once()
 
             allowed = LANE_CONTROL_SURFACE[kind]
@@ -726,7 +726,7 @@ class TestDeliveryLadder:
 
         client = Probing()
         steering = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
 
         actions = await steering.drain_once()
 
@@ -746,7 +746,7 @@ class TestDeliveryLadder:
 
         client = Lagging()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))
 
         actions = await session.drain_once()
 
@@ -759,7 +759,7 @@ class TestDeliveryLadder:
         assert svc.mailbox.commands["cmd-1"].status == "applied"
         assert svc.mailbox.commands["cmd-1"].status != "checkpointed"
         # and the command has left pending(): the drain cannot re-send it
-        assert svc.pending("wp-1") == []
+        assert await svc.pending("wp-1") == []
 
     async def test_a_connection_error_is_uncertain_delivery(self):
         svc = OperatorControlService()
@@ -771,7 +771,7 @@ class TestDeliveryLadder:
 
         client = Dropping()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "dropped note"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "dropped note"}))
 
         actions = await session.drain_once()
 
@@ -788,7 +788,7 @@ class TestDeliveryLadder:
 
         client = OnceLagging()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "uncertain"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "uncertain"}))
 
         first = await session.drain_once()
         second = await session.drain_once()
@@ -807,7 +807,7 @@ class TestDeliveryLadder:
 
         client = Refusing()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "doomed"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "doomed"}))
 
         actions = await session.drain_once()
 
@@ -827,7 +827,7 @@ class TestDeliveryLadder:
 
         client = Lagging()
         session = _session(svc, "codex", client, vendor="th-9")
-        _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "probe me"}))
 
         await session.drain_once()
 
@@ -848,7 +848,7 @@ class TestDeliveryLadder:
                 raise TimeoutError("no answer")
 
         session = _session(svc, "claude", Lagging())
-        _submit(svc, _cmd("steer", 1, payload={"text": "gone"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "gone"}))
         await session.drain_once()
 
         closed = session.mark_delivery_unknown("cmd-1", "probe found no session evidence")
@@ -872,7 +872,7 @@ class TestDeliveryLadder:
 
         client = Hanging()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "in flight"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "in flight"}))
 
         # the process-death window, in-process: the bounding wait cancels the
         # dispatch between the intent record and the vendor's answer
@@ -906,8 +906,8 @@ class TestPausePriorityDrain:
 
         client = SlowSteer()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))  # sequenced FIRST
-        _submit(svc, _cmd("pause", 2))  # ...but urgent
+        await _submit(svc, _cmd("steer", 1, payload={"text": "slow note"}))  # sequenced FIRST
+        await _submit(svc, _cmd("pause", 2))  # ...but urgent
 
         actions = await session.drain_once()
 
@@ -924,9 +924,9 @@ class TestPausePriorityDrain:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
-        _submit(svc, _cmd("steer", 1, payload={"text": "ordinary note"}))
-        _submit(svc, _cmd("pause", 2))
-        _submit(svc, _cmd("resume", 3))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "ordinary note"}))
+        await _submit(svc, _cmd("pause", 2))
+        await _submit(svc, _cmd("resume", 3))
 
         actions = await session.drain_once()
 
@@ -947,9 +947,9 @@ class TestTeardownGuard:
         svc = OperatorControlService()
         client = FakeCodexClient()
         session = _session(svc, "codex", client, vendor="th-1", poll_interval=5.0)
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
         await session.drain_once()  # paused: a resume would otherwise be eligible
-        _submit(svc, _cmd("resume", 2))  # seen only by the final drain
+        await _submit(svc, _cmd("resume", 2))  # seen only by the final drain
 
         async with session:
             pass  # the turn ends here
@@ -965,7 +965,7 @@ class TestTeardownGuard:
         svc = OperatorControlService()
         client = FakeClaudeClient()
         session = _session(svc, "claude", client, poll_interval=5.0)
-        _submit(svc, _cmd("steer", 1, payload={"text": "last word"}))
+        await _submit(svc, _cmd("steer", 1, payload={"text": "last word"}))
 
         async with session:
             pass
@@ -983,7 +983,7 @@ class TestNxt14UrgentControlPath:
         client = FakeClaudeClient()
         session = _session(svc, "claude", client)
         session.bind("sess-1")
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
 
         actions = await session.drain_once()
 
@@ -1002,7 +1002,7 @@ class TestNxt14UrgentControlPath:
         client.interrupt = hang
         session = _session(svc, "claude", client)
         session.bind("sess-1")
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
 
         actions = await session.drain_once()
 
@@ -1019,7 +1019,7 @@ class TestNxt14UrgentControlPath:
         # Guidance queued (as the bridge does while paused) before the
         # urgent pause lands in the same cycle.
         session._queued.append("go west")
-        _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("pause", 1))
 
         actions = await session.drain_once()
 

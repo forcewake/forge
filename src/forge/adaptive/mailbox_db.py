@@ -75,6 +75,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from forge.adaptive.control import (
     BROADCAST_SCOPE,
+    FENCE_KINDS,
     BroadcastCommand,
     RecipientAcknowledgement,
     broadcast_view,
@@ -648,6 +649,36 @@ class PostgresMailbox:
                 if (row.payload or {}).get("scope") == BROADCAST_SCOPE
             ]
         return broadcasts
+
+    async def fence_active(self, work_id: str) -> bool:
+        """True while a work-wide pause is not yet decided for every lane.
+
+        The durable twin of
+        :meth:`forge.adaptive.control.BroadcastMailbox.fence_active`: the
+        fence is a still-pending delivery row of a pause-kind broadcast
+        parent (:data:`forge.adaptive.control.FENCE_KINDS` — the same
+        closed set the in-memory scan reads). A lane that has neither
+        acknowledged nor been marked uncertain keeps the fence up, so a
+        child created during the pause cannot start through it; a
+        broadcast that completed WITH an explicitly uncertain subset has
+        finished deciding, and the fence lifts exactly as it does in
+        memory.
+        """
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(ControlCommandDeliveryRow.recipient)
+                .join(
+                    ControlCommandRow,
+                    ControlCommandRow.id == ControlCommandDeliveryRow.command_id,
+                )
+                .where(
+                    ControlCommandDeliveryRow.work_id == work_id,
+                    ControlCommandDeliveryRow.status == "pending",
+                    ControlCommandRow.kind.in_(FENCE_KINDS),
+                )
+                .limit(1)
+            )
+        return row is not None
 
     # -- internals ------------------------------------------------------------
 

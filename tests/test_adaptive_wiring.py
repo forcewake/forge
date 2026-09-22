@@ -88,10 +88,10 @@ class TestOperatorControlService:
     def _service(self) -> OperatorControlService:
         return OperatorControlService()
 
-    def test_pause_fences_the_epoch_before_the_interrupt(self):
+    async def test_pause_fences_the_epoch_before_the_interrupt(self):
         svc = self._service()
 
-        state = svc.pause("wp-1", "human:op", "note:1")
+        state = await svc.pause("wp-1", "human:op", "note:1")
 
         # CTL-05's ordering: the fence closed (epoch bumped from 0) and the
         # interrupt was recorded
@@ -99,53 +99,53 @@ class TestOperatorControlService:
         assert state.pause_requested is True
         assert state.interrupt_sent is True
 
-    def test_a_second_pause_with_the_same_key_dedups(self):
+    async def test_a_second_pause_with_the_same_key_dedups(self):
         svc = self._service()
 
-        svc.pause("wp-1", "human:op", "note:1")
-        svc.pause("wp-1", "human:op", "note:1")
+        await svc.pause("wp-1", "human:op", "note:1")
+        await svc.pause("wp-1", "human:op", "note:1")
 
         # same idempotency key → the mailbox keeps ONE pause command
         pauses = [c for c in svc.mailbox.commands.values() if c.kind == "pause"]
         assert len(pauses) == 1
 
-    def test_resume_requires_a_confirmed_checkpoint(self):
+    async def test_resume_requires_a_confirmed_checkpoint(self):
         svc = self._service()
-        svc.pause("wp-1", "human:op", "note:1")
+        await svc.pause("wp-1", "human:op", "note:1")
 
         # no checkpoint captured → resume refuses
-        assert svc.resume("wp-1", "human:op", "note:2") is False
+        assert await svc.resume("wp-1", "human:op", "note:2") is False
 
-    def test_steer_rejects_acceptance_weakening(self):
+    async def test_steer_rejects_acceptance_weakening(self):
         svc = self._service()
 
-        result = svc.steer("wp-1", "human:op", "skip the test")
+        result = await svc.steer("wp-1", "human:op", "skip the test")
 
         assert result["status"] == "rejected"
         assert "revision gate" in result["reason"]
 
-    def test_steer_delivers_guidance(self):
+    async def test_steer_delivers_guidance(self):
         svc = self._service()
 
-        result = svc.steer("wp-1", "human:op", "fix the assertion first")
+        result = await svc.steer("wp-1", "human:op", "fix the assertion first")
 
         assert result["status"] == "accepted"
 
-    def test_answer_routes_through_the_mailbox(self):
+    async def test_answer_routes_through_the_mailbox(self):
         svc = self._service()
 
-        created = svc.answer("wp-1", "human:op", "Q1", "use option A")
+        created = await svc.answer("wp-1", "human:op", "Q1", "use option A")
 
         assert created is True
         answers = [c for c in svc.mailbox.commands.values() if c.kind == "answer"]
         assert len(answers) == 1
         assert answers[0].payload["question_id"] == "Q1"
 
-    def test_a_redelivered_answer_does_not_duplicate(self):
+    async def test_a_redelivered_answer_does_not_duplicate(self):
         svc = self._service()
 
-        svc.answer("wp-1", "human:op", "Q1", "use A")
-        created2 = svc.answer("wp-1", "human:op", "Q1", "use A")
+        await svc.answer("wp-1", "human:op", "Q1", "use A")
+        created2 = await svc.answer("wp-1", "human:op", "Q1", "use A")
 
         assert created2 is False  # same idempotency key — deduped
 
@@ -172,10 +172,10 @@ class _FakeClaudeClient:
 class TestSteerMailboxWiring:
     """The service records accepted steers; a running lane drains them."""
 
-    def test_an_accepted_steer_records_a_mailbox_command(self):
+    async def test_an_accepted_steer_records_a_mailbox_command(self):
         svc = OperatorControlService()
 
-        result = svc.steer("wp-1", "human:op", "fix the assertion first")
+        result = await svc.steer("wp-1", "human:op", "fix the assertion first")
 
         assert result["status"] == "accepted"
         command = svc.mailbox.commands[result["command_id"]]
@@ -183,28 +183,28 @@ class TestSteerMailboxWiring:
         assert command.status == "received"
         assert command.payload["text"] == "fix the assertion first"
 
-    def test_a_rejected_steer_never_reaches_the_mailbox(self):
+    async def test_a_rejected_steer_never_reaches_the_mailbox(self):
         svc = OperatorControlService()
 
-        result = svc.steer("wp-1", "human:op", "skip the tests")
+        result = await svc.steer("wp-1", "human:op", "skip the tests")
 
         assert result["status"] == "rejected"
         assert svc.mailbox.commands == {}
 
-    def test_a_steer_scopes_to_a_run_id(self):
+    async def test_a_steer_scopes_to_a_run_id(self):
         svc = OperatorControlService()
 
-        svc.steer("wp-1", "human:op", "note", run_id="run-7")
+        await svc.steer("wp-1", "human:op", "note", run_id="run-7")
 
-        assert svc.pending("wp-1")[0].payload["run_id"] == "run-7"
+        assert (await svc.pending("wp-1"))[0].payload["run_id"] == "run-7"
 
-    def test_pending_lists_received_commands_in_sequence_order(self):
+    async def test_pending_lists_received_commands_in_sequence_order(self):
         svc = OperatorControlService()
 
-        first = svc.steer("wp-1", "human:op", "first")
-        second = svc.steer("wp-1", "human:op", "second")
+        first = await svc.steer("wp-1", "human:op", "first")
+        second = await svc.steer("wp-1", "human:op", "second")
 
-        assert [c.command_id for c in svc.pending("wp-1")] == [
+        assert [c.command_id for c in await svc.pending("wp-1")] == [
             first["command_id"],
             second["command_id"],
         ]
@@ -221,7 +221,7 @@ class TestSteerMailboxWiring:
             vendor_session_id="sess-1",
         )
 
-        svc.steer("wp-1", "human:op", "prefer the existing helper", run_id="run-1")
+        await svc.steer("wp-1", "human:op", "prefer the existing helper", run_id="run-1")
         actions = await session.drain_once()
 
         assert client.calls == [("steer", "sess-1", "prefer the existing helper")]
@@ -239,13 +239,13 @@ class TestSteerMailboxWiring:
             vendor_session_id="sess-1",
         )
 
-        svc.steer("wp-1", "human:op", "for the other lane", run_id="run-9")
+        await svc.steer("wp-1", "human:op", "for the other lane", run_id="run-9")
         actions = await session.drain_once()
 
         assert client.calls == []
         assert [a.outcome for a in actions] == ["ignored"]
         # the command stays in the mailbox for its owning lane
-        assert svc.pending("wp-1")[0].status == "received"
+        assert (await svc.pending("wp-1"))[0].status == "received"
 
 
 def _package() -> WorkPackage:

@@ -620,3 +620,138 @@ class TestWorkWideBroadcasts:
         assert [entry["to"] for entry in row.journal] == ["pending", "acknowledged"]
         assert row.journal[-1]["note"] == "ckpt:aaa"
         assert row.acknowledged_at is not None
+
+    async def test_the_fence_reads_the_pending_delivery_rows(self, lab):
+        """The durable twin of the in-memory fence scan: a work-wide pause
+        holds the fence until EVERY recipient is decided; an explicitly
+        uncertain completion lifts it with the lane still named."""
+        mailbox = lab.mailbox
+        assert await mailbox.fence_active("wp-demo-1") is False
+
+        broadcast, _ = await mailbox.submit_broadcast(self._broadcast(), ("run-a", "run-b"))
+        assert await mailbox.fence_active("wp-demo-1") is True
+
+        await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        assert await mailbox.fence_active("wp-demo-1") is True  # run-b outstanding
+
+        await mailbox.mark_uncertain(
+            broadcast.command_id, "run-b", "probe inconclusive: session gone"
+        )
+        assert await mailbox.fence_active("wp-demo-1") is False  # decided, with the name kept
+
+
+class TestServiceOverTheDurableMailbox:
+    """The unified async surface over the DURABLE implementation: the SAME
+    :class:`~forge.adaptive.wiring.OperatorControlService` code that runs
+    over the in-memory mailbox (tests/test_adaptive_control.py) runs over
+    PostgresMailbox — the flag-gated production mount, exercised here on
+    SQLite and on real Postgres when the FI lab URL is set."""
+
+    async def test_the_service_round_trips_submit_pending_checkpoint(self, lab):
+        from forge.adaptive.wiring import OperatorControlService
+
+        service = OperatorControlService(mailbox=lab.reopen())
+        assert service.surface is service.mailbox  # the durable mailbox IS the surface
+
+        stored, created = await service.submit(
+            _command(
+                sequence=1,
+                command_id="cmd-svc-1",
+                idempotency_key="svc:1",
+                kind="steer",
+                payload={"text": "fix the parser first", "run_id": "run-a"},
+            )
+        )
+        assert created is True
+        assert stored.status == "received"
+        assert [command.command_id for command in await service.pending("wp-demo-1")] == [
+            "cmd-svc-1"
+        ]
+
+        # the ladder is NXT-12's on this side of the seam: the coarse
+        # memory ``apply`` is the dispatch -> vendor_accepted -> observe walk.
+        authorized = await service.surface.authorize("cmd-svc-1", SCOPES)
+        assert authorized.status == "authorized"
+        dispatching = await service.surface.dispatch(
+            "cmd-svc-1", current_plan_revision=1, current_execution_epoch=1
+        )
+        assert dispatching.status == "dispatching"
+        await service.surface.vendor_accepted("cmd-svc-1")
+        observed = await service.surface.observe("cmd-svc-1")
+        assert observed.status == "applied"
+        checkpointed = await service.surface.checkpoint("cmd-svc-1")
+        assert checkpointed.status == "checkpointed"
+        assert await service.pending("wp-demo-1") == []  # a spent command never re-delivers
+
+        # a redelivery through the service spends nothing (NXT-09):
+        replayed, created_again = await service.submit(
+            _command(
+                sequence=2,
+                command_id="cmd-svc-replay",
+                idempotency_key="svc:1",
+                kind="steer",
+                payload={"text": "replayed bytes", "run_id": "run-a"},
+            )
+        )
+        assert created_again is False
+        assert replayed.command_id == "cmd-svc-1"
+
+    async def test_the_service_fence_and_acknowledgements_run_durably(self, lab):
+        from forge.adaptive.wiring import OperatorControlService
+
+        service = OperatorControlService(mailbox=lab.reopen())
+        broadcast = await service.pause(
+            "wp-demo-1",
+            "human:reviewer-17",
+            "svc:wide:1",
+            work_scoped=True,
+            recipients=("run-a", "run-b"),
+        )
+        assert broadcast.status == "pending"
+        assert await service.fence_active("wp-demo-1") is True
+        for lane in ("run-a", "run-b"):
+            view = await service.pending_for("wp-demo-1", lane)
+            assert [command.command_id for command in view] == [broadcast.command_id]
+            assert view[0].payload["run_id"] == lane
+
+        await service.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        await service.mark_uncertain(
+            broadcast.command_id, "run-b", "runner died before acknowledgement"
+        )
+        decided = await service.broadcast(broadcast.command_id)
+        assert decided is not None
+        assert decided.uncertain_recipients == ("run-b",)
+        assert await service.fence_active("wp-demo-1") is False
+
+        # a duplicate work-wide pause refans nothing (the winner verbatim):
+        second = await service.pause(
+            "wp-demo-1",
+            "human:reviewer-17",
+            "svc:wide:1",
+            work_scoped=True,
+            recipients=("run-a", "run-b"),
+        )
+        assert second.command_id == broadcast.command_id
+        assert second.acknowledgement("run-a").status == "acknowledged"  # state kept
+
+    async def test_the_factory_mounts_the_durable_mailbox_over_a_real_factory(self, lab):
+        """control_service_from_env(flag=postgres, session_factory=...) builds
+        exactly the service above; without the flag the same factory yields
+        the in-memory reference — the flag is the ONLY difference."""
+        from forge.adaptive.control import Mailbox
+        from forge.adaptive.wiring import control_service_from_env
+
+        engine_session_factory = async_sessionmaker(lab._engine, expire_on_commit=False)
+        flagged = control_service_from_env(
+            env={"FORGE_CONTROL_MAILBOX": "postgres"}, session_factory=engine_session_factory
+        )
+        assert isinstance(flagged.mailbox, PostgresMailbox)
+        stored, created = await flagged.submit(_command(idempotency_key="svc:flag:1"))
+        assert created is True
+        recovered = await flagged.surface.get("cmd-1")
+        assert recovered is not None and recovered.status == "received"
+
+        unflagged = control_service_from_env(
+            env={}, session_factory=engine_session_factory
+        )  # the factory is IGNORED without the flag
+        assert isinstance(unflagged.mailbox, Mailbox)

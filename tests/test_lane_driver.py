@@ -1411,7 +1411,7 @@ class TestClaudeLaneSteering:
         monkeypatch.setenv("FORGE_RUN_ID", "run-1")
         monkeypatch.setenv("FORGE_WORK_ID", "wp-1")
         control = OperatorControlService()
-        control.steer("wp-1", "human:op", "tighten the retry bounds", run_id="run-1")
+        await control.steer("wp-1", "human:op", "tighten the retry bounds", run_id="run-1")
         client = SteerableLaneClient()
 
         outcome = await drive_lane(
@@ -1481,7 +1481,7 @@ class TestCodexLaneSteering:
         monkeypatch.setenv("FORGE_RUN_ID", "run-1")
         monkeypatch.setenv("FORGE_WORK_ID", "wp-1")
         control = OperatorControlService()
-        control.steer("wp-1", "human:op", "use the fixture factory", run_id="run-1")
+        await control.steer("wp-1", "human:op", "use the fixture factory", run_id="run-1")
         client = SteerableCodexClient()
 
         outcome = await drive_codex_lane(
@@ -1515,7 +1515,7 @@ class TestOpenCodeLaneSteering:
         # the attach binds there, and a queued mid-turn steer is honestly
         # refused (the profile has no live_input), never guessed at.
         control = OperatorControlService()
-        control.steer("wp-1", "human:op", "look at the parser next", run_id="run-1")
+        await control.steer("wp-1", "human:op", "look at the parser next", run_id="run-1")
         client = FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")])
         install_opencode(monkeypatch, client)
 
@@ -1572,7 +1572,7 @@ class TestEpisodeTiming:
         # In memory the breakdown carries the canonical phase order.
         client = SteerableLaneClient()
         control = OperatorControlService()
-        control.steer("wp", "human:op", "finish now", run_id="run")
+        await control.steer("wp", "human:op", "finish now", run_id="run")
 
         outcome = await drive_lane(
             client, task="do the thing", budget_s=5.0, poll_s=0.01, control=control
