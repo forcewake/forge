@@ -784,7 +784,34 @@ class GitHubRunService:
         now = now or datetime.now(timezone.utc)
         resuming = False
 
+        # The plan heading shows the 8-char prefix (LIVE-found 2026-09-22:
+        # the GitHub side rejected /go <prefix> with RunNotFound while the
+        # GitLab side had learned prefix resolution). Resolve short ids by
+        # this repo+issue's GitHub runs; anything else reads as unknown.
         async with self._session_factory() as session:
+            if len(run_id) < 32:
+                found = (
+                    (
+                        await session.execute(
+                            select(FlowRun)
+                            .where(
+                                FlowRun.provider == "github",
+                                FlowRun.project_id == project_id,
+                                FlowRun.issue_iid == issue_number,
+                                FlowRun.id.like(f"{run_id}%"),
+                            )
+                            .order_by(FlowRun.created_at.desc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if len(found) != 1:
+                    logger.info(
+                        "GitHub /go prefix %s matched %d runs — ignoring", run_id[:8], len(found)
+                    )
+                    return
+                run_id = found[0].id
             run = await self._get_run(session, run_id)
             if (
                 run is None
