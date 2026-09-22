@@ -1379,7 +1379,9 @@ class CitationAuthority:
         tree_entry = record.get("snapshot_tree")
         tree_entry = tree_entry if isinstance(tree_entry, Mapping) else {}
         files = tree_entry.get("files")
-        tree = {str(path): entry for path, entry in (files or {}).items() if isinstance(entry, Mapping)}
+        tree = {
+            str(path): entry for path, entry in (files or {}).items() if isinstance(entry, Mapping)
+        }
         return cls(
             repository_id=str(dispatch.get("repository_id") or ""),
             source_oid=str(dispatch.get("source_oid") or ""),
@@ -1444,9 +1446,7 @@ class CitationAuthority:
         line = int(entry.get("line") or 0)
         lines = int(bounds.get("lines") or 0)
         if line < 1 or line > lines:
-            violations.append(
-                f"line {line} is outside {path!r}'s recorded range 1..{lines}"
-            )
+            violations.append(f"line {line} is outside {path!r}'s recorded range 1..{lines}")
         return violations
 
 

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-22
+
+### Added — the edf938c backlog completed: every issue closed
+
+The full 31-item review backlog (#123–#153) is closed. This release
+lands the remaining 11 slices (+~300 tests; suite ~4700):
+
+- **NXT-10**: `/pause /resume /steer /answer` routed through the real
+  authenticated ingress on all three providers
+  (FORGE_ADAPTIVE_COMMANDS_ENABLED, default OFF; the /go approver gate;
+  short-id resolution; journaled replies).
+- **NXT-13+24**: work-wide broadcast commands with per-lane
+  acknowledgements (migration 021) + the recoverable publication saga —
+  write-ahead intents, adopt-by-marker, HUMAN-moved heads park, and the
+  provider protocol has no merge/force-push by construction.
+- **NXT-27+28+29**: driver capabilities as versioned observed behavior
+  (exact-version answers only; CLI version pins in the templates),
+  episode timing in every lane meta, and LANE_PROFILE_V2 (staged
+  credentials, data boundaries, cap-drop-all, deny-by-default egress).
+- **NXT-21+22**: evidence invalidation by RELEVANT dependency identity
+  (revision bumps invalidate nothing — a change type cannot carry a
+  revision) + OID/digest validators, frozen members, persisted
+  tested-world digests at freeze time.
+- **NXT-07+23**: persisted clarification questions gate planning;
+  /answer folds mailbox commands; WorkPackage coordination persists —
+  idempotent child intents close both crash windows, advance requires
+  PROVEN outcomes.
+- **NXT-04+06**: 31 real-construction-surface tests (NO fakes — found
+  and fixed real drift: GitLabClient lacks read_text); citations bind
+  to repository+OID+path+line-range against the authorized snapshot
+  tree (cross-repo/stale-OID/out-of-range fail closed).
+- **NXT-26**: independent candidate checks — contract suite + DB
+  cross-checks, evidence-only (no verdict surface by construction).
+- **NXT-14** (second half), **NXT-03** (evidence-mapped closure).
+
+Live findings en route: migration 021 json/jsonb incoherence (the
+e53ffd2 lesson, caught by the lab chain run — fixed); a GitHub
+preflight//go deadlock surfaced by the live discovery journey (filed,
+#154).
+
 ## [0.24.0] - 2026-09-22
 
 ### Fixed + Added — the edf938c review campaign: assembly over new modules

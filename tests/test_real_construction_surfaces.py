@@ -111,8 +111,7 @@ def _assert_call_surface(
         f"{inspect.signature(expected)}"
     )
     assert inspect.iscoroutinefunction(real) is inspect.iscoroutinefunction(expected), (
-        f"{what}: coroutine parity with the seam changed "
-        f"(real={inspect.iscoroutinefunction(real)})"
+        f"{what}: coroutine parity with the seam changed (real={inspect.iscoroutinefunction(real)})"
     )
     expected_return = get_type_hints(expected).get("return")
     real_return = get_type_hints(real).get("return")
@@ -242,10 +241,7 @@ class TestDriverFromEnvFactories:
     """The lane runner's actual construction seams build real clients."""
 
     def test_claude_factory_signature_and_construction(self):
-        (param,) = [
-            p
-            for n, p in inspect.signature(claude_sdk_client_from_env).parameters.items()
-        ]
+        (param,) = [p for n, p in inspect.signature(claude_sdk_client_from_env).parameters.items()]
         assert param.name == "sdk" and param.default is None
         client = claude_sdk_client_from_env(sdk=types.ModuleType("claude_agent_sdk"))
         assert isinstance(client, ClaudeSDKDriverClient)
@@ -374,7 +370,11 @@ class TestOperatorControlServiceSurface:
 
     def test_steer_accepts_the_router_call_shape_and_answers_status_and_classification(self):
         _binds(
-            OperatorControlService.steer, "run-1", "pavel", "use the existing helper", run_id="run-1"
+            OperatorControlService.steer,
+            "run-1",
+            "pavel",
+            "use the existing helper",
+            run_id="run-1",
         )
         service = OperatorControlService()
         outcome = service.steer("run-1", "pavel", "use the existing helper", run_id="run-1")
@@ -471,7 +471,9 @@ def github_reader() -> GitHubRepositoryReader:
     # GitHubStaticCredentials is the repo's own static-token provider: a real
     # TokenProvider, not a mock. No request happens at construction.
     return GitHubRepositoryReader(
-        GitHubClient(base_url="https://api.github.com", token_provider=GitHubStaticCredentials("t")),
+        GitHubClient(
+            base_url="https://api.github.com", token_provider=GitHubStaticCredentials("t")
+        ),
         "example",
         "repo",
     )
@@ -494,14 +496,14 @@ def gitlab_client() -> GitLabClient:
 class TestDiscoveryReaderDuckType:
     """The snapshot seam's calls fit the REAL GitHub/GitLab/Azure readers."""
 
-    def test_all_three_construct_side_effect_free(
-        self, github_reader, azure_reader, gitlab_client
-    ):
+    def test_all_three_construct_side_effect_free(self, github_reader, azure_reader, gitlab_client):
         assert isinstance(github_reader, GitHubRepositoryReader)
         assert isinstance(azure_reader, AzureRepositoryReader)
         assert isinstance(gitlab_client, GitLabClient)
 
-    def test_get_tree_matches_the_seam_on_all_three(self, github_reader, azure_reader, gitlab_client):
+    def test_get_tree_matches_the_seam_on_all_three(
+        self, github_reader, azure_reader, gitlab_client
+    ):
         # load_snapshot_files issues: reader.get_tree(project_id, "", ref, recursive=True)
         for reader in (github_reader, azure_reader, gitlab_client):
             method = getattr(type(reader), "get_tree")

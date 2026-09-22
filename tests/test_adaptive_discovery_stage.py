@@ -719,7 +719,11 @@ class TestCitationAuthorityBinding:
         plan = {
             "steps": [
                 "first per evidence:ev-1 and evidence:ev-3",
-                {"step_id": "s2", "objective": "last line per evidence:ev-2", "evidence_refs": ["ev-2"]},
+                {
+                    "step_id": "s2",
+                    "objective": "last line per evidence:ev-2",
+                    "evidence_refs": ["ev-2"],
+                },
             ]
         }
         assert validate_citations_against_snapshot(plan, record) == []
@@ -822,9 +826,12 @@ class TestCitationAuthorityBinding:
         try:
             with pytest.raises(QuestionsOutstanding):
                 await maybe_run_discovery(
-                    _ctx(factory, questions=_question_source(
-                        {"text": "which way?", "criticality": "critical", "citations": []}
-                    )),
+                    _ctx(
+                        factory,
+                        questions=_question_source(
+                            {"text": "which way?", "criticality": "critical", "citations": []}
+                        ),
+                    ),
                     PLANNER_INPUT,
                 )
             record = await _discovery_record(factory)
