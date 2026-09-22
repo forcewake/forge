@@ -56,6 +56,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/forge"]
+# Package data (script-rendering architecture): the lane driver-script
+# templates (harnesses/scripts/**/*.sh) and the harness log filter
+# (harnesses/scripts/harness-log-filter.mjs) are non-Python files INSIDE
+# the package tree — they ride the wheel as package data and are read at
+# render time via importlib.resources (never fetched over the network at
+# lane time). The explicit include documents that intent: executable lane
+# assets ship with the code they belong to.
+include = ["src/forge"]
 
 [tool.ruff]
 target-version = "py313"

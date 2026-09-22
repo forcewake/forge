@@ -13,8 +13,11 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   opencode | copilot | codex-sdk-lane | opencode-sdk-lane)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
-  ``docs/research/2026-09-13-harness-interfaces.md``) — per-CLI FLAGS live here, the
-  PROMPT is shared; the two SDK-lane ids provision their CLI and hand
+  ``docs/research/2026-09-13-harness-interfaces.md``) — per-CLI FLAGS live in
+  the package-data ``.sh`` templates rendered by
+  :mod:`forge.harnesses.script_render` (byte-pinned by the golden
+  fixtures, ``tests/fixtures/rendered/``), the PROMPT is shared; the two
+  SDK-lane ids provision their CLI and hand
   over to ``forge.lane_driver`` (the interactive driver twin of the
   scripted ``-p`` calls — no prompt pointer, no event tee, the lane
   runner writes the meta/usage receipts itself);
@@ -102,15 +105,31 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 from typing import Any
 import sys
 from html import unescape
 from pathlib import Path
 
+#: Re-exported from :mod:`forge.harnesses.script_render` — the render
+#: engine, the driver/pin tables and the tool-policy constants live THERE
+#: (next to the package-data .sh templates they substitute); this module
+#: keeps them importable at the historical path (the lane API is
+#: ``python -m forge.harness_entry``) and stays the thin dispatcher.
+#: ``TASK_PROMPT`` is re-exported from :mod:`forge.harnesses.prompt` for
+#: the same historical-path reason (it names the brief file the rendered
+#: ``-p`` pointer carries).
+from forge.harnesses import script_render
+from forge.harnesses.prompt import TASK_PROMPT as TASK_PROMPT  # noqa: F401 — re-export
+from forge.harnesses.script_render import (  # noqa: F401 — deliberate re-exports
+    DEFAULT_DRIVER_VERSIONS as DEFAULT_DRIVER_VERSIONS,
+    DRIVERS as DRIVERS,
+    LANE_DRIVERS as LANE_DRIVERS,
+    SCRIPTED_DRIVERS as SCRIPTED_DRIVERS,
+    _CLAUDE_TOOL_RULES as _CLAUDE_TOOL_RULES,
+    resolve_driver_versions as resolve_driver_versions,
+)
 from forge.harnesses.prompt import (
-    TASK_PROMPT,
     BriefContext,
     BriefPolicy,
     render_brief as render_shared_brief,
@@ -120,176 +139,7 @@ from forge.harnesses.brief_envelope import (
     extract_approved_sections,
     verify_brief_envelope,
 )
-from forge.harnesses.mcp import (
-    McpConfigError,
-    for_claude,
-    for_copilot,
-    for_grok,
-    for_opencode,
-    parse_servers,
-)
-
-#: Claude's scoped shell allowlist (same posture as the GitLab template:
-#: edits auto-accepted, shell limited to read-only git).
-# The quality bar demands the agent RUN the tests (ADR-0008): the
-# allowlist carries the test/lint commands per runner reality — hosted
-# Actions runners have NO .venv (forge installs into the interpreter via
-# pip; LIVE-found: ".venv/bin/python" patterns denied everything and the
-# agent flailed). Read-only utils are allowed too: Claude Code requires
-# EVERY segment of a compound command to be allowed, and exploration
-# commands (ls|grep|head) otherwise deny the whole pipeline. Writes stay
-# denied: commit/push are --disallowedTools and the push URL is FORBIDDEN.
-# A09: ONE rule per literal, serialized by an explicit ",".join. Adjacent
-# string literals inside a parenthesized concatenation silently GLUE when
-# a comma is missing (LIVE-found: "Bash(python3:*)" "Bash(python:*)"
-# "Bash(.venv/bin/python:*)" rendered as ONE merged rule the driver could
-# never match) — never concatenate rule literals again.
-_CLAUDE_TOOL_RULES: tuple[str, ...] = (
-    "Bash(git status:*)",
-    "Bash(git diff:*)",
-    "Bash(git log:*)",
-    "Bash(git -C * diff:*)",
-    "Bash(ls:*)",
-    "Bash(cat:*)",
-    "Bash(grep:*)",
-    "Bash(head:*)",
-    "Bash(tail:*)",
-    "Bash(wc:*)",
-    "Bash(which:*)",
-    # Read-only text processing (LIVE-found: `... | awk 'length > 100'` and
-    # `sed 's/^+//'` in analysis pipelines were DENIED — every pipeline
-    # segment must be allowlisted, not just the head command):
-    "Bash(awk:*)",
-    "Bash(sed:*)",
-    "Bash(sort:*)",
-    "Bash(uniq:*)",
-    "Bash(cut:*)",
-    "Bash(tr:*)",
-    "Bash(find:*)",
-    "Bash(diff:*)",
-    "Bash(basename:*)",
-    "Bash(dirname:*)",
-    "Bash(realpath:*)",
-    "Bash(python3:*)",
-    "Bash(python:*)",
-    "Bash(.venv/bin/python:*)",
-    "Bash(./.venv/bin/python:*)",
-    "Bash(.venv/bin/pytest:*)",
-    "Bash(.venv/bin/ruff:*)",
-    "Bash(.venv/bin/mypy:*)",
-    "Bash(./.venv/bin/pytest:*)",
-    "Bash(./.venv/bin/ruff:*)",
-    "Bash(./.venv/bin/mypy:*)",
-    "Bash(pip install:*)",
-    "Bash(pip list)",
-    "Bash(pip show:*)",
-    "Bash(pip3 install:*)",
-    # The repo's own quality gates (AGENTS.md / brief quality bar tell the
-    # agent to run them — LIVE-found: `make lint`, `uv run ruff`, bare
-    # pytest/ruff/mypy and `set -o pipefail &&` compounds were all DENIED
-    # and the agent burned turns flailing against permission prompts):
-    "Bash(pytest:*)",
-    "Bash(ruff:*)",
-    "Bash(mypy:*)",
-    "Bash(uv:*)",
-    "Bash(make:*)",
-    "Bash(set:*)",
-)
-# Serialized ONLY at the render site via the explicit
-# ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules)) — never by literal
-# concatenation (A09).
-#: The SDK-lane drivers: the agent is driven by ``forge.lane_driver``
-#: (the REAL interactive driver clients), not a scripted ``-p`` call —
-#: the rendered script only provisions the CLI and hands the lane over
-#: (the Actions/AzDO mirror of the codex/opencode GitLab sdk-lane
-#: templates).
-LANE_DRIVERS = ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane")
-
-#: The SCRIPTED drivers: a rendered one-shot CLI invocation with the
-#: shared ``-p`` prompt pointer and the tee'd event stream.
-SCRIPTED_DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
-
-#: Drivers understood by this entry point (the shipped multi-harness set):
-#: the scripted drivers above plus the SDK-lane drivers.
-DRIVERS = SCRIPTED_DRIVERS + LANE_DRIVERS
-
-#: R15 known-good driver CLI versions: an unpinned install rides the npm
-#: ``latest`` dist-tag, so a CLI release can silently change lane behavior
-#: between the plan gate and the run. The install preambles pin
-#: ``@<version>``; each value cites its source and is refreshed
-#: deliberately, never by an automated bump.
-DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
-    # npm registry latest at the R15 slice (2026-09-17); the lane needs
-    # --permission-prompts none, documented v2.1.259+.
-    "claude-code": "2.1.276",
-    # GROUND TRUTH 2026-09-13 (docs/research/2026-09-13-harness-interfaces.md §3):
-    # verified against the installed CLI.
-    "grok-build": "1.0.30",
-    # npm registry latest at the R15 slice (2026-09-17).
-    "opencode": "1.18.31",
-    # npm registry latest at the R15 slice (2026-09-17).
-    "copilot": "1.0.86",
-    # LIVE-verified 2026-09-21 (docs/research/2026-09-21-codex-app-server.md LIVE
-    # CORRECTION + codex-live.json): the app-server wire the codex driver
-    # client speaks — the sandbox spellings and turn-completion semantics
-    # this lane depends on.
-    # LIVE-verified 2026-09-21 (claude-live.json: "claude 2.1.273 (Claude
-    # Code)") — the SDK lane drives the bundled CLI.
-    "claude-sdk-lane": "2.1.273",
-    "codex-sdk-lane": "0.153.4",
-    # LIVE-verified 2026-09-21 (opencode-live.json: "opencode v2.0.10") —
-    # the serve wire layer the opencode driver client targets.
-    "opencode-sdk-lane": "2.0.10",
-}
-
-#: A version/dist-tag token safe to splice into an npm install spec
-#: (semver, dist-tags like ``latest``). Anything else is refused — the
-#: pin lands in a shell command and must never carry metacharacters.
-_DRIVER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def resolve_driver_versions(raw: str | None) -> dict[str, str]:
-    """The effective per-driver CLI version pins (R15).
-
-    *raw* is the ``FORGE_DRIVER_VERSIONS`` JSON object (driver → version)
-    — the workflow template passes the same-named repo VARIABLE through.
-    Absent/empty → :data:`DEFAULT_DRIVER_VERSIONS`; a per-driver override
-    wins; the literal ``"latest"`` keeps the unpinned install. Fail-closed
-    (same posture as the MCP parse): malformed JSON, a non-object, an
-    unknown driver id, or a version with characters outside
-    ``[A-Za-z0-9._-]`` raises ``ValueError`` — a typo must never silently
-    downgrade the lane to an unpinned (or shell-interpreted) install.
-    """
-    pins = dict(DEFAULT_DRIVER_VERSIONS)
-    text = str(raw or "").strip()
-    if not text:
-        return pins
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"FORGE_DRIVER_VERSIONS is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError("FORGE_DRIVER_VERSIONS must be a JSON object of driver → version")
-    for name, version in data.items():
-        if name not in DEFAULT_DRIVER_VERSIONS:
-            raise ValueError(
-                f"FORGE_DRIVER_VERSIONS names unknown driver {name!r} "
-                f"(expected one of {', '.join(sorted(DEFAULT_DRIVER_VERSIONS))})"
-            )
-        pin = str(version).strip()
-        if not _DRIVER_VERSION_RE.match(pin):
-            raise ValueError(
-                f"FORGE_DRIVER_VERSIONS[{name!r}]: bad version {pin!r} "
-                "(letters, digits, dot, underscore, dash only)"
-            )
-        pins[name] = pin
-    return pins
-
-
-def _npm_pin(package: str, version: str) -> str:
-    """One pinned global npm install (R15): ``package@version`` — the
-    literal ``latest`` version resolves to the unpinned dist-tag."""
-    return f"npm install -g --no-fund --no-audit {package}@{version}"
+from forge.harnesses.mcp import McpConfigError, parse_servers
 
 
 def render_brief(issue_text: str, plan_text: str) -> str:
@@ -646,8 +496,57 @@ def render_driver_script(
 ) -> str:
     """The bash script that provisions and invokes *driver* unattended.
 
-    *mcp_servers* (parsed ``FORGE_HARNESS_MCP``) is rendered per driver per
-    :mod:`forge.harnesses.mcp`: claude always runs with
+    Thin delegate to :func:`forge.harnesses.script_render.render`: the
+    script bodies are package-data ``.sh`` templates
+    (``forge/harnesses/scripts/``, read via ``importlib.resources`` and
+    shipped in the wheel), the renderer applies the token table
+    (version pins from :data:`DEFAULT_DRIVER_VERSIONS`, the shared ``-p``
+    prompt pointer, model routing, MCP provisioning) fail-closed, and the
+    rendered bytes are byte-pinned by the golden fixtures
+    (``tests/fixtures/rendered/``) plus mechanical ``bash -n`` /
+    shellcheck gates (``tests/test_script_rendering.py``). The per-driver
+    CONTRACT this render implements:
+
+    - ``claude-code`` — headless print mode, stream-json events, no
+      external settings (prompt-injection surface reduction),
+      bypassPermissions PLUS the R5 mechanical deny: commit/push are
+      ``--disallowedTools`` (holds even under bypass — deny beats every
+      permission mode; the lane's real boundary is no write credentials +
+      push FORBIDDEN + trusted publisher) ``--permission-prompts none``
+      guarantees no interactive prompt, and the vendor timeout budgets
+      keep long tool calls from dying mid-run;
+    - ``grok-build`` — the hardened npm preamble first: the wrapper
+      declares its platform binary as an optionalDependency, so a flaky
+      registry silently skips it and the CLI hangs forever at startup.
+      Both packages are installed explicitly, with retries (verified
+      live, template comment); the platform binary follows the PINNED
+      wrapper (the version is read back from the binary just installed).
+      The lane's ONLY grok credential is the provider-native subscription
+      auth blob (``FORGE_GROK_AUTH`` → ``~/.grok/auth.json``, the GitLab
+      template contract) — an API key is a different capability and is
+      never requested here (R15 BYOK: capability/credential pairs).
+      ``--always-approve`` is required or headless grok HANGS.
+      ``--trust`` loads project rules headlessly and ``--deny`` rules
+      beat always-approve (R5: commit/push denied mechanically, not just
+      asked);
+    - ``opencode`` — ``run --auto`` (approves what the permission config
+      does not deny; the ephemeral runner is the execution profile). The
+      permission map rides in via ``OPENCODE_CONFIG_CONTENT``: commit/push
+      denied mechanically, and the two "ask"-by-default keys
+      (``external_directory``, ``doom_loop``) are allowed so the headless
+      run cannot hang on a prompt (R5). The model is config-owned here,
+      not CLI-owned (mirror of the GitLab template, which routes it
+      through opencode.json).
+    - ``copilot`` — GitHub Copilot CLI in ``-p`` mode (completes and
+      exits): scoped grants (``read,write`` + ``shell(git:*)``) so nothing
+      else can prompt, and the mechanical ``--deny-tool`` on commit/push
+      — documented Copilot rule: deny beats every allow, including
+      ``--allow-all``. Auth rides on ``COPILOT_GITHUB_TOKEN``
+      (fine-grained PAT with the "Copilot Requests" permission); no
+      parseable usage receipt, unknown stays unknown.
+
+    *mcp_servers* (parsed ``FORGE_HARNESS_MCP``) is rendered per driver
+    per :mod:`forge.harnesses.mcp`: claude always runs with
     ``--mcp-config <file> --strict-mcp-config`` (empty map = only the
     repo's own MCP configs are locked out — injection-surface reduction);
     grok/copilot get their config files written; opencode's servers ride
@@ -656,46 +555,9 @@ def render_driver_script(
     *driver_versions* (resolved ``FORGE_DRIVER_VERSIONS``,
     :func:`resolve_driver_versions`) pins the npm installs: each preamble
     installs ``package@<version>`` and then echoes the installed
-    ``<cli> --version`` into the job log (R15: pin drift is visible, never
-    silent). The literal ``latest`` keeps the unpinned dist-tag install.
-
-    Rendered per driver from the GitLab templates' contract:
-
-    - ``claude-code`` — headless print mode, stream-json events, no external
-      settings (prompt-injection surface reduction), bypassPermissions PLUS
-      the R5 mechanical deny: commit/push are ``--disallowedTools`` (holds
-      even under bypass — deny beats every permission mode; the lane's real
-      boundary is no write credentials + push FORBIDDEN + trusted publisher)
-      ``--permission-prompts none`` guarantees no interactive prompt, and
-      the vendor timeout budgets keep long tool calls from dying mid-run;
-    - ``grok-build`` — the hardened npm preamble first: the wrapper declares
-      its platform binary as an optionalDependency, so a flaky registry
-      silently skips it and the CLI hangs forever at startup. Both packages
-      are installed explicitly, with retries (verified live, template
-      comment); the platform binary follows the PINNED wrapper (the version
-      is read back from the binary just installed). The lane's ONLY grok
-      credential is the provider-native subscription auth blob
-      (``FORGE_GROK_AUTH`` → ``~/.grok/auth.json``, the GitLab template
-      contract) — an API key is a different capability and is never
-      requested here (R15 BYOK: capability/credential pairs).
-      ``--always-approve`` is required or headless grok HANGS.
-      ``--trust`` loads project rules headlessly and ``--deny`` rules beat
-      always-approve (R5: commit/push denied mechanically, not just asked);
-    - ``opencode`` — ``run --auto`` (approves what the permission config
-      does not deny; the ephemeral runner is the execution profile). The
-      permission map rides in via ``OPENCODE_CONFIG_CONTENT``: commit/push
-      denied mechanically, and the two "ask"-by-default keys
-      (``external_directory``, ``doom_loop``) are allowed so the headless
-      run cannot hang on a prompt (R5). The model is config-owned here, not
-      CLI-owned (mirror of the GitLab template, which routes it through
-      opencode.json).
-    - ``copilot`` — GitHub Copilot CLI in ``-p`` mode (completes and exits):
-      scoped grants (``read,write`` + ``shell(git:*)``) so nothing else can
-      prompt, and the mechanical ``--deny-tool`` on commit/push — documented
-      Copilot rule: deny beats every allow, including ``--allow-all``.
-      Auth rides on ``COPILOT_GITHUB_TOKEN`` (fine-grained PAT with the
-      "Copilot Requests" permission); no parseable usage receipt, unknown
-      stays unknown.
+    ``<cli> --version`` into the job log (R15: pin drift is visible,
+    never silent). The literal ``latest`` keeps the unpinned dist-tag
+    install.
 
     The SDK-lane drivers (:data:`LANE_DRIVERS`) render no ``-p``
     invocation at all — the agent is driven by forge's own interactive
@@ -718,359 +580,24 @@ def render_driver_script(
       into ``OPENCODE_PROVIDER_ID``/``OPENCODE_MODEL_ID``.
 
     For the scripted drivers, the ``-p`` prompt is the shared SHORT
-    pointer (:data:`TASK_PROMPT`) — the brief file at *brief_path*
-    carries the whole contract. The script streams the driver's
-    normalized event log into the job log AND tees it to *events_file*;
-    ``pipefail`` keeps the driver's exit code so a nonzero agent exit
-    classifies the run as failed WITHOUT aborting the audit trail (the
-    workflow uploads artifacts ``if: always()``). The SDK lanes need no
-    tee — ``forge.lane_driver`` writes the meta + usage receipts itself,
-    and a nonzero exit classifies the run exactly the same way.
+    pointer (:data:`TASK_PROMPT`) — the brief file carries the whole
+    contract. The script streams the driver's normalized event log into
+    the job log AND tees it to *events_file*; ``pipefail`` keeps the
+    driver's exit code so a nonzero agent exit classifies the run as
+    failed WITHOUT aborting the audit trail (the workflow uploads
+    artifacts ``if: always()``). The SDK lanes need no tee —
+    ``forge.lane_driver`` writes the meta + usage receipts itself, and a
+    nonzero exit classifies the run exactly the same way.
     """
-    quoted_prompt = shlex.quote(TASK_PROMPT)
-    events = shlex.quote(events_file)
-    servers = mcp_servers or {}
-    pins = dict(DEFAULT_DRIVER_VERSIONS)
-    pins.update(driver_versions or {})
-    for name, pin in pins.items():
-        if not _DRIVER_VERSION_RE.match(pin):
-            raise ValueError(
-                f"bad driver version pin for {name!r}: {pin!r} "
-                "(letters, digits, dot, underscore, dash only)"
-            )
-
-    if driver == "claude-code":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('@anthropic-ai/claude-code', pins['claude-code'])} && break\n"
-            '  echo "npm install of claude-code failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "claude --version\n"
-        )
-        mcp_file = "/tmp/forge-mcp.json"
-        mcp_provision = (
-            "# MCP (ADR-0022): config ONLY from the CI variable — strict mode\n"
-            "# locks out the repo's own .mcp.json (injection surface).\n"
-            f"cat > {shlex.quote(mcp_file)} <<'FORGE_MCP_EOF'\n"
-            f"{for_claude(servers)}\n"
-            "FORGE_MCP_EOF\n"
-        )
-        # A09: MCP grants ride the SAME explicit-comma serialization as the
-        # shell rules — one plain rule string per grant, per server (the
-        # GitLab contract), never pre-quoted: the whole list is shell-
-        # quoted ONCE below, and an inner quote used to ship rules named
-        # 'mcp__x__*' WITH the quote characters (unmatchable).
-        mcp_rules: list[str] = []
-        for name in servers:
-            mcp_rules.append(f"mcp__{name}__*")
-            mcp_rules.append(f"mcp__{name}")
-        allowed_tools = ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules))
-        model_flag = f" --model {shlex.quote(model)}" if model else ""
-        invocation = (
-            f"claude -p {quoted_prompt}{model_flag} \\\n"
-            f"  --allowedTools {shlex.quote(allowed_tools)} \\\n"
-            '  --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \\\n'
-            "  --permission-prompts none \\\n"
-            # bypassPermissions, NOT acceptEdits + allowlist: the allowlist
-            # whack-a-mole is unfixable in principle (LIVE: three waves —
-            # quality gates, pipeline segments like awk/sed, then ANY
-            # redirection such as `python3 -m pytest 2>&1` poisoned segment
-            # matching). The lane's real security boundary is elsewhere:
-            # no write credentials, push FORBIDDEN at the remote, output as
-            # an artifact validated by the trusted publisher. The mechanical
-            # commit/push deny still applies (deny beats bypass).
-            "  --permission-mode bypassPermissions \\\n"
-            "  --max-turns 200 \\\n"
-            f"  --mcp-config {shlex.quote(mcp_file)} --strict-mcp-config \\\n"
-            "  --setting-sources '' --output-format stream-json --verbose 2>&1"
-        )
-        return (
-            "# Vendor timeout budgets (R5): long tool calls and API turns\n"
-            "# must not die at the client default mid-run.\n"
-            "export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000"
-            " BASH_MAX_TIMEOUT_MS=600000\n"
-            "# Ephemeral isolated config: claude's auto-memory is pointless in\n"
-            "# a proposal-only lane (the brief IS this run's memory) and\n"
-            "# HAZARDOUS on reused runners — the MEMORY.md index auto-loads into\n"
-            "# context, so a stale index from ANOTHER run on the same VM would\n"
-            "# poison this run (LIVE-found: the agent wrote memory/MEMORY.md).\n"
-            "# A fresh config dir per lane guarantees a cold start; lane auth\n"
-            "# rides on env vars, so nothing stored is lost.\n"
-            'export CLAUDE_CONFIG_DIR="$(mktemp -d /tmp/claude-lane-config.XXXXXX)"\n'
-            "# Repair re-dispatches are GUIDED fixes (bounded failure context\n"
-            "# rides in the brief) — deep per-turn thinking is the lane's\n"
-            "# dominant wall-time cost (LIVE: 17% of turns >40s ≈ half the\n"
-            "# run), so repair cycles cap the thinking budget. First cycles\n"
-            "# think freely.\n"
-            'if [ -n "$FORGE_REPAIR_CONTEXT" ]; then\n'
-            '  export MAX_THINKING_TOKENS="${FORGE_MAX_THINKING_TOKENS:-8000}"\n'
-            "fi\n"
-            + mcp_provision
-            + preamble
-            + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
-        )
-
-    if driver == "grok-build":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('@xai-official/grok', pins['grok-build'])} && break\n"
-            '  echo "npm install of grok failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# The platform binary follows the PINNED wrapper: GROK_VER is\n"
-            "# read back from the binary just installed (a pin on the\n"
-            "# wrapper alone would leave the optionalDependency floating).\n"
-            "GROK_VER=\"$(grok --version | awk '{print $2}')\"\n"
-            'npm install -g --no-fund --no-audit "@xai-official/grok-linux-x64@${GROK_VER}" \\\n'
-            "  || npm install -g --no-fund --no-audit @xai-official/grok-linux-x64\n"
-            "test -d /usr/local/lib/node_modules/@xai-official/grok-linux-x64\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "grok --version\n"
-        )
-        credential = (
-            "# R15 minimal lane credentials: the ONLY grok credential is the\n"
-            "# provider-native subscription auth blob (FORGE_GROK_AUTH — the\n"
-            "# full ~/.grok/auth.json contents, the GitLab template\n"
-            "# contract). An API key is a different capability and is never\n"
-            "# requested here (BYOK is per capability/credential pair, not\n"
-            "# interchangeable).\n"
-            "mkdir -p ~/.grok\n"
-            'if [ -n "$FORGE_GROK_AUTH" ]; then\n'
-            '  printf "%s" "$FORGE_GROK_AUTH" > ~/.grok/auth.json\n'
-            "  chmod 600 ~/.grok/auth.json\n"
-            "fi\n"
-        )
-        mcp_provision = (
-            (
-                "# MCP (ADR-0022): claude-shaped mcpServers in Grok's settings.\n"
-                "mkdir -p ~/.grok\n"
-                "cat > ~/.grok/settings.json <<'FORGE_MCP_EOF'\n"
-                f"{for_grok(servers)}\n"
-                "FORGE_MCP_EOF\n"
-            )
-            if servers
-            else ""
-        )
-        invocation = (
-            "grok --no-auto-update --always-approve --no-alt-screen \\\n"
-            "  --trust --max-turns 200 \\\n"
-            "  --allow 'Bash(uv run pytest:*)' --allow 'Bash(pytest:*)' \\\n"
-            "  --allow 'Bash(uv run ruff:*)' --allow 'Bash(uv run mypy:*)' \\\n"
-            "  --allow 'Bash(python3:*)' --allow 'Bash(python:*)' \\\n"
-            "  --allow 'Bash(pip install:*)' \\\n"
-            # The repo's own quality gates (LIVE-found: make lint / bare
-            # ruff / venv python were denied and burned turns):
-            "  --allow 'Bash(uv:*)' --allow 'Bash(make:*)' --allow 'Bash(set:*)' \\\n"
-            "  --allow 'Bash(ruff:*)' --allow 'Bash(mypy:*)' \\\n"
-            "  --allow 'Bash(.venv/bin/python:*)' --allow 'Bash(.venv/bin/ruff:*)' \\\n"
-            "  --allow 'Bash(awk:*)' --allow 'Bash(sed:*)' --allow 'Bash(sort:*)' \\\n"
-            "  --allow 'Bash(cut:*)' --allow 'Bash(tr:*)' --allow 'Bash(find:*)' \\\n"
-            "  --deny 'Bash(git commit:*)' --deny 'Bash(git push:*)' \\\n"
-            "  --output-format streaming-json \\\n"
-            f"  --debug-file {shlex.quote(debug_log)} \\\n"
-            f"  -p {quoted_prompt} 2>&1"
-        )
-        return (
-            preamble
-            + credential
-            + mcp_provision
-            + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
-        )
-
-    if driver == "opencode":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('opencode-ai', pins['opencode'])} && break\n"
-            '  echo "npm install of opencode failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "opencode --version\n"
-        )
-        permission_config = json.dumps(
-            {
-                "permission": {
-                    "bash": {
-                        "git commit *": "deny",
-                        "git push *": "deny",
-                        "*": "allow",
-                    },
-                    # "ask"-by-default keys hang a headless run (R5).
-                    "external_directory": "allow",
-                    "doom_loop": "allow",
-                },
-                # MCP (ADR-0022): schema-translated (http -> remote).
-                **({"mcp": json.loads(for_opencode(servers))} if servers else {}),
-            }
-        )
-        invocation = f"opencode run --auto --format json {quoted_prompt} 2>&1"
-        return (
-            preamble + "# The mechanical deny rides in via the documented\n"
-            "# config-injection env (merges over global/project config).\n"
-            f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
-            f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
-        )
-
-    if driver == "copilot":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('@github/copilot', pins['copilot'])} && break\n"
-            '  echo "npm install of copilot failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "copilot --version\n"
-        )
-        mcp_provision = (
-            (
-                "# MCP (ADR-0022): documented Copilot CLI config location.\n"
-                "mkdir -p ~/.copilot\n"
-                "cat > ~/.copilot/mcp-config.json <<'FORGE_MCP_EOF'\n"
-                f"{for_copilot(servers)}\n"
-                "FORGE_MCP_EOF\n"
-            )
-            if servers
-            else ""
-        )
-        mcp_grants = "".join(f" --allow-tool {shlex.quote(name)}" for name in servers)
-        model_flag = f" --model {shlex.quote(model)}" if model else ""
-        invocation = (
-            f"copilot -p {quoted_prompt}{model_flag} \\\n"
-            "  --allow-tool 'read,write' \\\n"
-            "  --allow-tool 'shell(git:*)' \\\n"
-            "  --allow-tool 'shell(uv run pytest:*)' \\\n"
-            "  --allow-tool 'shell(pytest:*)' \\\n"
-            "  --allow-tool 'shell(uv run ruff:*)' \\\n"
-            "  --allow-tool 'shell(uv run mypy:*)' \\\n"
-            "  --allow-tool 'shell(uv:*)' --allow-tool 'shell(make:*)' \\\n"
-            "  --allow-tool 'shell(set:*)' --allow-tool 'shell(ruff:*)' \\\n"
-            "  --allow-tool 'shell(mypy:*)' \\\n"
-            "  --allow-tool 'shell(awk:*)' --allow-tool 'shell(sed:*)' \\\n"
-            "  --allow-tool 'shell(sort:*)' --allow-tool 'shell(cut:*)' \\\n"
-            f"{mcp_grants}"
-            "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
-        )
-        return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
-
-    if driver == "claude-sdk-lane":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('@anthropic-ai/claude-code', pins['claude-sdk-lane'])} && break\n"
-            '  echo "npm install of claude-code failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "claude --version\n"
-            "# The bootstrap installs forge WITHOUT extras; the claude lane\n"
-            "# needs the interactive extra's SDK (LIVE-found on the Actions\n"
-            "# runner: sdk_missing with a green bootstrap).\n"
-            "pip install --quiet 'claude-agent-sdk>=0.2.118'\n"
-            "# GitLab docker executors run as root; claude refuses the bypass\n"
-            "# posture for root unless told it is sandboxed (ADR-0002).\n"
-            'export IS_SANDBOX="${IS_SANDBOX:-1}"\n'
-            "# NXT-10 outbound leg: the steering attach dials the control\n"
-            "# plane when the dispatch carried the pair — the work-scoped\n"
-            "# lane token rides the job env (never a control-plane secret);\n"
-            "# exported empty when unset so the lane honestly stays local.\n"
-            'export FORGE_LANE_CONTROL_URL="${FORGE_LANE_CONTROL_URL:-}"\n'
-            'export FORGE_LANE_CONTROL_TOKEN="${FORGE_LANE_CONTROL_TOKEN:-}"\n'
-        )
-        # The SDK lane drives the REAL claude-agent-sdk client (EXE-02):
-        # gateway env rides the ambient environment (the driver merges
-        # options.env over it); the runner writes the candidate artifacts
-        # itself; a nonzero exit classifies through the same .forge/exit.
-        invocation = "python -m forge.lane_driver --driver claude"
-        return preamble + invocation
-
-    if driver == "codex-sdk-lane":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('@openai/codex', pins['codex-sdk-lane'])} && break\n"
-            '  echo "npm install of codex failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "codex --version\n"
-        )
-        credential = (
-            "# OPTIONAL provider-native credential: the ChatGPT-login auth\n"
-            "# blob (OAuth tokens cannot ride an API-key env). Guarded: an\n"
-            "# unauthenticated lane still runs and reports its own failure.\n"
-            "mkdir -p ~/.codex\n"
-            'if [ -n "$FORGE_CODEX_AUTH" ]; then\n'
-            '  printf "%s" "$FORGE_CODEX_AUTH" > ~/.codex/auth.json\n'
-            "  chmod 600 ~/.codex/auth.json\n"
-            "fi\n"
-        )
-        model_export = f"export CODEX_MODEL={shlex.quote(model)}\n" if model else ""
-        # The SDK lane's "invocation" is forge's own lane runner (EXE-02):
-        # it spawns `codex app-server` (auth inherited from the ambient
-        # env), drives ONE thread to turn/completed and writes the meta +
-        # usage receipts itself — no -p prompt, no event tee, the runner's
-        # nonzero exit classifies the run through the same .forge/exit.
-        invocation = (
-            f'{model_export}export CODEX_CWD="$PWD"\npython -m forge.lane_driver --driver codex'
-        )
-        return preamble + credential + invocation
-
-    if driver == "opencode-sdk-lane":
-        preamble = (
-            "for attempt in 1 2 3; do\n"
-            f"  {_npm_pin('opencode-ai', pins['opencode-sdk-lane'])} && break\n"
-            '  echo "npm install of opencode failed (attempt $attempt), retrying..."\n'
-            "  sleep $((attempt * 5))\n"
-            "done\n"
-            "# R15: the resolved CLI version lands in the job log — pin\n"
-            "# drift is visible, never silent.\n"
-            "opencode --version\n"
-        )
-        permission_config = json.dumps(
-            {
-                "permission": {
-                    "bash": {
-                        "git commit *": "deny",
-                        "git push *": "deny",
-                        "*": "allow",
-                    },
-                    # "ask"-by-default keys hang a headless run (R5).
-                    "external_directory": "allow",
-                    "doom_loop": "allow",
-                },
-            }
-        )
-        # A "provider/model" route splits; a bare model is the model id
-        # (the provider stays whatever the ambient env configured).
-        if model and "/" in model:
-            provider_id, _, model_id = model.partition("/")
-            model_exports = (
-                f"export OPENCODE_PROVIDER_ID={shlex.quote(provider_id)}\n" if provider_id else ""
-            ) + (f"export OPENCODE_MODEL_ID={shlex.quote(model_id)}\n" if model_id else "")
-        elif model:
-            model_exports = f"export OPENCODE_MODEL_ID={shlex.quote(model)}\n"
-        else:
-            model_exports = ""
-        # The lane runner spawns the serve process itself (lane-local,
-        # loopback, password-pinned); the config-injection env rides the
-        # ambient environment INTO that child (the spawner merges it), so
-        # the mechanical deny reaches the server.
-        invocation = (
-            f"export OPENCODE_CONFIG_CONTENT={shlex.quote(permission_config)}\n"
-            f"{model_exports}"
-            'export OPENCODE_SERVE_CWD="$PWD"\n'
-            # LIVE-found: the factory default "reject" starves every tool
-            # call in a task lane — "once" grants per request.
-            'export OPENCODE_PERMISSION_RESPONSE="${OPENCODE_PERMISSION_RESPONSE:-once}"\n'
-            "python -m forge.lane_driver --driver opencode"
-        )
-        return preamble + invocation
-
-    raise ValueError(f"unknown driver {driver!r} (expected one of {', '.join(DRIVERS)})")
+    return script_render.render(
+        driver,
+        model,
+        brief_path,
+        events_file=events_file,
+        debug_log=debug_log,
+        mcp_servers=mcp_servers,
+        driver_versions=driver_versions,
+    )
 
 
 def parse_usage(driver: str, event_log: str) -> dict | None:

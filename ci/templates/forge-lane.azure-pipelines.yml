@@ -167,8 +167,16 @@ jobs:
       # artifact's meta exit (the Actions lane's audit-trail preservation).
       - bash: |
           set -uo pipefail
+          # The forge install ref ships a REAL released tag as its default —
+          # never a placeholder token a raw, un-edited copy of this file would
+          # carry to the runner (pip would attempt the literal token and the
+          # lane would die in bootstrap). Override per repo by setting the
+          # FORGE_LANE_REF pipeline variable (mapped below with the
+          # compile-time expression, NOT the $(macro): an UNDEFINED macro
+          # expands to its literal text — the junk class guarded further
+          # down — and would override the default with garbage).
           for attempt in 1 2 3; do
-            pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" && break
+            pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}" && break
             echo "pip install of forge failed (attempt $attempt), retrying..."
             sleep $((attempt * 5))
           done
@@ -234,6 +242,10 @@ jobs:
           FORGE_AZDO_ORG_URL: $(FORGE_AZDO_ORG_URL)
           FORGE_AZDO_PROJECT: $(System.TeamProject)
           FORGE_AZDO_BOT_NAME: $(FORGE_AZDO_BOT_NAME)
+          # The forge install ref override (optional; the script's default
+          # is the released tag). Compile-time expression on purpose — see
+          # the install step's comment.
+          FORGE_LANE_REF: ${{ variables.FORGE_LANE_REF }}
           # MCP (ADR-0022): canonical mcpServers JSON from a pipeline
           # VARIABLE (not secret — it references secrets by name); an empty
           # value means strict isolation with no servers.

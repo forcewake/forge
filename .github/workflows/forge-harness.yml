@@ -5,7 +5,8 @@
 # this dispatch-only workflow runs the coding agent in an ephemeral runner.
 # The lane has NO write credential and NO forge secret; its only output is
 # the candidate artifact the trusted publisher validates and pushes as a
-# Draft PR. The PINNED_REF below tracks main — this repo IS the product.
+# Draft PR. The lane install ref below tracks main by default — this repo
+# IS the product — overridable via the FORGE_LANE_REF repo variable.
 # forge harness executor for GitHub Actions (ADR-0016/0019, Stage E3b)
 #
 # Human-applied to the TARGET repository at onboarding (mirrors the GitLab
@@ -179,6 +180,11 @@ jobs:
           # server, the brief names its tools AND this step indexes the
           # repo for it (pinned; telemetry off; local exclude above).
           FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
+          # The forge install ref: this dogfooding lane tracks main (the
+          # repo IS the product) — same env-override mechanism the shipped
+          # template uses with a released-tag default; override via the
+          # FORGE_LANE_REF repo variable when testing a specific ref.
+          FORGE_LANE_REF: ${{ vars.FORGE_LANE_REF }}
         run: |
           # A18 environment classification: a FAILED environment bootstrap
           # is lane INFRASTRUCTURE/CONFIG — the environment never matched
@@ -188,7 +194,7 @@ jobs:
           # .forge/bootstrap (ok|failed) for the candidate meta and echoes
           # the FORGE_BOOTSTRAP_FAILED marker into the job log (the
           # control plane's log classifier carries it).
-          pip install "forge @ git+https://github.com/forcewake/forge@main" || {
+          pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-main}" || {
             echo "failed" > .forge/bootstrap
             echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
             exit 1

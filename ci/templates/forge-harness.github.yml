@@ -169,6 +169,13 @@ jobs:
           # server, the brief names its tools AND this step indexes the
           # repo for it (pinned; telemetry off; local exclude above).
           FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
+          # The forge install ref below ships a REAL released tag as its
+          # default — never a placeholder token a raw, un-edited copy of this
+          # file would carry to the runner (pip would attempt the literal
+          # token and the lane would die in bootstrap; LIVE-found). Override
+          # per repo by setting the FORGE_LANE_REF Actions variable to any
+          # tag, branch or SHA.
+          FORGE_LANE_REF: ${{ vars.FORGE_LANE_REF }}
         run: |
           # A18 environment classification: a FAILED environment bootstrap
           # is lane INFRASTRUCTURE/CONFIG — the environment never matched
@@ -178,7 +185,7 @@ jobs:
           # .forge/bootstrap (ok|failed) for the candidate meta and echoes
           # the FORGE_BOOTSTRAP_FAILED marker into the job log (the
           # control plane's log classifier carries it).
-          pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" || {
+          pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}" || {
             echo "failed" > .forge/bootstrap
             echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
             exit 1

@@ -205,12 +205,19 @@ class TestWorkflowTemplateContract:
 
         run = driver_step["run"]
         assert "python -m forge.harness_entry" in run
-        # The pin is a placeholder the onboarding must replace (never a
-        # moving branch) — it lives on the pip install (brief step):
-        # docs/harness-onboarding.md, "GitHub Actions harness".
+        # The install ships a REAL released tag as the default — never a
+        # <PLACEHOLDER> a raw copy would carry to the runner (the LIVE
+        # class: pip attempted the literal ref and the lane died in
+        # bootstrap). The FORGE_LANE_REF repo variable overrides; the tag
+        # default is refreshed deliberately per release (phase 3 of
+        # docs/research/2026-09-22-script-rendering-architecture.md §7).
         text = TEMPLATE.read_text()
-        assert "<PINNED_REF>" in text
-        assert "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>" in text
+        assert "<PINNED_REF>" not in text
+        assert (
+            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}"'
+            in text
+        )
+        assert "FORGE_LANE_REF: ${{ vars.FORGE_LANE_REF }}" in text
 
     def test_concurrency_groups_one_run_per_forge_run(self):
         workflow = load_template()

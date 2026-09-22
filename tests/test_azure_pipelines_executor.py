@@ -775,7 +775,19 @@ class TestLaneTemplateContract:
         driver = next(step for step in steps if step.get("displayName") == "Run harness driver")
         assert "python -m forge.harness_entry" in driver["bash"]
         assert "exit 0" in driver["bash"]  # the audit trail is the artifact
-        assert 'pip install "forge @ git+https://github.com/forcewake/forge@<PINNED_REF>"' in text
+        # The install ships a REAL released tag as the default — never a
+        # <PLACEHOLDER> a raw copy would carry to the runner (the LIVE
+        # class: pip attempted the literal ref and the lane died in
+        # bootstrap). FORGE_LANE_REF (mapped with the compile-time
+        # expression, not the literal-expanding $(macro)) overrides; the
+        # tag default is refreshed deliberately per release (phase 3 of
+        # docs/research/2026-09-22-script-rendering-architecture.md §7).
+        assert "<PINNED_REF>" not in text
+        assert (
+            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}"'
+            in text
+        )
+        assert "FORGE_LANE_REF: ${{ variables.FORGE_LANE_REF }}" in text
 
     def test_brief_transport_is_opt_in_via_the_owners_read_token(self):
         """With FORGE_AZDO_READ_TOKEN set the lane fetches its own brief

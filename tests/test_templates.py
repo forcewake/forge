@@ -186,11 +186,17 @@ class TestMechanicalDeny:
         assert "--max-turns 200" in text
 
     def test_actions_lane_mirrors_the_gitlab_contract(self):
-        # forge.harness_entry renders the Actions-lane driver scripts; it
-        # must enforce the same mechanical deny posture.
-        entry = (
-            Path(__file__).resolve().parent.parent / "src" / "forge" / "harness_entry.py"
-        ).read_text()
+        # forge.harness_entry renders the Actions-lane driver scripts (via
+        # forge.harnesses.script_render and the package-data .sh templates
+        # under src/forge/harnesses/scripts/); those render sources must
+        # enforce the same mechanical deny posture.
+        src = Path(__file__).resolve().parent.parent / "src" / "forge"
+        entry = (src / "harnesses" / "script_render.py").read_text()
+        entry += "\n".join(
+            path.read_text()
+            for path in sorted((src / "harnesses" / "scripts").rglob("*"))
+            if path.is_file()
+        )
         assert "--disallowedTools" in entry
         assert "Bash(git commit:*)" in entry
         assert "--deny 'Bash(git commit:*)'" in entry
