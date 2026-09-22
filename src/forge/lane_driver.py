@@ -94,6 +94,20 @@ the turn (the bridge's async-context seam), and the append-only
 ``steering_journal`` rides the meta beside the usage receipt. A lane
 with steering disabled runs byte-for-byte the old path — no session, no
 drain task, no journal key.
+
+NXT-28 — every driven outcome carries an ``episode`` timing breakdown
+in the meta (:data:`EPISODE_PHASE_KEYS`): seconds spent in startup
+(session/thread/server start), the driven turn, the interrupt+grace
+window, and teardown. The values are wall-clock deltas between the
+timestamps the lane ALREADY takes at its own phase boundaries —
+structured and recorded, never invented: a phase this lane never
+reached records ``null`` (interrupt_grace_s on a turn that completed
+without an interrupt; the opencode lane has no separate interrupt
+phase at all), never ``0.0``. Outcomes that fail BEFORE any driving
+starts (brief_missing, sdk_missing, driver_setup_error ...) carry no
+``episode`` key — there was no episode to time. This measures the full
+interactive episode the budget doctrine describes: startup cannot hide
+inside the turn, teardown cannot hide after the verdict.
 """
 
 from __future__ import annotations
@@ -130,6 +144,7 @@ from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "CODEX_LANE_DRIVER_ID",
+    "EPISODE_PHASE_KEYS",
     "LANE_DRIVER_ID",
     "LANE_DRIVER_IDS",
     "NO_COMMIT_ADDENDUM",
@@ -199,6 +214,34 @@ NO_COMMIT_ADDENDUM = (
     "Work in the current repository. Do NOT commit and do NOT push: leave "
     "your changes in the working tree for collection."
 )
+
+#: The episode timing breakdown's keys (NXT-28) — the phases of ONE
+#: driven interactive episode, recorded in the meta as the ``episode``
+#: dict. Values are wall-clock seconds measured at the lane's OWN phase
+#: boundaries; a phase the lane never reached is ``None`` (never 0.0 —
+#: an unmeasured phase is not a zero-length phase).
+EPISODE_PHASE_KEYS: tuple[str, ...] = (
+    "startup_s",  # session/thread/server start (before the turn is driven)
+    "turn_s",  # the driven turn, up to its terminal verdict or budget expiry
+    "interrupt_grace_s",  # the interrupt request + grace window after budget expiry
+    "teardown_s",  # client close / server teardown after the verdict
+)
+
+
+def _episode(
+    startup_s: float,
+    turn_s: float,
+    interrupt_grace_s: float | None,
+    teardown_s: float,
+) -> dict[str, float | None]:
+    """Assemble the ``episode`` breakdown (rounded, phase keys fixed)."""
+    return {
+        "startup_s": round(startup_s, 6),
+        "turn_s": round(turn_s, 6),
+        "interrupt_grace_s": None if interrupt_grace_s is None else round(interrupt_grace_s, 6),
+        "teardown_s": round(teardown_s, 6),
+    }
+
 
 # ---------------------------------------------------------------------------
 # The steering attach (NXT-11) — the driven turn + the control consumer
@@ -307,6 +350,11 @@ class LaneOutcome:
     #: the meta as ``steering_journal`` ONLY when the lane ran with
     #: steering attached; None (key absent) when the gate was off.
     steering_journal: list[dict[str, Any]] | None = None
+    #: The episode timing breakdown (NXT-28) — :data:`EPISODE_PHASE_KEYS`
+    #: seconds for THIS outcome, carried into the meta as ``episode``;
+    #: None (key absent) when the lane failed before any driving started
+    #: (no episode existed to time).
+    episode: dict[str, float | None] | None = None
 
 
 def build_task(brief_text: str, issue_iid: str = "") -> str:
@@ -453,41 +501,67 @@ async def drive_lane(
     SAME client — bound to the session id the moment ``start_session``
     answers, its bounded mailbox drain running CONCURRENTLY with the
     turn (the async-context seam), its journal returned on the outcome.
+
+    NXT-28: the outcome carries the ``episode`` breakdown — startup
+    (``start_session``), the drained turn, the interrupt+grace window
+    (only when the budget expired it into one) and teardown (``close``).
     """
+    loop = asyncio.get_running_loop()
+    startup_started = loop.time()
     session_id = await client.start_session(task)
+    startup_s = loop.time() - startup_started
     steering = _steering_session(control, driver_key="claude", client=client)
     if steering is not None:
         steering.bind(session_id)
 
-    async def _turn() -> LaneOutcome:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + budget_s
+    async def _turn() -> tuple[LaneOutcome, float, float | None]:
+        turn_started = loop.time()
+        deadline = turn_started + budget_s
         result = await _drain_until_result(client, session_id, deadline=deadline, poll_s=poll_s)
+        interrupt_grace_s: float | None = None
         if result is None:
             await client.interrupt(session_id)
+            grace_started = loop.time()
             result = await _drain_until_result(
-                client, session_id, deadline=loop.time() + grace_s, poll_s=poll_s
+                client, session_id, deadline=grace_started + grace_s, poll_s=poll_s
             )
+            interrupt_grace_s = loop.time() - grace_started
+            turn_s = loop.time() - turn_started
             if result is None:
-                return LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
+                return (
+                    LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded"),
+                    turn_s,
+                    interrupt_grace_s,
+                )
+        else:
+            turn_s = loop.time() - turn_started
         exit_status, reason = classify_result(result)
-        return LaneOutcome(
-            exit_status=exit_status,
-            terminal_reason=reason,
-            usage=usage_receipt(result),
+        return (
+            LaneOutcome(
+                exit_status=exit_status,
+                terminal_reason=reason,
+                usage=usage_receipt(result),
+            ),
+            turn_s,
+            interrupt_grace_s,
         )
 
     try:
         if steering is None:
-            outcome = await _turn()
+            outcome, turn_s, interrupt_grace_s = await _turn()
         else:
             async with steering.attach(poll_interval=poll_s):
-                outcome = await _turn()
+                outcome, turn_s, interrupt_grace_s = await _turn()
     finally:
+        teardown_started = loop.time()
         await client.close(session_id)
+        teardown_s = loop.time() - teardown_started
     if steering is not None:
         outcome = replace(outcome, steering_journal=_steering_journal(steering))
-    return outcome
+    return replace(
+        outcome,
+        episode=_episode(startup_s, turn_s, interrupt_grace_s, teardown_s),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -661,16 +735,25 @@ async def drive_codex_lane(
     drains CONCURRENTLY with the poll loop. The notification buffer is a
     non-consuming re-read, so the bridge's vendor calls never compete
     with the lane's own drain for the event stream.
+
+    NXT-28: the outcome carries the ``episode`` breakdown — startup
+    (``start_thread`` to acceptance), the polled turn, the
+    interrupt+grace window (only when the budget expired it into one)
+    and teardown (``close``).
     """
+    loop = asyncio.get_running_loop()
+    startup_started = loop.time()
     thread_id = await client.start_thread(task)
+    startup_s = loop.time() - startup_started
     steering = _steering_session(control, driver_key="codex", client=client)
     if steering is not None:
         steering.bind(thread_id)
 
-    async def _turn() -> LaneOutcome:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + budget_s
+    async def _turn() -> tuple[LaneOutcome, float, float | None]:
+        turn_started = loop.time()
+        deadline = turn_started + budget_s
         params = await _poll_codex_completion(client, thread_id, deadline=deadline, poll_s=poll_s)
+        interrupt_grace_s: float | None = None
         if params is None:
             try:
                 await asyncio.wait_for(client.interrupt(thread_id), timeout=grace_s)
@@ -680,31 +763,49 @@ async def drive_codex_lane(
                 # e.g. the turn ended by itself at the deadline — the
                 # buffered verdict (if any) decides, never the error.
                 pass
+            grace_started = loop.time()
             params = await _poll_codex_completion(
-                client, thread_id, deadline=loop.time() + grace_s, poll_s=poll_s
+                client, thread_id, deadline=grace_started + grace_s, poll_s=poll_s
             )
+            interrupt_grace_s = loop.time() - grace_started
+            turn_s = loop.time() - turn_started
             if params is None:
-                return LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
+                return (
+                    LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded"),
+                    turn_s,
+                    interrupt_grace_s,
+                )
+        else:
+            turn_s = loop.time() - turn_started
         exit_status, reason, error = classify_codex_turn(params)
-        return LaneOutcome(
-            exit_status=exit_status,
-            terminal_reason=reason,
-            usage=codex_usage_receipt(client.events()),
-            error=error,
-            reply_excerpt=_codex_last_agent_text(client.events()),
+        return (
+            LaneOutcome(
+                exit_status=exit_status,
+                terminal_reason=reason,
+                usage=codex_usage_receipt(client.events()),
+                error=error,
+                reply_excerpt=_codex_last_agent_text(client.events()),
+            ),
+            turn_s,
+            interrupt_grace_s,
         )
 
     try:
         if steering is None:
-            outcome = await _turn()
+            outcome, turn_s, interrupt_grace_s = await _turn()
         else:
             async with steering.attach(poll_interval=poll_s):
-                outcome = await _turn()
+                outcome, turn_s, interrupt_grace_s = await _turn()
     finally:
+        teardown_started = loop.time()
         await client.close()
+        teardown_s = loop.time() - teardown_started
     if steering is not None:
         outcome = replace(outcome, steering_journal=_steering_journal(steering))
-    return outcome
+    return replace(
+        outcome,
+        episode=_episode(startup_s, turn_s, interrupt_grace_s, teardown_s),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -848,10 +949,20 @@ async def run_opencode_lane(
     has — and the drain runs beside it. Mid-turn steering is honestly
     absent on this profile (no ``live_input``): the attached bridge
     journals the refusals rather than guessing a capability.
+
+    NXT-28: the ``episode`` breakdown for this lane — startup is the
+    server spawn + client build; ``turn_s`` spans the ``start_session``
+    wait (the client waits the turn INSIDE it) through the verdict
+    poll; ``interrupt_grace_s`` is always None here: a timed-out turn
+    never yields its session id, so there is no interrupt-by-id phase
+    (the server teardown bounds the orphaned turn) — recorded as the
+    None it is, never a zero.
     """
     source = os.environ if env is None else env
     steering: LaneSteeringSession | None = None
     server = opencode_server_from_env(env=source)
+    loop = asyncio.get_running_loop()
+    startup_started = loop.time()
     async with server:
         client_env = {
             **source,
@@ -864,6 +975,8 @@ async def run_opencode_lane(
         client = opencode_client_from_env(
             source.get("OPENCODE_PROVIDER_API_KEY") or None, env=client_env
         )
+        startup_s = loop.time() - startup_started
+        turn_started = loop.time()
         try:
             try:
                 # Belt over the client's own budget: even an
@@ -873,6 +986,7 @@ async def run_opencode_lane(
                     client.start_session(task), timeout=budget_s + grace_s
                 )
             except TimeoutError:
+                turn_s = loop.time() - turn_started
                 outcome = LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded")
             else:
                 steering = _steering_session(
@@ -882,7 +996,6 @@ async def run_opencode_lane(
                     # the id-existence point for this vendor: the turn is
                     # already complete — bind, then drain beside the poll.
                     steering.bind(session_id)
-                loop = asyncio.get_running_loop()
                 deadline = loop.time() + grace_s
 
                 async def _poll_events() -> list[dict[str, Any]]:
@@ -897,6 +1010,7 @@ async def run_opencode_lane(
                 else:
                     async with steering.attach(poll_interval=poll_s):
                         events = await _poll_events()
+                turn_s = loop.time() - turn_started
                 exit_status, reason = classify_opencode_events(events, session_id)
                 outcome = LaneOutcome(
                     exit_status=exit_status,
@@ -904,10 +1018,15 @@ async def run_opencode_lane(
                     usage=opencode_usage_receipt(events),
                 )
         finally:
+            teardown_started = loop.time()
             await client.aclose()
+    teardown_s = loop.time() - teardown_started
     if steering is not None:
         outcome = replace(outcome, steering_journal=_steering_journal(steering))
-    return outcome
+    return replace(
+        outcome,
+        episode=_episode(startup_s, turn_s, None, teardown_s),
+    )
 
 
 def write_artifacts(
@@ -945,6 +1064,11 @@ def write_artifacts(
         # ONLY when the lane ran with the bridge attached (empty list =
         # attached, nothing arrived; absent = the gate was off).
         meta["steering_journal"] = outcome.steering_journal
+    if outcome.episode is not None:
+        # NXT-28: the episode timing breakdown — present whenever a turn
+        # was driven (any exit classification); absent only for failures
+        # that preceded the episode itself (brief_missing, sdk_missing...).
+        meta["episode"] = outcome.episode
     meta_file = Path(meta_path)
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     meta_file.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")

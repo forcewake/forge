@@ -27,6 +27,8 @@ from forge.runs.execution_profile import (
     INSTALL_PIP_MINIMAL,
     INSTALL_UV_FROZEN,
     LANE_CREDENTIAL_CAPABILITIES,
+    LANE_PROFILE_VALUES,
+    LANE_PROFILE_V2,
     LANE_PYTHON_VERSION,
     LANE_TEST_COMMANDS,
     LOCK_ABSENT,
@@ -38,8 +40,11 @@ from forge.runs.execution_profile import (
     MaterializedFiles,
     bootstrap_failed,
     classify_bootstrap_failure,
+    credentials_at,
     derive_from_reader,
     derive_from_repo,
+    lane_profile,
+    validate_lane_profile_declaration,
 )
 from forge.runs.spec import ExecutableRunSpec, SpecInvalid
 
@@ -581,3 +586,214 @@ def test_workspace_receipts_are_stamped_self_reported() -> None:
     record = observed_execution(driver="claude-code", receipts_producer="self_reported")
     assert record.receipts_producer == "self_reported"
     assert observed_execution().receipts_producer == ""  # absent = unknown
+
+
+# ----------------------------------------------------------------------
+# NXT-29 — the hardened lane execution profile: honest data + validators
+# ----------------------------------------------------------------------
+
+
+class TestLaneProfileV2:
+    def test_staged_credentials_mount_the_provider_key_only_for_coding(self):
+        """No phase receives unrelated provider or publication
+        credentials: the model key exists at the coding stage ONLY and is
+        stripped from every other stage."""
+        coding = credentials_at(LANE_PROFILE_V2, "coding")
+        assert "ANTHROPIC_AUTH_TOKEN" in coding
+        assert "ZAI_API_KEY" in coding
+        assert "OPENAI_API_KEY" in coding
+        assert credentials_at(LANE_PROFILE_V2, "discovery") == ()
+        assert credentials_at(LANE_PROFILE_V2, "verification") == ()
+        # bootstrap carries the scoped READ token only — never a provider
+        # key, never anything writable
+        assert credentials_at(LANE_PROFILE_V2, "bootstrap") == ("FORGE_BOT_READ_TOKEN",)
+
+    def test_no_stage_carries_a_publisher_or_write_credential(self):
+        every_name = {n for _s, names in LANE_PROFILE_V2.credential_staging for n in names}
+        assert not any("WRITE" in n or "PUBLISH" in n for n in every_name)
+        # the scoped read token exists ONLY at bootstrap
+        token_stages = [
+            stage
+            for stage, names in LANE_PROFILE_V2.credential_staging
+            if "FORGE_BOT_READ_TOKEN" in names
+        ]
+        assert token_stages == ["bootstrap"]
+
+    def test_data_boundaries_are_workspace_and_tmpfs_only(self):
+        assert LANE_PROFILE_V2.writable_roots == ("/workspace",)
+        assert LANE_PROFILE_V2.tmpfs_roots == ("/tmp",)
+        assert LANE_PROFILE_V2.read_only_roots == ("/",)  # everything else ro
+
+    def test_capabilities_drop_all_and_add_none(self):
+        assert LANE_PROFILE_V2.cap_drop_all is True
+        assert LANE_PROFILE_V2.cap_add == ()
+
+    def test_the_egress_hook_is_env_carried_and_deny_by_default(self):
+        assert LANE_PROFILE_V2.egress_allowlist_env == "FORGE_EGRESS_ALLOWLIST"
+        assert "FORGE_EGRESS_ALLOWLIST" in LANE_PROFILE_V2.egress_policy
+        assert "deny by default" in LANE_PROFILE_V2.egress_policy
+        # the honesty bound is IN the data, not only the docstring
+        assert "runner-side enforcement required" in LANE_PROFILE_V2.egress_policy
+        assert "declared contract" in LANE_PROFILE_V2.egress_policy
+
+    def test_v1_is_the_unstaged_posture_stated_as_data(self):
+        from forge.runs.execution_profile import LANE_PROFILE_V1
+
+        assert LANE_PROFILE_V1.cap_drop_all is False
+        assert LANE_PROFILE_V1.writable_roots == ("/",)
+        # unstaged: every phase sees the ambient set
+        assert credentials_at(LANE_PROFILE_V1, "coding") == LANE_CREDENTIAL_CAPABILITIES
+        assert credentials_at(LANE_PROFILE_V1, "verification") == LANE_CREDENTIAL_CAPABILITIES
+        assert LANE_PROFILE_V1.to_document() != LANE_PROFILE_V2.to_document()
+
+    def test_the_profiles_stay_out_of_the_execution_profile_digest(self):
+        """The hardened-profile symbols are ADDITIVE: the versioned
+        build/test record (A18) and its digest do not gain a profile
+        axis — a repo derives the same digest as before."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = write_repo(Path(tmp))
+            profile = derive_from_repo(LocalRepoSource(repo))
+            assert "lane_profile" not in profile.to_document()
+            assert set(profile.to_document()) == {
+                "schema_version",
+                "python_version",
+                "requires_python",
+                "install",
+                "toolchain_pins",
+                "test_commands",
+                "network_policy",
+                "mcp_policy",
+                "credential_capabilities",
+            }
+
+
+class TestLaneProfileValidation:
+    def test_unknown_profile_ids_fail_closed(self):
+        with pytest.raises(ValueError, match="unknown lane profile"):
+            lane_profile("v9")
+        with pytest.raises(ValueError, match="unknown lane profile"):
+            lane_profile("")
+
+    def test_the_vocabulary_is_derived_from_the_shipped_records(self):
+        assert LANE_PROFILE_VALUES == ("v1", "v2")
+        assert lane_profile("v1") is not None
+        assert lane_profile("v2") is LANE_PROFILE_V2
+
+    def test_an_unnamed_v2_stage_sees_nothing(self):
+        assert credentials_at(LANE_PROFILE_V2, "not-a-stage") == ()
+
+    def test_record_construction_validates_its_own_invariants(self):
+        from forge.runs.execution_profile import LaneExecutionProfile
+
+        with pytest.raises(ValueError, match="unknown lane profile"):
+            LaneExecutionProfile(
+                profile_id="v3",
+                credential_staging=(),
+                writable_roots=(),
+                read_only_roots=(),
+                tmpfs_roots=(),
+                cap_drop_all=True,
+                cap_add=(),
+                egress_policy="p",
+                egress_allowlist_env="E",
+            )
+        with pytest.raises(ValueError, match="outside the vocabulary"):
+            LaneExecutionProfile(
+                profile_id="v2",
+                credential_staging=(("wonderland", ()),),
+                writable_roots=(),
+                read_only_roots=(),
+                tmpfs_roots=(),
+                cap_drop_all=True,
+                cap_add=(),
+                egress_policy="p",
+                egress_allowlist_env="E",
+            )
+        with pytest.raises(ValueError, match="no duplicates"):
+            LaneExecutionProfile(
+                profile_id="v2",
+                credential_staging=(("coding", ()), ("coding", ())),
+                writable_roots=(),
+                read_only_roots=(),
+                tmpfs_roots=(),
+                cap_drop_all=True,
+                cap_add=(),
+                egress_policy="p",
+                egress_allowlist_env="E",
+            )
+
+
+class TestLaneProfileDeclaration:
+    """The declaration validator: refusal is observable, never a silent
+    fallback to an unrestricted profile."""
+
+    def test_an_undeclared_profile_is_refused(self):
+        ok, reason = validate_lane_profile_declaration({})
+        assert ok is False
+        assert "FORGE_LANE_PROFILE is not declared" in reason
+
+    def test_a_value_outside_the_vocabulary_is_refused(self):
+        ok, reason = validate_lane_profile_declaration(
+            {"FORGE_LANE_PROFILE": "v3", "FORGE_EGRESS_ALLOWLIST": ""}
+        )
+        assert ok is False
+        assert "outside the vocabulary" in reason
+
+    def test_v1_declares_cleanly_without_needing_the_hook(self):
+        assert validate_lane_profile_declaration({"FORGE_LANE_PROFILE": " v1 "}) == (True, "ok")
+
+    def test_v2_without_the_egress_hook_is_a_refused_half_declaration(self):
+        ok, reason = validate_lane_profile_declaration({"FORGE_LANE_PROFILE": "v2"})
+        assert ok is False
+        assert "FORGE_EGRESS_ALLOWLIST" in reason
+
+    def test_v2_with_an_empty_allowlist_is_deny_all_and_valid(self):
+        assert validate_lane_profile_declaration(
+            {"FORGE_LANE_PROFILE": "v2", "FORGE_EGRESS_ALLOWLIST": ""}
+        ) == (True, "ok")
+        assert validate_lane_profile_declaration(
+            {"FORGE_LANE_PROFILE": "v2", "FORGE_EGRESS_ALLOWLIST": "api.z.ai,pypi.org"}
+        ) == (True, "ok")
+
+
+class TestSdkLaneTemplatesDeclareTheProfile:
+    """The v2 template jobs (ci/templates/*sdk-lane*) CAN declare the
+    hardened profile: each template's variables block validates as-is
+    (v1 default) and still validates with the dispatch's v2 flip —
+    because the egress hook rides in the same block."""
+
+    TEMPLATES = (
+        Path(__file__).resolve().parent.parent / "ci" / "templates" / name
+        for name in (
+            "claude-sdk-lane.gitlab-ci.yml",
+            "codex-sdk-lane.gitlab-ci.yml",
+            "opencode-sdk-lane.gitlab-ci.yml",
+        )
+    )
+
+    def _variables(self, template: Path) -> dict:
+        import yaml
+
+        doc = yaml.safe_load(template.read_text())
+        lane_key = next(k for k in doc if k.startswith("forge-agent"))
+        return doc[lane_key]["variables"]
+
+    def test_every_sdk_lane_template_declares_a_valid_default(self):
+        for template in self.TEMPLATES:
+            variables = self._variables(template)
+            assert variables["FORGE_LANE_PROFILE"] == "v1", template.name
+            assert validate_lane_profile_declaration(variables) == (True, "ok"), template.name
+
+    def test_every_sdk_lane_template_can_declare_v2(self):
+        for template in self.TEMPLATES:
+            declared = dict(self._variables(template))
+            declared["FORGE_LANE_PROFILE"] = "v2"  # the dispatch's opt-in flip
+            assert validate_lane_profile_declaration(declared) == (True, "ok"), template.name
+
+    def test_the_templates_do_not_silently_default_to_v2(self):
+        # Opt-in means opt-in: the YAML default stays the v1 posture; only
+        # a dispatch/pipeline variable (which beats YAML) selects v2.
+        for template in self.TEMPLATES:
+            assert self._variables(template)["FORGE_LANE_PROFILE"] == "v1", template.name

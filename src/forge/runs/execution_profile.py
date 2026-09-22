@@ -37,6 +37,21 @@ Derivation is BEST-EFFORT and typed-honest, never fatal: a repo whose lock
 cannot be read freezes the ``unknown``-honest record (and its digest), and a
 run is never parked on a profile read failure — the profile sharpens the
 approval contract, it does not gate it (the A13 config read keeps that job).
+
+NXT-29 — :data:`LANE_PROFILE_V2` is the hardened lane execution profile:
+staged credentials (the provider key mounted only for the lane/coding
+step and stripped from every other stage), data boundaries (workspace +
+tmpfs writable, a read-only rootfs elsewhere), ``cap_drop ALL`` with no
+added capabilities, and an env-carried egress allowlist hook
+(:data:`FORGE_EGRESS_ALLOWLIST_ENV`). HONESTY BOUND, stated plainly: this
+module ships that surface as DATA plus validators — the template declares
+it, the validators refuse malformed or half-declared selections, and
+nothing here claims the runner ENFORCES it. Mounts, capability drops and
+egress filtering act at the runner/container boundary; wiring them into a
+customer CI fleet is deployment work outside this package. A lane that
+declares v2 without runner-side enforcement is a declared intent, not an
+isolation claim — the profile records which surface a run was supposed
+to be bound to, so drift is detectable, never silent.
 """
 
 from __future__ import annotations
@@ -46,7 +61,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from forge.runs.spec import canonical_json_digest
@@ -56,23 +71,33 @@ __all__ = [
     "BOOTSTRAP_STATUS_OK",
     "BOOTSTRAP_STATUS_VALUES",
     "FORGE_BOOTSTRAP_FAILED_MARKER",
+    "FORGE_EGRESS_ALLOWLIST_ENV",
+    "FORGE_LANE_PROFILE_ENV",
     "LANE_CREDENTIAL_CAPABILITIES",
     "LANE_MCP_POLICY",
     "LANE_NETWORK_POLICY",
+    "LANE_PROFILE_VALUES",
+    "LANE_PROFILE_V1",
+    "LANE_PROFILE_V2",
     "LANE_PYTHON_VERSION",
+    "LANE_STAGES",
     "LANE_TEST_COMMANDS",
     "PROFILE_LOCK_FILE",
     "PROFILE_PYPROJECT_FILE",
     "TOOLCHAIN_PACKAGE_NAMES",
     "ExecutionProfile",
     "FileRead",
+    "LaneExecutionProfile",
     "LocalRepoSource",
     "MaterializedFiles",
     "ProfileSource",
     "bootstrap_failed",
     "classify_bootstrap_failure",
+    "credentials_at",
     "derive_from_reader",
     "derive_from_repo",
+    "lane_profile",
+    "validate_lane_profile_declaration",
 ]
 
 #: Schema version of the profile record covered by the digest. A changed
@@ -190,6 +215,248 @@ def bootstrap_failed(meta: dict) -> bool:
     unrecognized is NOT a bootstrap failure — unknown stays unknown.
     """
     return str(meta.get("bootstrap") or "").strip() == BOOTSTRAP_STATUS_FAILED
+
+
+# -- the hardened lane execution profile (NXT-29) ---------------------------
+
+#: The env var a lane template/dispatch declares the execution profile
+#: through. Pipeline variables beat YAML ones, so a template default of
+#: ``v1`` stays an OPT-IN: the dispatch leg (or a project variable) is
+#: what selects ``v2``.
+FORGE_LANE_PROFILE_ENV = "FORGE_LANE_PROFILE"
+
+#: The env-carried egress allowlist hook (v2): comma-separated host
+#: patterns the LANE/coding step may reach (``api.z.ai,...``). Empty or
+#: unset means DENY-ALL for the agent step — bootstrap still needs its
+#: pinned package registries, which is the bootstrap stage's own
+#: allowance, never the agent's. Documented contract: the runner reads
+#: this variable and enforces the filter at its network boundary
+#: (deployment work — this module carries the contract, not the
+#: enforcement).
+FORGE_EGRESS_ALLOWLIST_ENV = "FORGE_EGRESS_ALLOWLIST"
+
+#: The profile id vocabulary — anything else fails closed.
+_PROFILE_V1_ID = "v1"
+_PROFILE_V2_ID = "v2"
+_PROFILE_IDS = (_PROFILE_V1_ID, _PROFILE_V2_ID)
+
+#: The execution stages a hardened lane job runs, in order (NXT-29's
+#: phase separation): bootstrap installs pinned toolchains; discovery
+#: is read-only; coding is the writable agent step; verification is the
+#: trusted test executor. Credential staging is per stage.
+LANE_STAGES = ("bootstrap", "discovery", "coding", "verification")
+
+#: v1's single undifferentiated "stage": the whole job shares one env
+#: (the unstaged posture, stated as data).
+_JOB_STAGE = "job"
+_CREDENTIAL_STAGES = (*LANE_STAGES, _JOB_STAGE)
+
+#: Provider credential names the v2 CODING stage may mount — the union
+#: over the shipped SDK lanes' provider surfaces (the same names
+#: ``forge.runs.harness_selection`` gates per driver). At run time only
+#: the SELECTED lane's subset is mounted: the dispatch names exactly one
+#: driver, and no stage ever receives another provider's key. Publisher
+#: and write tokens appear NOWHERE in the vocabulary by construction.
+_V2_PROVIDER_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CODEX_API_KEY",
+    "FORGE_CODEX_AUTH",
+    "OPENAI_API_KEY",
+    "OPENCODE_PROVIDER_API_KEY",
+    "ZAI_API_KEY",
+)
+
+#: The read-only repository token bootstrap needs for ``git fetch`` — a
+#: scoped read credential, not a provider key and never a write token.
+_V2_BOOTSTRAP_KEYS = ("FORGE_BOT_READ_TOKEN",)
+
+
+@dataclass(frozen=True)
+class LaneExecutionProfile:
+    """One lane execution profile's enforcement surface, as DATA (NXT-29).
+
+    ``credential_staging`` maps stage → the env-var names that stage may
+    see (empty tuple = no credentials at that stage); the stages come
+    from :data:`LANE_STAGES`. ``writable_roots`` / ``read_only_roots`` /
+    ``tmpfs_roots`` describe the container mount posture (read-only
+    rootfs first, workspace over-mounted writable, tmpfs for scratch).
+    ``cap_drop_all`` + ``cap_add`` are the Linux capability posture.
+    ``egress_policy`` is the documented sentence and
+    ``egress_allowlist_env`` the env var the runner reads.
+
+    This record is a DECLARED CONTRACT, not a deployed control: the
+    runner must enforce mounts/caps/egress for any of it to be true
+    (see the module docstring's honesty bound).
+    """
+
+    profile_id: str
+    credential_staging: tuple[tuple[str, tuple[str, ...]], ...]
+    writable_roots: tuple[str, ...]
+    read_only_roots: tuple[str, ...]
+    tmpfs_roots: tuple[str, ...]
+    cap_drop_all: bool
+    cap_add: tuple[str, ...]
+    egress_policy: str
+    egress_allowlist_env: str
+
+    def __post_init__(self) -> None:
+        if self.profile_id not in _PROFILE_IDS:
+            raise ValueError(
+                f"unknown lane profile {self.profile_id!r}; vocabulary is {_PROFILE_IDS}"
+            )
+        stages = tuple(stage for stage, _names in self.credential_staging)
+        unknown = set(stages) - set(_CREDENTIAL_STAGES)
+        if unknown:
+            raise ValueError(f"credential stages outside the vocabulary: {sorted(unknown)}")
+        if len(stages) != len(set(stages)):
+            raise ValueError("one credential-staging row per stage, no duplicates")
+
+    def to_document(self) -> dict:
+        """The audit shape (NOT digested — distinct from
+        :attr:`ExecutionProfile.profile_digest`, which pins the
+        build/test contract, not the isolation posture)."""
+        return {
+            "profile_id": self.profile_id,
+            "credential_staging": {stage: list(names) for stage, names in self.credential_staging},
+            "data_boundaries": {
+                "writable": list(self.writable_roots),
+                "read_only": list(self.read_only_roots),
+                "tmpfs": list(self.tmpfs_roots),
+            },
+            "capabilities": {
+                "drop_all": self.cap_drop_all,
+                "add": list(self.cap_add),
+            },
+            "egress": {
+                "policy": self.egress_policy,
+                "allowlist_env": self.egress_allowlist_env,
+            },
+        }
+
+
+#: v1 — the CURRENT documented posture, stated as data so the contrast
+#: with v2 is auditable: credentials ride the job env unstaged (one
+#: undifferentiated ``job`` "stage"), the runner filesystem is as the
+#: executor shipped it, no capabilities are dropped, egress is open
+#: (:data:`LANE_NETWORK_POLICY`).
+LANE_PROFILE_V1 = LaneExecutionProfile(
+    profile_id=_PROFILE_V1_ID,
+    credential_staging=((_JOB_STAGE, LANE_CREDENTIAL_CAPABILITIES),),
+    writable_roots=("/",),
+    read_only_roots=(),
+    tmpfs_roots=(),
+    cap_drop_all=False,
+    cap_add=(),
+    egress_policy=LANE_NETWORK_POLICY,
+    egress_allowlist_env=FORGE_EGRESS_ALLOWLIST_ENV,
+)
+
+#: v2 — the hardened profile (NXT-29): staged credentials, workspace +
+#: tmpfs data boundaries, cap_drop ALL, deny-by-default egress with the
+#: env-carried allowlist hook. DECLARED SURFACE ONLY — runner-side
+#: enforcement is deployment work; selecting v2 without it records
+#: intent, it does not isolate.
+LANE_PROFILE_V2 = LaneExecutionProfile(
+    profile_id=_PROFILE_V2_ID,
+    credential_staging=(
+        # Bootstrap fetches the pinned toolchains and the attempt base:
+        # the scoped READ token, never a provider key.
+        ("bootstrap", _V2_BOOTSTRAP_KEYS),
+        # Discovery is read-only navigation — NO model credentials.
+        ("discovery", ()),
+        # The agent step: the SELECTED provider's key only, mounted for
+        # this step and stripped from every later one.
+        ("coding", _V2_PROVIDER_KEYS),
+        # The trusted test executor runs tests, not models — NO
+        # provider credentials reach verification.
+        ("verification", ()),
+    ),
+    writable_roots=("/workspace",),
+    read_only_roots=("/",),
+    tmpfs_roots=("/tmp",),
+    cap_drop_all=True,
+    cap_add=(),
+    egress_policy=(
+        "deny by default: the lane/coding step may reach only the hosts in "
+        f"{FORGE_EGRESS_ALLOWLIST_ENV} (comma-separated; empty = deny-all for "
+        "the agent step) plus the bootstrap stage's pinned package "
+        "registries; runner-side enforcement required — this profile is the "
+        "declared contract, not a deployed control"
+    ),
+    egress_allowlist_env=FORGE_EGRESS_ALLOWLIST_ENV,
+)
+
+#: The profile id vocabulary, derived from the shipped records.
+LANE_PROFILE_VALUES = (LANE_PROFILE_V1.profile_id, LANE_PROFILE_V2.profile_id)
+
+_LANE_PROFILES: dict[str, LaneExecutionProfile] = {
+    LANE_PROFILE_V1.profile_id: LANE_PROFILE_V1,
+    LANE_PROFILE_V2.profile_id: LANE_PROFILE_V2,
+}
+
+
+def lane_profile(profile_id: str) -> LaneExecutionProfile:
+    """The execution profile for *profile_id*; unknown ids raise (fail closed).
+
+    Denial is observable — there is no silent fallback to any profile,
+    and never a fallback to an UNRESTRICTED one.
+    """
+    try:
+        return _LANE_PROFILES[str(profile_id or "").strip()]
+    except KeyError:
+        raise ValueError(
+            f"unknown lane profile {profile_id!r}; vocabulary is {LANE_PROFILE_VALUES}"
+        ) from None
+
+
+def credentials_at(profile: LaneExecutionProfile, stage: str) -> tuple[str, ...]:
+    """The credential names *stage* may see under *profile* (fail closed).
+
+    v2 answers per its staging rows. v1 is the unstaged posture: every
+    phase sees the ambient set. A v2 stage the profile does not name
+    sees NOTHING — an unnamed stage is an unconfigured one, never a
+    permissive one.
+    """
+    for named_stage, names in profile.credential_staging:
+        if named_stage == stage:
+            return names
+    if profile.profile_id == LANE_PROFILE_V1.profile_id:
+        return LANE_CREDENTIAL_CAPABILITIES
+    return ()
+
+
+def validate_lane_profile_declaration(variables: Mapping[str, Any]) -> tuple[bool, str]:
+    """Validate a template/dispatch ``FORGE_LANE_PROFILE`` declaration.
+
+    *variables* is the job's declared variables mapping (the template's
+    YAML ``variables:`` block, or the dispatch env). Rules, fail closed
+    and observable:
+
+    - the profile key (:data:`FORGE_LANE_PROFILE_ENV`) must be present —
+      an undeclared profile is refused, never defaulted;
+    - its value must be in :data:`LANE_PROFILE_VALUES`;
+    - declaring ``v2`` requires the egress allowlist hook
+      (:data:`FORGE_EGRESS_ALLOWLIST_ENV`) to be declared in the same
+      mapping — a v2 selection without its documented hook is a
+      half-declaration and is refused (the hook's VALUE may be empty:
+      empty is deny-all, which is a valid hardened state).
+    """
+    if FORGE_LANE_PROFILE_ENV not in variables:
+        return False, f"{FORGE_LANE_PROFILE_ENV} is not declared"
+    declared = str(variables[FORGE_LANE_PROFILE_ENV] or "").strip()
+    if declared not in LANE_PROFILE_VALUES:
+        return False, (
+            f"{FORGE_LANE_PROFILE_ENV}={declared!r} is outside the vocabulary {LANE_PROFILE_VALUES}"
+        )
+    if declared == LANE_PROFILE_V2.profile_id and FORGE_EGRESS_ALLOWLIST_ENV not in variables:
+        return False, (
+            f"{LANE_PROFILE_V2.profile_id} requires the {FORGE_EGRESS_ALLOWLIST_ENV} hook "
+            "to be declared in the same variables block (empty value = "
+            "deny-all, which is valid; absent is a half-declaration)"
+        )
+    return True, "ok"
 
 
 # -- reads -----------------------------------------------------------------

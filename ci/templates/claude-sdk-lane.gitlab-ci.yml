@@ -64,10 +64,29 @@ forge-agent-claude-sdk:
     # The forge ref this lane installs the driver from (the worker can pin
     # by dispatching FORGE_LANE_REF; pipeline variables beat YAML ones).
     FORGE_LANE_REF: "main"
+    # NXT-27: the CLI install pin defaults to the LIVE-verified version
+    # (docs/evaluation/2026-09-21-drivers — claude 2.1.273), so a vendor
+    # release cannot silently change lane behavior; a dispatch/pipeline
+    # variable still overrides, and `claude --version` below records what
+    # actually installed into the trace.
+    FORGE_CLAUDE_VERSION: "2.1.273"
+    # NXT-29: the hardened execution profile is OPT-IN. Default stays
+    # "v1" — the current documented posture; the dispatch leg or a
+    # pipeline variable (which beat YAML ones) selects "v2", the surface
+    # declared in forge.runs.execution_profile.LANE_PROFILE_V2: staged
+    # credentials (the provider key mounted only for the lane step and
+    # stripped from later stages), workspace+tmpfs-only writable mounts,
+    # cap_drop ALL, and deny-by-default egress filtered from the
+    # FORGE_EGRESS_ALLOWLIST hook below (comma-separated hosts; empty =
+    # deny-all for the agent step). v2 requires runner-side enforcement
+    # of that surface — deployment work; declaring it without the
+    # runner side records intent, it does not isolate.
+    FORGE_LANE_PROFILE: "v1"
+    FORGE_EGRESS_ALLOWLIST: ""
   before_script:
     - |
       for attempt in 1 2 3; do
-        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${FORGE_CLAUDE_VERSION:-latest}" && break
+        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${FORGE_CLAUDE_VERSION:-2.1.273}" && break
         echo "npm install of claude-code failed (attempt $attempt), retrying..."
         sleep $((attempt * 5))
       done

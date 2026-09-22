@@ -70,6 +70,26 @@ forge-agent-opencode-sdk:
     # The forge ref this lane installs the driver from (the worker can pin
     # by dispatching FORGE_LANE_REF; pipeline variables beat YAML ones).
     FORGE_LANE_REF: "main"
+    # NXT-27: the CLI install pin defaults to the LIVE-verified version
+    # (docs/evaluation/2026-09-21-drivers — opencode v2.0.10; the official
+    # installer accepts `--version`, v-prefix stripped), so a vendor
+    # release cannot silently change lane behavior; a dispatch/pipeline
+    # variable still overrides, and `opencode --version` below records
+    # what actually installed into the trace.
+    FORGE_OPENCODE_VERSION: "2.0.10"
+    # NXT-29: the hardened execution profile is OPT-IN. Default stays
+    # "v1" — the current documented posture; the dispatch leg or a
+    # pipeline variable (which beat YAML ones) selects "v2", the surface
+    # declared in forge.runs.execution_profile.LANE_PROFILE_V2: staged
+    # credentials (the provider key mounted only for the lane step and
+    # stripped from later stages), workspace+tmpfs-only writable mounts,
+    # cap_drop ALL, and deny-by-default egress filtered from the
+    # FORGE_EGRESS_ALLOWLIST hook below (comma-separated hosts; empty =
+    # deny-all for the agent step). v2 requires runner-side enforcement
+    # of that surface — deployment work; declaring it without the
+    # runner side records intent, it does not isolate.
+    FORGE_LANE_PROFILE: "v1"
+    FORGE_EGRESS_ALLOWLIST: ""
   before_script:
     # opencode CLI (npm opencode-ai — the package name the Actions lane
     # already installs pinned; retry loop like every forge lane's npm
@@ -81,8 +101,9 @@ forge-agent-opencode-sdk:
         # The OFFICIAL installer — the same distribution the batch
         # opencode lane uses (LIVE-found 2026-09-21: the npm
         # `opencode-ai` package is a different build; v2.0.10's prompt
-        # route 400s under it while the installer build works).
-        curl -fsSL https://opencode.ai/install | bash && break
+        # route 400s under it while the installer build works) — pinned
+        # to the LIVE-verified version (NXT-27).
+        curl -fsSL https://opencode.ai/install | bash -s -- --version "${FORGE_OPENCODE_VERSION:-2.0.10}" && break
         echo "opencode install failed (attempt $attempt), retrying..."
         sleep $((attempt * 5))
       done

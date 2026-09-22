@@ -39,8 +39,10 @@ import yaml
 
 import forge.adaptive.drivers.claude_sdk as claude_sdk_module
 import forge.lane_driver as lane_driver
+from forge.adaptive.drivers.live_registrations import install_pin_of
 from forge.adaptive.wiring import OperatorControlService
 from forge.lane_driver import (
+    EPISODE_PHASE_KEYS,
     LANE_DRIVER_ID,
     NO_COMMIT_ADDENDUM,
     STEERING_ENV,
@@ -1267,7 +1269,11 @@ class TestCodexLaneTemplateDetails:
     def test_the_cli_is_openai_codex_over_npm(self):
         text = CODEX_TEMPLATE.read_text()
 
-        assert '"@openai/codex@${FORGE_CODEX_VERSION:-latest}"' in text
+        # NXT-27: the npm pin defaults to the LIVE-verified version, not
+        # a floating latest (a vendor release must not silently change
+        # lane behavior).
+        assert f'"@openai/codex@${{FORGE_CODEX_VERSION:-{install_pin_of("codex-app")}}}"' in text
+        assert f'FORGE_CODEX_VERSION: "{install_pin_of("codex-app")}"' in text
         assert "codex --version" in text
 
     def test_the_optional_provider_native_auth_lands_owner_only(self):
@@ -1548,3 +1554,194 @@ class TestOpenCodeLaneSteering:
 
         assert outcome.exit_status == "failed"
         assert outcome.steering_journal is None
+
+
+# ---------------------------------------------------------------------------
+# NXT-28 — the episode timing breakdown: every DRIVEN outcome carries it,
+# whatever the exit classification; failures before the episode do not
+# ---------------------------------------------------------------------------
+
+
+class TestEpisodeTiming:
+    def _assert_keys(self, episode: dict) -> None:
+        # presence of every phase key (the meta is written sort_keys=True,
+        # so only presence — not order — survives the JSON round-trip)
+        assert set(episode) == set(EPISODE_PHASE_KEYS)
+
+    async def test_the_outcomes_episode_keys_are_canonically_ordered(self):
+        # In memory the breakdown carries the canonical phase order.
+        client = SteerableLaneClient()
+        control = OperatorControlService()
+        control.steer("wp", "human:op", "finish now", run_id="run")
+
+        outcome = await drive_lane(
+            client, task="do the thing", budget_s=5.0, poll_s=0.01, control=control
+        )
+
+        assert outcome.episode is not None
+        assert tuple(outcome.episode) == EPISODE_PHASE_KEYS
+
+    # -- claude -----------------------------------------------------------
+
+    def test_completed_claude_turn_carries_all_four_phase_keys(self, lane_env):
+        assert main(sdk=FakeSDK(CompletedTurnClient).module) == 0
+
+        episode = read_meta(lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["startup_s"] >= 0.0
+        assert episode["turn_s"] >= 0.0
+        assert episode["teardown_s"] >= 0.0
+        # the turn completed without an interrupt: the phase is honestly
+        # absent (None), never a fabricated 0.0
+        assert episode["interrupt_grace_s"] is None
+
+    def test_failed_claude_turn_still_carries_the_breakdown(self, lane_env):
+        assert main(sdk=FakeSDK(AbortedTurnClient).module) == 1
+
+        episode = read_meta(lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["interrupt_grace_s"] is None
+
+    def test_budget_exceeded_claude_turn_measures_the_interrupt_grace(self, lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.05")
+
+        assert main(sdk=FakeSDK(SilentTurnClient).module) == 1
+
+        episode = read_meta(lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["interrupt_grace_s"] is not None
+        assert episode["interrupt_grace_s"] >= 0.0
+        assert episode["turn_s"] >= 0.0
+
+    def test_a_failure_before_the_episode_carries_no_episode_key(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # no .forge/brief.md → nothing was ever driven
+        monkeypatch.setenv("FORGE_ATTEMPT_BASE", ATTEMPT_BASE)
+
+        assert main(sdk=FakeSDK(CompletedTurnClient).module) == 1
+
+        meta = json.loads((tmp_path / ".forge" / "candidate.meta.json").read_text())
+        assert meta["terminal_reason"] == "brief_missing"
+        assert "episode" not in meta
+
+    # -- codex ------------------------------------------------------------
+
+    def test_completed_codex_turn_carries_the_breakdown(self, codex_lane_env, monkeypatch):
+        install_codex_client(monkeypatch, FakeCodexLaneClient(events=[_codex_turn("completed")]))
+
+        assert main(["--driver", "codex"]) == 0
+
+        episode = read_meta(codex_lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["startup_s"] >= 0.0
+        assert episode["turn_s"] >= 0.0
+        assert episode["teardown_s"] >= 0.0
+        assert episode["interrupt_grace_s"] is None
+
+    def test_budget_exceeded_codex_turn_measures_the_interrupt_grace(
+        self, codex_lane_env, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.05")
+        install_codex_client(monkeypatch, FakeCodexLaneClient())
+
+        assert main(["--driver", "codex"]) == 1
+
+        episode = read_meta(codex_lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["interrupt_grace_s"] is not None
+
+    # -- opencode ----------------------------------------------------------
+
+    def test_completed_opencode_turn_carries_the_breakdown(self, opencode_lane_env, monkeypatch):
+        install_opencode(
+            monkeypatch,
+            FakeOpenCodeLaneClient([_opencode_event("session.execution.succeeded")]),
+        )
+
+        assert main(["--driver", "opencode"]) == 0
+
+        episode = read_meta(opencode_lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["startup_s"] >= 0.0
+        assert episode["turn_s"] >= 0.0
+        assert episode["teardown_s"] >= 0.0
+        # this lane has no interrupt-by-id phase at all — recorded as the
+        # None it is (a timed-out turn never yields its session id)
+        assert episode["interrupt_grace_s"] is None
+
+    def test_budget_exceeded_opencode_turn_still_measures_start_and_turn(
+        self, opencode_lane_env, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        client = FakeOpenCodeLaneClient(timeout=True)
+        install_opencode(monkeypatch, client)
+
+        assert main(["--driver", "opencode"]) == 1
+
+        episode = read_meta(opencode_lane_env)["episode"]
+        self._assert_keys(episode)
+        assert episode["turn_s"] >= 0.0
+        assert episode["teardown_s"] >= 0.0
+        assert episode["interrupt_grace_s"] is None
+
+
+# ---------------------------------------------------------------------------
+# NXT-27 + NXT-29 — the SDK-lane templates' version pins and the opt-in
+# hardened-profile block (single-sourced from the live evidence)
+# ---------------------------------------------------------------------------
+
+
+class TestSdkLaneVersionPins:
+    """The CLI installs default to the LIVE-verified versions — derived
+    from the recorded evidence rows, so a new smoke recording a new
+    version must move the pins with it (or they visibly disagree)."""
+
+    def test_claude_pin_defaults_to_the_live_verified_version(self):
+        text = TEMPLATE.read_text()
+        pin = install_pin_of("claude-sdk")
+
+        assert f'FORGE_CLAUDE_VERSION: "{pin}"' in text
+        assert f"@anthropic-ai/claude-code@${{FORGE_CLAUDE_VERSION:-{pin}}}" in text
+        assert "claude --version" in text  # the trace records what installed
+
+    def test_codex_pin_defaults_to_the_live_verified_version(self):
+        text = CODEX_TEMPLATE.read_text()
+        pin = install_pin_of("codex-app")
+
+        assert f'FORGE_CODEX_VERSION: "{pin}"' in text
+        assert f'"@openai/codex@${{FORGE_CODEX_VERSION:-{pin}}}"' in text
+        assert "codex --version" in text
+
+    def test_opencode_pin_defaults_to_the_live_verified_version(self):
+        text = OPENCODE_TEMPLATE.read_text()
+        pin = install_pin_of("opencode-server")
+
+        assert f'FORGE_OPENCODE_VERSION: "{pin}"' in text
+        # the official installer accepts --version (v-prefix stripped)
+        assert f'bash -s -- --version "${{FORGE_OPENCODE_VERSION:-{pin}}}"' in text
+        assert "opencode --version" in text
+
+    def test_no_sdk_lane_template_ships_a_floating_latest_install(self):
+        for path in (TEMPLATE, CODEX_TEMPLATE, OPENCODE_TEMPLATE):
+            text = path.read_text()
+            assert ":-latest" not in text, path
+
+
+class TestSdkLaneProfileBlock:
+    """NXT-29: every SDK-lane template declares the (opt-in) hardened
+    execution profile — default v1, with the egress hook beside it so a
+    dispatch flipping to v2 is never a half-declaration."""
+
+    @pytest.mark.parametrize(
+        "template",
+        [TEMPLATE, CODEX_TEMPLATE, OPENCODE_TEMPLATE],
+        ids=["claude", "codex", "opencode"],
+    )
+    def test_the_profile_defaults_to_v1_with_the_egress_hook(self, template):
+        doc = yaml.safe_load(template.read_text())
+        lane_key = next(k for k in doc if k.startswith("forge-agent"))
+        variables = doc[lane_key]["variables"]
+
+        assert variables["FORGE_LANE_PROFILE"] == "v1"
+        assert "FORGE_EGRESS_ALLOWLIST" in variables

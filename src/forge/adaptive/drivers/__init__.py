@@ -41,8 +41,11 @@ from forge.adaptive.drivers.opencode_serve import (
     opencode_server_from_env,
 )
 from forge.adaptive.drivers.live_registrations import (
+    LIVE_OBSERVED_CAPABILITIES,
     LIVE_REGISTRATIONS,
     LiveRegistration,
+    ObservedCapabilities,
+    observed_capabilities,
     seed_live_matrix,
 )
 
@@ -68,8 +71,12 @@ __all__ = [
     "OpenCodeServer",
     "OpenCodeServerError",
     "opencode_server_from_env",
-    # the live-verified DriverMatrix seed (EXE-07's honest half)
+    # the live-verified DriverMatrix seed (EXE-07's honest half) + the
+    # versioned observed-capability rows (NXT-27)
+    "LIVE_OBSERVED_CAPABILITIES",
     "LIVE_REGISTRATIONS",
     "LiveRegistration",
+    "ObservedCapabilities",
+    "observed_capabilities",
     "seed_live_matrix",
 ]
