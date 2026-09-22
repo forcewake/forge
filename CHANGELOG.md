@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-09-22
+
+### Fixed — the 1ae5290 review M0+M1: checkpoint input security, exact resume, pause fence (14 items)
+
+The reviewer's P0: **checkpoint upload accepted path-shaped blob keys**
+— extra entries not referenced by the manifest became filesystem paths
+without hex64 validation, writing OUTSIDE the CAS root (reproduced by
+the reviewer). All 14 P0+P1 items from the review are closed:
+
+**Checkpoint security (R28-01/02/03/04):**
+- Every blob key is hex64-validated before ANY filesystem write; exact
+  closure (extra/missing refused); entry-count and aggregate-size caps;
+  `_cas_path` itself validates (defense in depth)
+- Restore is transactional: full verification → staging dir → atomic
+  promotion; symlink ancestors refused; `.git/` and credential
+  patterns are reserved namespaces; partial restore is impossible
+- A required checkpoint restore that fails HALTS the lane (zero model
+  turns, nonzero exit); fresh runs proceed
+- The baseline stores raw-content sha256 (one `git cat-file --batch`);
+  the walk excludes `.forge/`, `__pycache__`, `.pytest_cache`,
+  `*.egg-info`, `node_modules`
+
+**Exact resume (R28-05/06/07):**
+- Resume binds to the EXACT checkpoint reference from the resume
+  command (`work@id`); fallback to latest is recorded explicitly
+- Latest-selection by `max(sequence, checkpoint_id)` — never
+  `entries[-1]`; concurrent writes under per-work `fcntl.flock`
+- Attempt-scoped credentials: `HMAC(secret, work:generation)`;
+  superseded generations get 403; backward-compat works
+
+**Durable pause fence (R28-08):**
+- Migration 022 `pause_fences`; /pause raises the durable fence (epoch
+  bump), /resume clears under a new epoch; the classic publisher
+  checks it at the final native-effect boundary; composed test: pause
+  → restart → delayed publish REFUSES
+
+**Control semantics (R28-09/10):**
+- Steering dedup by native event identity (delivery ID, not UUID)
+- Checkpointed-ack replay is idempotent (200, no state change);
+  stale-generation acks get 403
+
+**Quality gates (R28-13/15/24):**
+- Shellcheck gate fixed (shell pinned, severity, both streams)
+- Discovery and attempt-base freeze on ONE resolved SHA; the discovery
+  call is INSIDE the try block
+- Execution profile v2 runtime validation (egress allowlist, read-only
+  root FS, credential staging) — non-compliant fails closed at lane
+  startup
+
+Suite 4808 (+91). The reviewer's exact path-escape repro is pinned by
+a test that proves ZERO filesystem writes.
+
 ## [0.27.1] - 2026-09-22
 
 ### Refactored — the script-rendering architecture (research doc phases 0-3)
