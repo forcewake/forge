@@ -1193,11 +1193,32 @@ def retry_rejection(run: FlowRun | None, *, other_active: bool = False) -> str:
             "grant is not allowed. Start fresh with a new implement request."
         )
     if not list(run.candidate_shas or []):
-        return (
-            f"Run `{run.id[:8]}` died before it committed a candidate, so there is no work to "
-            "retry in place. Start fresh with a new implement request."
-        )
+        # Wave D: a run that was PAUSED mid-turn has no candidate — but
+        # it may have a DURABLE CHECKPOINT on the control plane (the
+        # pause captured verified WIP). The checkpoint IS the work to
+        # continue from; the re-dispatched lane restores from it before
+        # its turn. No checkpoint AND no candidate = genuinely nothing.
+        if not _has_durable_checkpoint(run.id):
+            return (
+                f"Run `{run.id[:8]}` died before it committed a candidate and has no "
+                "stored checkpoint — there is no work to retry in place. Start fresh "
+                "with a new implement request."
+            )
+        return ""  # the checkpoint is the resume point
     return ""
+
+
+def _has_durable_checkpoint(run_id: str) -> bool:
+    """The control plane holds a verified checkpoint for this work."""
+    try:
+        from pathlib import Path as _P
+
+        from forge.api_checkpoint_channel import CheckpointStore, _store_dir
+
+        index = CheckpointStore(_store_dir())._load_index(run_id)
+        return bool(index.get("checkpoints"))
+    except Exception:  # noqa: BLE001 — no store, no checkpoint, no resume
+        return False
 
 
 def retry_in_flight_rejection(run_id: str) -> str:
