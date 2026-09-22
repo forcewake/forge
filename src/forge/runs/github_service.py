@@ -104,6 +104,11 @@ from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.llm import LLMError, LLMResponseError
+from forge.adaptive.discovery_stage import (
+    DiscoveryRunContext,
+    DiscoveryStageError,
+    maybe_run_discovery,
+)
 from forge.factory.planner import PLAN_SUMMARY_CHARS
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError
@@ -525,6 +530,20 @@ class GitHubRunService:
                 )
                 await session.commit()
         await self._apply_run_budget(run_id)
+        # NXT-05: optional durable discovery before planning — OFF by default
+        # (FORGE_DISCOVERY_ENABLED); see docs/adaptive/discovery-splice.md.
+        issue_description = await maybe_run_discovery(
+            DiscoveryRunContext.from_reader(
+                run_id=run_id,
+                project_id=project_id,
+                session_factory=self._session_factory,
+                reader=self._stack.reader,
+                ref=self._target_branch(),
+                repository_id=self._repo_full_name,
+                allowed_globs=path_scope or None,
+            ),
+            issue_description,
+        )
         try:
             plan = await self._stack.planner.plan(
                 issue_title,
@@ -532,7 +551,7 @@ class GitHubRunService:
                 flow_run_id=run_id,
                 path_scope=path_scope or None,
             )
-        except (LLMError, LLMResponseError) as exc:
+        except (LLMError, LLMResponseError, DiscoveryStageError) as exc:
             # (planning failure handling unchanged below)
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
             await self._post_journaled_note(
