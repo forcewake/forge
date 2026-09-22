@@ -1440,7 +1440,7 @@ def main(
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
     if resume_report is not None:
-        meta = write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
         # The restore report rides the meta as additive evidence (the
         # lane-side steering sidecar already handles journal+episode).
         meta_path = Path(os.environ.get("FORGE_META") or ".forge/candidate.meta.json")
