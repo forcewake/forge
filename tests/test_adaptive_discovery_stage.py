@@ -24,7 +24,18 @@ These tests pin the integration slice's behavior:
   question id has a durably recorded answer; answers arrive through the
   ``OperatorControlService`` mailbox and unblock planning across a
   second process, with the bounded answers section injected beside the
-  evidence digest.
+  evidence digest;
+- the NXT-08 multi-repo read leg: a context built from N EXPLICITLY
+  authorized readers freezes every repo's tree under per-repo
+  namespaces, records the full authorized set + per-repo OIDs in the
+  dispatch, and authorizes them under ONE repo-set digest — so a repo
+  added or removed is new input, an untouched repo's identical content
+  is a replay, evidence from different repos coexists in one record
+  (each citation validating against its OWN repo's tree; cross-repo
+  path confusion fails closed), the caps apply PER repo, and the
+  planner digest carries a per-repo provenance header. Single-repo
+  callers stay byte-identical (``from_reader`` delegates to
+  ``from_readers`` with one entry).
 """
 
 from __future__ import annotations
@@ -52,6 +63,8 @@ from forge.adaptive.discovery_stage import (
     FORGE_DISCOVERY_ENABLED_ENV,
     PLANNER_INPUT_CAP_CHARS,
     SNAPSHOT_TREE_SCHEMA,
+    SNAPSHOT_TREE_SET_SCHEMA,
+    _SNAPSHOT_MAX_FILES,
     CitationAuthority,
     DiscoveryRunContext,
     DiscoveryStageError,
@@ -76,6 +89,7 @@ from forge.adaptive.discovery_stage import (
     record_answers,
     render_answers_section,
     render_digest_section,
+    repo_set_digest,
     run_discovery_stage,
     snapshot_set_digest,
     snapshot_tree_digest,
@@ -103,6 +117,34 @@ FILES = {
 }
 
 RUN_ID = "run-disc-stage-1"
+
+OWN_REPO_ID = "example/repo"
+OWN_OID = "f" * 40
+NEIGHBOR_REPO_ID = "partner/org/neighbor"
+NEIGHBOR_OID = "a" * 40
+
+#: The NEIGHBOR repository (NXT-08): its own symbols for the same issue
+#: keywords, one path that ONLY exists there (``libs/neighbor/bridge.py``)
+#: and one path that exists in BOTH repos with DISAGREEING content — the
+#: own repo's planner.py is 3 lines, the neighbor's declares the class at
+#: line 4 of a 6-line file, so a re-bound citation trips the line bounds.
+NEIGHBOR_FILES = {
+    "src/app/planner.py": (
+        "# the neighbor's fork of the planner\n"
+        "# deliberately different, and longer,\n"
+        "# so line bounds disagree with the own repo's tree.\n"
+        "class LLMPlanner:\n"
+        "    def plan(self, issue, ctx):\n"
+        "        return ctx\n"
+    ),
+    "libs/neighbor/bridge.py": (
+        "from app.planner import LLMPlanner\n"
+        "\n"
+        "def start_run():\n"
+        "    planner = LLMPlanner()\n"
+        "    return planner.plan(None, None)\n"
+    ),
+}
 
 
 class FakeReader:
@@ -1267,3 +1309,330 @@ class TestAnswersSection:
     def test_attach_answers_short_base_has_no_marker(self):
         section = f"{ANSWERS_BEGIN}\n{{}}\n{ANSWERS_END}"
         assert attach_answers("short issue", section) == f"short issue\n\n{section}"
+
+
+def _multi_ctx(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    neighbor_files: dict[str, str] | None = None,
+    neighbor_globs: list[str] | None = None,
+) -> DiscoveryRunContext:
+    """A context over TWO explicitly authorized repos: own + neighbor."""
+    return DiscoveryRunContext.from_readers(
+        {"own": FakeReader(FILES), "neighbor": FakeReader(neighbor_files or NEIGHBOR_FILES)},
+        {"own": OWN_REPO_ID, "neighbor": NEIGHBOR_REPO_ID},
+        run_id=RUN_ID,
+        project_id=1,
+        session_factory=factory,
+        refs={"own": OWN_OID, "neighbor": NEIGHBOR_OID},
+        allowed_globs={"neighbor": neighbor_globs} if neighbor_globs is not None else None,
+    )
+
+
+def _own_only_ctx(factory: async_sessionmaker[AsyncSession]) -> DiscoveryRunContext:
+    """The same own repo, ALONE — from_readers with one entry."""
+    return DiscoveryRunContext.from_readers(
+        {"own": FakeReader(FILES)},
+        {"own": OWN_REPO_ID},
+        run_id=RUN_ID,
+        project_id=1,
+        session_factory=factory,
+        refs={"own": OWN_OID},
+    )
+
+
+class TestMultiRepoDiscovery:
+    """NXT-08: discovery reads NEIGHBOR repositories — N authorized
+    read-only repos, one durable record, per-repo citation authority."""
+
+    async def test_two_repos_evidence_coexist_in_one_record_with_provenance(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            augmented = await maybe_run_discovery(_multi_ctx(factory), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            assert record["status"] == "complete"
+
+            # BOTH repos' evidence in ONE record, unique ids, each entry
+            # bound to the repo it was found in.
+            entries = record["evidence"]
+            by_repo = {e["repository_id"] for e in entries}
+            assert by_repo == {OWN_REPO_ID, NEIGHBOR_REPO_ID}
+            ids = [e["id"] for e in entries]
+            assert len(set(ids)) == len(ids)
+            for entry in entries:
+                if entry["repository_id"] == NEIGHBOR_REPO_ID:
+                    assert entry["source_oid"] == NEIGHBOR_OID
+                    assert entry["path"] in NEIGHBOR_FILES
+                else:
+                    assert entry["source_oid"] == OWN_OID
+                    assert entry["path"] in FILES
+
+            # the dispatch carries the FULL authorized set + per-repo
+            # OIDs/digests, under one repo-set authorization digest.
+            dispatch = record["dispatch"]
+            assert dispatch["repository_id"] == OWN_REPO_ID  # the own repo stays primary
+            assert dispatch["snapshot_set_digest"] == repo_set_digest(
+                {"own": FILES, "neighbor": NEIGHBOR_FILES}
+            )
+            assert dispatch["repositories"]["neighbor"] == {
+                "repository_id": NEIGHBOR_REPO_ID,
+                "source_oid": NEIGHBOR_OID,
+                "snapshot_set_digest": snapshot_set_digest(NEIGHBOR_FILES),
+            }
+            assert dispatch["repositories"]["own"]["snapshot_set_digest"] == snapshot_set_digest(
+                FILES
+            )
+
+            # every repo's tree is recorded under its own namespace and
+            # hashes back to its OWN dispatch digest.
+            tree = record["snapshot_tree"]
+            assert tree["schema"] == SNAPSHOT_TREE_SET_SCHEMA
+            assert set(tree["repos"]) == {"own", "neighbor"}
+            for key, files in (("own", FILES), ("neighbor", NEIGHBOR_FILES)):
+                assert set(tree["repos"][key]["files"]) == set(files)
+                assert (
+                    snapshot_tree_digest(tree["repos"][key]["files"])
+                    == dispatch["repositories"][key]["snapshot_set_digest"]
+                )
+            assert CitationAuthority.of_record(record).consistent is True
+
+            # a plan citing evidence from BOTH repos validates in one pass
+            plan = {"steps": [f"work per evidence:{eid}" for eid in ids]}
+            assert validate_citations_against_snapshot(plan, record) == []
+            enforce_citations_against_snapshot(plan, record)  # does not raise
+
+            # the planner digest says WHICH repo each citation came from
+            digest = _digest_of(augmented)
+            assert digest["repositories"] == {
+                "own": {"repository_id": OWN_REPO_ID, "source_oid": OWN_OID},
+                "neighbor": {"repository_id": NEIGHBOR_REPO_ID, "source_oid": NEIGHBOR_OID},
+            }
+            assert {entry["repository_id"] for entry in digest["evidence"]} == by_repo
+        finally:
+            await engine.dispose()
+
+    async def test_a_citation_resolves_against_its_own_repos_tree_only(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            await run_discovery_stage(_multi_ctx(factory), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+
+            def _forged() -> dict:
+                return json.loads(json.dumps(record))
+
+            # a path that ONLY exists in the neighbor, re-bound to the own
+            # repo (id AND oid, to isolate path confusion): fails closed.
+            bridge_id = next(
+                e["id"] for e in record["evidence"] if e["path"] == "libs/neighbor/bridge.py"
+            )
+            path_forged = _forged()
+            entry = next(e for e in path_forged["evidence"] if e["id"] == bridge_id)
+            entry.update(repository_id=OWN_REPO_ID, source_oid=OWN_OID)
+            plan = {"steps": [f"work per evidence:{bridge_id}"]}
+            violations = validate_citations_against_snapshot(plan, path_forged)
+            assert len(violations) == 1
+            assert "not inside the snapshot's recorded tree" in violations[0]
+            with pytest.raises(InvalidPlanCitation):
+                enforce_citations_against_snapshot(plan, path_forged)
+
+            # the SAME relative path in both repos: the neighbor's planner
+            # hit (line 4) re-bound to the own repo's 3-line tree trips
+            # the line bounds — the trees are not interchangeable.
+            neighbor_planner = next(
+                e
+                for e in record["evidence"]
+                if e["path"] == "src/app/planner.py" and e["repository_id"] == NEIGHBOR_REPO_ID
+            )
+            assert neighbor_planner["line"] == 4  # the neighbor's fork declares at line 4
+            line_forged = _forged()
+            entry = next(e for e in line_forged["evidence"] if e["id"] == neighbor_planner["id"])
+            entry.update(repository_id=OWN_REPO_ID, source_oid=OWN_OID)
+            plan = {"steps": [f"work per evidence:{neighbor_planner['id']}"]}
+            violations = validate_citations_against_snapshot(plan, line_forged)
+            assert len(violations) == 1
+            assert "line 4 is outside 'src/app/planner.py''s recorded range 1..3" in violations[0]
+
+            # a repository nobody authorized: refused by name.
+            ghost_forged = _forged()
+            entry = next(e for e in ghost_forged["evidence"] if e["id"] == bridge_id)
+            entry["repository_id"] = "ghost/org/repo"
+            plan = {"steps": [f"work per evidence:{bridge_id}"]}
+            violations = validate_citations_against_snapshot(plan, ghost_forged)
+            assert len(violations) == 1
+            assert "not one of this discovery's authorized repositories" in violations[0]
+            assert NEIGHBOR_REPO_ID in violations[0]
+
+            # the UNTOUCHED record still validates both repos together.
+            plan = {"steps": [f"work per evidence:{bridge_id}"]}
+            assert validate_citations_against_snapshot(plan, record) == []
+        finally:
+            await engine.dispose()
+
+    async def test_a_tampered_per_repo_tree_refuses_every_citation(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            await run_discovery_stage(_multi_ctx(factory), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            record["snapshot_tree"]["repos"]["neighbor"]["files"]["libs/neighbor/bridge.py"][
+                "digest"
+            ] = "0" * 64
+            assert CitationAuthority.of_record(record).consistent is False
+            any_id = record["evidence"][0]["id"]
+            plan = {"steps": [f"work per evidence:{any_id}"]}
+            violations = validate_citations_against_snapshot(plan, record)
+            assert len(violations) == 1
+            assert "authorized repository-set digest" in violations[0]
+            with pytest.raises(InvalidPlanCitation):
+                enforce_citations_against_snapshot(plan, record)
+        finally:
+            await engine.dispose()
+
+    def test_repo_set_digest_covers_the_set_and_each_repos_content(self):
+        own = {"src/a.py": "one\n"}
+        neighbor = {"src/b.py": "two\n"}
+        both = {"own": own, "neighbor": neighbor}
+        assert repo_set_digest(both) == repo_set_digest(
+            {"neighbor": neighbor, "own": own}
+        )  # order-stable
+        assert repo_set_digest(both) != repo_set_digest({"own": own})  # a repo REMOVED moves it
+        assert repo_set_digest(both) != repo_set_digest(
+            {"own": own, "renamed": neighbor}
+        )  # the namespace is part of the authorization
+        changed = dict(neighbor)
+        changed["src/b.py"] = "two!\n"
+        assert repo_set_digest(both) != repo_set_digest(
+            {"own": own, "neighbor": changed}
+        )  # a content change in ANY repo moves it
+        assert repo_set_digest(both) == repo_set_digest(
+            {"own": dict(own), "neighbor": dict(neighbor)}
+        )  # identical content, identical digest
+
+    async def test_identity_moves_with_the_repo_set_not_with_identical_content(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            first = await maybe_run_discovery(_multi_ctx(factory), PLANNER_INPUT)
+            record_a = await _discovery_record(factory)
+
+            # SAME authorized set, fresh readers, identical content: a
+            # REPLAY — the untouched repos keep the digest stable.
+            second = await maybe_run_discovery(_multi_ctx(factory), PLANNER_INPUT)
+            record_b = await _discovery_record(factory)
+            assert second == first  # byte for byte, same discovery id inside
+            assert record_b["discovery_id"] == record_a["discovery_id"]
+            assert record_b["replay_count"] == 1
+
+            # a repo REMOVED from the authorized set: the own repo's
+            # content is untouched and identical, yet the authorization
+            # digest moved — new input, a NEW discovery that supersedes.
+            await maybe_run_discovery(_own_only_ctx(factory), PLANNER_INPUT)
+            record_c = await _discovery_record(factory)
+            assert record_c["discovery_id"] != record_a["discovery_id"]
+            assert record_c["supersedes"] == record_a["discovery_id"]
+            counts = await _outbox_counts(factory)
+            assert counts.get("discovery.started") == 2  # probes re-paid for the new set
+            assert counts.get("discovery.replayed") == 1
+        finally:
+            await engine.dispose()
+
+    async def test_snapshot_caps_apply_per_repo(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            big = {f"big/src/mod_{i:03d}.py": f"# module {i}\n" for i in range(250)}
+            await maybe_run_discovery(_multi_ctx(factory, neighbor_files=big), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            trees = record["snapshot_tree"]["repos"]
+            # the oversized neighbor is capped at its OWN file cap...
+            assert len(trees["neighbor"]["files"]) == _SNAPSHOT_MAX_FILES
+            # ...and the own repo is NOT crowded out by it: its full
+            # tree froze under the same caps, independently.
+            assert set(trees["own"]["files"]) == set(FILES)
+        finally:
+            await engine.dispose()
+
+    async def test_per_repo_allowed_globs_scope_their_own_repo(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            await maybe_run_discovery(
+                _multi_ctx(factory, neighbor_globs=["libs/**"]), PLANNER_INPUT
+            )
+            record = await _discovery_record(factory)
+            trees = record["snapshot_tree"]["repos"]
+            assert set(trees["neighbor"]["files"]) == {"libs/neighbor/bridge.py"}
+            assert set(trees["own"]["files"]) == set(FILES)  # the own repo keeps its scope
+            neighbor_paths = {
+                e["path"] for e in record["evidence"] if e["repository_id"] == NEIGHBOR_REPO_ID
+            }
+            assert neighbor_paths == {"libs/neighbor/bridge.py"}  # evidence respects it too
+        finally:
+            await engine.dispose()
+
+    async def test_single_repo_callers_stay_byte_identical(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            # 1. the legacy direct construction (pre-NXT-08 shapes).
+            legacy = await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            assert "repositories" not in record["dispatch"]
+            assert record["snapshot_tree"]["schema"] == SNAPSHOT_TREE_SCHEMA
+            assert "repos" not in record["snapshot_tree"]
+            digest = _digest_of(legacy)
+            assert "repositories" not in digest
+            assert all("repository_id" not in e for e in digest["evidence"])
+            assert CitationAuthority.of_record(record).repos == {}
+
+            # 2. from_reader — which now DELEGATES to from_readers with
+            #    one entry — replays the SAME discovery, byte for byte.
+            via_from_reader = await maybe_run_discovery(
+                DiscoveryRunContext.from_reader(
+                    run_id=RUN_ID,
+                    project_id=1,
+                    session_factory=factory,
+                    reader=FakeReader(FILES),
+                    ref=OWN_OID,
+                    repository_id=OWN_REPO_ID,
+                ),
+                PLANNER_INPUT,
+            )
+            assert via_from_reader == legacy
+
+            # 3. from_readers with ONE entry: identical again — a single
+            #    namespace is not a multi-repo record.
+            via_from_readers = await maybe_run_discovery(_own_only_ctx(factory), PLANNER_INPUT)
+            assert via_from_readers == legacy
+
+            record = await _discovery_record(factory)
+            assert record["replay_count"] == 2  # both replays adopted the legacy record
+            counts = await _outbox_counts(factory)
+            assert counts.get("discovery.started") == 1
+            assert counts.get("discovery.replayed") == 2
+        finally:
+            await engine.dispose()
+
+    def test_from_readers_validates_the_authorized_set(self):
+        kwargs: dict = {"run_id": RUN_ID, "project_id": 1, "session_factory": None}
+        with pytest.raises(ValueError, match="at least one reader"):
+            DiscoveryRunContext.from_readers({}, {}, **kwargs)
+        with pytest.raises(ValueError, match="missing entries"):
+            DiscoveryRunContext.from_readers({"own": object()}, {}, **kwargs)
+        with pytest.raises(ValueError, match="with no reader"):
+            DiscoveryRunContext.from_readers(
+                {"own": object()}, {"own": "a/b", "ghost": "x/y"}, **kwargs
+            )

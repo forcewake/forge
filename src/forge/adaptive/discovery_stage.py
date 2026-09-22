@@ -48,6 +48,32 @@ of paying the probes again; a dispatched-but-never-completed record is
 re-run under the SAME discovery id; a FAILED one is never silently
 fallen back from — the stage raises.
 
+NXT-08 (the multi-repo read leg — the SUBSTANCE behind the partner
+objection) lives here too:
+
+- :meth:`DiscoveryRunContext.from_readers` builds a context over N
+  AUTHORIZED read-only repositories — each with its own reader,
+  repository_id, ref and allowed_globs, and ONLY what the caller
+  explicitly passes (no authority is invented here: the run's own repo
+  may be one of the entries, and nothing else counts). The snapshot
+  freezes every repo's tree under per-repo namespaces, each under its
+  OWN file/byte caps; the dispatch record carries the full authorized
+  repo set with per-repo OIDs and per-repo set digests; and
+  :func:`repo_set_digest` derives ONE authorization digest over them
+  all, so a repo added or removed later is NEW input (not a replay)
+  while an untouched repo's identical content keeps the digest stable.
+- Evidence ids from DIFFERENT repos coexist in one record: every
+  :class:`EvidenceRecord` already binds its own repository_id/OID, and
+  :class:`CitationAuthority` now carries per-repo bindings so each
+  citation validates against its OWN repo's recorded tree — a path
+  from another repository re-bound to this one fails closed exactly
+  like any out-of-tree path.
+- The planner digest gains a per-repo provenance header (the authorized
+  repo set) and per-entry repository attribution, so the planner sees
+  WHICH repo each citation came from. Single-repo callers are
+  unchanged: ``from_reader`` delegates to ``from_readers`` with one
+  entry and the record/digest shapes stay byte-identical.
+
 NXT-07 (persisted clarification questions, answer-gated planning) lives
 here too:
 
@@ -84,7 +110,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Any
@@ -116,7 +142,10 @@ __all__ = [
     "InvalidPlanCitation",
     "PLANNER_INPUT_CAP_CHARS",
     "QuestionsOutstanding",
+    "ReaderLike",
+    "RepoSpec",
     "SNAPSHOT_TREE_SCHEMA",
+    "SNAPSHOT_TREE_SET_SCHEMA",
     "attach_answers",
     "attach_digest",
     "discovery_enabled",
@@ -136,6 +165,7 @@ __all__ = [
     "record_answers",
     "render_answers_section",
     "render_digest_section",
+    "repo_set_digest",
     "run_discovery_stage",
     "snapshot_set_digest",
     "snapshot_tree_digest",
@@ -288,6 +318,12 @@ _ANSWERS_SCHEMA = "forge.discovery.answers/1"
 #: The schema stamp of the record's ``snapshot_tree`` entry (the authorized
 #: SnapshotSet as recorded at read time — see :func:`snapshot_tree_of`).
 SNAPSHOT_TREE_SCHEMA = "forge.discovery.snapshot-tree/1"
+#: The schema stamp of a MULTI-repo record's ``snapshot_tree`` entry
+#: (NXT-08): ``{"repos": {key: {repository_id, source_oid,
+#: snapshot_set_digest, files}}}`` — every authorized repository's tree
+#: recorded under its own namespace, each hashing to that repo's OWN
+#: dispatch digest.
+SNAPSHOT_TREE_SET_SCHEMA = "forge.discovery.snapshot-tree-set/1"
 
 #: Snapshot loading caps: the stage reads a bounded, read-only view —
 #: not the whole history of a huge monorepo — and stops loudly (logged)
@@ -406,6 +442,19 @@ def snapshot_tree_digest(tree: Mapping[str, Mapping[str, Any]]) -> str:
     return _sha256(
         _canonical({path: str(entry.get("digest") or "") for path, entry in tree.items()})
     )
+
+
+def repo_set_digest(repos: Mapping[str, Mapping[str, str]]) -> str:
+    """The ONE authorization digest over a multi-repo snapshot (NXT-08).
+
+    sha256 over the canonical ``{repo_key: per-repo snapshot_set_digest}``
+    — so the repo SET is part of the authorization (a repo added or
+    removed later moves the digest, even when every surviving repo's
+    content is untouched) and each repo's content is part of it too
+    (a change anywhere moves that repo's per-repo digest). Key order
+    does not matter; equal authorized sets hash equal.
+    """
+    return _sha256(_canonical({key: snapshot_set_digest(files) for key, files in repos.items()}))
 
 
 def frozen_input_digest(planner_input: str, snapshot_digest: str) -> str:
@@ -528,6 +577,35 @@ QuestionSource = Callable[
 ]
 
 
+QuestionSource = Callable[
+    [str, list[dict[str, Any]]],
+    "Iterable[Mapping[str, Any]] | Awaitable[Iterable[Mapping[str, Any]]]",
+]
+
+#: Anything satisfying the duck-typed repository read surface
+#: (``get_tree`` plus ``read_text`` or the GitLab ``get_file`` shape) —
+#: the same seam :func:`load_snapshot_files` reads through.
+ReaderLike = Any
+
+
+@dataclass(frozen=True)
+class RepoSpec:
+    """One authorized read-only repository of a multi-repo context (NXT-08).
+
+    ``repo_key`` is the caller's short namespace (``"own"``,
+    ``"partner-x"``); ``repository_id`` is the full identity evidence
+    binds to. Built by :meth:`DiscoveryRunContext.from_readers` — never
+    mind-read here: only the readers the caller EXPLICITLY passes become
+    authority.
+    """
+
+    repo_key: str
+    reader: ReaderLike
+    repository_id: str
+    ref: str = "HEAD"
+    allowed_globs: list[str] | None = None
+
+
 @dataclass(frozen=True)
 class DiscoveryRunContext:
     """Everything the stage needs from the run it serves ("run_ctx").
@@ -539,6 +617,17 @@ class DiscoveryRunContext:
     content-addressed store the full bundle (with cited line text) is
     written as an artifact and its digest pinned into the record;
     without one, the compact records ride the run's evidence blob alone.
+
+    NXT-08: ``repo_specs`` carries N authorized repositories when the
+    discovery reads NEIGHBOR repositories too — each its own reader,
+    repository_id, ref and allowed_globs, frozen under its own
+    namespace. Empty (the default, and every single-repo construction)
+    means the legacy fields ``repository_id`` / ``source_oid`` /
+    ``allowed_globs`` / ``snapshot_files`` ARE the one repository, and
+    the stage's record/digest shapes stay byte-identical to the
+    pre-NXT-08 stage. With EXACTLY one spec the same legacy shapes come
+    out (a namespace with one repo is not a multi-repo record), so
+    :meth:`from_reader` simply delegates to :meth:`from_readers`.
     """
 
     run_id: str
@@ -554,6 +643,11 @@ class DiscoveryRunContext:
     max_answer_chars: int = DISCOVERY_ANSWERS_MAX_CHARS
     max_keywords: int = _MAX_KEYWORDS
     max_questions: int = _MAX_QUESTIONS
+    #: The authorized repo set (NXT-08): empty = the legacy single-repo
+    #: fields above; non-empty = the FIRST spec is the run's own repo
+    #: (its identity fills the legacy dispatch fields) and the rest are
+    #: neighbors. The stage resolves each spec's reader LAZILY.
+    repo_specs: tuple[RepoSpec, ...] = ()
 
     @classmethod
     def from_reader(
@@ -577,20 +671,100 @@ class DiscoveryRunContext:
         back as base64 ``RepositoryFile`` records;
         :func:`load_snapshot_files` decodes that fallback itself). The
         loader is deferred: a disabled stage never touches the provider.
+
+        NXT-08: this is now a one-entry delegation to
+        :meth:`from_readers` — the single-repo shapes it produces are
+        byte-identical to the ones this method built directly.
         """
+        return cls.from_readers(
+            {repository_id: reader},
+            {repository_id: repository_id},
+            run_id=run_id,
+            project_id=project_id,
+            session_factory=session_factory,
+            refs={repository_id: ref},
+            allowed_globs={repository_id: allowed_globs} if allowed_globs is not None else None,
+            store=store,
+        )
+
+    @classmethod
+    def from_readers(
+        cls,
+        readers: Mapping[str, ReaderLike],
+        repository_ids: Mapping[str, str],
+        *,
+        run_id: str,
+        project_id: int,
+        session_factory: SessionFactory,
+        refs: Mapping[str, str] | None = None,
+        allowed_globs: Mapping[str, list[str]] | None = None,
+        store: ContentAddressedStore | None = None,
+    ) -> DiscoveryRunContext:
+        """A context over N AUTHORIZED read-only repositories (NXT-08).
+
+        ``readers`` maps each repo key to its own reader (the same
+        duck-typed surface :meth:`from_reader` takes); every key MUST
+        have a ``repository_ids`` entry, and may carry its own ``refs``
+        entry (default ``HEAD``) and its own ``allowed_globs`` entry
+        (default: no restriction). The FIRST entry is the run's own
+        repository — its identity fills the legacy
+        ``repository_id``/``source_oid`` dispatch fields; the rest are
+        neighbors. Each repo's snapshot loads lazily and under its OWN
+        file/byte caps, so one huge neighbor cannot crowd another repo
+        out of the frozen set.
+
+        No authority is invented here: exactly the readers passed become
+        the authorized set, and it is validated loudly — no readers, a
+        reader without a repository_id, or a repository_id without a
+        reader is a construction error, not a silently narrower scope.
+        """
+        if not readers:
+            raise ValueError(
+                "from_readers requires at least one reader — a discovery with nothing "
+                "authorized is not a discovery"
+            )
+        missing = sorted(key for key in readers if key not in repository_ids)
+        if missing:
+            raise ValueError(f"repository_ids is missing entries for reader key(s) {missing}")
+        extra = sorted(key for key in repository_ids if key not in readers)
+        if extra:
+            raise ValueError(f"repository_ids carries key(s) {extra} with no reader")
+        resolved_refs = refs or {}
+        resolved_globs = allowed_globs or {}
+        specs = tuple(
+            RepoSpec(
+                repo_key=str(key),
+                reader=readers[key],
+                repository_id=str(repository_ids[key]),
+                ref=str(resolved_refs.get(key) or "HEAD"),
+                allowed_globs=(
+                    list(resolved_globs[key])
+                    if key in resolved_globs and resolved_globs[key] is not None
+                    else None
+                ),
+            )
+            for key in readers
+        )
+        primary = specs[0]
 
         async def _load() -> Mapping[str, str]:
-            return await load_snapshot_files(reader, project_id, ref, allowed_globs=allowed_globs)
+            return await load_snapshot_files(
+                primary.reader,
+                project_id,
+                primary.ref,
+                allowed_globs=primary.allowed_globs,
+            )
 
         return cls(
             run_id=run_id,
             project_id=project_id,
             session_factory=session_factory,
             snapshot_files=_load,
-            repository_id=repository_id,
-            source_oid=ref,
-            allowed_globs=allowed_globs,
+            repository_id=primary.repository_id,
+            source_oid=primary.ref,
+            allowed_globs=primary.allowed_globs,
             store=store,
+            repo_specs=specs,
         )
 
 
@@ -742,16 +916,44 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
        the ``plan.research_mode`` outbox row;
     7. render the bounded digest the planner will cite.
     """
-    files = dict(await _resolve_snapshot(run_ctx))
-    snap_digest = snapshot_set_digest(files)
+    repos = await _resolve_repo_snapshots(run_ctx)
+    #: NXT-08: one repo is the legacy stage, byte for byte — the flat
+    #: digest, tree and dispatch shapes. More than one repo freezes
+    #: EVERY authorized tree under per-repo namespaces and authorizes
+    #: them together: the dispatch's ``snapshot_set_digest`` becomes the
+    #: repo-SET digest (a repo added/removed later is new input), while
+    #: each repo's OWN digest rides ``dispatch.repositories`` and its
+    #: tree under ``snapshot_tree.repos`` for per-repo binding.
+    multi = len(repos) > 1
+    primary = next(iter(repos.values()))
+    per_repo_digests = {key: snapshot_set_digest(view.files) for key, view in repos.items()}
+    snap_digest = (
+        repo_set_digest({key: view.files for key, view in repos.items()})
+        if multi
+        else per_repo_digests[primary.repo_key]
+    )
     input_digest = frozen_input_digest(planner_input, snap_digest)
     #: The authorized snapshot AS RECORDED (NXT-06's read-time authority):
     #: every completed record carries the tree citation validation bounds
     #: file:line citations by, hashed to the dispatch's snapshot digest.
-    recorded_tree = {
-        "schema": SNAPSHOT_TREE_SCHEMA,
-        "files": snapshot_tree_of(files),
-    }
+    if multi:
+        recorded_tree = {
+            "schema": SNAPSHOT_TREE_SET_SCHEMA,
+            "repos": {
+                key: {
+                    "repository_id": view.repository_id,
+                    "source_oid": view.source_oid,
+                    "snapshot_set_digest": per_repo_digests[key],
+                    "files": snapshot_tree_of(view.files),
+                }
+                for key, view in repos.items()
+            },
+        }
+    else:
+        recorded_tree = {
+            "schema": SNAPSHOT_TREE_SCHEMA,
+            "files": snapshot_tree_of(primary.files),
+        }
 
     existing = await _read_record(run_ctx.session_factory, run_ctx.run_id)
     if existing is not None:
@@ -793,8 +995,8 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
             "executor": "snapshot_toolbox",
             "frozen_input_digest": input_digest,
             "snapshot_set_digest": snap_digest,
-            "repository_id": run_ctx.repository_id,
-            "source_oid": run_ctx.source_oid,
+            "repository_id": primary.repository_id,
+            "source_oid": primary.source_oid,
         },
         "supersedes": str(existing.get("discovery_id") or "") if existing else "",
         "evidence": [],
@@ -804,6 +1006,18 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
         "block_reason": "",
         "questions": [],
     }
+    if multi:
+        # The full authorized repo set + per-repo OIDs and digests (the
+        # legacy dispatch fields above stay the OWN repo's, so single
+        # readers of a multi-repo record keep their meaning).
+        record["dispatch"]["repositories"] = {
+            key: {
+                "repository_id": view.repository_id,
+                "source_oid": view.source_oid,
+                "snapshot_set_digest": per_repo_digests[key],
+            }
+            for key, view in repos.items()
+        }
     await _persist(
         run_ctx.session_factory,
         run_ctx.run_id,
@@ -822,7 +1036,7 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
     )
 
     try:
-        found, coverage, domain = _probe(run_ctx, discovery_id, snap_digest, files, planner_input)
+        found, coverage, domain = _probe(run_ctx, discovery_id, snap_digest, repos, planner_input)
     except Exception as exc:
         await _fail(run_ctx, record, str(exc))
         raise DiscoveryStageError(f"discovery {discovery_id!r} failed: {exc}") from exc
@@ -988,7 +1202,7 @@ def _probe(
     run_ctx: DiscoveryRunContext,
     discovery_id: str,
     snap_digest: str,
-    files: Mapping[str, str],
+    repos: Mapping[str, _RepoView],
     planner_input: str,
 ) -> tuple[list[tuple[EvidenceRecord, str]], dict[str, Any], DiscoveryRun]:
     """Deterministic read-only probes over the frozen snapshot.
@@ -1000,8 +1214,13 @@ def _probe(
     lifecycle object is driven through start → record_evidence and
     returned STILL RUNNING — the stage (not the probe) decides whether
     the run completes or lands in ``waiting_question`` (NXT-07).
+
+    NXT-08: the probes run against EVERY authorized repository, each
+    through its OWN toolbox (its own ``allowed_globs``, its own
+    per-keyword result caps), and every record binds the repository and
+    OID of the repo it was found in — evidence from different repos
+    coexists in one bundle under one global ``ev-N`` id sequence.
     """
-    toolbox = SnapshotToolbox(files, allowed_globs=run_ctx.allowed_globs)
     keywords = extract_keywords(planner_input, limit=run_ctx.max_keywords)
     domain = DiscoveryRun(
         discovery_id=discovery_id,
@@ -1010,49 +1229,58 @@ def _probe(
     ).start()
     found: list[tuple[EvidenceRecord, str]] = []
 
-    def _add(path: str, line: int, kind: str, detail: str, text: str) -> None:
+    def _add(view: _RepoView, path: str, line: int, kind: str, detail: str, text: str) -> None:
         record = EvidenceRecord(
             evidence_id=f"ev-{len(found) + 1}",
             path=path,
             line=line,
             kind=kind,
             detail=detail,
-            repository_id=run_ctx.repository_id,
-            source_oid=run_ctx.source_oid,
+            repository_id=view.repository_id,
+            source_oid=view.source_oid,
             content_digest=_sha256(text),
         )
         found.append((record, text))
 
-    for keyword in keywords:
-        symbols = (toolbox.find_symbol(keyword).get("symbols") or [])[:_PER_KEYWORD_RESULTS]
-        for symbol in symbols:
-            path = str(symbol.get("path") or "")
-            line_no = int(symbol.get("line_no") or 0)
-            if not path or line_no < 1:
-                continue
-            window = toolbox.read_file(path, offset=line_no - 1, length=1)
-            _add(
-                path,
-                line_no,
-                "symbol",
-                str(symbol.get("symbol") or keyword),
-                str(window.get("content") or ""),
-            )
-        references = (toolbox.find_references(keyword).get("references") or [])[
-            :_PER_KEYWORD_RESULTS
-        ]
-        for reference in references:
-            path = str(reference.get("path") or "")
-            line_no = int(reference.get("line_no") or 0)
-            if not path or line_no < 1:
-                continue
-            _add(path, line_no, "reference", keyword, str(reference.get("text") or ""))
+    multi = len(repos) > 1
+    paths_visible: Any = {} if multi else 0
+    for view in repos.values():
+        toolbox = SnapshotToolbox(view.files, allowed_globs=view.allowed_globs)
+        for keyword in keywords:
+            symbols = (toolbox.find_symbol(keyword).get("symbols") or [])[:_PER_KEYWORD_RESULTS]
+            for symbol in symbols:
+                path = str(symbol.get("path") or "")
+                line_no = int(symbol.get("line_no") or 0)
+                if not path or line_no < 1:
+                    continue
+                window = toolbox.read_file(path, offset=line_no - 1, length=1)
+                _add(
+                    view,
+                    path,
+                    line_no,
+                    "symbol",
+                    str(symbol.get("symbol") or keyword),
+                    str(window.get("content") or ""),
+                )
+            references = (toolbox.find_references(keyword).get("references") or [])[
+                :_PER_KEYWORD_RESULTS
+            ]
+            for reference in references:
+                path = str(reference.get("path") or "")
+                line_no = int(reference.get("line_no") or 0)
+                if not path or line_no < 1:
+                    continue
+                _add(view, path, line_no, "reference", keyword, str(reference.get("text") or ""))
+        if multi:
+            paths_visible[view.repo_key] = toolbox.path_count
+        else:
+            paths_visible = toolbox.path_count
 
     for rec, _text in found:
         domain = domain.record_evidence(rec.evidence_id)
     coverage = {
         "keywords": keywords,
-        "paths_visible": toolbox.path_count,
+        "paths_visible": paths_visible,
         "evidence_count": len(found),
     }
     return found, coverage, domain
@@ -1133,6 +1361,62 @@ async def _resolve_snapshot(run_ctx: DiscoveryRunContext) -> Mapping[str, str]:
     return source
 
 
+@dataclass(frozen=True)
+class _RepoView:
+    """One resolved repository of the authorized set: identity + frozen tree."""
+
+    repo_key: str
+    repository_id: str
+    source_oid: str
+    allowed_globs: list[str] | None
+    files: Mapping[str, str]
+
+
+async def _resolve_repo_snapshots(
+    run_ctx: DiscoveryRunContext,
+) -> dict[str, _RepoView]:
+    """Resolve the authorized repo set into frozen views, in spec order.
+
+    Multi-repo (NXT-08): each spec's reader is read LAZILY — only when
+    the stage actually discovers — and under its OWN file/byte caps
+    (:func:`load_snapshot_files` defaults), so every repository earns
+    the same bounded read regardless of how big its neighbors are.
+    Single-repo (``repo_specs`` empty, every legacy construction): the
+    context's own ``snapshot_files`` resolves under the "" namespace
+    that never leaves this function — the record stays key-free and
+    byte-identical to the pre-NXT-08 stage.
+    """
+    if run_ctx.repo_specs:
+        views: dict[str, _RepoView] = {}
+        for spec in run_ctx.repo_specs:
+            files = dict(
+                await load_snapshot_files(
+                    spec.reader,
+                    run_ctx.project_id,
+                    spec.ref,
+                    allowed_globs=spec.allowed_globs,
+                )
+            )
+            views[spec.repo_key] = _RepoView(
+                repo_key=spec.repo_key,
+                repository_id=spec.repository_id,
+                source_oid=spec.ref,
+                allowed_globs=spec.allowed_globs,
+                files=files,
+            )
+        return views
+    files = dict(await _resolve_snapshot(run_ctx))
+    return {
+        "": _RepoView(
+            repo_key="",
+            repository_id=run_ctx.repository_id,
+            source_oid=run_ctx.source_oid,
+            allowed_globs=run_ctx.allowed_globs,
+            files=files,
+        )
+    }
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers (the runs/ patterns: evidence blob + outbox row)
 # ---------------------------------------------------------------------------
@@ -1179,20 +1463,51 @@ async def _persist(
 # ---------------------------------------------------------------------------
 
 
-def _digest_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+def _digest_entry(entry: Mapping[str, Any], *, with_repository: bool = False) -> dict[str, Any]:
+    doc = {
         "id": str(entry.get("id") or ""),
         "path": str(entry.get("path") or ""),
         "line": int(entry.get("line") or 0),
         "kind": str(entry.get("kind") or ""),
         "detail": str(entry.get("detail") or ""),
     }
+    if with_repository:
+        # NXT-08: in a multi-repo digest every entry says WHICH repository
+        # it came from (absent in single-repo digests — byte-identical
+        # back-compat with the pre-NXT-08 shape).
+        doc["repository_id"] = str(entry.get("repository_id") or "")
+    return doc
+
+
+def _authorized_repos_of(record: Mapping[str, Any]) -> dict[str, dict[str, str]] | None:
+    """The dispatch's authorized repo set as a digest header (multi only).
+
+    ``None`` for single-repo records (no ``dispatch.repositories``) —
+    the signal the renderer uses to keep single-repo digests
+    byte-identical to the pre-NXT-08 shape.
+    """
+    dispatch = record.get("dispatch") if isinstance(record, Mapping) else None
+    repos = dispatch.get("repositories") if isinstance(dispatch, Mapping) else None
+    if not isinstance(repos, Mapping) or not repos:
+        return None
+    return {
+        str(key): {
+            "repository_id": str(entry.get("repository_id") or ""),
+            "source_oid": str(entry.get("source_oid") or ""),
+        }
+        for key, entry in repos.items()
+        if isinstance(entry, Mapping)
+    }
 
 
 def _digest_document(
-    record: Mapping[str, Any], entries: list[dict[str, Any]], *, dropped: int
+    record: Mapping[str, Any],
+    entries: list[dict[str, Any]],
+    *,
+    dropped: int,
+    repositories: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
-    return {
+    doc: dict[str, Any] = {
         "schema": _DIGEST_SCHEMA,
         "discovery_id": str(record.get("discovery_id") or ""),
         "repository_researched": bool(record.get("repository_researched")),
@@ -1204,6 +1519,12 @@ def _digest_document(
             "Citing an id not listed here is rejected."
         ),
     }
+    if repositories is not None:
+        # NXT-08: the per-repo provenance header — the authorized repo set
+        # the citations come from, so a plan can say (and a reader can
+        # check) WHICH repository each piece of evidence belongs to.
+        doc["repositories"] = dict(repositories)
+    return doc
 
 
 def render_digest_section(
@@ -1215,19 +1536,28 @@ def render_digest_section(
     order. When the budget cannot hold every entry, entries are dropped
     from the END and ``truncated``/``dropped`` say so — a partial digest
     is honest, and citation validation runs against the durable record,
-    so a truncation can never forge or hide a citable id.
+    so a truncation can never forge or hide a citable id. Multi-repo
+    records (NXT-08) additionally carry the per-repo provenance header
+    and per-entry ``repository_id``.
     """
-    entries = [_digest_entry(entry) for entry in (record.get("evidence") or [])]
+    provenance = _authorized_repos_of(record)
+    entries = [
+        _digest_entry(entry, with_repository=provenance is not None)
+        for entry in (record.get("evidence") or [])
+    ]
     dropped = 0
 
     def _render(doc: dict[str, Any]) -> str:
         return f"{DIGEST_BEGIN}\n{_canonical(doc)}\n{DIGEST_END}"
 
-    section = _render(_digest_document(record, entries, dropped=dropped))
+    def _document() -> dict[str, Any]:
+        return _digest_document(record, entries, dropped=dropped, repositories=provenance)
+
+    section = _render(_document())
     while len(section) > max_chars and entries:
         entries.pop()
         dropped += 1
-        section = _render(_digest_document(record, entries, dropped=dropped))
+        section = _render(_document())
     return section
 
 
@@ -1358,12 +1688,33 @@ class CitationAuthority:
     record's binding is verified, so a missing dispatch, a missing tree,
     or a tree that does not hash to the authorized digest leaves an
     authority that REFUSES everything (fail closed, never a guess).
+
+    NXT-08: a MULTI-repo record carries one binding PER authorized
+    repository in :attr:`repos` (each a full authority for its own
+    repo's tree, hashing to that repo's per-repo digest), and the
+    composite's own :attr:`authorized_set_digest` is the dispatch's
+    repo-SET digest — re-derived from the per-repo digests, so a tampered
+    tree in ANY repo refuses every citation. A citation then validates
+    against the tree of the repository ITS entry is bound to: ids from
+    different repos coexist in one record, and a path re-bound to a
+    repository whose tree does not carry it fails closed.
     """
 
     repository_id: str
     source_oid: str
     tree: Mapping[str, Mapping[str, Any]]
     authorized_set_digest: str
+    #: Per-repo authorities of a multi-repo record, keyed by repo key —
+    #: empty on single-repo records, where the four fields above ARE the
+    #: binding (and the validation messages stay exactly the legacy ones).
+    repos: Mapping[str, CitationAuthority] = field(default_factory=dict)
+
+    @staticmethod
+    def _files_tree_of(entry: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        files = entry.get("files")
+        return {
+            str(path): bound for path, bound in (files or {}).items() if isinstance(bound, Mapping)
+        }
 
     @classmethod
     def of_record(cls, record: Mapping[str, Any]) -> CitationAuthority:
@@ -1372,20 +1723,38 @@ class CitationAuthority:
         Malformed pieces become EMPTY/refusal values (``""``,
         ``{}``) — the resulting authority's :meth:`binding_violations`
         then rejects every citation with the naming reason, instead of
-        the validator crashing or, worse, skipping the check.
+        the validator crashing or, worse, skipping the check. A record
+        whose ``snapshot_tree`` carries the NXT-08 per-repo shape builds
+        one authority per repo under ``repos``; the flat legacy shape
+        builds the single binding it always did.
         """
         dispatch = record.get("dispatch") if isinstance(record, Mapping) else None
         dispatch = dispatch if isinstance(dispatch, Mapping) else {}
         tree_entry = record.get("snapshot_tree")
         tree_entry = tree_entry if isinstance(tree_entry, Mapping) else {}
-        files = tree_entry.get("files")
-        tree = {
-            str(path): entry for path, entry in (files or {}).items() if isinstance(entry, Mapping)
-        }
+        repos_entry = tree_entry.get("repos")
+        if isinstance(repos_entry, Mapping) and repos_entry:
+            subs = {
+                str(key): cls(
+                    repository_id=str(entry.get("repository_id") or ""),
+                    source_oid=str(entry.get("source_oid") or ""),
+                    tree=cls._files_tree_of(entry),
+                    authorized_set_digest=str(entry.get("snapshot_set_digest") or ""),
+                )
+                for key, entry in repos_entry.items()
+                if isinstance(entry, Mapping)
+            }
+            return cls(
+                repository_id=str(dispatch.get("repository_id") or ""),
+                source_oid=str(dispatch.get("source_oid") or ""),
+                tree={},
+                authorized_set_digest=str(dispatch.get("snapshot_set_digest") or ""),
+                repos=subs,
+            )
         return cls(
             repository_id=str(dispatch.get("repository_id") or ""),
             source_oid=str(dispatch.get("source_oid") or ""),
-            tree=tree,
+            tree=cls._files_tree_of(tree_entry),
             authorized_set_digest=str(dispatch.get("snapshot_set_digest") or ""),
         )
 
@@ -1397,7 +1766,21 @@ class CitationAuthority:
         ``snapshot_set_digest`` (:func:`snapshot_tree_digest`); a record
         whose tree hashes elsewhere is not mis-parsed — it is a binding
         nobody authorized, and citations checked against it fail closed.
+
+        Multi-repo (NXT-08): EVERY repo's tree must hash to that repo's
+        per-repo digest, and the per-repo digests together must re-derive
+        the dispatch's repo-SET digest — one tampered tree anywhere
+        refuses the whole record.
         """
+        if self.repos:
+            if not self.authorized_set_digest:
+                return False
+            derived = _sha256(
+                _canonical({key: sub.authorized_set_digest for key, sub in self.repos.items()})
+            )
+            return derived == self.authorized_set_digest and all(
+                sub.consistent for sub in self.repos.values()
+            )
         if not self.repository_id or not self.source_oid or not self.tree:
             return False
         return bool(self.authorized_set_digest) and (
@@ -1410,7 +1793,15 @@ class CitationAuthority:
         Empty means the entry is bound to THIS authority's repository and
         OID, its path is inside the recorded tree, and its line falls
         within the file's recorded 1-based line range (boundaries exact).
+
+        Multi-repo (NXT-08): the entry answers to the authority of the
+        repository it names — its OWN repo's tree, never a neighbor's.
         """
+        if self.repos:
+            return self._multi_binding_violations(entry)
+        return self._single_binding_violations(entry)
+
+    def _single_binding_violations(self, entry: Mapping[str, Any]) -> list[str]:
         if not self.repository_id:
             return ["the record carries no dispatch repository_id to bind citations to"]
         if not self.source_oid:
@@ -1448,6 +1839,35 @@ class CitationAuthority:
         if line < 1 or line > lines:
             violations.append(f"line {line} is outside {path!r}'s recorded range 1..{lines}")
         return violations
+
+    def _multi_binding_violations(self, entry: Mapping[str, Any]) -> list[str]:
+        if not self.consistent:
+            return [
+                "the record's per-repo snapshot trees do not hash back to the dispatch's "
+                "authorized repository-set digest — the trees are not the authorized "
+                "snapshots"
+            ]
+        entry_repo = str(entry.get("repository_id") or "")
+        candidates = [
+            (key, sub) for key, sub in self.repos.items() if sub.repository_id == entry_repo
+        ]
+        if not candidates:
+            authorized = ", ".join(
+                f"{key}={sub.repository_id!r}" for key, sub in sorted(self.repos.items())
+            )
+            return [
+                f"cross-repository: evidence is bound to {entry_repo!r}, not one of this "
+                f"discovery's authorized repositories ({authorized})"
+            ]
+        # The entry answers to its OWN repo's binding; when the OID does
+        # not match that repo's ref, the chosen sub-authority reports the
+        # stale OID with that repo's authorized value.
+        entry_oid = str(entry.get("source_oid") or "")
+        chosen = next(
+            ((key, sub) for key, sub in candidates if sub.source_oid == entry_oid),
+            candidates[0],
+        )
+        return chosen[1]._single_binding_violations(entry)
 
 
 def validate_citations_against_snapshot(
