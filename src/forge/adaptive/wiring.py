@@ -296,9 +296,17 @@ class OperatorControlService:
         return await self.surface.fence_active(work_id)
 
     async def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:
-        """Resume only from a confirmed checkpoint (CTL-06)."""
+        """Resume only from a confirmed checkpoint (CTL-06).
+
+        LIVE-found (wave C→D): the pause ran in the LANE process; this
+        service runs in the APP process — its in-memory pause_states can
+        never hold the lane's pause. The DURABLE truth is the checkpoint
+        on the control plane: when the store has one for this work, the
+        resume stands (the checkpoint IS the confirmed capture).
+        """
         state = self.pause_states.get(work_id)
-        if state is None or not state.checkpoint_captured:
+        in_memory = state is not None and state.checkpoint_captured
+        if not in_memory and not self._server_has_checkpoint(work_id):
             return False  # no confirmed checkpoint — resume refuses
         self.pause_states.pop(work_id, None)
         await self.surface.submit(
@@ -315,6 +323,16 @@ class OperatorControlService:
             )
         )
         return True
+
+    def _server_has_checkpoint(self, work_id: str) -> bool:
+        """The durable checkpoint store answers for the LANE's pause."""
+        try:
+            from forge.api_checkpoint_channel import CheckpointStore, _store_dir
+
+            index = CheckpointStore(_store_dir())._load_index(work_id)
+            return bool(index.get("checkpoints"))
+        except Exception:  # noqa: BLE001 — no store configured, no resume
+            return False
 
     async def steer(
         self, work_id: str, actor: str, text: str, *, run_id: str = ""
