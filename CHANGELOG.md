@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-09-22
+
+### Added — the adaptive waves LIVE: /steer, /pause with verified checkpoint, /resume
+
+The review's demanded chain — operator command → durable mailbox →
+running agent → effect → checkpoint — now runs END-TO-END on a real
+GitHub Actions runner (forge-lab-gh, evidence in
+docs/evaluation/2026-09-21-drivers/):
+
+- **Wave B (/steer)**: issue comment → ingress → ControlCommandRouter
+  → PostgresMailbox → lane outbound poll → Claude agent effect → the
+  FULL ack ladder home: received → authorized → dispatching →
+  vendor_accepted → applied → checkpointed. steering_journal +
+  episode (211s turn) in the candidate meta.
+- **Wave C (/pause)**: the pause drain runs the REAL checkpoint
+  transaction — interrupt ack 3ms → cooperative capture (git baseline
+  + content-addressed store) → upload via /lane/checkpoints →
+  pause_status=paused, receipt verified=true. 124 digest-verified
+  blobs on the control plane.
+- **Wave D (/resume)**: the cross-process pause-state boundary found
+  and fixed live — the resume gate now checks the DURABLE checkpoint
+  store (the APP process can never hold the LANE's pause).
+- **The dispatch infrastructure**: the per-work HMAC lane token
+  computed at dispatch (the shared secret NEVER enters a lane job);
+  the checkpoint channel API (upload/download, digest-verified both
+  sides, retention keeps latest); the lane remote-control poller (the
+  same MailboxSurface, steering over HTTP).
+
+**Live-found and fixed** (each one a real runner caught): SecretStr
+str() is the MASK (get_secret_value is the value); FORGE_RUN_ID needed
+on the driver step; emit-meta dropped lane keys (sidecar pass-through);
+the upload channel must be a Protocol object; work-token satisfies the
+channel config; resume must check the durable store. Plus: GitHub /go
+prefix resolution; the claude-sdk-lane harness_entry arm; #154
+eternal-preflight.
+
+**Capability matrix honestly updated**: adaptive-commands,
+steering-bridge, pause-resume-checkpoint are now
+real_provider_scenario (live evidence artifacts recorded). Suite 4692.
+
 ## [0.25.0] - 2026-09-22
 
 ### Added — the edf938c backlog completed: every issue closed
