@@ -552,8 +552,16 @@ class GitHubRunService:
                 path_scope=path_scope or None,
             )
         except (LLMError, LLMResponseError, DiscoveryStageError) as exc:
-            # (planning failure handling unchanged below)
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
+            await self._post_journaled_note(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` **failed** at planning: {exc}\n\n"
+                "*This is an automated message.*",
+                run_id,
+                "planning_failed",
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — #154: a stuck preflight is worse
             # LIVE-found (2026-09-22, forge-lab-gh): a ValueError from harness
             # selection left the run in preflight FOREVER — the operator note
@@ -562,14 +570,13 @@ class GitHubRunService:
             # /implement, never a silent deadlock.
             logger.exception("GitHub run %s planning leg crashed unexpectedly", run_id[:8])
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_crashed: {exc}")
-            raise
             await self._post_journaled_note(
                 project_id,
                 issue_number,
-                f"Run `{run_id[:8]}` **failed** at planning: {exc}\n\n"
+                f"Run `{run_id[:8]}` **crashed** at planning: {exc}\n\n"
                 "*This is an automated message.*",
                 run_id,
-                "planning_failed",
+                "planning_crashed",
             )
             raise
 
