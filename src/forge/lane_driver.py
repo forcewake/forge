@@ -1439,22 +1439,22 @@ def main(
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
+    write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+    # The wip_restore report rides the STEERING SIDECAR (the same
+    # .forge/steering.json emit-meta passes through — writing to the
+    # meta directly never reaches the uploaded artifact because the
+    # emit step rebuilds it at forge-output/). LIVE-found.
     if resume_report is not None:
-        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
-        # The restore report rides the meta as additive evidence (the
-        # lane-side steering sidecar already handles journal+episode).
-        meta_path = Path(os.environ.get("FORGE_META") or ".forge/candidate.meta.json")
-        if meta_path.is_file():
-            import json as _json
+        sidecar = Path(".forge/steering.json")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
 
-            try:
-                existing = _json.loads(meta_path.read_text())
-                existing["wip_restore"] = resume_report
-                meta_path.write_text(_json.dumps(existing, indent=2, sort_keys=True) + "\n")
-            except (ValueError, OSError):
-                pass
-    else:
-        write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+        try:
+            existing = _json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        except ValueError:
+            existing = {}
+        existing["wip_restore"] = resume_report
+        sidecar.write_text(_json.dumps(existing, indent=2, sort_keys=True) + "\n")
     print(
         f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,
