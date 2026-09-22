@@ -772,6 +772,13 @@ class TestCredentialContractC03:
 
         matrix = self._azdo_driver_vars()
         for driver in SHIPPED_DRIVERS:
+            # R28-21: the dotnet lane is a GitLab-lane recipe in this
+            # slice — the AzDO dispatch surface carries no arm for it and
+            # the registry deliberately requires no per-driver secrets
+            # (it rides the forge gateway), so there is nothing to map.
+            if driver == "dotnet-lane":
+                assert driver not in matrix, "add a registry entry before mapping secrets"
+                continue
             from forge.runs.harness_selection import DRIVER_OPTIONAL_CREDENTIAL_VARS
 
             allowed = set(DRIVER_CREDENTIAL_VARS[driver]) | set(

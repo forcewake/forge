@@ -1,0 +1,188 @@
+# forge implementer harness — copilot-sdk-lane (the execution lane, driven
+# by the REAL Copilot CLI ACP driver)
+#
+# The copilot twin of claude-sdk-lane.gitlab-ci.yml: same skeleton, same
+# rules, same proposal-only candidate contract — but the agent is driven
+# by forge's own driver client (forge.adaptive.drivers.copilot_acp, via
+# `python -m forge.lane_driver --driver copilot`) against a spawned
+# `copilot --acp --stdio` server (the Agent Client Protocol surface the
+# CLI ships since the 2026-01-28 public preview). One task, watched to
+# its terminal stopReason, bounded by an overall budget; the same
+# .forge/ artifacts come out the other end. Issue #4561 workaround: a
+# canceled turn's wire answers stopReason end_turn — the driver's cancel
+# ledger reclassifies it as interrupted_by_ledger, never completed.
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/copilot-sdk-lane.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block,
+# which also filters on $FORGE_HARNESS_DRIVER (ADR-0023 §7): a repo that
+# includes several forge templates runs exactly one lane
+# (driver: copilot-sdk-lane).
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   COPILOT_GITHUB_TOKEN  a fine-grained PAT (github_pat_ prefix) with the
+#                         "Copilot Requests" permission — the ACP child
+#                         reads it straight from the env (classic ghp_
+#                         tokens are NOT supported and fail silently). A
+#                         Copilot subscription covers the model spend.
+#   COPILOT_MODEL       OPTIONAL model override; when unset the vendor
+#                       default applies. Model names are Copilot's own
+#                       (e.g. claude-sonnet-4.5, gpt-5) — gateway-specific
+#                       names do not run here.
+#   FORGE_BOT_READ_TOKEN  OPTIONAL read-only PAT (repo read only). The
+#                         proposal-only lane (ADR-0016) must NEVER receive
+#                         a write token; when unset the lane keeps the
+#                         runner's default fetch credential only.
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Candidate contract (ADR-0016 §1, proposal-only): the job checks out the
+# frozen attempt base ($FORGE_ATTEMPT_BASE, detached), runs the driver
+# WITHOUT any commit/push capability, and uploads the working-tree delta as
+# CI artifacts:
+#   .forge/candidate.diff        git diff --binary --full-index vs the base
+#   .forge/candidate.meta.json   attempt base, driver, model, exit, usage
+# The last trace lines carry the machine-readable markers:
+#   FORGE_CANDIDATE:{"attempt_base": "<oid>", "artifact": "candidate.diff", "exit": "<completed|failed>"}
+#   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
+# forge downloads the artifacts and publishes via the trusted publisher;
+# claims in the trace are never trusted.
+
+forge-agent-copilot-sdk:
+  image: node:22-bookworm
+  timeout: 30m
+  rules:
+    # ADR-0023 §7: a repo including MULTIPLE forge templates runs exactly
+    # one lane — the one whose driver matches $FORGE_HARNESS_DRIVER (set by
+    # the dispatch leg). Unset/empty keeps single-driver repos as before.
+    - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "copilot-sdk-lane")'
+  variables:
+    # The forge ref this lane installs the driver from (the worker can pin
+    # by dispatching FORGE_LANE_REF; pipeline variables beat YAML ones).
+    FORGE_LANE_REF: "main"
+    # The CLI install pin defaults to forge's known-good copilot pin
+    # (1.0.86, the 2026-09-17 registry slice; npm latest is 1.0.88 today).
+    # ACP is public preview and subject to change — a vendor release must
+    # not silently change lane behavior; a dispatch/pipeline variable
+    # still overrides, and `copilot --version` below records what actually
+    # installed into the trace. NO live smoke has verified this lane yet —
+    # re-pin deliberately on the first smoke (the NXT-27 doctrine).
+    FORGE_COPILOT_VERSION: "1.0.86"
+    # NXT-29: the hardened execution profile is OPT-IN (see the codex
+    # lane's notes — v2 requires runner-side enforcement).
+    FORGE_LANE_PROFILE: "v1"
+    FORGE_EGRESS_ALLOWLIST: ""
+  before_script:
+    # copilot CLI (the driver spawns `copilot --acp --stdio` from it — npm
+    # @github/copilot, retry loop like every forge lane's npm preamble).
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit "@github/copilot@${FORGE_COPILOT_VERSION:-1.0.86}" && break
+        echo "npm install of copilot failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+      copilot --version
+    # Auth: the ACP child reads COPILOT_GITHUB_TOKEN straight from the
+    # ambient env (masked/protected CI variable) — no file landing, no
+    # stored login. An unauthenticated lane still runs and the driver
+    # reports its own auth failure (classic ghp_ tokens fail silently).
+    # Python side: forge requires >=3.13 and Debian bookworm's apt python3
+    # is 3.11 (LIVE-found in the ADR-0024 AzDO lab run: pip refused the
+    # forge install). apt python3+pip bootstraps uv, which installs a
+    # standalone 3.13 and the lane venv. --break-system-packages is only
+    # used for the uv bootstrap wheel, never for the lane environment.
+    - apt-get update -qq && apt-get install -y -qq python3 python3-pip >/dev/null
+    - python3 -m pip install --quiet --no-input --break-system-packages uv
+    - uv python install 3.13
+    - uv venv /tmp/forge-lane-venv --python 3.13
+    - >
+      uv pip install --quiet --python /tmp/forge-lane-venv/bin/python
+      "forge[interactive] @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF}"
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
+    # credential at most, and push is disabled by construction — the job has
+    # nothing to push even if the model tried.
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_READ_TOKEN:-forge:placeholder}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+    - git remote set-url --push origin FORBIDDEN
+    # .forge/ is a control directory: local-only, never staged, never
+    # committed (ADR-0016 §1 step 5).
+    - mkdir -p .forge
+    - mkdir -p .git/info && echo ".forge/" >> .git/info/exclude
+    # Check out the FROZEN attempt base (detached). The pipeline ref is the
+    # factory branch, whose head IS the attempt base in the proposal-only
+    # model — nothing else ever pushes to it.
+    - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
+    - git checkout --detach "$FORGE_ATTEMPT_BASE"
+  script:
+    # The task brief: approved plan, written into the REPO's control
+    # directory — never /tmp (the sandbox lesson: run context lives with
+    # the run, ephemeral scratch does not).
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # The model route: dispatched FORGE_COPILOT_MODEL > dispatched
+    # COPILOT_MODEL > the copilot CLI default. FORGE_HARNESS_MODEL is
+    # DELIBERATELY not in the chain (the codex lesson): it carries
+    # gateway-specific names the Copilot backend cannot run.
+    - export FORGE_COPILOT_MODEL="${FORGE_COPILOT_MODEL:-${COPILOT_MODEL:-}}"
+    # The sandbox is the ephemeral CI container (ADR-0002): the driver
+    # spawns the ACP server with --allow-all-tools plus the mechanical
+    # commit/push --deny-tool posture (deny beats allow beats allow-all)
+    # and an allow-once permission responder — no human to prompt.
+    - export COPILOT_CWD="$PWD"
+    # Interactive driver run: lane_driver reads .forge/brief.md, builds the
+    # client from the ambient env, spawns the ACP server, watches ONE
+    # session to its terminal stopReason and writes the meta + usage
+    # receipts (usage stays honestly unknown — no per-turn tokens cross
+    # the ACP wire). Its task appends the batch lane's unattended posture
+    # verbatim — the agent is told: Do NOT commit and do NOT push: leave
+    # your changes in the working tree for collection — with the FORBIDDEN
+    # push URL as the architectural backstop (no write credential exists
+    # to use). A nonzero exit does not abort the audit trail — the
+    # artifacts still upload (when: always) and forge classifies the run
+    # from the meta's exit, exactly like the batch lane.
+    - |
+      FORGE_DRIVER_EXIT="completed"
+      set +e
+      /tmp/forge-lane-venv/bin/python -m forge.lane_driver --driver copilot
+      _driver_rc=$?
+      set -e
+      if [ "$_driver_rc" -ne 0 ]; then
+        FORGE_DRIVER_EXIT="failed"
+      fi
+      export FORGE_DRIVER_EXIT
+      # A driver FAILURE fails the JOB (batch-lane pipefail parity; the
+      # artifacts still upload via when:always). An agent that completed
+      # without changes keeps the job green — classified at the run level.
+      exit "$_driver_rc"
+    # Defensive meta floor: lane_driver writes the real meta itself; if it
+    # died before writing one (install/import crash), the artifacts still
+    # carry an honest failed meta instead of nothing.
+    - |
+      if [ ! -f .forge/candidate.meta.json ]; then
+        printf '%s\n' "{\"attempt_base\": \"${FORGE_ATTEMPT_BASE}\", \"driver\": \"copilot-sdk-lane\", \"model\": \"${FORGE_COPILOT_MODEL}\", \"exit\": \"${FORGE_DRIVER_EXIT}\", \"terminal_reason\": \"lane_driver_no_meta\", \"usage\": null}" > .forge/candidate.meta.json
+      fi
+    # Stage the whole working tree and capture the candidate diff against
+    # the FROZEN attempt base. No commit, no push — the artifact is the
+    # deliverable.
+    - git add -A
+    - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
+    # Machine-readable contract. FORGE_CANDIDATE points at the artifact the
+    # backend downloads; the legacy FORGE_RESULT line stays only for the
+    # v0.2 → v0.3 migration window and carries the attempt base — it is not
+    # a branch claim anymore.
+    - 'printf "FORGE_CANDIDATE:{\"attempt_base\": \"%s\", \"artifact\": \"candidate.diff\", \"exit\": \"%s\"}\n" "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"'
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"candidate artifacts; proposal-only lane\"}\n" "$FORGE_ATTEMPT_BASE"'
+  artifacts:
+    paths:
+      - .forge/candidate.diff
+      - .forge/candidate.meta.json
+    when: always
+    expire_in: 1 week

@@ -22,6 +22,7 @@ as the only output, and usage receipts where the vendor provides them
 | Grok Build | [grok-build.md](grok-build.md) | always-approve + deny rules, hardened npm preamble |
 | opencode | [opencode.md](opencode.md) | injected permission map, schema-translated MCP |
 | GitHub Copilot CLI | [copilot-cli.md](copilot-cli.md) | `-p` + scoped grants, deny-wins tool rules |
+| dotnet-lane (R28-21) | [dotnet-lane.md](dotnet-lane.md) | the claude-code contract on a digest-pinned .NET 9 SDK image; locked restore/build + TRX tests |
 
 Shared setup (include lines, common variables, the MCP variable, runner
 profile, how a run flows, monitoring/triage):

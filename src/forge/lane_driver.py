@@ -42,9 +42,9 @@ tokens and cost come ONLY from the drained ``ResultMessage``
 anything absent stays absent — unknown is never zero. No receipt fields
 are fabricated from anywhere else.
 
-The SAME contract now drives two more REAL interactive clients
-(``--driver codex | opencode``, or ``FORGE_LANE_DRIVER``; ``claude``
-stays the default and its path is unchanged):
+The SAME contract now drives three more REAL interactive clients
+(``--driver codex | opencode | copilot``, or ``FORGE_LANE_DRIVER``;
+``claude`` stays the default and its path is unchanged):
 
 - ``codex`` — :class:`forge.adaptive.drivers.codex_app.CodexAppDriverClient`
   (built via :func:`codex_app_client_from_env`; the spawned ``codex
@@ -70,8 +70,20 @@ stays the default and its path is unchanged):
   cost, and no event means no receipt at all. Permission prompts are
   answered ``once`` (LIVE-found: the factory default ``reject`` starves
   every tool call in a task lane).
+- ``copilot`` — :class:`forge.adaptive.drivers.copilot_acp.
+  CopilotACPDriverClient` (built via :func:`copilot_acp_client_from_env`;
+  a spawned ``copilot --acp --stdio`` child reading the ambient
+  ``COPILOT_GITHUB_TOKEN``). ``start_session`` answers at ``session/new``
+  — the id exists BEFORE any turn — so the lane poll-watches the
+  client's terminal record (the turn ends when a ``stopReason``
+  arrives). The client's cancel LEDGER owns the #4561 workaround: a
+  canceled turn whose wire answers ``stopReason: "end_turn"`` reports
+  ``interrupted_by_ledger``, never ``completed``. No mid-turn steer
+  exists on ACP (the client refuses a second in-flight prompt); no
+  per-turn usage crosses the wire, so the receipt stays honestly
+  unknown (None — never a zeroed dict).
 
-Both lanes keep the claude lane's budget doctrine: one overall
+All lanes keep the claude lane's budget doctrine: one overall
 ``FORGE_LANE_BUDGET_SECONDS`` wall clock; on expiry the running turn is
 interrupted (codex ``turn/interrupt`` — opencode's timed-out
 ``start_session`` never yields the session id, so the serve teardown
@@ -148,6 +160,10 @@ from forge.adaptive.drivers.codex_app import (
     CodexAppError,
     codex_app_client_from_env,
 )
+from forge.adaptive.drivers.copilot_acp import (
+    CopilotACPError,
+    copilot_acp_client_from_env,
+)
 from forge.adaptive.drivers.opencode import opencode_client_from_env
 from forge.adaptive.drivers.opencode_serve import opencode_server_from_env
 from forge.adaptive.lane_channel import LaneControlChannel, lane_channel_from_env
@@ -156,6 +172,7 @@ from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
     "CODEX_LANE_DRIVER_ID",
+    "COPILOT_LANE_DRIVER_ID",
     "EPISODE_PHASE_KEYS",
     "LANE_DRIVER_ID",
     "LANE_DRIVER_IDS",
@@ -166,10 +183,13 @@ __all__ = [
     "LaneOutcome",
     "build_task",
     "classify_codex_turn",
+    "classify_copilot_turn",
     "classify_opencode_events",
     "classify_result",
     "codex_usage_receipt",
+    "copilot_usage_receipt",
     "drive_codex_lane",
+    "drive_copilot_lane",
     "drive_lane",
     "main",
     "opencode_usage_receipt",
@@ -193,6 +213,10 @@ CODEX_LANE_DRIVER_ID = "codex-sdk-lane"
 #: The opencode lane's registered harness id.
 OPENCODE_LANE_DRIVER_ID = "opencode-sdk-lane"
 
+#: The copilot lane's registered harness id — the interactive ACP twin of
+#: the scripted ``copilot`` batch lane (``copilot --acp`` over stdio).
+COPILOT_LANE_DRIVER_ID = "copilot-sdk-lane"
+
 #: ``--driver`` key → registered harness id (the meta ``driver`` and the
 #: template filter value). The worker dispatches the id; the lane takes
 #: the short key on the CLI.
@@ -200,6 +224,7 @@ LANE_DRIVER_IDS: dict[str, str] = {
     "claude": LANE_DRIVER_ID,
     "codex": CODEX_LANE_DRIVER_ID,
     "opencode": OPENCODE_LANE_DRIVER_ID,
+    "copilot": COPILOT_LANE_DRIVER_ID,
 }
 
 #: The brief file the lane job writes (``$FORGE_PLAN``) and the agent
@@ -1434,6 +1459,190 @@ async def run_opencode_lane(
     )
 
 
+# ---------------------------------------------------------------------------
+# The copilot lane (CopilotACPDriverClient over ``copilot --acp`` stdio)
+# ---------------------------------------------------------------------------
+
+
+def classify_copilot_turn(result: dict | None) -> tuple[str, str]:
+    """(exit classification, terminal reason) for a copilot ACP turn record.
+
+    The record is the client's ledger-corrected terminal dict
+    (``outcome`` is the honest verdict — ``end_turn`` after a recorded
+    cancel already reads ``interrupted_by_ledger`` there, the #4561
+    workaround); only ``outcome == completed`` exits clean, and the
+    outcome itself rides the meta as the reason, the vendor ``stopReason``
+    never silently replacing it. A record without an outcome is classified
+    from what it DID carry, never guessed.
+    """
+    outcome = str((result or {}).get("outcome") or "").strip()
+    if outcome == "completed":
+        return "completed", "completed"
+    if outcome:
+        return "failed", outcome
+    return "failed", "turn_end_unobserved"
+
+
+def _copilot_agent_text(events: list[dict[str, Any]]) -> str | None:
+    """The concatenated agent_message_chunk text, bounded — turn diagnosis."""
+    chunks: list[str] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("method") != "session/update":
+            continue
+        update = (event.get("params") or {}).get("update") or {}
+        if update.get("sessionUpdate") != "agent_message_chunk":
+            continue
+        content = update.get("content") or {}
+        text = content.get("text")
+        if isinstance(text, str) and text.strip():
+            chunks.append(text)
+    return "".join(chunks)[:400] if chunks else None
+
+
+def copilot_usage_receipt(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The meta ``usage`` receipt — honestly absent on the ACP wire today.
+
+    No practitioner has ever observed a ``usage_update`` over
+    ``copilot --acp`` and the spec's optional ``usage_update`` carries
+    context-window occupancy (``used``/``size``), not token metering —
+    nothing is mapped onto ``input_tokens``/``output_tokens`` and no cost
+    is fabricated. If a future binary DOES emit one, its counters ride
+    verbatim under additive keys with ``completeness: "unknown"`` (the
+    opencode-lane doctrine); no event means no receipt at all (None, not
+    a zeroed dict).
+    """
+    update: dict[str, Any] | None = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("method") != "session/update":
+            continue
+        candidate = (event.get("params") or {}).get("update") or {}
+        if candidate.get("sessionUpdate") == "usage_update":
+            update = candidate
+    if update is None:
+        return None
+
+    def _int(key: str) -> int | None:
+        value = update.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    receipt: dict[str, Any] = {
+        "driver": COPILOT_LANE_DRIVER_ID,
+        "completeness": "unknown",
+        "source": "session/update usage_update",
+    }
+    context_used = _int("used")
+    context_size = _int("size")
+    if context_used is not None:
+        receipt["context_used"] = context_used
+    if context_size is not None:
+        receipt["context_size"] = context_size
+    cost = update.get("cost")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        receipt["total_cost_usd"] = float(cost)
+    return receipt
+
+
+async def drive_copilot_lane(
+    client: Any,
+    *,
+    task: str,
+    budget_s: float,
+    grace_s: float = _DEFAULT_GRACE_S,
+    poll_s: float = _POLL_INTERVAL_S,
+) -> LaneOutcome:
+    """Drive ONE copilot ACP session to its terminal ``stopReason``, bounded.
+
+    ``start_session(task)`` answers IMMEDIATELY (``session/new`` assigns
+    the id before any turn resolves — this lane's id-existence advantage),
+    so the lane poll-watches the client's terminal record — the turn ends
+    when a ``stopReason`` arrives — with the whole turn bounded by
+    *budget_s*. On expiry the turn is cancelled (``session/cancel``); the
+    client's cancel LEDGER owns the #4561 workaround: a response that
+    says ``end_turn`` after a recorded cancel reports
+    ``interrupted_by_ledger``, never ``completed``. A short *grace_s*
+    window still honors the vendor's own terminal verdict (including a
+    truthful ``cancelled``); only a turn that produces no verdict at all
+    ends ``budget_exceeded``. The connection is ALWAYS closed (teardown
+    is bounded inside the driver).
+
+    No steering attach rides this lane yet: ACP has no mid-turn steer
+    (the client refuses a second prompt with ``TurnInProgressError``),
+    and the bridge's copilot adapter does not exist — the ``control``
+    seam stays with the claude/codex/opencode arms until one does.
+
+    NXT-28: the outcome carries the ``episode`` breakdown — startup
+    (handshake + session/new to the id), the polled turn, the
+    cancel+grace window (only when the budget expired it into one) and
+    teardown (``close``).
+    """
+    loop = asyncio.get_running_loop()
+    startup_started = loop.time()
+    session_id = await client.start_session(task)
+    startup_s = loop.time() - startup_started
+
+    async def _poll_verdict(deadline: float) -> dict | None:
+        while True:
+            result = client.turn_result(session_id)
+            if result is not None or loop.time() >= deadline:
+                return result
+            await asyncio.sleep(poll_s)
+
+    async def _turn() -> tuple[LaneOutcome, float, float | None]:
+        turn_started = loop.time()
+        result = await _poll_verdict(turn_started + budget_s)
+        interrupt_grace_s: float | None = None
+        if result is None:
+            # #4561: the cancel itself is fire-and-forget (a notification);
+            # the verdict — corrected by the client's ledger — is what the
+            # grace window waits for, never the wire's lying stopReason.
+            try:
+                await client.interrupt(session_id)
+            except CopilotACPError:
+                # e.g. the pipe died at the deadline — the grace poll below
+                # is the turn's last chance (a connection_lost record from
+                # the driver decides, never the error).
+                pass
+            grace_started = loop.time()
+            result = await _poll_verdict(grace_started + grace_s)
+            interrupt_grace_s = loop.time() - grace_started
+            turn_s = loop.time() - turn_started
+            if result is None:
+                return (
+                    LaneOutcome(exit_status="failed", terminal_reason="budget_exceeded"),
+                    turn_s,
+                    interrupt_grace_s,
+                )
+        else:
+            turn_s = loop.time() - turn_started
+        events = await client.query(session_id)
+        exit_status, reason = classify_copilot_turn(result)
+        error = str(result.get("error") or "") if isinstance(result, dict) else ""
+        return (
+            LaneOutcome(
+                exit_status=exit_status,
+                terminal_reason=reason,
+                usage=copilot_usage_receipt(events),
+                error=error,
+                reply_excerpt=_copilot_agent_text(events),
+            ),
+            turn_s,
+            interrupt_grace_s,
+        )
+
+    try:
+        outcome, turn_s, interrupt_grace_s = await _turn()
+    finally:
+        teardown_started = loop.time()
+        await client.close()
+        teardown_s = loop.time() - teardown_started
+    return replace(
+        outcome,
+        episode=_episode(startup_s, turn_s, interrupt_grace_s, teardown_s),
+    )
+
+
 def write_artifacts(
     outcome: LaneOutcome,
     *,
@@ -1551,6 +1760,11 @@ def _lane_model(driver_key: str) -> str:
     """The meta ``model`` route per lane, from the dispatch env."""
     if driver_key == "codex":
         return os.environ.get("FORGE_CODEX_MODEL") or os.environ.get("CODEX_MODEL") or ""
+    if driver_key == "copilot":
+        # Copilot's own model names only — FORGE_HARNESS_MODEL is
+        # deliberately out of the chain (the codex lesson: it carries
+        # gateway-specific names the vendor backend cannot run).
+        return os.environ.get("FORGE_COPILOT_MODEL") or os.environ.get("COPILOT_MODEL") or ""
     if driver_key == "opencode":
         return (
             os.environ.get("FORGE_OPENCODE_MODEL")
@@ -1687,6 +1901,24 @@ def main(
             grace_s=grace_s,
             poll_s=poll_s,
             control=control,
+        )
+    elif driver_key == "copilot":
+        # Ambient env carries COPILOT_BINARY/COPILOT_CWD and the inherited
+        # auth (COPILOT_GITHUB_TOKEN fine-grained PAT — the child reads the
+        # env itself; classic ghp_ tokens fail silently).
+        try:
+            client = copilot_acp_client_from_env()
+        except (RuntimeError, ValueError) as exc:
+            return _fail("driver_setup_error", str(exc))
+        # No steering attach on this lane yet: ACP has no mid-turn steer
+        # and the bridge has no copilot adapter — control stays unused.
+        drive = functools.partial(
+            drive_copilot_lane,
+            client,
+            task=task,
+            budget_s=budget_s,
+            grace_s=grace_s,
+            poll_s=poll_s,
         )
     else:  # opencode — the server + client are built inside the coroutine
         # (the spawner owns the loopback listener's lifetime).

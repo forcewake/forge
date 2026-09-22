@@ -241,10 +241,13 @@ class TestValidatePreference:
         """The builtin lane dispatches no harness — only the id set binds."""
         validate_preference(["grok-build"], None)
 
-    def test_shipped_driver_set_is_the_seven_lanes(self):
-        # The four scripted harness templates plus the three EXE-02
-        # interactive SDK lanes (claude/codex/opencode — same candidate
-        # contract; the agent is driven by forge.lane_driver).
+    def test_shipped_driver_set_is_the_nine_lanes(self):
+        # The four scripted harness templates, the three EXE-02 interactive
+        # SDK lanes (claude/codex/opencode — same candidate contract; the
+        # agent is driven by forge.lane_driver), the R28-21 reproducible
+        # .NET recipe (the claude-code contract on a digest-pinned .NET 9
+        # SDK image — docs/harnesses/dotnet-lane.md), and the interactive
+        # copilot ACP twin of the scripted copilot lane.
         assert SHIPPED_DRIVERS == {
             "claude-code",
             "grok-build",
@@ -253,6 +256,8 @@ class TestValidatePreference:
             "claude-sdk-lane",
             "codex-sdk-lane",
             "opencode-sdk-lane",
+            "dotnet-lane",
+            "copilot-sdk-lane",
         }
 
     def test_the_sdk_lane_shares_the_claude_code_credential_recipe(self):
@@ -298,6 +303,38 @@ class TestValidatePreference:
         assert DRIVER_CREDENTIAL_VARS["opencode-sdk-lane"] == ("ZAI_API_KEY",)
         assert DRIVER_OPTIONAL_CREDENTIAL_VARS["opencode-sdk-lane"] == (
             "OPENCODE_PROVIDER_API_KEY",
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
+        )
+
+    def test_the_dotnet_lane_declares_no_driver_credentials(self):
+        # R28-21: the .NET lane rides the forge gateway — the shared
+        # ANTHROPIC_* surface the runner already provisions for
+        # claude-shaped lanes. The registry deliberately requires NOTHING
+        # per-driver: doctor has no new variable to check, and a missing
+        # gateway pair fails at the driver's own auth boundary (documented
+        # in docs/harnesses/dotnet-lane.md).
+        from forge.runs.harness_selection import (
+            DRIVER_CREDENTIAL_VARS,
+            DRIVER_OPTIONAL_CREDENTIAL_VARS,
+        )
+
+        assert DRIVER_CREDENTIAL_VARS["dotnet-lane"] == ()
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS.get("dotnet-lane", ()) == ()
+
+    def test_the_copilot_sdk_lane_shares_the_batch_copilot_token(self):
+        # The ACP child reads the SAME fine-grained PAT ("Copilot
+        # Requests" permission) the scripted copilot lane consumes — one
+        # credential, both surfaces; the optional surface is the shared
+        # sdk-lane control pair only.
+        from forge.runs.harness_selection import (
+            DRIVER_CREDENTIAL_VARS,
+            DRIVER_OPTIONAL_CREDENTIAL_VARS,
+        )
+
+        assert DRIVER_CREDENTIAL_VARS["copilot-sdk-lane"] == DRIVER_CREDENTIAL_VARS["copilot"]
+        assert DRIVER_CREDENTIAL_VARS["copilot-sdk-lane"] == ("COPILOT_GITHUB_TOKEN",)
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["copilot-sdk-lane"] == (
             "FORGE_LANE_CONTROL_URL",
             "FORGE_LANE_CONTROL_TOKEN",
         )

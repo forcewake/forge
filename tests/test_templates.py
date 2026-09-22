@@ -23,6 +23,8 @@ HARNESS_TEMPLATES = (
     "claude-sdk-lane.gitlab-ci.yml",
     "codex-sdk-lane.gitlab-ci.yml",
     "opencode-sdk-lane.gitlab-ci.yml",
+    "dotnet-lane.gitlab-ci.yml",
+    "copilot-sdk-lane.gitlab-ci.yml",
 )
 
 # A write token must never appear, but FORGE_BOT_READ_TOKEN (the read-only
@@ -250,6 +252,8 @@ class TestDriverFilter:
         "claude-sdk-lane.gitlab-ci.yml": "claude-sdk-lane",
         "codex-sdk-lane.gitlab-ci.yml": "codex-sdk-lane",
         "opencode-sdk-lane.gitlab-ci.yml": "opencode-sdk-lane",
+        "dotnet-lane.gitlab-ci.yml": "dotnet-lane",
+        "copilot-sdk-lane.gitlab-ci.yml": "copilot-sdk-lane",
     }
 
     def test_every_template_carries_its_own_filter(self, template_doc, request):
@@ -295,3 +299,90 @@ class TestEventFilters:
         for name in ("grok.gitlab-ci.yml", "claude-code.gitlab-ci.yml"):
             text = (TEMPLATES_DIR / name).read_text()
             assert ".forge/usage.json" in text, name
+
+
+class TestDotnetLaneRecipe:
+    """R28-21: the reproducible .NET recipe — one complete runtime lane,
+    not a file-extension allowlist addition. The template pins every input
+    (image digest, global.json, nuget.lock.json) and the render arm
+    produces a valid script (npm pin → SDK check → dotnet test).
+
+    NOTE: deliberately NOT using the parametrized ``template_doc`` /
+    ``template_text`` fixtures — those sweep every shipped template; this
+    class pins the one .NET lane file directly.
+    """
+
+    def _text(self) -> str:
+        return (TEMPLATES_DIR / "dotnet-lane.gitlab-ci.yml").read_text()
+
+    def _doc(self) -> dict:
+        import yaml
+
+        return yaml.safe_load(self._text())["forge-agent-dotnet"]
+
+    def test_image_is_pinned_by_digest(self):
+        image = self._doc()["image"]
+        assert image.startswith("mcr.microsoft.com/dotnet/sdk:")
+        assert "@sha256:" in image, "the lane image must be digest-pinned (R28-21)"
+
+    def test_restore_and_build_run_locked_mode(self):
+        text = self._text()
+        assert "dotnet restore --locked-mode" in text
+        assert "dotnet build --no-restore --locked-mode" in text
+
+    def test_tests_emit_trx_the_verifier_reads(self):
+        text = self._text()
+        assert '--logger "trx;LogFileName=$FORGE_DOTNET_TRX"' in text
+        assert "--results-directory .forge/testresults" in text
+        # the TRX counters land in the candidate meta (the verifier's
+        # surface — docs/harnesses/dotnet-lane.md).
+        assert '"verification"' in text
+        assert "ResultSummary" in text and "Counters" in text
+
+    def test_pinned_inputs_fail_closed_before_the_paid_call(self):
+        text = self._text()
+        # global.json and a committed lock file are prerequisites: the lane
+        # refuses to run without them, BEFORE the agent burns a token.
+        assert "global.json is required" in text
+        assert "no nuget.lock.json found" in text
+        assert "dotnet --version" in text
+
+    def test_environment_failures_separated_from_test_failures(self):
+        text = self._text()
+        assert "FORGE_RESTORE_EXIT" in text
+        assert "FORGE_BUILD_EXIT" in text
+        assert "FORGE_TEST_EXIT" in text
+
+    def test_render_arm_produces_a_valid_script(self):
+        import shlex
+        import shutil
+        import subprocess
+
+        from forge.harness_entry import render_driver_script
+        from forge.harnesses.prompt import TASK_PROMPT
+
+        script = render_driver_script("dotnet-lane", "glm-5.3-flash", ".forge/brief.md")
+        # npm pin → SDK check → dotnet test, in order.
+        assert "npm install -g --no-fund --no-audit @anthropic-ai/claude-code@" in script
+        preamble = script.index("claude --version")
+        assert script.index("dotnet --version") > preamble
+        assert script.index("dotnet restore --locked-mode") > script.index("dotnet --version")
+        assert "dotnet test --no-build --logger" in script
+        # the agent keeps the claude-code unattended contract.
+        assert shlex.quote(TASK_PROMPT) in script
+        assert "tee -a .forge/events.jsonl" in script
+        bash = shutil.which("bash")
+        if bash is not None:
+            proc = subprocess.run(
+                [bash, "-n"], input=script.encode(), capture_output=True, check=False
+            )
+            assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+
+    def test_render_arm_records_the_trx_block(self):
+        from forge.harness_entry import render_driver_script
+
+        script = render_driver_script("dotnet-lane", "", ".forge/brief.md")
+        assert ".forge/verify.json" in script
+        assert "dotnet-trx/1" in script
+        # the mechanical deny rides this lane too (its agent is a CLI).
+        assert '--disallowedTools "Bash(git commit:*)" "Bash(git push:*)"' in script

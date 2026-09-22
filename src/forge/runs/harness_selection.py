@@ -64,6 +64,17 @@ SHIPPED_DRIVERS: frozenset[str] = frozenset(
         "claude-sdk-lane",
         "codex-sdk-lane",
         "opencode-sdk-lane",
+        # R28-21: the reproducible .NET recipe — the claude-code contract
+        # on a digest-pinned .NET 9 SDK image with a locked restore/build
+        # and TRX tests (docs/harnesses/dotnet-lane.md). One complete
+        # runtime lane for API/database/broker systems, not a
+        # file-extension allowlist entry.
+        "dotnet-lane",
+        # The INTERACTIVE copilot twin of the scripted ``copilot`` batch
+        # lane: the agent is driven by forge's ACP client
+        # (forge.adaptive.drivers.copilot_acp) against a spawned
+        # ``copilot --acp --stdio`` server — same candidate contract.
+        "copilot-sdk-lane",
     }
 )
 
@@ -96,6 +107,18 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     # ambient key the batch opencode lane uses; the generic BYOK surface
     # (PUT /api/auth/:id) is optional.
     "opencode-sdk-lane": ("ZAI_API_KEY",),
+    # dotnet-lane (R28-21): NONE — the .NET lane's agent rides the SAME
+    # forge gateway the claude-code lane consumes (ANTHROPIC_AUTH_TOKEN +
+    # ANTHROPIC_BASE_URL provisioned as the runner's shared gateway
+    # surface), so doctor has no NEW per-driver variable to require; a
+    # missing gateway pair fails at the driver's own auth boundary,
+    # exactly like the claude-code lane.
+    "dotnet-lane": (),
+    # copilot-sdk-lane: the ACP child inherits the ambient env and reads
+    # the SAME fine-grained PAT ("Copilot Requests" permission) the batch
+    # copilot lane consumes — nothing new is requested (classic ghp_
+    # tokens fail silently; the lane reports its own auth failure).
+    "copilot-sdk-lane": ("COPILOT_GITHUB_TOKEN",),
 }
 
 #: OPTIONAL per-driver credential surfaces (C03): a recipe may map them
@@ -114,6 +137,10 @@ DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
         "FORGE_LANE_CONTROL_URL",
         "FORGE_LANE_CONTROL_TOKEN",
     ),
+    # copilot-sdk-lane: no provider-native optional surface — the shared
+    # sdk-lane control pair only (the steering attach is future work on
+    # this lane; the variables are registered for the dispatch contract).
+    "copilot-sdk-lane": ("FORGE_LANE_CONTROL_URL", "FORGE_LANE_CONTROL_TOKEN"),
 }
 
 #: A version/dist-tag token in a pinned chain entry (``driver@version``):

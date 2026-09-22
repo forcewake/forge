@@ -49,6 +49,7 @@ from forge.lane_driver import (
     build_task,
     classify_result,
     drive_codex_lane,
+    drive_copilot_lane,
     drive_lane,
     main,
     run_opencode_lane,
@@ -779,6 +780,285 @@ class TestCodexClassification:
 
 
 # ---------------------------------------------------------------------------
+# The copilot lane (CopilotACPDriverClient faked at the module seam — no
+# subprocess, no ACP server, no network)
+# ---------------------------------------------------------------------------
+
+
+ACP_SESSION_ID = "ses_fake"
+
+
+def _copilot_result(
+    stop_reason: str = "end_turn",
+    *,
+    outcome: str | None = None,
+    cancelled: bool = False,
+    error: str = "",
+) -> dict:
+    """One ledger-corrected terminal record, as the ACP client reports it."""
+    record: dict = {
+        "stopReason": stop_reason,
+        "outcome": outcome or stop_reason,
+        "cancelled_by_ledger": cancelled,
+    }
+    if error:
+        record["error"] = error
+    return record
+
+
+def _acp_update(kind: str, text: str = "", session_id: str = ACP_SESSION_ID) -> dict:
+    return {
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {"sessionUpdate": kind, "content": {"type": "text", "text": text}},
+        },
+    }
+
+
+class FakeCopilotLaneClient:
+    """Stand-in for :class:`CopilotACPDriverClient` at the lane seam.
+
+    ``turn_result()`` is the terminal-record poll the real client offers
+    (None until the turn resolves); the interrupt fakes mirror the real
+    contract: the #4561 record lands only when the cancel produced one.
+    """
+
+    def __init__(
+        self,
+        result: dict | None = None,
+        *,
+        events: list[dict] | None = None,
+        interrupt_result: dict | None = None,
+    ):
+        self._result = result
+        self._events = list(events or [])
+        self._interrupt_result = interrupt_result
+        self.tasks: list[str] = []
+        self.interrupt_calls = 0
+        self.closed = False
+
+    async def start_session(self, task: str) -> str:
+        self.tasks.append(task)
+        return ACP_SESSION_ID
+
+    def turn_result(self, session_id: str) -> dict | None:
+        return dict(self._result) if self._result is not None else None
+
+    async def interrupt(self, session_id: str) -> None:
+        self.interrupt_calls += 1
+        if self._interrupt_result is not None:
+            self._result = self._interrupt_result
+
+    async def query(self, session_id: str) -> list[dict]:
+        drained, self._events = self._events, []
+        return drained
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def copilot_lane_env(lane_env, monkeypatch):
+    monkeypatch.setenv("FORGE_COPILOT_MODEL", "gpt-5.2")
+    return lane_env
+
+
+def install_copilot_client(monkeypatch, client: FakeCopilotLaneClient) -> FakeCopilotLaneClient:
+    monkeypatch.setattr(lane_driver, "copilot_acp_client_from_env", lambda: client)
+    return client
+
+
+class TestCopilotLane:
+    def test_completed_turn_writes_the_lane_contract_and_exits_zero(
+        self, copilot_lane_env, monkeypatch, capsys
+    ):
+        client = install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(
+                result=_copilot_result("end_turn", outcome="completed"),
+                events=[
+                    _acp_update("agent_message_chunk", "renamed the field and updated tests"),
+                    _acp_update("tool_call"),
+                ],
+            ),
+        )
+
+        assert main(["--driver", "copilot"]) == 0
+
+        meta = read_meta(copilot_lane_env)
+        assert meta["driver"] == "copilot-sdk-lane"
+        assert meta["attempt_base"] == ATTEMPT_BASE
+        assert meta["model"] == "gpt-5.2"
+        assert meta["exit"] == "completed"
+        assert meta["terminal_reason"] == "completed"
+        # No per-turn usage crosses the ACP wire — unknown stays unknown.
+        assert meta["usage"] is None
+        assert read_usage(copilot_lane_env) is None
+        assert meta["reply_excerpt"] == "renamed the field and updated tests"
+        assert "lane_driver: copilot-sdk-lane exit=completed reason=completed" in (
+            capsys.readouterr().err
+        )
+        assert client.closed
+        assert "episode" in meta
+
+    def test_the_brief_becomes_the_one_task(self, copilot_lane_env, monkeypatch):
+        client = install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(result=_copilot_result("end_turn", outcome="completed")),
+        )
+
+        main(["--driver", "copilot"])
+
+        (task,) = client.tasks
+        assert "PLAN: modernize the orders service" in task
+        assert "issue #42" in task
+        assert task.rstrip().endswith(NO_COMMIT_ADDENDUM)
+
+    def test_the_env_dispatch_selects_the_lane_without_a_flag(self, copilot_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_DRIVER", "copilot")
+        install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(result=_copilot_result("end_turn", outcome="completed")),
+        )
+
+        assert main() == 0
+
+        assert read_meta(copilot_lane_env)["driver"] == "copilot-sdk-lane"
+
+    def test_budget_expiry_reclassifies_the_4561_lie(self, copilot_lane_env, monkeypatch):
+        # The canceled turn answers stopReason end_turn on the wire; the
+        # client's ledger-corrected record says interrupted_by_ledger —
+        # the reason the meta carries, never "completed".
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.5")
+        client = install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(
+                interrupt_result=_copilot_result(
+                    "end_turn", outcome="interrupted_by_ledger", cancelled=True
+                )
+            ),
+        )
+
+        assert main(["--driver", "copilot"]) == 1
+
+        meta = read_meta(copilot_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "interrupted_by_ledger"
+        assert client.interrupt_calls == 1
+        assert client.closed
+
+    def test_a_truthful_cancelled_stop_reason_is_honored(self, copilot_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.5")
+        install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(interrupt_result=_copilot_result("cancelled", cancelled=True)),
+        )
+
+        assert main(["--driver", "copilot"]) == 1
+
+        meta = read_meta(copilot_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "cancelled"
+
+    def test_a_silent_interrupt_ends_as_budget_exceeded(self, copilot_lane_env, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_BUDGET_SECONDS", "0.05")
+        monkeypatch.setenv("FORGE_LANE_GRACE_SECONDS", "0.05")
+        client = install_copilot_client(monkeypatch, FakeCopilotLaneClient())
+
+        assert main(["--driver", "copilot"]) == 1
+
+        meta = read_meta(copilot_lane_env)
+        assert meta["terminal_reason"] == "budget_exceeded"
+        assert client.interrupt_calls == 1
+
+    def test_a_prompt_error_record_carries_its_detail(self, copilot_lane_env, monkeypatch):
+        install_copilot_client(
+            monkeypatch,
+            FakeCopilotLaneClient(
+                result=_copilot_result("", outcome="request_error", error="Session not found")
+            ),
+        )
+
+        assert main(["--driver", "copilot"]) == 1
+
+        meta = read_meta(copilot_lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "request_error"
+        assert "Session not found" in meta["error"]
+
+    async def test_drive_copilot_lane_records_the_episode_phases(self):
+        client = FakeCopilotLaneClient(result=_copilot_result("end_turn", outcome="completed"))
+
+        outcome = await drive_copilot_lane(client, task="the task", budget_s=5.0, poll_s=0.01)
+
+        assert outcome.exit_status == "completed"
+        assert set(outcome.episode) == set(EPISODE_PHASE_KEYS)
+        assert outcome.episode["interrupt_grace_s"] is None  # no interrupt happened
+        assert client.closed
+
+
+class TestCopilotClassification:
+    def test_only_the_completed_outcome_exits_clean(self):
+        assert lane_driver.classify_copilot_turn(
+            _copilot_result("end_turn", outcome="completed")
+        ) == (
+            "completed",
+            "completed",
+        )
+
+    def test_the_ledger_outcome_and_vendor_spellings_carry_through(self):
+        assert lane_driver.classify_copilot_turn(
+            _copilot_result("end_turn", outcome="interrupted_by_ledger", cancelled=True)
+        ) == ("failed", "interrupted_by_ledger")
+        assert lane_driver.classify_copilot_turn(_copilot_result("cancelled", cancelled=True)) == (
+            "failed",
+            "cancelled",
+        )
+        assert lane_driver.classify_copilot_turn(_copilot_result("refusal", outcome="refusal")) == (
+            "failed",
+            "refusal",
+        )
+        assert lane_driver.classify_copilot_turn(
+            _copilot_result("max_tokens", outcome="max_tokens")
+        ) == ("failed", "max_tokens")
+
+    def test_a_recordless_turn_never_guesses_success(self):
+        assert lane_driver.classify_copilot_turn(None) == ("failed", "turn_end_unobserved")
+        assert lane_driver.classify_copilot_turn({}) == ("failed", "turn_end_unobserved")
+
+    def test_usage_stays_none_without_a_usage_update(self):
+        # The honest receipt: no per-turn tokens cross the ACP wire.
+        assert lane_driver.copilot_usage_receipt([]) is None
+        assert lane_driver.copilot_usage_receipt([_acp_update("agent_message_chunk", "hi")]) is None
+
+    def test_a_future_usage_update_rides_verbatim_never_as_tokens(self):
+        # If a binary ever emits the spec's optional usage_update, its
+        # context-window counters ride under additive keys with
+        # completeness unknown — never fabricated input/output tokens.
+        receipt = lane_driver.copilot_usage_receipt(
+            [
+                _acp_update("agent_message_chunk", "hi"),
+                {
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": ACP_SESSION_ID,
+                        "update": {"sessionUpdate": "usage_update", "used": 12, "size": 200},
+                    },
+                },
+            ]
+        )
+        assert receipt["driver"] == "copilot-sdk-lane"
+        assert receipt["completeness"] == "unknown"
+        assert receipt["context_used"] == 12
+        assert receipt["context_size"] == 200
+        assert "input_tokens" not in receipt
+        assert "output_tokens" not in receipt
+
+
+# ---------------------------------------------------------------------------
 # The opencode lane (OpenCodeServer + OpenCodeDriverClient faked at the
 # module seam — no serve process, no HTTP, no network)
 # ---------------------------------------------------------------------------
@@ -1094,10 +1374,12 @@ class TestLaneRegistration:
         # until that registration lands beside them).
         assert lane_driver.CODEX_LANE_DRIVER_ID == "codex-sdk-lane"
         assert lane_driver.OPENCODE_LANE_DRIVER_ID == "opencode-sdk-lane"
+        assert lane_driver.COPILOT_LANE_DRIVER_ID == "copilot-sdk-lane"
         assert lane_driver.LANE_DRIVER_IDS == {
             "claude": "claude-sdk-lane",
             "codex": "codex-sdk-lane",
             "opencode": "opencode-sdk-lane",
+            "copilot": "copilot-sdk-lane",
         }
 
     def test_an_unknown_driver_fails_closed_but_still_writes_the_meta(self, lane_env, monkeypatch):
@@ -1179,14 +1461,18 @@ CODEX_TEMPLATE = (
 OPENCODE_TEMPLATE = (
     Path(__file__).resolve().parent.parent / "ci" / "templates" / "opencode-sdk-lane.gitlab-ci.yml"
 )
+COPILOT_TEMPLATE = (
+    Path(__file__).resolve().parent.parent / "ci" / "templates" / "copilot-sdk-lane.gitlab-ci.yml"
+)
 
 SDK_LANE_TEMPLATES = {
     CODEX_TEMPLATE: ("codex-sdk-lane", "codex"),
     OPENCODE_TEMPLATE: ("opencode-sdk-lane", "opencode"),
+    COPILOT_TEMPLATE: ("copilot-sdk-lane", "copilot"),
 }
 
 
-@pytest.mark.parametrize("template", list(SDK_LANE_TEMPLATES), ids=["codex", "opencode"])
+@pytest.mark.parametrize("template", list(SDK_LANE_TEMPLATES), ids=["codex", "opencode", "copilot"])
 class TestSdkLaneTemplates:
     def _text(self, template: Path) -> str:
         return template.read_text()
@@ -1338,6 +1624,37 @@ class TestOpenCodeLaneTemplateDetails:
         assert not any(line.lstrip().startswith("opencode serve") for line in text.splitlines())
         assert 'export OPENCODE_SERVE_CWD="$PWD"' in text
         assert "export FORGE_OPENCODE_MODEL=" in text
+
+
+class TestCopilotLaneTemplateDetails:
+    def test_the_cli_is_github_copilot_over_npm_at_the_forge_pin(self):
+        text = COPILOT_TEMPLATE.read_text()
+
+        # The pin defaults to forge's known-good copilot pin (1.0.86, the
+        # 2026-09-17 registry slice) — NO live smoke has verified the ACP
+        # wire yet, so the default moves only with a deliberate re-smoke.
+        assert '"@github/copilot@${FORGE_COPILOT_VERSION:-1.0.86}"' in text
+        assert 'FORGE_COPILOT_VERSION: "1.0.86"' in text
+        assert "copilot --version" in text
+
+    def test_the_documented_credential_rides_the_ambient_env(self):
+        # The ACP child reads COPILOT_GITHUB_TOKEN itself — a fine-grained
+        # PAT with the "Copilot Requests" permission; classic ghp_ tokens
+        # fail silently (the header documents exactly that).
+        text = COPILOT_TEMPLATE.read_text()
+
+        assert "COPILOT_GITHUB_TOKEN" in text
+        assert "Copilot Requests" in text
+
+    def test_the_model_route_and_cwd_exports(self):
+        text = COPILOT_TEMPLATE.read_text()
+
+        assert "export FORGE_COPILOT_MODEL=" in text
+        assert 'export COPILOT_CWD="$PWD"' in text
+        # The codex lesson: gateway-specific FORGE_HARNESS_MODEL names are
+        # deliberately NOT routed to a copilot backend (the comment may
+        # NAME the exclusion — no export ever reads it).
+        assert "export FORGE_HARNESS_MODEL" not in text
 
 
 # ---------------------------------------------------------------------------

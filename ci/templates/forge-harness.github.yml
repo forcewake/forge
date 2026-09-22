@@ -33,7 +33,7 @@ on:
         required: true
         type: string
       driver:
-        description: "harness driver: claude-code | grok-build | opencode | copilot | claude-sdk-lane | codex-sdk-lane | opencode-sdk-lane"
+        description: "harness driver: claude-code | grok-build | opencode | copilot | claude-sdk-lane | codex-sdk-lane | opencode-sdk-lane | copilot-sdk-lane"
         required: true
         type: string
       model:
@@ -255,6 +255,8 @@ jobs:
           #   codex-sdk-lane: OPENAI_API_KEY/CODEX_API_KEY (+ FORGE_CODEX_AUTH
           #     — the optional ChatGPT-login blob)
           #   opencode-sdk-lane: the same ZAI_API_KEY the batch lane uses
+#   copilot-sdk-lane: the same COPILOT_GITHUB_TOKEN fine-grained PAT
+#     the batch copilot lane uses (the ACP child reads the env)
           #   copilot: COPILOT_GITHUB_TOKEN
           ANTHROPIC_API_KEY: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_API_KEY || '' }}
           ANTHROPIC_AUTH_TOKEN: ${{ (inputs.driver == 'claude-code' || inputs.driver == 'claude-sdk-lane') && secrets.ANTHROPIC_AUTH_TOKEN || '' }}
@@ -264,7 +266,7 @@ jobs:
           CODEX_API_KEY: ${{ inputs.driver == 'codex-sdk-lane' && secrets.CODEX_API_KEY || '' }}
           FORGE_CODEX_AUTH: ${{ inputs.driver == 'codex-sdk-lane' && secrets.FORGE_CODEX_AUTH || '' }}
           FORGE_GROK_AUTH: ${{ inputs.driver == 'grok-build' && secrets.FORGE_GROK_AUTH || '' }}
-          COPILOT_GITHUB_TOKEN: ${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}
+          COPILOT_GITHUB_TOKEN: ${{ (inputs.driver == 'copilot' || inputs.driver == 'copilot-sdk-lane') && secrets.COPILOT_GITHUB_TOKEN || '' }}
           # R15: per-driver CLI version pins (JSON object driver → version;
           # "latest" = unpinned). A repo VARIABLE like FORGE_HARNESS_MCP —
           # unset falls back to forge's known-good defaults.
@@ -287,8 +289,8 @@ jobs:
           # as a repo SECRET. SDK lanes only — the scripted drivers have
           # no steering attach to feed. Both empty → the lane honestly
           # stays on its local mailbox.
-          FORGE_LANE_CONTROL_URL: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && vars.FORGE_LANE_CONTROL_URL || '' }}
-          FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && inputs.lane_control_token || '' }}
+          FORGE_LANE_CONTROL_URL: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane' || inputs.driver == 'copilot-sdk-lane') && vars.FORGE_LANE_CONTROL_URL || '' }}
+          FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane' || inputs.driver == 'copilot-sdk-lane') && inputs.lane_control_token || '' }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):

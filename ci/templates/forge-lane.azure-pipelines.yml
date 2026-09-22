@@ -105,6 +105,7 @@ jobs:
       #   grok-build:  FORGE_GROK_AUTH (the provider-native auth blob)
       #   opencode:    ZAI_API_KEY
       #   copilot:     COPILOT_GITHUB_TOKEN
+      #   copilot-sdk-lane: the SAME copilot PAT (the ACP child reads the env)
       # A driver never receives another provider's secret.
       ${{ if eq(parameters.driver, 'claude-code') }}:
         LANE_ANTHROPIC_AUTH_TOKEN: $(ANTHROPIC_AUTH_TOKEN)
@@ -122,6 +123,8 @@ jobs:
       ${{ if eq(parameters.driver, 'opencode') }}:
         LANE_ZAI_API_KEY: $(ZAI_API_KEY)
       ${{ if eq(parameters.driver, 'copilot') }}:
+        LANE_COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
+      ${{ if eq(parameters.driver, 'copilot-sdk-lane') }}:
         LANE_COPILOT_GITHUB_TOKEN: $(COPILOT_GITHUB_TOKEN)
     steps:
       # forge requires Python >=3.13 — the hosted ubuntu-latest image

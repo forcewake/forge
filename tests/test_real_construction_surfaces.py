@@ -525,10 +525,11 @@ class TestHarnessDriverRenderArms:
 
     def test_the_lane_runner_accepts_the_keys_the_arms_render(self):
         # The rendered --driver values must be dispatchable CLI choices.
-        assert set(LANE_DRIVER_IDS) == {"claude", "codex", "opencode"}
+        assert set(LANE_DRIVER_IDS) == {"claude", "codex", "opencode", "copilot"}
         # The registered harness ids the runner reports are real driver names.
         assert LANE_DRIVER_IDS["codex"] == "codex-sdk-lane"
         assert LANE_DRIVER_IDS["opencode"] == "opencode-sdk-lane"
+        assert LANE_DRIVER_IDS["copilot"] == "copilot-sdk-lane"
         assert LANE_DRIVER_IDS["codex"] in DRIVERS and LANE_DRIVER_IDS["opencode"] in DRIVERS
 
     def test_drivers_and_shipped_drivers_agree(self):
@@ -537,7 +538,12 @@ class TestHarnessDriverRenderArms:
         # closed vocabularies now agree exactly.
         assert set(DRIVERS) <= SHIPPED_DRIVERS
         assert SHIPPED_DRIVERS - set(DRIVERS) == frozenset()
-        assert LANE_DRIVERS == ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane")
+        assert LANE_DRIVERS == (
+            "claude-sdk-lane",
+            "codex-sdk-lane",
+            "opencode-sdk-lane",
+            "copilot-sdk-lane",
+        )
         assert LANE_DRIVER_IDS["claude"] == "claude-sdk-lane"
 
 

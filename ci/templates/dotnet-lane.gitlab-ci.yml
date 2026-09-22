@@ -1,0 +1,264 @@
+# forge implementer harness — dotnet-lane (R28-21: the reproducible .NET
+# recipe — one complete runtime lane for systems with APIs, databases and
+# queues, not a file-extension allowlist entry).
+#
+# The lane is the claude-code CONTRACT on a .NET 9 SDK image: the agent
+# rides the SAME forge gateway (ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL —
+# no Copilot or OpenAI keys are involved anywhere), and its candidate is
+# verified by PINNED, LOCKED inputs instead of whatever the runner happens
+# to have cached:
+#
+#   global.json          pins the EXACT .NET SDK version — `dotnet
+#                         --version` refuses to run on any other
+#   nuget.lock.json      pins every transitive package — restore and
+#                         build run --locked-mode and FAIL when the lock
+#                         file no longer matches the project files
+#   TRX                  `dotnet test --logger trx` writes the VS test
+#                         report; the lane parses its Counters into the
+#                         candidate meta (the verifier's format — see
+#                         docs/harnesses/dotnet-lane.md)
+#
+# Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
+# human-applied, static include — see docs/harness-onboarding.md):
+#
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/<org>/forge/main/ci/templates/dotnet-lane.gitlab-ci.yml'
+#
+# The job only runs when forge triggers a pipeline with $FORGE_RUN_ID set —
+# regular pipelines (MRs, pushes by humans) skip it via the rules block,
+# which also filters on $FORGE_HARNESS_DRIVER (ADR-0023 §7): a repo that
+# includes several forge templates runs exactly one lane (driver:
+# dotnet-lane).
+#
+# Required project CI variables (masked/protected per policy; forge stores
+# none of them — ADR-0015 §4):
+#   ANTHROPIC_AUTH_TOKEN   harness API key for the forge gateway (the SAME
+#                          recipe as the claude-code lane; never forge's)
+#   ANTHROPIC_BASE_URL     harness API base URL (the forge gateway/proxy)
+#   FORGE_BOT_READ_TOKEN   OPTIONAL read-only PAT (repo read only). The
+#                          proposal-only lane (ADR-0016) must NEVER receive
+#                          a write token; when unset the lane keeps the
+#                          runner's default fetch credential only.
+#
+# Runner requirements: ephemeral docker executor, no privileged mode, no
+# Docker socket, no production secrets (ADR-0002 execution profile).
+#
+# Candidate contract (ADR-0016 §1, proposal-only): the job checks out the
+# frozen attempt base ($FORGE_ATTEMPT_BASE, detached), runs the driver
+# WITHOUT any commit/push capability, and uploads the working-tree delta as
+# CI artifacts:
+#   .forge/candidate.diff        git diff --binary --full-index vs the base
+#   .forge/candidate.meta.json   attempt base, driver, model, exit, usage +
+#                                the TRX verification block
+# The last trace lines carry the machine-readable markers:
+#   FORGE_CANDIDATE:{"attempt_base": "<oid>", "artifact": "candidate.diff", "exit": "<completed|failed>"}
+#   FORGE_RESULT:{"head": "<attempt_base>", "summary": "..."}   (legacy v0.2 line, migration only)
+# forge downloads the artifacts and publishes via the trusted publisher;
+# claims in the trace are never trusted.
+
+forge-agent-dotnet:
+  # R28-21: pinned by DIGEST, not the moving 9.0 tag — the SDK the lane
+  # builds with is part of the recipe (digest verified live against MCR
+  # 2026-09-23; refresh deliberately, in review).
+  image: mcr.microsoft.com/dotnet/sdk:9.0@sha256:01fabc4758d1d74e39eda700c8463dae6241a61481f973683692ddcb59a5eeb7
+  timeout: 45m
+  rules:
+    # ADR-0023 §7: a repo including MULTIPLE forge templates runs exactly
+    # one lane — the one whose driver matches $FORGE_HARNESS_DRIVER (set by
+    # the dispatch leg). Unset/empty keeps single-driver repos as before.
+    - if: '$FORGE_RUN_ID && ($FORGE_HARNESS_DRIVER == "" || $FORGE_HARNESS_DRIVER == "dotnet-lane")'
+  variables:
+    ANTHROPIC_MODEL: "glm-5.3-flash[1m]"
+    API_TIMEOUT_MS: "300000"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    # GitLab docker executors run containers as root; claude refuses
+    # --dangerously-skip-permissions for root unless told it is sandboxed.
+    # The ephemeral CI container IS the execution profile (ADR-0002).
+    IS_SANDBOX: "1"
+    # R15: the agent CLI pin — a vendor release must not change lane
+    # behavior between the plan gate and the run; the preamble echoes the
+    # installed version so pin drift is visible, never silent.
+    FORGE_CLAUDE_VERSION: "2.1.276"
+    # The reproducible-recipe knobs (R28-21): the build configuration and
+    # the TRX file name the verifier's parser keys on.
+    FORGE_DOTNET_CONFIGURATION: "Release"
+    FORGE_DOTNET_TRX: "forge.trx"
+    DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    DOTNET_NOLOGO: "1"
+  before_script:
+    # The agent CLI is npm-distributed; the .NET SDK image carries no node
+    # (Debian bookworm's nodejs 18 satisfies claude-code). python3 parses
+    # the TRX report into the candidate meta at the end of the run.
+    - apt-get update -qq && apt-get install -y -qq nodejs npm python3 >/dev/null
+    - |
+      for attempt in 1 2 3; do
+        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${FORGE_CLAUDE_VERSION:-latest}" && break
+        echo "npm install of claude-code failed (attempt $attempt), retrying..."
+        sleep $((attempt * 5))
+      done
+      claude --version
+    # R28-21 step 1 — the pinned SDK check: global.json must exist and pin
+    # the version THIS image carries; `dotnet --version` resolves THROUGH
+    # global.json and fails loudly on any mismatch, so a drifted runner
+    # image is caught BEFORE the agent burns a single token.
+    - |
+      if [ ! -f global.json ]; then
+        echo "dotnet-lane: global.json is required (pin the .NET SDK version — R28-21 reproducible recipe)" >&2
+        exit 1
+      fi
+      dotnet --version
+    # R28-21 step 2 — the locked dependency surface: every restore must
+    # consume a committed nuget.lock.json (--locked-mode fails the build
+    # when project files drifted past the lock — that is the point).
+    - |
+      if ! find . -name "*.lock.json" -not -path "*/bin/*" -not -path "*/obj/*" | grep -q .; then
+        echo "dotnet-lane: no nuget.lock.json found — commit it (lock via RestorePackagesWithLockFile, R28-21)" >&2
+        exit 1
+      fi
+    - export NO_PROXY="${CI_SERVER_HOST},127.0.0.1,localhost"
+    - git config user.name "forge"
+    - git config user.email "forge@users.noreply.gitlab.com"
+    # Proposal-only lane (ADR-0016): the remote carries a READ-ONLY
+    # credential at most, and push is disabled by construction — the job has
+    # nothing to push even if the model tried.
+    - 'git remote set-url origin "https://forge:${FORGE_BOT_READ_TOKEN:-forge:placeholder}@${CI_SERVER_FQDN}/${CI_PROJECT_PATH}.git"'
+    - git remote set-url --push origin FORBIDDEN
+    # .forge/ is a control directory: local-only, never staged, never
+    # committed (ADR-0016 §1 step 5).
+    - mkdir -p .forge
+    - mkdir -p .git/info && echo ".forge/" >> .git/info/exclude
+    # Check out the FROZEN attempt base (detached). The pipeline ref is the
+    # factory branch, whose head IS the attempt base in the proposal-only
+    # model — nothing else ever pushes to it.
+    - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
+    - git checkout --detach "$FORGE_ATTEMPT_BASE"
+  script:
+    # Live visibility: the compacted agent-event stream flows into the job
+    # trace while the harness works. The event stream IS claude-code's
+    # stream-json, so the universal filter runs its claude-code renderer;
+    # it also aggregates usage receipts into .forge/usage.json.
+    - 'curl -fsSL https://raw.githubusercontent.com/forcewake/forge/main/ci/templates/harness-log-filter.mjs -o /tmp/filter.mjs'
+    - export FORGE_LOG_PLATFORM=gitlab
+    # The task brief: approved plan, written to an ephemeral file (ADR-0012:
+    # context passes through GitLab CI variables, not forge-side state).
+    - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    - set -o pipefail
+    # Headless harness run. The driver NEVER commits or pushes: its
+    # working-tree edits ARE the candidate. A nonzero exit does not abort
+    # the audit trail — the artifacts still upload (when: always) and the
+    # .NET verification below still records its TRX block; FORGE_DRIVER_EXIT
+    # carries the classification (pipefail keeps claude's exit code through
+    # the tee/filter pipeline).
+    - |
+      FORGE_DRIVER_EXIT="completed"
+      export API_TIMEOUT_MS=3000000 BASH_DEFAULT_TIMEOUT_MS=300000 BASH_MAX_TIMEOUT_MS=600000
+      # MCP (ADR-0022): servers come ONLY from the FORGE_HARNESS_MCP CI
+      # variable; --strict-mcp-config means ONLY this config loads (the
+      # repo's own .mcp.json is ignored — injection-surface reduction).
+      CLAUDE_TOOLS="Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(which:*),Bash(find:*),Bash(dotnet --version),Bash(dotnet restore:*),Bash(dotnet build:*),Bash(dotnet test:*),Bash(dotnet format:*),Bash(dotnet tool:*)"
+      if [ -n "$FORGE_HARNESS_MCP" ]; then
+        printf '%s' "$FORGE_HARNESS_MCP" > /tmp/forge-mcp.json
+        for n in $(node -e 'const s=JSON.parse(process.argv[1]);const m=s.mcpServers||s;console.log(Object.keys(m).join("\n"))' "$FORGE_HARNESS_MCP"); do
+          CLAUDE_TOOLS="$CLAUDE_TOOLS,mcp__${n}__*,mcp__${n}"
+        done
+      else
+        echo '{"mcpServers":{}}' > /tmp/forge-mcp.json
+      fi
+      set +e
+      claude -p "Implement the task described in .forge/brief.md for issue #$FORGE_ISSUE_IID. Work in the current repository. Do NOT commit and do NOT push: leave your changes in the working tree for collection." \
+        --model "$ANTHROPIC_MODEL" \
+        --allowedTools "$CLAUDE_TOOLS" \
+        --disallowedTools "Bash(git commit:*)" "Bash(git push:*)" \
+        --permission-prompts none \
+        --permission-mode acceptEdits \
+        --max-turns 200 \
+        --mcp-config /tmp/forge-mcp.json --strict-mcp-config \
+        --setting-sources '' --output-format stream-json --verbose 2>&1 \
+        | tee /tmp/harness.jsonl \
+        | node /tmp/filter.mjs claude-code
+      _agent_rc=$?
+      set -e
+      if [ "$_agent_rc" -ne 0 ]; then
+        FORGE_DRIVER_EXIT="failed"
+      fi
+      export FORGE_DRIVER_EXIT
+    # R28-21 steps 3-5 — the reproducible verification tail. It runs on
+    # EVERY lane outcome (a candidate that fails verification is exactly
+    # the signal the control plane needs — ADR-0008), each leg's exit code
+    # is recorded beside the TRX counters, and only the AGENT's failure
+    # classifies the lane itself.
+    - |
+      set +e
+      FORGE_RESTORE_EXIT=0 FORGE_BUILD_EXIT=0 FORGE_TEST_EXIT=0
+      dotnet restore --locked-mode || FORGE_RESTORE_EXIT=$?
+      dotnet build --no-restore --locked-mode --configuration "$FORGE_DOTNET_CONFIGURATION" || FORGE_BUILD_EXIT=$?
+      dotnet test --no-build --configuration "$FORGE_DOTNET_CONFIGURATION" \
+        --logger "trx;LogFileName=$FORGE_DOTNET_TRX" \
+        --results-directory .forge/testresults || FORGE_TEST_EXIT=$?
+      set -e
+      export FORGE_RESTORE_EXIT FORGE_BUILD_EXIT FORGE_TEST_EXIT
+    # Stage the whole working tree and capture the candidate diff against
+    # the FROZEN attempt base. No commit, no push — the artifact is the
+    # deliverable.
+    - git add -A
+    - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
+    # Meta JSON: attempt base, driver id, model, exit classification, usage
+    # receipt, and the R28-21 TRX verification block (counters parsed from
+    # the VS TRX report the verifier reads — docs/harnesses/dotnet-lane.md).
+    - |
+      python3 - <<'PYEOF'
+      import hashlib, json, os, xml.etree.ElementTree as ET
+      trx_dir = ".forge/testresults"
+      trx_path = None
+      if os.path.isdir(trx_dir):
+          for root, _dirs, names in os.walk(trx_dir):
+              if os.environ.get("FORGE_DOTNET_TRX", "forge.trx") in names:
+                  trx_path = os.path.join(root, os.environ["FORGE_DOTNET_TRX"])
+                  break
+      verification = {"kind": "dotnet-trx/1", "trx": None,
+                      "restore_exit": int(os.environ.get("FORGE_RESTORE_EXIT", "0") or 0),
+                      "build_exit": int(os.environ.get("FORGE_BUILD_EXIT", "0") or 0),
+                      "test_exit": int(os.environ.get("FORGE_TEST_EXIT", "0") or 0)}
+      if trx_path is not None:
+          raw = open(trx_path, "rb").read()
+          counters = {}
+          outcome = ""
+          root_el = ET.fromstring(raw)
+          ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+          summary = root_el.find(f"{ns}ResultSummary")
+          if summary is not None:
+              outcome = summary.get("outcome", "")
+              counted = summary.find(f"{ns}Counters")
+              if counted is not None:
+                  counters = {k: int(v) for k, v in counted.attrib.items()
+                              if v is not None and v.isdigit()}
+          verification["trx"] = {"file": trx_path,
+                                 "sha256": hashlib.sha256(raw).hexdigest(),
+                                 "outcome": outcome,
+                                 "counters": counters}
+      usage = None
+      try:
+          usage = json.load(open(".forge/usage.json"))
+      except Exception:
+          pass
+      meta = {"attempt_base": os.environ.get("FORGE_ATTEMPT_BASE", ""),
+              "driver": "dotnet-lane",
+              "model": os.environ.get("ANTHROPIC_MODEL", ""),
+              "exit": os.environ.get("FORGE_DRIVER_EXIT", "completed"),
+              "usage": usage,
+              "verification": verification}
+      with open(".forge/candidate.meta.json", "w") as fh:
+          json.dump(meta, fh, indent=2, sort_keys=True)
+      PYEOF
+    # Machine-readable contract. FORGE_CANDIDATE points at the artifact the
+    # backend downloads; the legacy FORGE_RESULT line stays only for the
+    # v0.2 → v0.3 migration window and carries the attempt base — it is not
+    # a branch claim anymore.
+    - 'printf "FORGE_CANDIDATE:{\"attempt_base\": \"%s\", \"artifact\": \"candidate.diff\", \"exit\": \"%s\"}\n" "$FORGE_ATTEMPT_BASE" "$FORGE_DRIVER_EXIT"'
+    - 'printf "FORGE_RESULT:{\"head\": \"%s\", \"summary\": \"candidate artifacts; reproducible dotnet lane\"}\n" "$FORGE_ATTEMPT_BASE"'
+  artifacts:
+    paths:
+      - .forge/candidate.diff
+      - .forge/candidate.meta.json
+    when: always
+    expire_in: 1 week

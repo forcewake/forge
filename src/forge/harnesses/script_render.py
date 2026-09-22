@@ -113,16 +113,29 @@ _CLAUDE_TOOL_RULES: tuple[str, ...] = (
 # Serialized ONLY at the token-table site via the explicit
 # ",".join((*_CLAUDE_TOOL_RULES, *mcp_rules)) — never by literal
 # concatenation (A09).
+#: R28-21: the .NET lane's tool grants on top of the claude allowlist —
+#: the quality bar demands the agent RUN the pinned, locked .NET pipeline
+#: itself (restore/build/test), so the dotnet verbs are allowlisted beside
+#: the read-only git rules. commit/push stay mechanically denied.
+_DOTNET_TOOL_RULES: tuple[str, ...] = (
+    "Bash(dotnet --version)",
+    "Bash(dotnet restore:*)",
+    "Bash(dotnet build:*)",
+    "Bash(dotnet test:*)",
+    "Bash(dotnet format:*)",
+    "Bash(dotnet tool:*)",
+    "Bash(dotnet nuget:*)",
+)
 #: The SDK-lane drivers: the agent is driven by ``forge.lane_driver``
 #: (the REAL interactive driver clients), not a scripted ``-p`` call —
 #: the rendered script only provisions the CLI and hands the lane over
 #: (the Actions/AzDO mirror of the codex/opencode GitLab sdk-lane
 #: templates).
-LANE_DRIVERS = ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane")
+LANE_DRIVERS = ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane", "copilot-sdk-lane")
 
 #: The SCRIPTED drivers: a rendered one-shot CLI invocation with the
 #: shared ``-p`` prompt pointer and the tee'd event stream.
-SCRIPTED_DRIVERS = ("claude-code", "grok-build", "opencode", "copilot")
+SCRIPTED_DRIVERS = ("claude-code", "grok-build", "opencode", "copilot", "dotnet-lane")
 
 #: Drivers understood by the harness entry point (the shipped set):
 #: the scripted drivers above plus the SDK-lane drivers.
@@ -155,6 +168,17 @@ DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
     # LIVE-verified 2026-09-21 (opencode-live.json: "opencode v2.0.10") —
     # the serve wire layer the opencode driver client targets.
     "opencode-sdk-lane": "2.0.10",
+    # copilot-sdk-lane: the SAME 1.0.86 pin the scripted copilot lane
+    # carries (the 2026-09-17 registry slice; npm latest is 1.0.88 today).
+    # NO live smoke has verified the ACP wire the driver client speaks —
+    # ACP is public preview and subject to change, so this pin moves only
+    # with a deliberate re-smoke (the NXT-27 doctrine).
+    "copilot-sdk-lane": "1.0.86",
+    # R28-21: the .NET lane drives the SAME claude CLI the claude-code arm
+    # renders (the lane's own runtime pin is the digest-pinned dotnet SDK
+    # image + global.json + nuget.lock.json — see
+    # docs/harnesses/dotnet-lane.md); the npm pin mirrors claude-code's.
+    "dotnet-lane": "2.1.276",
 }
 
 #: A version/dist-tag token safe to splice into an npm install spec
@@ -173,6 +197,11 @@ _NPM_TARGETS: dict[str, tuple[str, str]] = {
     "claude-sdk-lane": ("@anthropic-ai/claude-code", "claude-code"),
     "codex-sdk-lane": ("@openai/codex", "codex"),
     "opencode-sdk-lane": ("opencode-ai", "opencode"),
+    "copilot-sdk-lane": ("@github/copilot", "copilot"),
+    # R28-21: the .NET lane's agent is the claude CLI (it rides the forge
+    # gateway); the reproducible .NET runtime comes from the pinned SDK
+    # image, not from npm.
+    "dotnet-lane": ("@anthropic-ai/claude-code", "claude"),
 }
 
 #: The scripted drivers that get an MCP config file written, →
@@ -424,6 +453,19 @@ def render(
     elif driver == "copilot":
         tokens["MCP_PROVISION"] = _mcp_fragment(driver, servers) if servers else ""
         tokens["MCP_GRANTS"] = "".join(f" --allow-tool {shlex.quote(name)}" for name in servers)
+    elif driver == "dotnet-lane":
+        # R28-21: the .NET lane's AGENT is the claude CLI — same grants,
+        # same strict MCP posture as the claude-code arm (plus the dotnet
+        # tool rules) — and its template appends the reproducible .NET
+        # verification tail (locked restore/build, TRX tests).
+        mcp_rules: list[str] = []
+        for name in servers:
+            mcp_rules.append(f"mcp__{name}__*")
+            mcp_rules.append(f"mcp__{name}")
+        tokens["ALLOWED_TOOLS"] = shlex.quote(
+            ",".join((*_CLAUDE_TOOL_RULES, *_DOTNET_TOOL_RULES, *mcp_rules))
+        )
+        tokens["MCP_PROVISION"] = _mcp_fragment("claude-code", servers)
     elif driver == "claude-sdk-lane":
         pass  # npm pin + handover only — the template is fully static
     elif driver == "codex-sdk-lane":
@@ -458,5 +500,11 @@ def render(
             ) + (f"export OPENCODE_MODEL_ID={shlex.quote(model_id)}\n" if model_id else "")
         elif model:
             tokens["OPENCODE_MODEL_EXPORTS"] = f"export OPENCODE_MODEL_ID={shlex.quote(model)}\n"
+    elif driver == "copilot-sdk-lane":
+        # npm pin + handover only — the template is fully static. Auth
+        # rides the ambient COPILOT_GITHUB_TOKEN (the ACP child reads the
+        # env itself); the mechanical commit/push posture lives in the
+        # driver client's spawn flags, not in this script.
+        pass
 
     return _strip_one_trailing_newline(_apply(f"drivers/{driver}.sh", tokens))

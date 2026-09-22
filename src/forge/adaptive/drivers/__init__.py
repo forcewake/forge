@@ -10,9 +10,9 @@ opencode-server, forge-harness-hacks}.md``.
 
 Import cost policy: the claude module guards its vendor import (the
 package lives in the ``interactive`` extra) — importing THIS package
-never requires any vendor dependency. The codex module is pure asyncio
-stdlib; the opencode module rides the httpx dependency forge already
-has.
+never requires any vendor dependency. The codex and copilot modules are
+pure asyncio stdlib; the opencode module rides the httpx dependency forge
+already has.
 """
 
 from forge.adaptive.drivers.claude_sdk import (
@@ -28,6 +28,14 @@ from forge.adaptive.drivers.codex_app import (
     StdioTransport,
     TurnInProgressError,
     codex_app_client_from_env,
+)
+from forge.adaptive.drivers.copilot_acp import (
+    CopilotACPDriverClient,
+    CopilotACPError,
+    CopilotACPTimeoutError,
+    CopilotConnectionClosedError,
+    TurnInProgressError as CopilotTurnInProgressError,
+    copilot_acp_client_from_env,
 )
 from forge.adaptive.drivers.opencode import (
     KNOWN_EVENT_TYPES,
@@ -62,6 +70,15 @@ __all__ = [
     "StdioTransport",
     "TurnInProgressError",
     "codex_app_client_from_env",
+    # copilot-acp (pure asyncio stdlib, JSON-RPC 2.0 ACP over stdio NDJSON;
+    # the codex TurnInProgressError stays the package-level name — the
+    # copilot twin rides under an explicit alias, same refusal semantics)
+    "CopilotACPDriverClient",
+    "CopilotACPError",
+    "CopilotACPTimeoutError",
+    "CopilotConnectionClosedError",
+    "CopilotTurnInProgressError",
+    "copilot_acp_client_from_env",
     # opencode-server (httpx against the ``opencode serve`` HTTP API)
     "KNOWN_EVENT_TYPES",
     "OpenCodeDriverClient",

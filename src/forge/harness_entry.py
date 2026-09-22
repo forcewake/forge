@@ -10,7 +10,7 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   brief file the agent reads IS the prompt, and the per-CLI ``-p``
   invocation stays the short pointer :data:`forge.harnesses.prompt.TASK_PROMPT`;
 - it renders the per-driver invocation (claude-code | grok-build |
-  opencode | copilot | codex-sdk-lane | opencode-sdk-lane)
+  opencode | copilot | codex-sdk-lane | opencode-sdk-lane | dotnet-lane)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
   ``docs/research/2026-09-13-harness-interfaces.md``) — per-CLI FLAGS live in
@@ -612,6 +612,13 @@ def render_driver_script(
     )
 
 
+#: R28-21: drivers whose EVENT STREAM is another driver's wire format —
+#: the dotnet-lane's agent is the claude CLI, so its stream-json events
+#: parse with the claude-code receipt grammar while the receipt's own
+#: ``driver`` field keeps naming the lane that produced it.
+_USAGE_PARSE_ALIAS: dict[str, str] = {"dotnet-lane": "claude-code"}
+
+
 def parse_usage(driver: str, event_log: str) -> dict | None:
     """Aggregate usage receipts out of the driver's NDJSON event log.
 
@@ -626,6 +633,9 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
     None. Returns a :mod:`forge.runs.candidate`-compatible meta ``usage``
     shape (input_tokens / cached_input_tokens / output_tokens).
     """
+
+    receipt_driver = driver
+    parse_driver = _USAGE_PARSE_ALIAS.get(driver, driver)
 
     def _token(value: object) -> int | None:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -652,13 +662,13 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
         etype = event.get("type")
         raw_usage = event.get("usage")
         payload: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
-        if driver == "grok-build" and etype == "end":
+        if parse_driver == "grok-build" and etype == "end":
             # The run aggregate — wins over the per-response receipts.
             end_usage = payload or {}
             continue
-        if driver == "claude-code" and etype == "result":
+        if parse_driver == "claude-code" and etype == "result":
             source = payload  # per-turn receipt on the result
-        elif driver == "grok-build" and etype == "usage":
+        elif parse_driver == "grok-build" and etype == "usage":
             source = payload  # per-response boundary receipt
         else:
             continue
@@ -671,7 +681,7 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
             if value is not None:
                 sums[mapped] = (sums[mapped] or 0) + value
 
-    if driver == "grok-build" and end_usage is not None:
+    if parse_driver == "grok-build" and end_usage is not None:
         end: dict[str, Any] = end_usage
         sums = {
             "input_tokens": _token(end.get("input_tokens")),
@@ -683,7 +693,7 @@ def parse_usage(driver: str, event_log: str) -> dict | None:
         return None
     return {
         **sums,
-        "driver": driver,
+        "driver": receipt_driver,
         "completeness": "aggregate",
         "source": "stream-json",
     }

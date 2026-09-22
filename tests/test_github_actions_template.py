@@ -271,10 +271,16 @@ class TestDriverCredentialGating:
 
     def test_copilot_lane_carries_its_documented_token(self):
         """The documented copilot driver is unusable without it: the
-        fine-grained PAT with the "Copilot Requests" permission."""
+        fine-grained PAT with the "Copilot Requests" permission. The gate
+        is SHARED with copilot-sdk-lane — the interactive ACP lane reads
+        the SAME token from the ambient env (one credential, both
+        surfaces)."""
         line = self.driver_env()["COPILOT_GITHUB_TOKEN"]
 
-        assert line == ("${{ inputs.driver == 'copilot' && secrets.COPILOT_GITHUB_TOKEN || '' }}")
+        assert line == (
+            "${{ (inputs.driver == 'copilot' || inputs.driver == 'copilot-sdk-lane') "
+            "&& secrets.COPILOT_GITHUB_TOKEN || '' }}"
+        )
 
     def test_grok_lane_uses_the_provider_native_subscription_only(self):
         """FORGE_GROK_AUTH (the auth.json blob, the GitLab contract) — the

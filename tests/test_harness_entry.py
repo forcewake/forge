@@ -200,6 +200,7 @@ class TestRenderSdkLanes:
             LANE_DRIVER_IDS["claude"],
             LANE_DRIVER_IDS["codex"],
             LANE_DRIVER_IDS["opencode"],
+            LANE_DRIVER_IDS["copilot"],
         )
 
     def test_the_claude_lane_exports_the_lane_control_pair(self):
@@ -226,6 +227,10 @@ _PACKAGES = {
     "claude-sdk-lane": ("@anthropic-ai/claude-code", "claude"),
     "codex-sdk-lane": ("@openai/codex", "codex"),
     "opencode-sdk-lane": ("opencode-ai", "opencode"),
+    # R28-21: the .NET lane's AGENT is the claude CLI riding the forge
+    # gateway; the reproducible .NET runtime is pinned by the SDK image.
+    "dotnet-lane": ("@anthropic-ai/claude-code", "claude"),
+    "copilot-sdk-lane": ("@github/copilot", "copilot"),
 }
 
 

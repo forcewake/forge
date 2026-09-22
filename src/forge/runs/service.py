@@ -52,6 +52,9 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from forge.adaptive.admission import QUEUED_STATUSES
+from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
+from forge.adaptive.admission import check_admission as check_fair_use
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -631,6 +634,11 @@ class RunService:
 
         run_id = uuid4().hex
 
+        # R28-23: the fair-use counts are gathered BEFORE the row exists —
+        # they describe the world without this candidate run.
+        fair_counts = await self._fair_use_counts(project_id, issue_iid, author_username)
+        fair_use = check_fair_use(FairUsePolicy.from_env(), **fair_counts)
+
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -640,6 +648,10 @@ class RunService:
                         project_id=project_id,
                         issue_iid=issue_iid,
                         provider="gitlab",
+                        # R28-23: the requesting actor, journaled at creation
+                        # so the per-user hourly fair-use dimension has a
+                        # durable source (merged, never replaced).
+                        evidence={"requested_by": author_username},
                     )
                 )
                 await controller.transition(run_id, FlowStatus.PREFLIGHT)
@@ -686,6 +698,33 @@ class RunService:
                 run_id[:8],
                 author_username,
                 admission.reason,
+            )
+            return run_id
+
+        # R28-23: bounded admission and fair use — ADDITIVE to the F16
+        # identity check above (which stays the authority on WHO may
+        # spend). This is the capacity half: per-issue attempt cap,
+        # per-user hourly rate, per-project WIP bound, queue depth. The
+        # denial path parks the run exactly like F16 does — blocked, with
+        # a journaled note whose reason the operator can quote — and the
+        # planner is never constructed.
+        if not fair_use.allowed:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"fair_use_denied: {fair_use.reason}"
+            )
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                self._fair_use_denied_comment(run_id, author_username, fair_use.reason),
+                run_id,
+                "admission_denied",
+            )
+            logger.warning(
+                "Run %s refused for fair use (@%s): %s — counts %s",
+                run_id[:8],
+                author_username,
+                fair_use.reason,
+                fair_use.counts,
             )
             return run_id
 
@@ -1130,6 +1169,68 @@ class RunService:
                 return None
             session.expunge(run)
             return run
+
+    async def _fair_use_counts(
+        self, project_id: int, issue_iid: int | None, author_username: str
+    ) -> dict[str, int]:
+        """The four live counts :func:`forge.adaptive.admission.check_admission`
+        judges, gathered for THIS provider's project before the candidate
+        run exists (R28-23).
+
+        - ``active_count`` — non-terminal runs past their gate (proposing
+          onward): executing work holding expensive capacity;
+        - ``queued_count`` — non-terminal runs still waiting to execute
+          (accepted/preflight/planning/waiting_approval): a waiting human
+          decision holds QUEUE capacity, never ACTIVE capacity;
+        - ``issue_run_count`` — every run ever for this issue, terminal
+          included (the per-issue attempt cap);
+        - ``user_recent_count`` — runs this actor requested in the
+          trailing hour, per the ``requested_by`` evidence key journaled
+          at creation.
+
+        The user dimension is matched in Python (the evidence key is a
+        JSON column and the portable cross-database query is not worth
+        the coupling); hourly volume per project is small by construction
+        — the fair-use bounds exist precisely because it is.
+        """
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        queued = set(QUEUED_STATUSES)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        FlowRun.status,
+                        FlowRun.issue_iid,
+                        FlowRun.created_at,
+                        FlowRun.evidence,
+                    ).where(
+                        FlowRun.provider == "gitlab",
+                        FlowRun.project_id == project_id,
+                    )
+                )
+            ).all()
+        active_count = queued_count = issue_run_count = user_recent_count = 0
+        for status, row_issue_iid, created_at, evidence in rows:
+            if status not in terminal:
+                if status in queued:
+                    queued_count += 1
+                else:
+                    active_count += 1
+            if row_issue_iid == issue_iid:
+                issue_run_count += 1
+            if author_username and created_at is not None:
+                created = (
+                    created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+                )
+                if created >= cutoff and (evidence or {}).get("requested_by") == author_username:
+                    user_recent_count += 1
+        return {
+            "active_count": active_count,
+            "queued_count": queued_count,
+            "issue_run_count": issue_run_count,
+            "user_recent_count": user_recent_count,
+        }
 
     async def _get_run(self, session: AsyncSession, run_id: str) -> FlowRun:
         """Fetch a run row this service minted earlier, or fail loudly.
@@ -5095,6 +5196,20 @@ class RunService:
             "## Forge — run not started\n\n"
             f"Run `{run_id[:8]}` was **not started**: admission denied — "
             f"@{actor} is not in the approver list (`FORGE_APPROVERS`).\n\n"
+            "*This is an automated message.*"
+        )
+
+    @staticmethod
+    def _fair_use_denied_comment(run_id: str, actor: str, reason: str) -> str:
+        """The R28-23 refusal note — the typed fair-use reason, quoted
+        verbatim so the operator (and the issue thread) can explain why
+        the task was refused instead of queued."""
+        return (
+            "## Forge — run not started\n\n"
+            f"Run `{run_id[:8]}` was **not started**: fair-use admission "
+            f"refused for @{actor} — {reason}.\n\n"
+            "Bounds are operator-configurable via the "
+            "`FORGE_ADMISSION_*` variables.\n\n"
             "*This is an automated message.*"
         )
 
