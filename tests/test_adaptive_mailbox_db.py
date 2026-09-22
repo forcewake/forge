@@ -30,7 +30,11 @@ from sqlalchemy.pool import StaticPool
 
 import forge.adaptive.mailbox_db  # noqa: F401  (registers control_commands in metadata)
 from forge.adaptive.control import PauseState, new_publication_epoch, request_pause, send_interrupt
-from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
+from forge.adaptive.mailbox_db import (
+    ControlCommandDeliveryRow,
+    ControlCommandRow,
+    PostgresMailbox,
+)
 from forge.adaptive.models import ControlCommand
 from forge.models.base import Base
 
@@ -462,3 +466,157 @@ class TestConcurrentSubmit:
             rows = (await conn.execute(text("SELECT count(*) FROM control_commands"))).scalar()
         assert rows == 1
         await engine.dispose()
+
+
+class TestWorkWideBroadcasts:
+    """NXT-13 — the durable twin: the parent is ONE control_commands row,
+    the per-lane state is control_command_deliveries, and each lane
+    consumes its OWN acknowledgement row. The first lane to checkpoint a
+    work-wide pause no longer removes it from the second lane's queue."""
+
+    def _broadcast(self, **overrides) -> ControlCommand:
+        return _command(kind="pause", **overrides)
+
+    async def test_two_lanes_ack_independently_and_the_parent_reflects_both(self, lab):
+        mailbox = lab.mailbox
+        broadcast, created = await mailbox.submit_broadcast(self._broadcast(), ("run-a", "run-b"))
+
+        assert created is True
+        assert broadcast.status == "pending"
+        assert broadcast.recipients == ("run-a", "run-b")
+
+        first = await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        assert first.status == "pending"  # run-b has not spoken
+
+        second = await mailbox.acknowledge(broadcast.command_id, "run-b", note="ckpt:bbb")
+        assert second.status == "completed"
+        assert second.acknowledged_recipients == ("run-a", "run-b")
+
+        row = await lab.row(broadcast.command_id)
+        assert row is not None
+        assert row.kind == "pause"  # ONE parent row — the logical intent
+
+    async def test_the_second_lane_still_sees_a_pause_the_first_acked(self, lab):
+        mailbox = lab.mailbox
+        broadcast, _ = await mailbox.submit_broadcast(self._broadcast(), ("run-a", "run-b"))
+
+        await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+
+        own = await mailbox.pending_for("wp-demo-1", "run-a")
+        other = await mailbox.pending_for("wp-demo-1", "run-b")
+
+        assert own == []  # its own view is consumed...
+        assert [command.command_id for command in other] == [broadcast.command_id]
+        assert other[0].payload["run_id"] == "run-b"  # ...the sibling's is not
+        assert other[0].payload["broadcast_id"] == broadcast.command_id
+
+    async def test_a_restart_recovers_the_delivery_state_verbatim(self, lab):
+        """A new process over the same database: the acknowledged row stays
+        acknowledged, the outstanding row is still pending for its lane."""
+        mailbox = lab.mailbox
+        broadcast, _ = await mailbox.submit_broadcast(self._broadcast(), ("run-a", "run-b"))
+        await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        await mailbox.mark_uncertain(
+            broadcast.command_id, "run-b", "probe inconclusive: session gone"
+        )
+
+        reopened = lab.reopen()
+
+        recovered = await reopened.broadcast(broadcast.command_id)
+        assert recovered is not None
+        assert recovered.status == "completed_with_uncertain"
+        assert recovered.acknowledgement("run-a").status == "acknowledged"
+        assert recovered.uncertain_recipients == ("run-b",)
+        # the new process continues from the durable rows:
+        resolved = await reopened.resolve_uncertain(
+            broadcast.command_id, "run-b", note="late receipt verified"
+        )
+        assert resolved.status == "completed"
+
+    async def test_broadcast_parents_leave_the_single_consumer_pending(self, lab):
+        """A lane draining the ordinary queue can never consume (and thereby
+        hide) a work-wide command — it is delivered per recipient only."""
+        mailbox = lab.mailbox
+        broadcast, _ = await mailbox.submit_broadcast(
+            self._broadcast(sequence=1, command_id="cmd-wide", idempotency_key="k-wide"),
+            ("run-a", "run-b"),
+        )
+        await mailbox.submit(
+            _command(
+                sequence=2,
+                command_id="cmd-plain",
+                idempotency_key="k-plain",
+                kind="steer",
+                payload={"text": "fix the parser first"},
+            )
+        )
+
+        assert [command.command_id for command in await mailbox.pending("wp-demo-1")] == [
+            "cmd-plain"
+        ]
+        assert len(await mailbox.pending_for("wp-demo-1", "run-a")) == 1
+
+    async def test_redelivery_adopts_the_winner_and_heals_missing_rows(self, lab):
+        """The mr_reservations shape: the delivery rows are derived from the
+        winner's frozen payload, so a crash between the parent INSERT and
+        the delivery INSERTs heals on resubmission without resetting state."""
+        mailbox = lab.mailbox
+        broadcast, created_first = await mailbox.submit_broadcast(
+            self._broadcast(), ("run-a", "run-b")
+        )
+        await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+
+        replayed, created_second = await mailbox.submit_broadcast(
+            self._broadcast(command_id="cmd-replayed", sequence=2), ("run-a", "run-b")
+        )
+
+        assert created_first is True
+        assert created_second is False
+        assert replayed.command_id == broadcast.command_id
+        assert replayed.acknowledgement("run-a").status == "acknowledged"  # never reset
+        assert replayed.acknowledgement("run-b").status == "pending"
+
+    async def test_the_ack_ladder_refuses_undeciding(self, lab):
+        mailbox = lab.mailbox
+        broadcast, _ = await mailbox.submit_broadcast(self._broadcast(), ("run-a",))
+
+        with pytest.raises(KeyError, match="not in the frozen recipient set"):
+            await mailbox.acknowledge(broadcast.command_id, "run-stranger")
+
+        await mailbox.mark_uncertain(broadcast.command_id, "run-a", "probe inconclusive")
+        with pytest.raises(ValueError, match="refuses to move"):
+            await mailbox.acknowledge(broadcast.command_id, "run-a")
+
+        # idempotent re-ack after resolution:
+        await mailbox.resolve_uncertain(broadcast.command_id, "run-a", note="evidence arrived")
+        again = await mailbox.acknowledge(broadcast.command_id, "run-a", note="again")
+        assert again.status == "completed"
+
+    async def test_every_transition_is_journaled_onto_the_delivery_row(self, lab):
+        mailbox = lab.mailbox
+        broadcast, _ = await mailbox.submit_broadcast(self._broadcast(), ("run-a",))
+
+        async with async_sessionmaker(lab._engine, expire_on_commit=False)() as session:
+            row = await session.scalar(
+                select(ControlCommandDeliveryRow).where(
+                    ControlCommandDeliveryRow.command_id == broadcast.command_id,
+                    ControlCommandDeliveryRow.recipient == "run-a",
+                )
+            )
+        assert row is not None
+        assert [entry["to"] for entry in row.journal] == ["pending"]  # submit journals it
+        assert row.acknowledged_at is None
+
+        await mailbox.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+
+        async with async_sessionmaker(lab._engine, expire_on_commit=False)() as session:
+            row = await session.scalar(
+                select(ControlCommandDeliveryRow).where(
+                    ControlCommandDeliveryRow.command_id == broadcast.command_id,
+                    ControlCommandDeliveryRow.recipient == "run-a",
+                )
+            )
+        assert row is not None
+        assert [entry["to"] for entry in row.journal] == ["pending", "acknowledged"]
+        assert row.journal[-1]["note"] == "ckpt:aaa"
+        assert row.acknowledged_at is not None

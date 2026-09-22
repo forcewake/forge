@@ -23,12 +23,14 @@ path uses. Three wirings:
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from forge.adaptive.control import (
+    BroadcastCommand,
+    BroadcastMailbox,
     Mailbox,
     PauseState,
     classify_instruction,
@@ -123,12 +125,28 @@ class OperatorControlService:
 
     mailbox: Mailbox = field(default_factory=Mailbox)
     pause_states: dict[str, PauseState] = field(default_factory=dict)
+    #: The work-wide fan-out over the SAME mailbox (NXT-13): broadcast
+    #: parents share its sequence/dedup discipline; delivery is
+    #: per-recipient through :meth:`pending_for`. Built in
+    #: ``__post_init__`` so the two views can never drift apart.
+    broadcast_mailbox: BroadcastMailbox = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.broadcast_mailbox = BroadcastMailbox(self.mailbox)
 
     def submit(self, command: ControlCommand) -> tuple[ControlCommand, bool]:
         """Gateway entry: dedups by idempotency key, enforces sequences."""
         return self.mailbox.submit(command)
 
-    def pause(self, work_id: str, actor: str, idempotency_key: str) -> PauseState:
+    def pause(
+        self,
+        work_id: str,
+        actor: str,
+        idempotency_key: str,
+        *,
+        work_scoped: bool = False,
+        recipients: Sequence[str] = (),
+    ) -> PauseState | BroadcastCommand:
         """CTL-05 + NXT-09: the durable command row FIRST, then the fence.
 
         ``recorded_pause`` submits the command BEFORE any state mutation:
@@ -137,7 +155,19 @@ class OperatorControlService:
         second time. Only a NEW command row sets ``pause_requested``,
         bumps the fence, and then the interrupt goes out (CTL-05's
         ordering preserved: pause on record before the interrupt).
+
+        ``work_scoped=True`` (NXT-13) fans the SAME parent intent out to
+        a FIXED recipient set — the work's lanes, snapshotted by the
+        caller at submission: the parent is one mailbox row, every lane
+        gets its own acknowledgement row through the broadcast mailbox,
+        and the returned :class:`BroadcastCommand` is the parent barrier
+        (``completed`` only when EVERY lane acknowledged; uncertain lanes
+        individually listed). The dedup-first gate is the same one: only
+        a NEW command row fences the epoch. The single-lane path
+        (default) is unchanged.
         """
+        if work_scoped:
+            return self._pause_work_scoped(work_id, actor, idempotency_key, recipients)
         command = ControlCommand(
             schema="forge.proposal.control-command/1",
             command_id=f"cmd-{uuid.uuid4().hex[:12]}",
@@ -156,6 +186,83 @@ class OperatorControlService:
         )
         self.pause_states[work_id] = fenced
         return send_interrupt(fenced)
+
+    def _pause_work_scoped(
+        self,
+        work_id: str,
+        actor: str,
+        idempotency_key: str,
+        recipients: Sequence[str],
+    ) -> BroadcastCommand:
+        """The work-wide pause: one parent row, per-lane acknowledgements.
+
+        The same ``recorded_pause`` gate wrapped around the broadcast
+        submit: a redelivered work-wide pause is refused by the parent
+        row's idempotency key BEFORE the epoch moves, and the frozen
+        recipient set of the WINNER is authoritative (a replay's lane
+        list is discarded with its other bytes).
+        """
+        command = ControlCommand(
+            schema="forge.proposal.control-command/1",
+            command_id=f"cmd-{uuid.uuid4().hex[:12]}",
+            work_id=work_id,
+            sequence=len(self.mailbox.commands) + 1,
+            kind="pause",
+            actor_ref=actor,
+            actor_origin="server_authenticated_human",
+            idempotency_key=idempotency_key,
+            status="received",
+        )
+        captured: list[BroadcastCommand] = []
+
+        def _broadcast_submit(
+            parent: ControlCommand,
+        ) -> tuple[ControlCommand, bool]:
+            broadcast, created = self.broadcast_mailbox.submit(parent, tuple(recipients))
+            captured.append(broadcast)
+            return broadcast.parent, created
+
+        fenced, _stored, created = recorded_pause(
+            self.pause_states.get(work_id, PauseState(work_id=work_id, publication_epoch=0)),
+            command,
+            _broadcast_submit,
+        )
+        if created:  # only a NEW parent row fences the epoch and interrupts
+            self.pause_states[work_id] = send_interrupt(fenced)
+        return captured[0]
+
+    def acknowledge(self, command_id: str, recipient: str, *, note: str = "") -> BroadcastCommand:
+        """One lane's acknowledgement of a work-wide command (NXT-13)."""
+        return self.broadcast_mailbox.acknowledge(command_id, recipient, note=note)
+
+    def mark_uncertain(self, command_id: str, recipient: str, note: str) -> BroadcastCommand:
+        """Record a lane whose outcome could not be proven — visible, not guessed."""
+        return self.broadcast_mailbox.mark_uncertain(command_id, recipient, note)
+
+    def resolve_uncertain(
+        self, command_id: str, recipient: str, *, note: str = ""
+    ) -> BroadcastCommand:
+        """Settle an uncertain lane with the evidence that later arrived."""
+        return self.broadcast_mailbox.resolve_uncertain(command_id, recipient, note=note)
+
+    def pending_for(self, work_id: str, recipient: str) -> list[ControlCommand]:
+        """The per-recipient lane view (NXT-13): the work's ordinary pending
+        commands PLUS this recipient's still-pending broadcast views, in
+        durable sequence order. One lane's consumption removes nothing
+        from another lane's view."""
+        combined = self.mailbox.pending(work_id) + self.broadcast_mailbox.pending_for(
+            work_id, recipient
+        )
+        return sorted(combined, key=lambda command: command.sequence)
+
+    def broadcast(self, command_id: str) -> BroadcastCommand | None:
+        """The work-wide barrier state of one broadcast command."""
+        return self.broadcast_mailbox.broadcast(command_id)
+
+    def fence_active(self, work_id: str) -> bool:
+        """True while a work-wide pause awaits a lane decision — a child
+        created during the pause must not start through the fence."""
+        return self.broadcast_mailbox.fence_active(work_id)
 
     def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:
         """Resume only from a confirmed checkpoint (CTL-06)."""

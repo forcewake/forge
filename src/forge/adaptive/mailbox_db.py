@@ -51,6 +51,7 @@ fix, so it is not collapsible back into one call.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Final, cast
 
@@ -72,10 +73,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
+from forge.adaptive.control import (
+    BROADCAST_SCOPE,
+    BroadcastCommand,
+    RecipientAcknowledgement,
+    broadcast_view,
+)
 from forge.adaptive.models import ControlCommand
 from forge.models.base import Base
 
-__all__ = ["CONTROL_COMMAND_STATUSES", "ControlCommandRow", "PostgresMailbox"]
+__all__ = [
+    "ACK_STATUSES",
+    "CONTROL_COMMAND_STATUSES",
+    "ControlCommandDeliveryRow",
+    "ControlCommandRow",
+    "PostgresMailbox",
+]
 
 #: The ordered delivery ladder (NXT-12) plus the two exits. ``rejected``
 #: and ``expired`` are exits, never rungs — the ladder only climbs.
@@ -169,6 +182,53 @@ class ControlCommandRow(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+#: The per-recipient acknowledgement ladder of a work-wide broadcast
+#: (NXT-13, migration 021). Mirrors the in-memory
+#: :data:`forge.adaptive.control.RecipientAckStatus` exactly.
+ACK_STATUSES: Final = ("pending", "acknowledged", "uncertain")
+
+
+class ControlCommandDeliveryRow(Base):
+    """One recipient's delivery row of a work-wide broadcast (NXT-13).
+
+    The durable twin of
+    :class:`forge.adaptive.control.RecipientAcknowledgement`: the parent
+    command is ONE ``control_commands`` row (``payload.scope = 'work'``,
+    ``payload.recipients`` frozen at submission); this table holds the
+    per-lane acknowledgement state the single-status parent cannot.
+    ``(command_id, recipient)`` is the identity — one row per lane per
+    broadcast, ever — and each row climbs ``pending -> acknowledged |
+    uncertain`` through guarded compare-and-sets with its own append-only
+    ``journal``. A crash between the parent INSERT and the delivery
+    INSERTs heals on resubmission (the rows are re-derived from the
+    winner's frozen payload, :meth:`PostgresMailbox.submit_broadcast`).
+    """
+
+    __tablename__ = "control_command_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'acknowledged', 'uncertain')",
+            name="ck_control_command_deliveries_status",
+        ),
+        Index(
+            "ix_control_command_deliveries_lane",
+            "work_id",
+            "recipient",
+            "status",
+        ),
+    )
+
+    command_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    work_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    recipient: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    journal: Mapped[list[dict[str, Any]]] = mapped_column(_JSONType, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 def _to_command(row: ControlCommandRow) -> ControlCommand:
@@ -420,6 +480,11 @@ class PostgresMailbox:
         left the queue has a vendor-side fate recorded on its row, and the
         drain must not re-deliver it (the review's premature-``applied``
         ordering fix — the queue view stops at the dispatch boundary).
+        Work-wide broadcast parents are absent TOO (NXT-13): one row with
+        one status is exactly the defect that let the first lane to
+        checkpoint a pause remove it from every other lane's queue — a
+        broadcast is delivered only through its per-recipient views
+        (:meth:`pending_for`).
         """
         async with self._session_factory() as session:
             rows = (
@@ -436,7 +501,9 @@ class PostgresMailbox:
                 .scalars()
                 .all()
             )
-        return [_to_command(row) for row in rows]
+        return [
+            _to_command(row) for row in rows if (row.payload or {}).get("scope") != BROADCAST_SCOPE
+        ]
 
     async def get(self, command_id: str) -> ControlCommand | None:
         """One command by id, whatever rung it sits on (or ``None``)."""
@@ -445,6 +512,142 @@ class PostgresMailbox:
                 select(ControlCommandRow).where(ControlCommandRow.id == command_id)
             )
         return _to_command(row) if row is not None else None
+
+    # -- work-wide broadcasts (NXT-13) ---------------------------------------
+
+    async def submit_broadcast(
+        self, command: ControlCommand, recipients: Sequence[str]
+    ) -> tuple[BroadcastCommand, bool]:
+        """Fan one parent intent out to a FIXED recipient set, durably.
+
+        The mr_reservations shape (migration 019) applied to control: the
+        PARENT row is the logical intent (one ``control_commands`` row,
+        deduped by ``UNIQUE (work_id, dedup_key)``), the DELIVERY rows are
+        the per-lane state — both committed BEFORE any lane is
+        interrupted. Redelivery adopts the winner's broadcast verbatim
+        (``created=False`` — the replay's bytes are discarded); a crash
+        between the parent INSERT and the delivery INSERTs heals because
+        the rows are re-derived from the winner's frozen payload
+        (``on conflict do nothing``, then read the truth back).
+        """
+        recipient_tuple = tuple(recipients)
+        if not recipient_tuple:
+            raise ValueError("a work-wide command needs the work's lane set — empty recipients")
+        if len(recipient_tuple) != len(set(recipient_tuple)):
+            raise ValueError(f"recipients must be unique: {list(recipient_tuple)}")
+        if isinstance(command.payload.get("run_id"), str):
+            raise ValueError(
+                "a command already scoped to one run cannot become a work-wide broadcast"
+            )
+        payload = dict(command.payload)
+        payload["scope"] = BROADCAST_SCOPE
+        payload["recipients"] = list(recipient_tuple)
+        parent, created = await self.submit(command.model_copy(update={"payload": payload}))
+        async with self._session_factory() as session:
+            await self._ensure_delivery_rows(session, parent.command_id, parent.work_id)
+            await session.commit()
+        return await self.broadcast(parent.command_id) or BroadcastCommand(
+            parent=parent,
+            acknowledgements=tuple(RecipientAcknowledgement(recipient=r) for r in recipient_tuple),
+        ), created
+
+    async def acknowledge(
+        self, command_id: str, recipient: str, *, note: str = ""
+    ) -> BroadcastCommand:
+        """One lane's checkpointed/apply acknowledgement (idempotent).
+
+        ``pending -> acknowledged`` as a guarded CAS; an already-
+        acknowledged row is an idempotent no-op (a redelivered ack spends
+        nothing), and an uncertain one raises — the reconciliation path
+        (:meth:`resolve_uncertain`) is the only way an uncertainty is
+        settled, never a blind re-acknowledgement.
+        """
+        return await self._advance_delivery(
+            command_id,
+            recipient,
+            ("pending",),
+            "acknowledged",
+            note=note,
+            idempotent_at="acknowledged",
+        )
+
+    async def mark_uncertain(self, command_id: str, recipient: str, note: str) -> BroadcastCommand:
+        """Record that this lane's outcome could NOT be proven.
+
+        The honest give-up, durably: the row SAYS uncertain — never
+        acknowledged (unproven), never silently retried. The parent
+        completes only with the lane explicitly listed.
+        """
+        return await self._advance_delivery(
+            command_id, recipient, ("pending",), "uncertain", note=note
+        )
+
+    async def resolve_uncertain(
+        self, command_id: str, recipient: str, *, note: str = ""
+    ) -> BroadcastCommand:
+        """Settle an uncertain lane with the evidence that later arrived."""
+        return await self._advance_delivery(
+            command_id,
+            recipient,
+            ("uncertain",),
+            "acknowledged",
+            note=note,
+        )
+
+    async def pending_for(self, work_id: str, recipient: str) -> list[ControlCommand]:
+        """The recipient's OWN lane view: every broadcast of the work this
+        recipient has not acknowledged, as run-scoped views in sequence
+        order. One lane's acknowledgement removes the command from ITS
+        view only — the durable twin of the review's per-recipient
+        delivery state."""
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(ControlCommandRow, ControlCommandDeliveryRow)
+                    .join(
+                        ControlCommandDeliveryRow,
+                        ControlCommandDeliveryRow.command_id == ControlCommandRow.id,
+                    )
+                    .where(
+                        ControlCommandDeliveryRow.work_id == work_id,
+                        ControlCommandDeliveryRow.recipient == recipient,
+                        ControlCommandDeliveryRow.status == "pending",
+                    )
+                    .order_by(ControlCommandRow.sequence)
+                )
+            ).all()
+        return [broadcast_view(_to_command(row), recipient) for row, _delivery in rows]
+
+    async def broadcast(self, command_id: str) -> BroadcastCommand | None:
+        """The broadcast with its per-recipient rows, or ``None``."""
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(ControlCommandRow).where(ControlCommandRow.id == command_id)
+            )
+            if row is None or (row.payload or {}).get("scope") != BROADCAST_SCOPE:
+                return None
+            return await self._broadcast_from(session, row)
+
+    async def broadcasts(self, work_id: str) -> list[BroadcastCommand]:
+        """The work's broadcasts in sequence order (the operator's view)."""
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ControlCommandRow)
+                        .where(ControlCommandRow.work_id == work_id)
+                        .order_by(ControlCommandRow.sequence)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            broadcasts = [
+                await self._broadcast_from(session, row)
+                for row in rows
+                if (row.payload or {}).get("scope") == BROADCAST_SCOPE
+            ]
+        return broadcasts
 
     # -- internals ------------------------------------------------------------
 
@@ -497,6 +700,151 @@ class PostgresMailbox:
         if row is None:
             raise KeyError(f"unknown command_id {command_id!r}")
         return row
+
+    # -- broadcast internals (NXT-13) -----------------------------------------
+
+    @staticmethod
+    async def _ensure_delivery_rows(session: AsyncSession, command_id: str, work_id: str) -> None:
+        """Insert the missing delivery rows for one broadcast parent.
+
+        Idempotent BY CONSTRUCTION: the frozen recipient list lives in the
+        winner's payload, existing rows are kept verbatim (their ack state
+        is the truth a resubmission must never reset), and the composite
+        primary key is the concurrent-writer backstop — a racing inserter
+        loses silently because both write the same bytes at ``pending``.
+        """
+        parent = await session.scalar(
+            select(ControlCommandRow).where(ControlCommandRow.id == command_id)
+        )
+        if parent is None:
+            raise KeyError(f"unknown command_id {command_id!r}")
+        recipients = (parent.payload or {}).get("recipients") or []
+        existing = set(
+            (
+                await session.execute(
+                    select(ControlCommandDeliveryRow.recipient).where(
+                        ControlCommandDeliveryRow.command_id == command_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for recipient in recipients:
+            if recipient in existing or not isinstance(recipient, str):
+                continue
+            session.add(
+                ControlCommandDeliveryRow(
+                    command_id=command_id,
+                    work_id=work_id,
+                    recipient=recipient,
+                    status="pending",
+                    journal=[_journal_entry(None, "pending")],
+                )
+            )
+
+    @staticmethod
+    async def _broadcast_from(session: AsyncSession, parent: ControlCommandRow) -> BroadcastCommand:
+        """Rebuild the broadcast value object from the durable rows.
+
+        ``populate_existing`` matters: this runs in the same session that
+        just CAS-updated a delivery row (with ``synchronize_session=False``
+        the identity-map object still holds its pre-update status), and the
+        rebuilt barrier must read the COMMITTED truth, not the stale copy.
+        """
+        rows = (
+            (
+                await session.execute(
+                    select(ControlCommandDeliveryRow)
+                    .where(ControlCommandDeliveryRow.command_id == parent.id)
+                    .order_by(
+                        ControlCommandDeliveryRow.created_at, ControlCommandDeliveryRow.recipient
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return BroadcastCommand(
+            parent=_to_command(parent),
+            acknowledgements=tuple(
+                RecipientAcknowledgement(
+                    recipient=row.recipient,
+                    status=row.status,  # type: ignore[arg-type]
+                    note=str((row.journal or [{}])[-1].get("note", "") if row.journal else ""),
+                )
+                for row in rows
+            ),
+        )
+
+    async def _advance_delivery(
+        self,
+        command_id: str,
+        recipient: str,
+        from_statuses: tuple[str, ...],
+        to_status: str,
+        *,
+        note: str = "",
+        idempotent_at: str | None = None,
+    ) -> BroadcastCommand:
+        """One guarded per-recipient CAS on ``control_command_deliveries``.
+
+        Same compare-and-set discipline as the command ladder: the WHERE
+        clause refuses a transition from any status the caller did not
+        see, the journal append rides the same statement, and
+        ``idempotent_at`` names the rung whose repeat is a no-op instead
+        of a race (an acknowledged lane re-acknowledging).
+        """
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(ControlCommandDeliveryRow).where(
+                    ControlCommandDeliveryRow.command_id == command_id,
+                    ControlCommandDeliveryRow.recipient == recipient,
+                )
+            )
+            if row is None:
+                parent = await session.scalar(
+                    select(ControlCommandRow).where(ControlCommandRow.id == command_id)
+                )
+                if parent is None:
+                    raise KeyError(f"unknown command_id {command_id!r}")
+                frozen = list((parent.payload or {}).get("recipients") or [])
+                raise KeyError(
+                    f"lane {recipient!r} is not in the frozen recipient set of "
+                    f"{command_id!r} ({frozen})"
+                )
+            if idempotent_at is not None and row.status == idempotent_at:
+                return await self._broadcast_from(session, await self._require(session, command_id))
+            if row.status not in from_statuses:
+                raise ValueError(
+                    f"delivery {command_id!r}/{recipient!r} is {row.status!r}; the "
+                    f"acknowledgement ladder {ACK_STATUSES} refuses to move to "
+                    f"{to_status!r} from anything but {' or '.join(repr(s) for s in from_statuses)}"
+                )
+            journal = list(row.journal or [])
+            journal.append(_journal_entry(row.status, to_status, note=note or None))
+            values: dict[str, Any] = {"status": to_status, "journal": journal}
+            if to_status == "acknowledged":
+                values["acknowledged_at"] = _utcnow()
+            result = await session.execute(
+                update(ControlCommandDeliveryRow)
+                .where(
+                    ControlCommandDeliveryRow.command_id == command_id,
+                    ControlCommandDeliveryRow.recipient == recipient,
+                    ControlCommandDeliveryRow.status.in_(from_statuses),
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            matched = cast("CursorResult[Any]", result).rowcount
+            if matched != 1:
+                raise ValueError(
+                    f"delivery {command_id!r}/{recipient!r} lost the compare-and-set to "
+                    f"{to_status!r}: it moved concurrently — reload and retry"
+                )
+            await session.commit()
+            return await self._broadcast_from(session, await self._require(session, command_id))
 
     @staticmethod
     def _skip_error(command_id: str, status: str, expected: tuple[str, ...]) -> ValueError:

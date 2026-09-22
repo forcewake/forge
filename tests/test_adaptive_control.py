@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 import pytest
 
 from forge.adaptive.control import (
+    BroadcastCommand,
+    BroadcastMailbox,
     Mailbox,
     MailboxSurface,
     PauseState,
@@ -807,3 +809,309 @@ class TestCancelContract:
 
     def test_a_late_effect_after_the_boundary_is_forbidden(self):
         assert late_effect_outcome(False) == "forbidden"
+
+
+class TestBroadcastCommand:
+    """NXT-13 — the work-wide barrier: one parent intent, one FIXED
+    recipient set, one acknowledgement row per lane. The parent is
+    completed by EVERY recipient, never by the first one to speak."""
+
+    def test_two_lanes_each_ack_and_the_parent_reflects_both(self):
+        mailbox = BroadcastMailbox()
+        broadcast, created = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+
+        assert created is True
+        assert broadcast.status == "pending"
+        assert broadcast.recipients == ("lane-1", "lane-2")
+
+        first = mailbox.acknowledge(broadcast.command_id, "lane-1", note="ckpt:aaa")
+        assert first.status == "pending"  # lane-2 has not spoken — no barrier yet
+
+        second = mailbox.acknowledge(broadcast.command_id, "lane-2", note="ckpt:bbb")
+        assert second.status == "completed"
+        assert second.acknowledged_recipients == ("lane-1", "lane-2")
+
+    def test_one_child_outcome_cannot_be_hidden_by_another(self):
+        """One lane's success never completes the barrier while the other is
+        undecided — and an uncertain lane stays NAMED, not averaged away."""
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+
+        mailbox.acknowledge(broadcast.command_id, "lane-1", note="ckpt:aaa")
+        uncertain = mailbox.mark_uncertain(
+            broadcast.command_id, "lane-2", "probe inconclusive: session gone"
+        )
+
+        assert uncertain.status == "completed_with_uncertain"
+        assert uncertain.uncertain_recipients == ("lane-2",)
+        assert uncertain.acknowledged_recipients == ("lane-1",)
+
+    def test_an_uncertain_lane_resolves_only_with_evidence(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+
+        mailbox.mark_uncertain(broadcast.command_id, "lane-1", "probe inconclusive")
+        with pytest.raises(ValueError, match="never re-acknowledged blind"):
+            mailbox.acknowledge(broadcast.command_id, "lane-1")
+
+        resolved = mailbox.resolve_uncertain(
+            broadcast.command_id, "lane-1", note="late checkpoint receipt verified"
+        )
+        mailbox.acknowledge(broadcast.command_id, "lane-2")
+        assert resolved.acknowledgement("lane-1").status == "acknowledged"
+        assert mailbox.broadcast(broadcast.command_id).status == "completed"
+
+    def test_an_empty_or_duplicated_recipient_set_is_refused(self):
+        mailbox = BroadcastMailbox()
+        with pytest.raises(ValueError, match="empty recipients"):
+            mailbox.submit(_command(kind="pause"), ())
+        with pytest.raises(ValueError, match="recipients must be unique"):
+            mailbox.submit(_command(kind="pause"), ("lane-1", "lane-1"))
+
+    def test_the_view_scopes_the_command_to_the_recipient_run(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(
+            _command(kind="pause", payload={"reason": "operator stop"}), ("lane-1", "lane-2")
+        )
+
+        view = broadcast.view_for("lane-1")
+
+        assert view is not None
+        assert view.command_id == broadcast.command_id  # the ack key is the parent
+        assert view.payload["run_id"] == "lane-1"  # a foreign lane's scope check refuses it
+        assert view.payload["broadcast_id"] == broadcast.command_id
+        assert view.payload["reason"] == "operator stop"
+        assert broadcast.view_for("lane-stranger") is None
+
+    def test_a_stranger_lane_can_never_acknowledge(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1",))
+
+        with pytest.raises(KeyError, match="not in the frozen recipient set"):
+            mailbox.acknowledge(broadcast.command_id, "lane-stranger")
+
+
+class TestBroadcastMailbox:
+    """The NXT-13 defect itself: one command, one status, first lane wins.
+    The per-recipient views are the fix — each lane consumes independently."""
+
+    def test_the_second_lane_still_sees_the_pause_after_the_first_acked(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+        assert len(mailbox.pending_for("wp-demo-1", "lane-1")) == 1
+        assert len(mailbox.pending_for("wp-demo-1", "lane-2")) == 1
+
+        mailbox.acknowledge(broadcast.command_id, "lane-1", note="checkpointed")
+
+        # THE regression: lane-1's consumption removed nothing from lane-2.
+        assert mailbox.pending_for("wp-demo-1", "lane-1") == []
+        still_pending = mailbox.pending_for("wp-demo-1", "lane-2")
+        assert [command.command_id for command in still_pending] == [broadcast.command_id]
+        assert still_pending[0].payload["run_id"] == "lane-2"
+
+    def test_a_work_scoped_command_never_enters_the_single_consumer_queue(self):
+        mailbox = BroadcastMailbox()
+        mailbox.submit(
+            _command(sequence=1, command_id="cmd-wide", idempotency_key="k-wide", kind="pause"),
+            ("lane-1", "lane-2"),
+        )
+        mailbox.mailbox.submit(
+            _command(
+                sequence=2,
+                command_id="cmd-plain",
+                idempotency_key="k-plain",
+                kind="steer",
+                payload={"text": "fix the parser first"},
+            )
+        )
+
+        # The single-lane view carries the ordinary steer only — a lane
+        # draining it can never consume (and thereby hide) the broadcast.
+        assert [command.command_id for command in mailbox.mailbox.pending("wp-demo-1")] == [
+            "cmd-plain"
+        ]
+        # ...and the broadcast is visible ONLY through per-recipient views.
+        assert len(mailbox.pending_for("wp-demo-1", "lane-1")) == 1
+        assert len(mailbox.pending_for("wp-demo-1", "lane-2")) == 1
+
+    def test_a_run_scoped_command_cannot_become_a_broadcast(self):
+        mailbox = BroadcastMailbox()
+        with pytest.raises(ValueError, match="cannot become a work-wide broadcast"):
+            mailbox.submit(
+                _command(payload={"run_id": "lane-1"}),
+                ("lane-1", "lane-2"),
+            )
+
+    def test_redelivery_adopts_the_winner_and_spends_nothing(self):
+        mailbox = BroadcastMailbox()
+        broadcast, created_first = mailbox.submit(_command(), ("lane-1", "lane-2"))
+        mailbox.acknowledge(broadcast.command_id, "lane-1", note="ckpt:aaa")
+
+        replayed, created_second = mailbox.submit(
+            _command(command_id="cmd-replayed", sequence=2), ("lane-1", "lane-2")
+        )
+
+        assert created_first is True
+        assert created_second is False
+        assert replayed.command_id == broadcast.command_id
+        assert replayed.acknowledgement("lane-1").status == "acknowledged"  # state kept
+        assert replayed.acknowledgement("lane-2").status == "pending"
+
+    def test_a_duplicate_work_wide_delivery_does_not_duplicate_child_interrupts(self):
+        """The replay's recipient list is discarded with its other bytes: the
+        winner's frozen set is authoritative, so one redelivered gateway event
+        cannot mint a second fan-out."""
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(), ("lane-1", "lane-2"))
+
+        replayed, created = mailbox.submit(
+            _command(command_id="cmd-replayed", sequence=2), ("lane-1", "lane-2", "lane-3")
+        )
+
+        assert created is False
+        assert replayed.recipients == ("lane-1", "lane-2")  # lane-3 never joined
+
+    def test_the_fence_holds_while_a_pause_is_undecided(self):
+        """A child created during the pause is not in the frozen set: it must
+        not start through the fence, and it cannot self-acknowledge."""
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+
+        assert mailbox.fence_active("wp-demo-1") is True  # a new lane waits
+
+        mailbox.acknowledge(broadcast.command_id, "lane-1")
+        assert mailbox.fence_active("wp-demo-1") is True  # lane-2 still outstanding
+
+        mailbox.acknowledge(broadcast.command_id, "lane-2")
+        assert mailbox.fence_active("wp-demo-1") is False
+
+    def test_an_uncertain_completion_lifts_the_fence_but_keeps_the_name(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(kind="pause"), ("lane-1", "lane-2"))
+        mailbox.acknowledge(broadcast.command_id, "lane-1")
+        mailbox.mark_uncertain(broadcast.command_id, "lane-2", "probe inconclusive")
+
+        finished = mailbox.broadcast(broadcast.command_id)
+
+        assert finished.status == "completed_with_uncertain"
+        assert mailbox.fence_active("wp-demo-1") is False  # decided, with the subset named
+        assert finished.uncertain_recipients == ("lane-2",)
+
+    def test_re_acknowledging_is_an_idempotent_noop_and_undeciding_refused(self):
+        mailbox = BroadcastMailbox()
+        broadcast, _ = mailbox.submit(_command(), ("lane-1",))
+        mailbox.acknowledge(broadcast.command_id, "lane-1", note="ckpt:aaa")
+
+        again = mailbox.acknowledge(broadcast.command_id, "lane-1", note="ckpt:aaa")
+
+        assert again.acknowledgement("lane-1").note == "ckpt:aaa"  # nothing re-spent
+        with pytest.raises(ValueError, match="only a pending recipient"):
+            mailbox.mark_uncertain(broadcast.command_id, "lane-1", "late doubt")
+
+    def test_an_unknown_broadcast_is_a_key_error(self):
+        mailbox = BroadcastMailbox()
+        with pytest.raises(KeyError, match="unknown broadcast command_id"):
+            mailbox.acknowledge("cmd-nope", "lane-1")
+
+
+class TestOperatorControlServiceWorkScopedPause:
+    """The shipped shape: pause(work_scoped=True, recipients=the work's
+    lanes) — additive; the single-lane path is untouched."""
+
+    def test_a_work_wide_pause_fans_out_and_completes_on_every_ack(self):
+        svc = OperatorControlService()
+
+        broadcast = svc.pause(
+            "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
+        )
+
+        assert isinstance(broadcast, BroadcastCommand)
+        assert broadcast.status == "pending"
+        # CTL-05's ordering holds at the parent: pause on record, interrupt out.
+        assert svc.pause_states["wp-1"].pause_requested is True
+        assert svc.pause_states["wp-1"].interrupt_sent is True
+        assert svc.pause_states["wp-1"].publication_epoch == 1
+        # both lanes see their own view through the per-recipient drain
+        for lane in ("run-a", "run-b"):
+            view = svc.pending_for("wp-1", lane)
+            assert [command.command_id for command in view] == [broadcast.command_id]
+            assert view[0].payload["run_id"] == lane
+
+        svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        half = svc.broadcast(broadcast.command_id)
+        assert half.status == "pending"
+        assert svc.pending_for("wp-1", "run-a") == []  # its own view is consumed
+        assert len(svc.pending_for("wp-1", "run-b")) == 1  # the second lane still sees it
+
+        svc.acknowledge(broadcast.command_id, "run-b", note="ckpt:bbb")
+        assert svc.broadcast(broadcast.command_id).status == "completed"
+        assert svc.fence_active("wp-1") is False
+
+    def test_a_duplicate_work_wide_pause_does_not_bump_the_epoch_or_refan(self):
+        svc = OperatorControlService()
+
+        first = svc.pause(
+            "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
+        )
+        svc.acknowledge(first.command_id, "run-a", note="ckpt:aaa")
+        second = svc.pause(
+            "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
+        )
+
+        assert second.command_id == first.command_id  # the winner, verbatim
+        assert svc.pause_states["wp-1"].publication_epoch == 1  # NOT bumped twice
+        assert second.acknowledgement("run-a").status == "acknowledged"  # state kept
+        assert [b.command_id for b in svc.broadcast_mailbox.broadcasts("wp-1")] == [
+            first.command_id
+        ]
+        assert svc.fence_active("wp-1") is True  # run-b is still outstanding
+
+    def test_an_uncertain_lane_is_individually_visible_at_the_parent(self):
+        svc = OperatorControlService()
+        broadcast = svc.pause(
+            "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a", "run-b")
+        )
+
+        svc.acknowledge(broadcast.command_id, "run-a", note="ckpt:aaa")
+        uncertain = svc.mark_uncertain(
+            broadcast.command_id, "run-b", "runner died before acknowledgement"
+        )
+
+        assert uncertain.status == "completed_with_uncertain"
+        assert uncertain.uncertain_recipients == ("run-b",)
+        assert svc.pending_for("wp-1", "run-b") == []  # it will not re-deliver blindly
+
+    def test_work_scoped_requires_a_recipient_set(self):
+        svc = OperatorControlService()
+        with pytest.raises(ValueError, match="empty recipients"):
+            svc.pause("wp-1", "human:op", "note:wide-1", work_scoped=True)
+
+    def test_the_single_lane_pause_path_is_unchanged(self):
+        """Back-compat: the default pause is still the CTL-05 single-lane
+        command — a PauseState in, a PauseState out, one mailbox row."""
+        svc = OperatorControlService()
+
+        state = svc.pause("wp-1", "human:op", "note:1")
+
+        assert isinstance(state, PauseState)
+        assert state.pause_requested is True
+        assert state.interrupt_sent is True
+        assert svc.fence_active("wp-1") is False  # no broadcast was created
+        assert svc.broadcast_mailbox.broadcasts("wp-1") == []
+        assert len(svc.mailbox.pending("wp-1")) == 1  # the ordinary pause row
+
+    def test_pending_for_merges_the_lane_view_in_sequence_order(self):
+        svc = OperatorControlService()
+        svc.steer("wp-1", "human:op", "fix the parser first")  # ordinary pending
+        broadcast = svc.pause(
+            "wp-1", "human:op", "note:wide-1", work_scoped=True, recipients=("run-a",)
+        )
+
+        combined = svc.pending_for("wp-1", "run-a")
+
+        assert [command.command_id for command in combined] == [
+            svc.mailbox.pending("wp-1")[0].command_id,
+            broadcast.command_id,
+        ]
+        # a foreign lane sees the steer but never run-a's broadcast view
+        assert [command.kind for command in svc.pending_for("wp-1", "run-b")] == ["steer"]

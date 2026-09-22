@@ -64,11 +64,17 @@ from typing import Final, Literal, Protocol, runtime_checkable
 from forge.adaptive.models import ChangeProposal, ControlCommand
 
 __all__ = [
+    "BROADCAST_SCOPE",
+    "BroadcastCommand",
+    "BroadcastMailbox",
+    "BroadcastStatus",
     "CaptureResult",
     "Mailbox",
     "MailboxSurface",
     "PauseState",
     "PauseStatus",
+    "RecipientAckStatus",
+    "RecipientAcknowledgement",
     "cancel_generation_applies",
     "classify_instruction",
     "deliver_steer",
@@ -234,12 +240,22 @@ class Mailbox:
         Sequence order is the delivery order — CTL-07 requires two
         steering messages to be applied in the order they were
         sequenced, never in the order they happened to arrive.
+
+        Work-wide (broadcast) parents are deliberately ABSENT from this
+        single-consumer view (NXT-13): one command with one status is
+        exactly the defect that let the first lane to checkpoint a
+        pause remove it from every other lane's queue. A broadcast is
+        delivered ONLY through its per-recipient views
+        (:meth:`BroadcastMailbox.pending_for`), each lane consuming its
+        own acknowledgement row independently.
         """
         return sorted(
             (
                 command
                 for command in self.commands.values()
-                if command.work_id == work_id and command.status in ("received", "authorized")
+                if command.work_id == work_id
+                and command.status in ("received", "authorized")
+                and command.payload.get("scope") != BROADCAST_SCOPE
             ),
             key=lambda command: command.sequence,
         )
@@ -262,6 +278,359 @@ class Mailbox:
         advanced = command.model_copy(update={"status": status})
         self.commands[command.command_id] = advanced
         return advanced
+
+
+# ---------------------------------------------------------------------------
+# NXT-13 — work-wide controls fanned out with per-recipient acknowledgements
+# ---------------------------------------------------------------------------
+
+#: The payload marker that makes a command a work-wide BROADCAST parent.
+#: A parent carrying ``{"scope": "work", "recipients": [...]}`` is never
+#: delivered through the single-consumer ``pending()`` view — only through
+#: its per-recipient acknowledgement rows (one lane consuming it says
+#: nothing about the other lanes' consumption).
+BROADCAST_SCOPE: Final = "work"
+
+#: The kinds whose work-wide delivery fences NEW child starts while the
+#: broadcast is still pending: a pause that not every recipient has
+#: acknowledged must not be raced by a lane that started after the
+#: snapshot was taken.
+_FENCE_KINDS: Final = frozenset({"pause"})
+
+#: The per-recipient acknowledgement ladder (NXT-13). Each recipient
+#: climbs INDEPENDENTLY: ``pending`` (the row exists, the lane has not
+#: spoken), ``acknowledged`` (this lane checkpointed/applied the command
+#: — the only rung that satisfies the parent barrier), ``uncertain``
+#: (this lane's outcome could NOT be proven — the honest state a
+#: reconciliation surfaces instead of guessing; individually visible at
+#: the parent, never hidden behind another lane's success).
+RecipientAckStatus = Literal["pending", "acknowledged", "uncertain"]
+
+#: The parent barrier's derived status. ``completed`` means EVERY
+#: recipient acknowledged; ``completed_with_uncertain`` means every
+#: recipient is decided with at least one explicitly ``uncertain`` — the
+#: review's "all children quiescent OR an explicitly listed uncertain
+#: subset"; anything undecided is ``pending``.
+BroadcastStatus = Literal["pending", "completed", "completed_with_uncertain"]
+
+
+@dataclass(frozen=True)
+class RecipientAcknowledgement:
+    """One recipient's delivery row: parent intent seen from ONE lane.
+
+    ``note`` carries the lane's own evidence — the checkpoint receipt
+    address on an acknowledgement, the probe result on an uncertainty —
+    because "lane 2 acknowledged" must be distinguishable from "lane 2
+    was silent" by reading the row, not by asking the lane.
+    """
+
+    recipient: str
+    status: RecipientAckStatus = "pending"
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class BroadcastCommand:
+    """One parent intent + a FIXED recipient set + their ack rows (NXT-13).
+
+    The wrapper is the value object the work-wide control plane reads:
+    the parent command (the durable intent, exactly one mailbox row),
+    the recipients snapshotted at submission (the work's lane set — the
+    set is frozen, so a lane created DURING the pause is not silently
+    added; it is fenced out by :meth:`BroadcastMailbox.fence_active`
+    until the operator re-scopes), and one acknowledgement per
+    recipient. Parent semantics:
+
+    - each recipient consumes independently — acknowledging for one lane
+      never marks another lane's row;
+    - ``status == "completed"`` ONLY when every recipient acknowledged
+      (the work-wide barrier; one lane's success cannot hide another
+      lane's missing or failed acknowledgement);
+    - ``uncertain`` recipients stay INDIVIDUALLY visible
+      (:attr:`uncertain_recipients`) — the parent completes with them
+      listed, never by rounding them up to acknowledged.
+    """
+
+    parent: ControlCommand
+    acknowledgements: tuple[RecipientAcknowledgement, ...]
+
+    def __post_init__(self) -> None:
+        if not self.acknowledgements:
+            raise ValueError(
+                "a broadcast with an empty recipient set is no broadcast — "
+                "refusing to pretend a fan-out with nothing fanned out"
+            )
+        seen = [ack.recipient for ack in self.acknowledgements]
+        if len(seen) != len(set(seen)):
+            raise ValueError(f"a recipient appears twice in one broadcast: {sorted(seen)}")
+
+    # -- identity passthroughs (the parent IS the command) ----------------
+
+    @property
+    def command_id(self) -> str:
+        return self.parent.command_id
+
+    @property
+    def work_id(self) -> str:
+        return self.parent.work_id
+
+    @property
+    def sequence(self) -> int:
+        return self.parent.sequence
+
+    @property
+    def kind(self) -> str:
+        return self.parent.kind
+
+    @property
+    def recipients(self) -> tuple[str, ...]:
+        return tuple(ack.recipient for ack in self.acknowledgements)
+
+    # -- the barrier --------------------------------------------------------
+
+    @property
+    def status(self) -> BroadcastStatus:
+        """ALL acknowledged → ``completed``; all decided with an explicit
+        uncertain subset → ``completed_with_uncertain``; else ``pending``."""
+        states = {ack.status for ack in self.acknowledgements}
+        if states == {"acknowledged"}:
+            return "completed"
+        if states <= {"acknowledged", "uncertain"} and "uncertain" in states:
+            return "completed_with_uncertain"
+        if states == {"uncertain"}:
+            return "completed_with_uncertain"
+        return "pending"
+
+    @property
+    def acknowledged_recipients(self) -> tuple[str, ...]:
+        return tuple(a.recipient for a in self.acknowledgements if a.status == "acknowledged")
+
+    @property
+    def unacknowledged_recipients(self) -> tuple[str, ...]:
+        return tuple(a.recipient for a in self.acknowledgements if a.status == "pending")
+
+    @property
+    def uncertain_recipients(self) -> tuple[str, ...]:
+        """The individually-visible uncertainty list — never collapsed."""
+        return tuple(a.recipient for a in self.acknowledgements if a.status == "uncertain")
+
+    def acknowledgement(self, recipient: str) -> RecipientAcknowledgement | None:
+        """One recipient's row, or ``None`` for a non-recipient lane."""
+        return next((a for a in self.acknowledgements if a.recipient == recipient), None)
+
+    def view_for(self, recipient: str) -> ControlCommand | None:
+        """The per-recipient VIEW of the parent, or ``None`` for a stranger.
+
+        The view is the command the lane consumes: the parent's bytes
+        with the recipient's ``run_id`` scope and the broadcast id in
+        the payload — so the single-lane scope check (a lane ignores
+        commands targeted at another run) accepts exactly its own view
+        and no foreign lane can consume the wrong delivery.
+        """
+        if self.acknowledgement(recipient) is None:
+            return None
+        return broadcast_view(self.parent, recipient)
+
+    def _with(self, recipient: str, status: RecipientAckStatus, note: str) -> BroadcastCommand:
+        """One recipient's row replaced; every other row untouched."""
+        return BroadcastCommand(
+            parent=self.parent,
+            acknowledgements=tuple(
+                replace(ack, status=status, note=note) if ack.recipient == recipient else ack
+                for ack in self.acknowledgements
+            ),
+        )
+
+
+def broadcast_view(parent: ControlCommand, recipient: str) -> ControlCommand:
+    """Project the parent into the recipient's run-scoped view.
+
+    The view keeps the parent's identity (``command_id`` — the
+    acknowledgement key) and sequence; the payload gains the recipient's
+    ``run_id`` plus the ``broadcast_id`` correlation, so a lane's own
+    scope machinery delivers exactly its view of the work-wide intent.
+    """
+    payload = dict(parent.payload)
+    payload["run_id"] = recipient
+    payload["broadcast_id"] = parent.command_id
+    return parent.model_copy(update={"payload": payload})
+
+
+class BroadcastMailbox:
+    """The work-wide fan-out over a single-consumer :class:`Mailbox` (NXT-13).
+
+    The parent is one durable row in the wrapped mailbox (sequence
+    discipline, idempotency-key dedup and the ladder all apply to it),
+    but its DELIVERY is per-recipient: each lane reads
+    :meth:`pending_for` — its own view of every broadcast it has not
+    acknowledged — and acknowledges independently. The single-lane path
+    is untouched: ordinary commands keep flowing through
+    :meth:`Mailbox.pending` exactly as before.
+
+    Acknowledgement ladder per recipient: ``pending -> acknowledged``
+    (:meth:`acknowledge`), ``pending -> uncertain``
+    (:meth:`mark_uncertain` — the probe could not decide; the parent
+    completes with the lane listed, it is never rounded up), and
+    ``uncertain -> acknowledged`` (:meth:`resolve_uncertain` — later
+    evidence settled it). An acknowledged row is terminal: re-acking is
+    an idempotent no-op, and un-deciding one raises. A foreign lane
+    (not in the frozen recipient set) can neither see a view nor
+    acknowledge — ``None`` / :class:`KeyError`.
+    """
+
+    def __init__(self, mailbox: Mailbox | None = None) -> None:
+        self.mailbox = mailbox if mailbox is not None else Mailbox()
+        #: command_id -> the broadcast value object.
+        self._broadcasts: dict[str, BroadcastCommand] = {}
+
+    def submit(
+        self, command: ControlCommand, recipients: tuple[str, ...]
+    ) -> tuple[BroadcastCommand, bool]:
+        """Fan one parent intent out to a FIXED recipient set.
+
+        The parent payload is stamped ``scope=work`` with the recipients
+        BEFORE it enters the wrapped mailbox, so the single-consumer
+        ``pending()`` never delivers it (NXT-13's defect: one status,
+        first lane wins). A command already scoped to one ``run_id``
+        cannot become a broadcast — that contradiction is refused. The
+        recipient set is frozen at submission: redelivery (same
+        idempotency key) adopts the winner's broadcast VERBATIM — the
+        replay's recipient list is discarded, exactly as its other bytes
+        are — and changes nothing.
+        """
+        if not recipients:
+            raise ValueError("a work-wide command needs the work's lane set — empty recipients")
+        if len(recipients) != len(set(recipients)):
+            raise ValueError(f"recipients must be unique: {list(recipients)}")
+        if isinstance(command.payload.get("run_id"), str):
+            raise ValueError(
+                "a command already scoped to one run cannot become a work-wide broadcast"
+            )
+        payload = dict(command.payload)
+        payload["scope"] = BROADCAST_SCOPE
+        payload["recipients"] = list(recipients)
+        stored, created = self.mailbox.submit(command.model_copy(update={"payload": payload}))
+        existing = self._broadcasts.get(stored.command_id)
+        if existing is not None:
+            return existing, False
+        broadcast = BroadcastCommand(
+            parent=stored,
+            acknowledgements=tuple(
+                RecipientAcknowledgement(recipient=recipient) for recipient in recipients
+            ),
+        )
+        self._broadcasts[stored.command_id] = broadcast
+        return broadcast, created
+
+    def acknowledge(self, command_id: str, recipient: str, *, note: str = "") -> BroadcastCommand:
+        """One lane's checkpointed/apply acknowledgement (idempotent)."""
+        broadcast = self._require_broadcast(command_id)
+        ack = self._require_recipient(broadcast, recipient)
+        if ack.status == "acknowledged":
+            return broadcast  # redelivered ack — nothing re-spent
+        if ack.status != "pending":
+            raise ValueError(
+                f"recipient {recipient!r} of {command_id!r} is {ack.status!r}; an uncertain "
+                "lane is settled through resolve_uncertain, never re-acknowledged blind"
+            )
+        advanced = broadcast._with(recipient, "acknowledged", note)
+        self._broadcasts[command_id] = advanced
+        return advanced
+
+    def mark_uncertain(self, command_id: str, recipient: str, note: str) -> BroadcastCommand:
+        """Record that this lane's outcome could NOT be proven.
+
+        The honest give-up: the row SAYS uncertain — never acknowledged
+        (unproven) and never silently dropped. The parent completes only
+        with the lane explicitly listed in
+        :attr:`BroadcastCommand.uncertain_recipients`.
+        """
+        broadcast = self._require_broadcast(command_id)
+        ack = self._require_recipient(broadcast, recipient)
+        if ack.status != "pending":
+            raise ValueError(
+                f"recipient {recipient!r} of {command_id!r} is {ack.status!r}; only a "
+                "pending recipient can be marked uncertain"
+            )
+        advanced = broadcast._with(recipient, "uncertain", note)
+        self._broadcasts[command_id] = advanced
+        return advanced
+
+    def resolve_uncertain(
+        self, command_id: str, recipient: str, *, note: str = ""
+    ) -> BroadcastCommand:
+        """Settle an uncertain lane with the evidence that later arrived."""
+        broadcast = self._require_broadcast(command_id)
+        ack = self._require_recipient(broadcast, recipient)
+        if ack.status != "uncertain":
+            raise ValueError(
+                f"recipient {recipient!r} of {command_id!r} is {ack.status!r}; only an "
+                "uncertain recipient can be resolved"
+            )
+        advanced = broadcast._with(recipient, "acknowledged", note)
+        self._broadcasts[command_id] = advanced
+        return advanced
+
+    def pending_for(self, work_id: str, recipient: str) -> list[ControlCommand]:
+        """The recipient's OWN lane view: every broadcast of the work this
+        recipient has not acknowledged, as run-scoped views in sequence
+        order. A lane that already acknowledged (or was marked uncertain)
+        does not see the command again — and no other lane's consumption
+        can remove it from THIS view."""
+        views = (
+            broadcast.view_for(recipient)
+            for broadcast in self._broadcasts.values()
+            if broadcast.work_id == work_id
+            and broadcast.acknowledgement(recipient) is not None
+            and broadcast.acknowledgement(recipient).status == "pending"  # type: ignore[union-attr]
+        )
+        return sorted((view for view in views if view is not None), key=lambda view: view.sequence)
+
+    def broadcast(self, command_id: str) -> BroadcastCommand | None:
+        """The broadcast value object, or ``None`` for an ordinary command."""
+        return self._broadcasts.get(command_id)
+
+    def broadcasts(self, work_id: str) -> list[BroadcastCommand]:
+        """The work's broadcasts in sequence order (the operator's view)."""
+        return sorted(
+            (b for b in self._broadcasts.values() if b.work_id == work_id),
+            key=lambda b: b.sequence,
+        )
+
+    def fence_active(self, work_id: str) -> bool:
+        """True while a work-wide pause is not yet decided for every lane.
+
+        The fence for FUTURE child starts (NXT-13): a lane created after
+        the snapshot must not begin work while a work-wide pause is still
+        awaiting acknowledgement — the recipient set is frozen, so the
+        new lane's only honest options are to wait for the fence to lift
+        (or for the operator to re-scope a fresh broadcast that includes
+        it), never to start straight through an in-flight pause. A
+        broadcast that completed with an explicitly uncertain subset has
+        finished deciding — the fence lifts and the uncertainty remains
+        individually visible at the parent.
+        """
+        return any(
+            broadcast.kind in _FENCE_KINDS and broadcast.status == "pending"
+            for broadcast in self._broadcasts.values()
+            if broadcast.work_id == work_id
+        )
+
+    def _require_broadcast(self, command_id: str) -> BroadcastCommand:
+        broadcast = self._broadcasts.get(command_id)
+        if broadcast is None:
+            raise KeyError(f"unknown broadcast command_id {command_id!r}")
+        return broadcast
+
+    @staticmethod
+    def _require_recipient(broadcast: BroadcastCommand, recipient: str) -> RecipientAcknowledgement:
+        ack = broadcast.acknowledgement(recipient)
+        if ack is None:
+            raise KeyError(
+                f"lane {recipient!r} is not in the frozen recipient set of "
+                f"{broadcast.command_id!r} ({list(broadcast.recipients)})"
+            )
+        return ack
 
 
 #: The honest pause outcomes (NXT-15). ``running``/``pausing`` are the
