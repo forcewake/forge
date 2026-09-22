@@ -23,6 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.pool import StaticPool
 
 from forge.config import ForgeConfig, Settings
+from forge.adaptive.pause_fence import (
+    clear_pause_fence,
+    pause_fence_decision,
+    raise_pause_fence,
+)
 from forge.durable import (
     FlowRun,
     FlowStatus,
@@ -38,9 +43,14 @@ from forge.factory.reviewer import ReviewVerdict
 from forge.harness_entry import PlanBindingError, fetch_issue_context
 from forge.harnesses.brief_envelope import build_brief_envelope
 from forge.integrations.github import GitHubAPIError
-from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
+from forge.integrations.github_flow import (
+    GitHubAgents,
+    GitHubPublishFlow,
+    github_factory_branch,
+)
 from forge.models.base import Base
 from forge.orchestrator.project_config import clear_cache
+from forge.repository import Change, ChangeSet, Operation
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.github_service import GitHubRunService, execute_github_run_command
 from forge.runs.service import task_digest_of
@@ -3240,3 +3250,204 @@ class TestFinalBoundaryFenceFND02:
         # refuses the native write (zero commits/PRs).
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []
+
+
+# ----------------------------------------------------------------------
+# R28-08: the durable pause fence — one persisted authority state
+# ----------------------------------------------------------------------
+
+
+class TestPauseFenceStore:
+    """The fence row's own semantics (migration 022's ORM surface)."""
+
+    async def test_raise_then_decision_is_fenced_with_the_durable_facts(self, db):
+        decision = await raise_pause_fence(
+            db, "run-1", publication_epoch_bumped=2, raised_by_command="cmd-a"
+        )
+        assert decision.fenced is True
+        assert decision.publication_epoch_bumped == 2
+        assert decision.fenced_at is not None
+        assert "publication epoch 2" in decision.reason
+
+        reread = await pause_fence_decision(db, "run-1")
+        assert reread.fenced is True
+        assert reread.publication_epoch_bumped == 2
+
+    async def test_an_unknown_work_is_not_fenced(self, db):
+        assert (await pause_fence_decision(db, "nope")).fenced is False
+
+    async def test_resume_clears_under_a_new_epoch_and_keeps_the_row(self, db):
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=4)
+        cleared = await clear_pause_fence(db, "run-1", cleared_by_command="cmd-b")
+        assert cleared is True
+
+        after = await pause_fence_decision(db, "run-1")
+        assert after.fenced is False
+        assert after.resumed_publication_epoch == 5  # fenced epoch + 1: fresh
+        # idempotent: a second resume clears nothing
+        assert await clear_pause_fence(db, "run-1") is False
+
+    async def test_re_arming_a_cleared_fence_is_monotonic_in_the_epoch(self, db):
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=4)
+        await clear_pause_fence(db, "run-1")
+        # a replayed OLD pause must not roll the authority backwards
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=3)
+        decision = await pause_fence_decision(db, "run-1")
+        assert decision.fenced is True
+        assert decision.publication_epoch_bumped == 4
+
+
+class TestPauseFenceIsDurableAcrossRestart:
+    """The composed R28-08 invariant: pause → RESTART the API process →
+    the delayed candidate callback arrives → the publisher REFUSES,
+    because the fence is a committed row, not in-memory state."""
+
+    async def test_delayed_publish_after_restart_is_refused_then_resume_reopens(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        # The pause lands (what ControlCommandRouter does on /pause): the
+        # command is recorded, the publication epoch bumped, the durable
+        # fence raised — in THAT order.
+        await raise_pause_fence(db, run_id, publication_epoch_bumped=1)
+
+        # The API process "restarts": a fresh service instance over the
+        # same durable state. Its memory holds no pause; only the row does.
+        restarted = make_service(db, fake)
+        assert (await pause_fence_decision(db, run_id)).fenced is True
+
+        clear_comments(fake)
+        await go(restarted, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status in (FlowStatus.FAILED.value, FlowStatus.BLOCKED.value)
+        assert "publication_refused" in (run.status_reason or "")
+        assert "pause fence active" in (run.status_reason or "")
+        # ZERO native effects were authorized after the fence.
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
+
+        # Resume clears the fence under a NEW epoch — publication reopens
+        # for a fresh grant (the run-aware entry publishes again).
+        await clear_pause_fence(db, run_id)
+        assert (await pause_fence_decision(db, run_id)).fenced is False
+        outcome = await restarted._publish_candidate_run_aware(
+            run_id,
+            issue_number=ISSUE,
+            changeset=ChangeSet(
+                branch=github_factory_branch(ISSUE, run_id),
+                commit_message="resume probe",
+                changes=[
+                    Change(
+                        path="forge-demo/resumed.py",
+                        operation=Operation.CREATE,
+                        content="VALUE = 1\n",
+                    )
+                ],
+            ),
+            expected_head=BASE_HEAD,
+            operation_key="resume-probe",
+        )
+        assert outcome.ok is True
+        assert len(fake.calls_of("create_commit_on_branch")) == 1
+
+
+# ----------------------------------------------------------------------
+# R28-15: discovery and implementation on ONE immutable source set
+# ----------------------------------------------------------------------
+
+
+class TestDiscoverySpliceInsidePlanning:
+    """The splice sits INSIDE the planning try: a discovery failure (or a
+    refusal to plan over unanswered questions) gets the deliberate
+    planning-failed handling — a parked run and an operator note, never a
+    silently stuck preflight run."""
+
+    async def _assert_parked_visibly(self, db, fake, make_exc):
+        from forge.adaptive.discovery_stage import DiscoveryStageError
+        from forge.runs import github_service as service_module
+
+        original = service_module.maybe_run_discovery
+
+        async def patched(run_ctx, planner_input):
+            raise make_exc()
+
+        service_module.maybe_run_discovery = patched
+        try:
+            service = make_service(db, fake)
+            with pytest.raises(DiscoveryStageError):
+                await start(service)
+        finally:
+            service_module.maybe_run_discovery = original
+
+        run = await get_run(db, await _only_run_id(db))
+        assert run.status == FlowStatus.BLOCKED.value  # parked, never stuck preflight
+        assert "planning_failed" in (run.status_reason or "")
+        assert "discovery" in (run.status_reason or "")
+        assert any("failed" in body for body in comments(fake))
+
+    async def test_a_failed_discovery_stage_parks_the_run(self, db, fake):
+        from forge.adaptive.discovery_stage import DiscoveryStageError
+
+        await self._assert_parked_visibly(
+            db, fake, lambda: DiscoveryStageError("discovery disc-1 refuses: probes died")
+        )
+
+    async def test_unanswered_questions_refuse_instead_of_defaulting(self, db, fake):
+        from forge.adaptive.discovery_stage import QuestionsOutstanding
+
+        await self._assert_parked_visibly(
+            db,
+            fake,
+            lambda: QuestionsOutstanding(
+                "disc-1", "run-x", [{"question_id": "q-1", "text": "which repo?"}]
+            ),
+        )
+
+
+class TestDiscoveryFreezesOneSourceSet:
+    """R28-15's freeze: the base SHA is resolved FIRST and binds the
+    config read, the discovery snapshot and the attempt base — a branch
+    that moves mid-planning cannot mix two snapshots into one approved
+    plan."""
+
+    async def test_discovery_reads_the_resolved_sha_and_base_is_never_reread(
+        self, db, fake, monkeypatch
+    ):
+        monkeypatch.setenv("FORGE_DISCOVERY_ENABLED", "1")
+        tree_refs: list[str] = []
+
+        real_get_tree = fake.get_tree
+
+        async def moving_get_tree(project_id, path="", ref="HEAD", recursive=False):
+            # main moves on EVERY listing — the movable name is poison; a
+            # frozen SHA is not.
+            fake.heads[REPO]["main"] = "9" * 40
+            tree_refs.append(ref)
+            return await real_get_tree(project_id, path, ref, recursive)
+
+        fake.get_tree = moving_get_tree  # type: ignore[method-assign]
+
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        # The attempt base is the FIRST resolved SHA — the branch moved
+        # during planning and the freeze never re-read the name.
+        assert run.base_sha == BASE_HEAD
+        # The discovery snapshot read the SAME immutable SHA, never the
+        # movable branch name.
+        assert tree_refs, "the enabled discovery stage never read a tree"
+        assert set(tree_refs) == {BASE_HEAD}
+        record = (run.evidence or {}).get("discovery") or {}
+        assert (record.get("dispatch") or {}).get("source_oid") == BASE_HEAD
+
+    async def test_disabled_discovery_stays_unresearched_with_no_io(self, db, fake):
+        calls_before = list(fake.calls)
+        service = make_service(db, fake)
+        run_id = await start(service)
+        run = await get_run(db, run_id)
+        assert "discovery" not in (run.evidence or {})
+        # Only the head read + config/profile reads happened — no tree
+        # listing (the disabled stage never pays the snapshot read).
+        assert [name for name, _ in fake.calls[len(calls_before) :] if name == "get_tree"] == []

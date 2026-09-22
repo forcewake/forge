@@ -34,6 +34,7 @@ from forge.adaptive.adapters import ClaudeSDKAdapter
 from forge.adaptive.control import MailboxSurface
 from forge.adaptive.lane_channel import (
     DEFAULT_POLL_INTERVAL_S,
+    LANE_CONTROL_GENERATION_ENV,
     LANE_CONTROL_TOKEN_ENV,
     LANE_CONTROL_URL_ENV,
     LaneControlChannel,
@@ -116,6 +117,23 @@ class TestFromEnv:
             "FORGE_LANE_CONTROL_POLL_SECONDS": "fast",
         }
         assert lane_channel_from_env(env).poll_interval == DEFAULT_POLL_INTERVAL_S
+
+    def test_the_runner_generation_rides_in_from_the_dispatch_env(self):
+        base = {
+            LANE_CONTROL_URL_ENV: BASE,
+            LANE_CONTROL_TOKEN_ENV: TOKEN,
+            "FORGE_RUN_ID": WORK,
+        }
+        # Unset → nothing declared (the pre-generation lane, the default).
+        assert lane_channel_from_env(base).generation is None
+        assert lane_channel_from_env({**base, LANE_CONTROL_GENERATION_ENV: "3"}).generation == 3
+        # Malformed or negative degrades to "no generation declared" — a
+        # typo must not brick the lane's acks against a pre-generation
+        # control plane.
+        assert (
+            lane_channel_from_env({**base, LANE_CONTROL_GENERATION_ENV: "soon"}).generation is None
+        )
+        assert lane_channel_from_env({**base, LANE_CONTROL_GENERATION_ENV: "-1"}).generation is None
 
     def test_the_lane_driver_seam_swaps_the_channel_in(self):
         local = steering_service_from_env({"FORGE_STEERING_ENABLED": "1"})
@@ -293,6 +311,28 @@ class TestAcks:
     def test_checkpoint_acks_the_climb(self, httpx_mock: HTTPXMock):
         self._mock_ack(httpx_mock, "checkpointed")
         assert channel().checkpoint("cmd-1").status == "checkpointed"
+
+    def test_the_acks_declare_the_runner_generation(self, httpx_mock: HTTPXMock):
+        """R28-10: a generation-carrying channel DECLARES it on every ack —
+        the control plane can then refuse a superseded generation's ack
+        before any state moves."""
+        self._mock_ack(httpx_mock, "authorized")
+        ch = channel(generation=4)
+
+        ch.authorize("cmd-1", {})
+
+        body = json_body(httpx_mock.get_requests()[-1])
+        assert body["generation"] == 4
+        assert body["journal_row"]["generation"] == 4
+
+    def test_a_generationless_channel_omits_the_field_entirely(self, httpx_mock: HTTPXMock):
+        """Pre-generation lanes never send the key — the honest migration
+        default, not an explicit null."""
+        self._mock_ack(httpx_mock, "authorized")
+
+        channel().authorize("cmd-1", {})
+
+        assert "generation" not in json_body(httpx_mock.get_requests()[-1])
 
     def test_a_refused_transition_raises_the_mailboxes_own_error(self, httpx_mock: HTTPXMock):
         httpx_mock.add_response(

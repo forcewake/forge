@@ -42,6 +42,7 @@ from uuid import uuid4
 
 import logging
 
+from forge.adaptive.pause_fence import PauseFenceDecision
 from forge.config import Settings
 from forge.durable import short_run_id
 from forge.durable.intents import commit_matches, message_with_marker
@@ -73,6 +74,13 @@ from forge.runs.publisher import PolicyViolation, ValidatedCandidate, validate_c
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 logger = logging.getLogger(__name__)
+
+#: R28-08: the durable pause-fence read the publisher evaluates at the
+#: NATIVE-effect boundary — ``async (work_id) -> PauseFenceDecision``.
+#: The transport stays storage-agnostic: the run service injects the
+#: durable reader (:func:`forge.adaptive.pause_fence.pause_fence_decision`
+#: over its session factory); the fakes duck-type it in tests.
+PublicationFence = Callable[[str], Awaitable[PauseFenceDecision]]
 
 
 def github_factory_branch(issue_number: int, run_id: str) -> str:
@@ -120,6 +128,13 @@ class GitHubPublishOutcome:
     #: re-posted. The caller records the intent as ``adopted`` (vs
     #: ``committed``); the run advances identically.
     adopted: bool = False
+    #: R28-08: True when the durable PAUSE FENCE refused the publication
+    #: (``reason`` carries the fence's persisted authority — work id,
+    #: bumped epoch, fenced-at). Unlike a cancel refusal this survives an
+    #: API/lane restart: the fence is a committed row, so the caller parks
+    #: the run visibly and a late candidate from the old lane cannot
+    #: re-enter through a fresh process.
+    fenced: bool = False
 
 
 class BaseContentReader(Protocol):
@@ -161,6 +176,7 @@ class GitHubPublishFlow:
         expected_head: str | None = None,
         allowed_paths: list[str] | None = None,
         operation_key: str | None = None,
+        publication_fence: PublicationFence | None = None,
     ) -> GitHubPublishOutcome:
         """Builtin-implementer leg: propose against the frozen base, publish.
 
@@ -206,6 +222,7 @@ class GitHubPublishFlow:
             expected_head=expected_head,
             allowed_paths=allowed_paths,
             operation_key=operation_key,
+            publication_fence=publication_fence,
         )
 
     async def publish_changeset(
@@ -223,6 +240,7 @@ class GitHubPublishFlow:
         allowed_paths: list[str] | None = None,
         operation_key: str | None = None,
         pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
+        publication_fence: PublicationFence | None = None,
     ) -> GitHubPublishOutcome:
         """Boundary-validate *changeset*, ensure the factory branch, commit.
 
@@ -260,6 +278,7 @@ class GitHubPublishFlow:
             body=body,
             operation_key=operation_key,
             pre_dispatch_guard=pre_dispatch_guard,
+            publication_fence=publication_fence,
         )
 
     async def publish_validated(
@@ -276,6 +295,7 @@ class GitHubPublishFlow:
         body: str | None = None,
         operation_key: str | None = None,
         pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
+        publication_fence: PublicationFence | None = None,
     ) -> GitHubPublishOutcome:
         """Commit an ALREADY-VALIDATED candidate (ADR-0026 transport contract).
 
@@ -285,6 +305,15 @@ class GitHubPublishFlow:
         lands during those operations forbids the write at the final
         boundary; a guard that returns False yields the blocked-class
         outcome with zero mutations.
+
+        R28-08: *publication_fence* is the DURABLE pause fence read at the
+        SAME boundary — one persisted authority state evaluated on both
+        sides (control processing raises it, the publisher refuses on it).
+        Unlike the guard (a caller-supplied closure over run state), the
+        fence answer comes from committed storage, so a pause that landed
+        before an API/lane restart still refuses a late candidate from
+        the old lane: the outcome is the blocked class with ``fenced``
+        set and zero mutations.
 
         The only route from a candidate to the commit API: the
         :class:`~forge.runs.publisher.ValidatedCandidate` wrapper is issued
@@ -335,6 +364,28 @@ class GitHubPublishFlow:
         # (research §3.4); the CAS plus the headline marker probe are the
         # exactly-once guards.
         try:
+            # R28-08: the durable pause fence FIRST — one persisted
+            # authority state read immediately before the native effect.
+            # A fenced work refuses with zero mutations whatever the
+            # candidate's own validity; the reason carries the fence's
+            # durable facts (work id, bumped epoch, fenced-at) so the
+            # refusal names the authority that caused it.
+            if publication_fence is not None:
+                fence = await publication_fence(run_id)
+                if fence.fenced:
+                    logger.warning(
+                        "GitHub publish for run %s REFUSED by the durable pause "
+                        "fence (%s) — zero native writes",
+                        run_id[:8],
+                        fence.reason,
+                    )
+                    return GitHubPublishOutcome(
+                        ok=False,
+                        reason=f"publication_refused: {fence.reason}",
+                        expected_head_oid=expected_head,
+                        branch=branch,
+                        fenced=True,
+                    )
             if pre_dispatch_guard is not None and not await pre_dispatch_guard():
                 return GitHubPublishOutcome(
                     ok=False,
@@ -462,6 +513,7 @@ class GitHubPublishFlow:
         body: str | None = None,
         operation_key: str | None = None,
         pre_dispatch_guard: "Callable[[], Awaitable[bool]] | None" = None,
+        publication_fence: PublicationFence | None = None,
     ) -> GitHubPublishOutcome:
         """The publication boundary of the GitHub transport (ADR-0026).
 
@@ -511,6 +563,7 @@ class GitHubPublishFlow:
             body=body,
             operation_key=operation_key,
             pre_dispatch_guard=pre_dispatch_guard,
+            publication_fence=publication_fence,
         )
 
     def _reader_for(self, owner: str, repo: str) -> BaseContentReader:

@@ -14,6 +14,7 @@ strict materialization + write policy before any commit-API call
 
 import pytest
 
+from forge.adaptive.pause_fence import PauseFenceDecision
 from forge.factory.reviewer import ReviewVerdict
 from forge.integrations.github_flow import (
     GitHubPRReviewer,
@@ -610,3 +611,154 @@ class TestPRReviewer:
                 base_sha=BASE_HEAD,
                 candidate_sha="c" * 40,
             )
+
+
+def fenced_decision(work_id: str = RUN_ID, epoch: int = 3) -> PauseFenceDecision:
+    """A durable-fence answer that says FENCED (the persisted row's shape)."""
+    from datetime import datetime, timezone
+
+    return PauseFenceDecision(
+        work_id=work_id,
+        fenced=True,
+        publication_epoch_bumped=epoch,
+        fenced_at=datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+class TestPauseFence:
+    """R28-08: the durable pause fence at the publisher's native-effect
+    boundary. The fence is ONE persisted authority state raised by
+    control processing and read here — the publisher refuses a fenced
+    work with ZERO commit-API calls, whatever the candidate's own
+    validity, and the refusal carries the fence's durable facts."""
+
+    async def test_a_fenced_work_is_refused_with_zero_commit_calls(self, fake: FakeGitHub):
+        flow = make_flow(fake)
+
+        async def fence(work_id: str) -> PauseFenceDecision:
+            return fenced_decision(work_id)
+
+        outcome = await flow.publish_changeset(
+            "acme",
+            "acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            changeset=changeset(),
+            publication_fence=fence,
+        )
+
+        assert outcome.ok is False
+        assert outcome.fenced is True
+        assert outcome.reason.startswith("publication_refused:")
+        assert "pause fence active" in outcome.reason
+        assert "publication epoch 3" in outcome.reason  # the durable facts ride the reason
+        assert fake.calls_of("create_commit_on_branch") == []
+        assert fake.calls_of("create_draft_pr") == []
+        assert fake.heads[REPO].get("forge/42/abcd1234") in (None, BASE_HEAD)
+
+    async def test_an_unfenced_work_publishes_normally(self, fake: FakeGitHub):
+        flow = make_flow(fake)
+
+        async def fence(work_id: str) -> PauseFenceDecision:
+            return PauseFenceDecision(work_id=work_id, fenced=False)
+
+        outcome = await flow.publish_changeset(
+            "acme",
+            "acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            changeset=changeset(),
+            publication_fence=fence,
+        )
+
+        assert outcome.ok is True
+        assert outcome.fenced is False
+        assert len(fake.calls_of("create_commit_on_branch")) == 1
+
+    async def test_no_fence_wired_keeps_the_legacy_behavior(self, fake: FakeGitHub):
+        """The parameter is additive: callers that do not inject a fence
+        (older compositions, non-durable deployments) publish exactly as
+        before — the fence is a new authority, not a new requirement."""
+        flow = make_flow(fake)
+
+        outcome = await flow.publish_changeset(
+            "acme", "acme-widget", issue_number=42, run_id=RUN_ID, changeset=changeset()
+        )
+
+        assert outcome.ok is True
+
+    async def test_the_fence_is_read_at_the_boundary_after_the_reads(self, fake: FakeGitHub):
+        """A pause that lands DURING the publish reads is still honored:
+        the fence is evaluated immediately before the commit-API call —
+        after the branch setup and blob hydration — so a durable pause
+        committed mid-flight refuses the write at the last instant."""
+        flow = make_flow(fake)
+        observed: dict[str, int] = {}
+
+        async def late_fence(work_id: str) -> PauseFenceDecision:
+            observed["branches_ensured"] = len(fake.calls_of("create_branch"))
+            observed["commits"] = len(fake.calls_of("create_commit_on_branch"))
+            return fenced_decision(work_id)
+
+        outcome = await flow.publish_changeset(
+            "acme",
+            "acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            changeset=changeset(),
+            publication_fence=late_fence,
+        )
+
+        assert outcome.fenced is True and outcome.ok is False
+        # The boundary read happened AFTER the branch setup, BEFORE any
+        # commit mutation — the exact FND-02 window the fence shares with
+        # the pre-dispatch guard.
+        assert observed["branches_ensured"] >= 1
+        assert observed["commits"] == 0
+        assert fake.calls_of("create_commit_on_branch") == []
+
+    async def test_the_fence_refusal_names_the_fence_not_the_guard(self, fake: FakeGitHub):
+        """Both boundary checks present: the fence's durable reason wins —
+        the operator sees WHICH persisted authority refused the write."""
+
+        async def fence(work_id: str) -> PauseFenceDecision:
+            return fenced_decision(work_id)
+
+        async def guard() -> bool:
+            return False
+
+        flow = make_flow(fake)
+        outcome = await flow.publish_changeset(
+            "acme",
+            "acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            changeset=changeset(),
+            pre_dispatch_guard=guard,
+            publication_fence=fence,
+        )
+
+        assert outcome.fenced is True
+        assert "pause fence active" in outcome.reason
+        assert "guard failed" not in outcome.reason
+
+    async def test_a_guard_refusal_still_reports_when_the_fence_is_clear(self, fake: FakeGitHub):
+        async def fence(work_id: str) -> PauseFenceDecision:
+            return PauseFenceDecision(work_id=work_id, fenced=False)
+
+        async def guard() -> bool:
+            return False
+
+        flow = make_flow(fake)
+        outcome = await flow.publish_changeset(
+            "acme",
+            "acme-widget",
+            issue_number=42,
+            run_id=RUN_ID,
+            changeset=changeset(),
+            pre_dispatch_guard=guard,
+            publication_fence=fence,
+        )
+
+        assert outcome.ok is False and outcome.fenced is False
+        assert "guard failed" in outcome.reason

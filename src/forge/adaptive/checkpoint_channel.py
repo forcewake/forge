@@ -179,7 +179,7 @@ class DownloadedCheckpoint:
     verified: bool = False
 
 
-def work_scoped_token(secret: str, scope: str) -> str:
+def work_scoped_token(secret: str, scope: str, *, generation: int | None = None) -> str:
     """The work-scoped bearer token: hex HMAC-SHA256(scope) under *secret*.
 
     Mirrors the lane control token scheme (HMAC of the work id under the
@@ -188,8 +188,17 @@ def work_scoped_token(secret: str, scope: str) -> str:
     surface uses the :data:`CHECKPOINT_LIST_SCOPE` scope. Derived
     independently on both sides — the wire contract is just the bearer
     string.
+
+    R28-07: with *generation* the token becomes ATTEMPT-SCOPED —
+    ``HMAC(secret, scope + ":" + generation)`` — minted by the dispatch
+    at dispatch time for the run's CURRENT generation, so a superseded
+    runner generation's credential no longer validates once the work's
+    generation moves. ``generation=None`` (the default, and the honest
+    migration posture while dispatches still mint work-scoped tokens)
+    derives exactly the legacy ``HMAC(secret, scope)`` bytes.
     """
-    return hmac.new(secret.encode("utf-8"), scope.encode("utf-8"), hashlib.sha256).hexdigest()
+    material = scope if generation is None else f"{scope}:{generation}"
+    return hmac.new(secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def format_checkpoint_ref(work_id: str, checkpoint_id: str) -> str:
@@ -648,11 +657,19 @@ def upload_checkpoint(
 
 
 def download_checkpoint(
-    work_id: str, api: LaneControlAPI, store: ContentAddressedStore
+    work_id: str,
+    api: LaneControlAPI,
+    store: ContentAddressedStore,
+    *,
+    checkpoint_id: str | None = None,
 ) -> DownloadedCheckpoint:
     """Fetch the work's checkpoint from the control plane into a LOCAL store.
 
-    Returns the verified restore handle (see
-    :meth:`CheckpointChannel.download_checkpoint`).
+    Without *checkpoint_id* the control plane serves the work's ACTIVE
+    checkpoint (highest sequence); with it, EXACTLY that one — the
+    resume leg's R28-05 contract: a ResumeSpec binds the exact approved
+    checkpoint, and ``LaneControlAPI.get_checkpoint`` passes the id
+    through as ``?checkpoint_id=``. Returns the verified restore handle
+    (see :meth:`CheckpointChannel.download_checkpoint`).
     """
-    return CheckpointChannel(api).download_checkpoint(work_id, store)
+    return CheckpointChannel(api).download_checkpoint(work_id, store, checkpoint_id=checkpoint_id)

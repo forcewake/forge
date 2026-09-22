@@ -116,18 +116,33 @@ class TestRenderedScriptsParse:
 
     def test_shellcheck_accepts_every_rendered_script(self):
         """shellcheck (where installed) over every rendered combination —
-        advisory severity stays visible, errors fail the gate."""
+        advisory severity stays visible, errors fail the gate.
+
+        R28-13 (the CI-red gate): the rendered scripts are ``run:`` blocks,
+        not standalone files — they carry no shebang, so shellcheck's
+        default "unknown shell" turns every combination into SC2148. The
+        gate pins the target shell explicitly (``--shell=bash`` — the
+        runners execute these blocks under bash) and gates at
+        ``--severity=error`` (warnings like SC2155 are advisory, visible
+        but not release-blocking). shellcheck writes its findings to
+        STDOUT; the assertion prints BOTH streams so a failure shows the
+        actual diagnostics instead of an empty stderr."""
         shellcheck = shutil.which("shellcheck")
         if shellcheck is None:
             pytest.skip("shellcheck unavailable")
         for driver, mcp in COMBINATIONS:
             proc = subprocess.run(
-                [shellcheck, "-"],
+                [shellcheck, "--shell=bash", "--severity=error", "-"],
                 input=render_for(driver, mcp).encode(),
                 capture_output=True,
                 check=False,
             )
-            assert proc.returncode == 0, (driver, mcp, proc.stderr.decode(errors="replace"))
+            assert proc.returncode == 0, (
+                driver,
+                mcp,
+                proc.stdout.decode(errors="replace"),
+                proc.stderr.decode(errors="replace"),
+            )
 
 
 @pytest.mark.parametrize("path", _TEMPLATE_FILES, ids=lambda p: p.name)

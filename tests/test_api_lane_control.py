@@ -9,11 +9,17 @@ the lane's drain climbs. Pinned here:
 - the token scheme: ``HMAC-SHA256(secret, work_id)`` — a lane holding
   run A's token can neither poll run B's queue nor ack B's commands
   (403, work-scoping by construction);
+- R28-07 attempt-scoped generations: the token gains a generation
+  component minted by the dispatch; the server validates against the
+  run's CURRENT durable generation (FlowRun.cancellation_generation), a
+  SUPERSEDED generation's token answers 403 with an actionable message,
+  and the legacy work-id-only HMAC keeps validating during migration;
 - pending means received/authorized ONLY, in durable sequence order, and
   ``after_sequence`` is an honest cursor;
 - every ack is the PostgresMailbox's own guarded CAS: rung skips are 409,
   a stale-world dispatch EXPIRES, and ``checkpointed`` climbs the
-  observation rungs (idempotently);
+  observation rungs; R28-10 makes the replay IDEMPOTENT (200, no state
+  change) and refuses an ack that declares a superseded generation;
 - the lane's journal row is APPENDED to the row's audit journal —
   evidence beside the transition entries, never a status claim.
 """
@@ -26,9 +32,14 @@ from pydantic import SecretStr
 
 from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
-from forge.api_lane_control import lane_control_token, verify_lane_token
+from forge.api_lane_control import (
+    _superseded_generation,
+    lane_control_token,
+    verify_lane_token,
+)
 from forge.config import Settings
 from forge.database import reset_engine
+from forge.durable.models import FlowRun
 from forge.main import create_app
 
 SECRET = "lane-secret"  # noqa: S105 — fake value for tests
@@ -112,6 +123,272 @@ class TestLaneToken:
         assert verify_lane_token(SECRET, token, OTHER_WORK) is False
         assert verify_lane_token("other-secret", token, WORK) is False
         assert verify_lane_token(SECRET, "", WORK) is False
+
+    def test_a_generation_scoped_token_is_not_the_legacy_token(self):
+        """R28-07: the attempt-scoped derivation binds the generation into
+        the HMAC material — the two spellings never collide, and each
+        verifies only against its own expectation."""
+        legacy = lane_control_token(SECRET, WORK)
+        scoped = lane_control_token(SECRET, WORK, generation=3)
+        other_generation = lane_control_token(SECRET, WORK, generation=4)
+
+        assert scoped != legacy
+        assert scoped != other_generation
+        assert verify_lane_token(SECRET, scoped, WORK, generation=3) is True
+        # A scoped token is neither the legacy expectation nor another
+        # generation's — moving the run's generation retires it at once.
+        assert verify_lane_token(SECRET, scoped, WORK) is False
+        assert verify_lane_token(SECRET, scoped, WORK, generation=4) is False
+        # The legacy default is byte-identical to the pre-R28-07 scheme.
+        assert lane_control_token(SECRET, WORK, generation=None) == legacy
+
+    def test_the_superseded_generation_scan_names_the_stale_generation(self):
+        stale = lane_control_token(SECRET, WORK, generation=1)
+
+        assert _superseded_generation(SECRET, stale, WORK, 2) == 1
+        # The CURRENT generation's token is not stale...
+        current = lane_control_token(SECRET, WORK, generation=2)
+        assert _superseded_generation(SECRET, current, WORK, 2) is None
+        # ...neither is a foreign work's, a legacy token, or garbage —
+        # those are work-scoping failures, not generational ones.
+        assert _superseded_generation(SECRET, lane_control_token(SECRET, WORK), WORK, 2) is None
+        assert (
+            _superseded_generation(SECRET, lane_control_token(SECRET, OTHER_WORK), WORK, 2) is None
+        )
+        assert _superseded_generation(SECRET, "nope", WORK, 2) is None
+        # Without a durable generation nothing can be judged stale.
+        assert _superseded_generation(SECRET, stale, WORK, None) is None
+
+
+async def _put_run(app, work_id: str, *, generation: int) -> None:
+    """The durable run row with its CURRENT generation (R28-07's authority)."""
+    async with app.state.session_factory() as session:
+        session.add(
+            FlowRun(id=work_id, project_id=1, provider="github", cancellation_generation=generation)
+        )
+        await session.commit()
+
+
+def _gen_headers(work_id: str, generation: int) -> dict[str, str]:
+    return {"Authorization": f"Bearer {lane_control_token(SECRET, work_id, generation=generation)}"}
+
+
+# -- attempt-scoped generations (R28-07) ----------------------------------------
+
+
+class TestGenerationScoping:
+    async def test_the_current_generations_token_reads_and_acks(self, app, client, mailbox):
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+
+        pending = await client.get(
+            "/lane/controls", params={"work_id": WORK}, headers=_gen_headers(WORK, 2)
+        )
+        assert pending.status_code == 200
+
+        ack = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={"state": "dispatching", "plan_revision": 1, "execution_epoch": 1},
+            headers=_gen_headers(WORK, 2),
+        )
+        assert ack.status_code == 200
+        assert ack.json()["command"]["status"] == "dispatching"
+
+    async def test_a_superseded_generations_token_is_refused_with_the_reason(
+        self, app, client, mailbox
+    ):
+        """The reviewer's retired-lane race: the OLD attempt's lane process
+        is still alive, dialing in with the token its dispatch minted."""
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+
+        response = await client.get(
+            "/lane/controls", params={"work_id": WORK}, headers=_gen_headers(WORK, 1)
+        )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert "superseded runner generation" in detail
+        assert "(1;" in detail and "generation 2" in detail
+
+    async def test_a_superseded_generations_token_cannot_ack_either(self, app, client, mailbox):
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+
+        response = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={"state": "authorized"},
+            headers=_gen_headers(WORK, 1),
+        )
+
+        assert response.status_code == 403
+        assert "superseded runner generation" in response.json()["detail"]
+        stored = await mailbox.get(command.command_id)
+        assert stored is not None and stored.status == "received"  # nothing moved
+
+    async def test_the_legacy_token_keeps_validating_during_migration(self, app, client, mailbox):
+        """A token that never carried a generation is not stale — the
+        honest default while dispatches still mint work-scoped tokens."""
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+
+        pending = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+        assert pending.status_code == 200
+
+        ack = await client.post(
+            f"/lane/controls/cmd-{WORK}-1/ack",
+            json={"state": "authorized"},
+            headers=auth(),
+        )
+        assert ack.status_code == 200
+
+    async def test_a_generation_ahead_of_the_run_is_a_scoping_refusal(self, app, client, mailbox):
+        """A token for a generation the run never reached matches nothing —
+        plain 403, never mislabeled as superseded."""
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+
+        response = await client.get(
+            "/lane/controls", params={"work_id": WORK}, headers=_gen_headers(WORK, 99)
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "lane token does not scope this work"
+
+
+# -- replay-safe acknowledgements (R28-10) ---------------------------------------
+
+
+class TestReplaySafeAcks:
+    async def _climb_the_full_ladder(self, client: AsyncClient, mailbox, command) -> None:
+        """authorized → dispatching → vendor_accepted → applied → checkpointed,
+        every rung through the API's own ack surface."""
+        rungs = (
+            ("authorized", {}),
+            ("dispatching", {"plan_revision": 1, "execution_epoch": 1}),
+            ("vendor_accepted", {}),
+            ("applied", {}),
+            ("checkpointed", {}),
+        )
+        for state, extra in rungs:
+            response = await client.post(
+                f"/lane/controls/{command.command_id}/ack",
+                json={"state": state, **extra},
+                headers=auth(),
+            )
+            assert response.status_code == 200, (state, response.text)
+            assert response.json()["command"]["status"] == state
+
+    async def test_replaying_the_final_checkpointed_ack_is_idempotent(self, app, client, mailbox):
+        """R28-10's composed trace: full ack ladder → the response is lost →
+        the lane replays the final ack. 200, the same state, NO new ladder
+        journal entries — a lost response never re-drives the vendor effect."""
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await self._climb_the_full_ladder(client, mailbox, command)
+        before = await _row(app, command.command_id)
+        rungs_before = [entry.get("to") for entry in before.journal]
+
+        replay = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={"state": "checkpointed"},
+            headers=auth(),
+        )
+
+        assert replay.status_code == 200  # idempotent success, not 409
+        assert replay.json()["command"]["status"] == "checkpointed"
+        stored = await mailbox.get(command.command_id)
+        assert stored is not None and stored.status == "checkpointed"
+        after = await _row(app, command.command_id)
+        rungs_after = [entry.get("to") for entry in after.journal]
+        # No state change: the ladder's own journal is unchanged (the
+        # replayed evidence append may ride, transitions may not).
+        assert rungs_after[: len(rungs_before)] == rungs_before
+        assert rungs_after.count("checkpointed") == 1
+
+    async def test_an_ack_declaring_the_current_generation_transitions(self, app, client, mailbox):
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+
+        response = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={
+                "state": "dispatching",
+                "plan_revision": 1,
+                "execution_epoch": 1,
+                "generation": 2,
+            },
+            headers=auth(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["command"]["status"] == "dispatching"
+
+    async def test_an_ack_from_a_superseded_generation_is_refused_state_unchanged(
+        self, app, client, mailbox
+    ):
+        """The retired lane can still READ (its queue view answers 200) but
+        its ack cannot move the current attempt's state."""
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+
+        read = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+        assert read.status_code == 200  # the legacy holder can still read
+
+        refused = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={
+                "state": "dispatching",
+                "plan_revision": 1,
+                "execution_epoch": 1,
+                "generation": 1,  # superseded by the run's current 2
+            },
+            headers=auth(),
+        )
+
+        assert refused.status_code == 403
+        detail = refused.json()["detail"]
+        assert "superseded runner generation" in detail and "generation 2" in detail
+        stored = await mailbox.get(command.command_id)
+        assert stored is not None and stored.status == "authorized"  # nothing moved
+
+    async def test_a_generationless_ack_still_transitions_during_migration(
+        self, app, client, mailbox
+    ):
+        """Pre-generation lanes omit the field; a known current generation
+        does not retroactively brick them."""
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+
+        response = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={"state": "dispatching", "plan_revision": 1, "execution_epoch": 1},
+            headers=auth(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["command"]["status"] == "dispatching"
+
+    async def test_a_negative_generation_is_a_shape_refusal(self, client, mailbox):
+        command = _cmd(1)
+        await mailbox.submit(command)
+
+        response = await client.post(
+            f"/lane/controls/{command.command_id}/ack",
+            json={"state": "authorized", "generation": -1},
+            headers=auth(),
+        )
+
+        assert response.status_code == 422
 
 
 # -- fail closed ---------------------------------------------------------------

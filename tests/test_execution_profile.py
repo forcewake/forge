@@ -45,6 +45,7 @@ from forge.runs.execution_profile import (
     derive_from_repo,
     lane_profile,
     validate_lane_profile_declaration,
+    validate_runtime,
 )
 from forge.runs.spec import ExecutableRunSpec, SpecInvalid
 
@@ -797,3 +798,192 @@ class TestSdkLaneTemplatesDeclareTheProfile:
         # a dispatch/pipeline variable (which beats YAML) selects v2.
         for template in self.TEMPLATES:
             assert self._variables(template)["FORGE_LANE_PROFILE"] == "v1", template.name
+
+
+# ---------------------------------------------------------------------------
+# R28-24: runner-side runtime enforcement
+# ---------------------------------------------------------------------------
+
+#: A v2-compliant coding-stage env: the egress hook present (deny-all
+#: value is valid) and no credential leaking from another stage.
+_V2_COMPLIANT_ENV = {
+    "FORGE_EGRESS_ALLOWLIST": "api.z.ai,pypi.org",
+    "ZAI_API_KEY": "sk-live",
+    "PATH": "/usr/bin:/bin",
+}
+
+#: A v2 container's mount table: read-only rootfs, tmpfs /tmp (the
+#: declared data boundaries), a workspace over-mount.
+_V2_RO_ROOT_MOUNTS = (
+    "/dev/sda1 / ext4 ro,relatime 0 0\n"
+    "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n"
+    "/dev/sda2 /workspace ext4 rw,relatime 0 0\n"
+)
+
+_RW_ROOT_MOUNTS = "/dev/sda1 / ext4 rw,relatime 0 0\ntmpfs /tmp tmpfs rw 0 0\n"
+
+
+class TestRuntimeEnforcement:
+    """``validate_runtime`` — the measurable slice of the v2 contract a
+    process can check about itself; v2-declared + non-compliant is the
+    fail-closed lane-entry refusal, never a silent downgrade."""
+
+    def test_v2_compliant_runtime_passes(self):
+        assert (
+            validate_runtime(
+                LANE_PROFILE_V2,
+                stage="coding",
+                env=_V2_COMPLIANT_ENV,
+                proc_mounts=_V2_RO_ROOT_MOUNTS,
+            )
+            == ()
+        )
+
+    def test_v2_with_an_empty_allowlist_is_deny_all_and_compliant(self):
+        assert (
+            validate_runtime(
+                LANE_PROFILE_V2,
+                stage="coding",
+                env={"FORGE_EGRESS_ALLOWLIST": ""},
+                proc_mounts=_V2_RO_ROOT_MOUNTS,
+            )
+            == ()
+        )
+
+    def test_v2_without_the_egress_allowlist_env_is_refused(self):
+        violations = validate_runtime(
+            LANE_PROFILE_V2,
+            stage="coding",
+            env={"ZAI_API_KEY": "sk-live"},
+            proc_mounts=_V2_RO_ROOT_MOUNTS,
+        )
+        assert [v.check for v in violations] == ["egress_allowlist_declared"]
+        assert "FORGE_EGRESS_ALLOWLIST" in violations[0].detail
+
+    def test_v2_with_a_writable_root_filesystem_is_refused(self):
+        violations = validate_runtime(
+            LANE_PROFILE_V2,
+            stage="coding",
+            env=dict(_V2_COMPLIANT_ENV),
+            proc_mounts=_RW_ROOT_MOUNTS,
+        )
+        assert [v.check for v in violations] == ["root_filesystem_read_only"]
+        assert "rw" in violations[0].detail
+
+    def test_v2_with_an_empty_mount_table_cannot_prove_the_boundary(self):
+        violations = validate_runtime(
+            LANE_PROFILE_V2, stage="coding", env=dict(_V2_COMPLIANT_ENV), proc_mounts=""
+        )
+        assert "root_filesystem_read_only" in [v.check for v in violations]
+
+    def test_a_bootstrap_credential_leaking_into_coding_is_refused(self):
+        leaked = dict(_V2_COMPLIANT_ENV)
+        leaked["FORGE_BOT_READ_TOKEN"] = "ghp-read"
+        violations = validate_runtime(
+            LANE_PROFILE_V2, stage="coding", env=leaked, proc_mounts=_V2_RO_ROOT_MOUNTS
+        )
+        assert [v.check for v in violations] == ["credential_staging"]
+        assert "FORGE_BOT_READ_TOKEN" in violations[0].detail
+
+    def test_a_provider_key_reaching_verification_is_refused(self):
+        violations = validate_runtime(
+            LANE_PROFILE_V2,
+            stage="verification",
+            env={
+                "FORGE_EGRESS_ALLOWLIST": "",
+                "ANTHROPIC_API_KEY": "sk-ant",  # models must not reach tests
+            },
+            proc_mounts=_V2_RO_ROOT_MOUNTS,
+        )
+        assert [v.check for v in violations] == ["credential_staging"]
+        assert "ANTHROPIC_API_KEY" in violations[0].detail
+
+    def test_an_allowed_credential_merely_absent_is_not_a_violation(self):
+        # Fail-closed on ISOLATION, never on availability: a missing key
+        # is the driver's own startup error, not an isolation breach.
+        assert (
+            validate_runtime(
+                LANE_PROFILE_V2,
+                stage="coding",
+                env={"FORGE_EGRESS_ALLOWLIST": "api.z.ai"},
+                proc_mounts=_V2_RO_ROOT_MOUNTS,
+            )
+            == ()
+        )
+
+    def test_an_unknown_stage_cannot_be_scoped(self):
+        violations = validate_runtime(
+            LANE_PROFILE_V2, stage="wonderland", env={}, proc_mounts=_V2_RO_ROOT_MOUNTS
+        )
+        assert [v.check for v in violations] == ["stage_identity"]
+
+    def test_v1_declares_no_isolation_so_nothing_is_checked(self):
+        """v1 IS the unstaged posture — the same env that fails v2 passes
+        v1. This is not a downgrade path: v1 makes no claims to verify."""
+        assert (
+            validate_runtime(
+                lane_profile("v1"),
+                stage="coding",
+                env={"FORGE_BOT_READ_TOKEN": "leak", "ANTHROPIC_API_KEY": "x"},
+                proc_mounts=_RW_ROOT_MOUNTS,
+            )
+            == ()
+        )
+
+    def test_every_violation_carries_an_actionable_detail(self):
+        violations = validate_runtime(LANE_PROFILE_V2, stage="coding", env={}, proc_mounts="")
+        checks = [v.check for v in violations]
+        assert "egress_allowlist_declared" in checks
+        assert "root_filesystem_read_only" in checks
+        for violation in violations:
+            assert str(violation).startswith(f"[{violation.check}]")
+            assert len(violation.detail) > 20  # says WHAT was observed
+
+
+class TestLaneEntryEnforcesTheProfile:
+    """The lane entry (forge.harness_entry) calls validate_runtime at
+    startup: v2-declared + non-compliant fails the lane CLOSED with an
+    actionable message — never a silent downgrade to the unstaged
+    posture."""
+
+    def _run_main(self, tmp_path, monkeypatch, env: dict) -> tuple[int, str]:
+        from forge import harness_entry
+
+        for name in ("FORGE_LANE_PROFILE", "FORGE_LANE_STAGE", "FORGE_EGRESS_ALLOWLIST"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("FORGE_EXIT_FILE", str(tmp_path / "exit"))
+        monkeypatch.chdir(tmp_path)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        rc = harness_entry.main(["--driver", "claude-code"])
+        return rc, (tmp_path / "exit").read_text()
+
+    def test_v2_on_a_non_compliant_runner_fails_closed(self, tmp_path, monkeypatch, capsys):
+        rc, exit_status = self._run_main(tmp_path, monkeypatch, {"FORGE_LANE_PROFILE": "v2"})
+        assert rc == 1
+        assert exit_status.strip() == "failed"
+        message = capsys.readouterr().err
+        assert "NON-COMPLIANT" in message
+        assert "no silent downgrade" in message
+        assert "FORGE_LANE_PROFILE=v1" in message  # the actionable exit
+
+    def test_v1_runs_its_own_startup_checks_instead(self, tmp_path, monkeypatch, capsys):
+        # v1 declares no isolation: the lane proceeds past the profile
+        # check and fails on its OWN next precondition (the missing brief
+        # file), proving the profile check did not fire.
+        rc, exit_status = self._run_main(tmp_path, monkeypatch, {"FORGE_LANE_PROFILE": "v1"})
+        assert rc == 1
+        message = capsys.readouterr().err
+        assert "NON-COMPLIANT" not in message
+        assert "brief file" in message
+
+    def test_an_unset_profile_is_the_legacy_dispatch_no_check(self, tmp_path, monkeypatch, capsys):
+        rc, _ = self._run_main(tmp_path, monkeypatch, {})
+        assert rc == 1
+        assert "NON-COMPLIANT" not in capsys.readouterr().err
+
+    def test_an_unknown_profile_id_fails_closed_too(self, tmp_path, monkeypatch, capsys):
+        rc, exit_status = self._run_main(tmp_path, monkeypatch, {"FORGE_LANE_PROFILE": "v9"})
+        assert rc == 1
+        assert exit_status.strip() == "failed"
+        assert "unknown lane profile" in capsys.readouterr().err

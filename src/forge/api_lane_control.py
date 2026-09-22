@@ -31,14 +31,33 @@ Two routes, both mounted unconditionally and FAIL-CLOSED (the
   is APPENDED to the row's audit journal additively — evidence, never a
   status claim.
 
-Auth is a lane token, minimal honest v1: ``HMAC-SHA256(secret,
-work_id)`` under the server-side ``FORGE_LANE_CONTROL_SECRET``, injected
-into the lane job env by the dispatch (``FORGE_LANE_CONTROL_TOKEN``).
-The token is WORK-SCOPED by construction — a lane holding run A's token
-can neither poll run B's queue nor ack B's commands (403, not 401: the
-bearer proved possession of SOME valid token, just not this work's). No
+Auth is a lane token: ``HMAC-SHA256(secret, work_id)`` under the
+server-side ``FORGE_LANE_CONTROL_SECRET``, injected into the lane job
+env by the dispatch (``FORGE_LANE_CONTROL_TOKEN``). The token is
+WORK-SCOPED by construction — a lane holding run A's token can neither
+poll run B's queue nor ack B's commands (403, not 401: the bearer
+proved possession of SOME valid token, just not this work's). No
 secret configured → BOTH routes answer 503 disabled, never
 unauthenticated-open.
+
+R28-07 — attempt-scoped generations: the token gains a generation
+component, ``HMAC-SHA256(secret, work_id + ":" + generation)``, minted
+by the dispatch at dispatch time for the run's CURRENT generation (the
+durable ``FlowRun.cancellation_generation``, bumped whenever the run's
+execution authority is superseded). The server validates against the
+run's current generation: a token from a SUPERSEDED generation is
+refused with 403 and an actionable message, so a retired lane can no
+longer poll or ack for the resumed attempt. The legacy work-id-only
+HMAC keeps validating while no generation-scoped dispatch exists — the
+honest migration default (a token that never carried a generation is
+not treated as stale).
+
+R28-10 — replay-safe acks: the ``checkpointed`` composite is
+IDEMPOTENT — a replayed ack against an already-checkpointed command
+answers 200 with the current state (a redelivered ack spends nothing),
+and every ack may declare its ``generation``; an ack from a superseded
+generation is refused with 403 (the lane can still READ its queue —
+it just cannot move anyone's state).
 """
 
 from __future__ import annotations
@@ -82,8 +101,8 @@ LANE_ACK_STATES: frozenset[str] = frozenset(
 )
 
 
-def lane_control_token(secret: str, work_id: str) -> str:
-    """The lane token for *work_id*: ``HMAC-SHA256(secret, work_id)`` hex.
+def lane_control_token(secret: str, work_id: str, *, generation: int | None = None) -> str:
+    """The lane token for *work_id*: hex ``HMAC-SHA256`` under *secret*.
 
     The dispatch-side derivation — the control plane computes this under
     ``FORGE_LANE_CONTROL_SECRET`` and injects the value into the lane job
@@ -91,15 +110,83 @@ def lane_control_token(secret: str, work_id: str) -> str:
     match run B's expected bytes, so the compare in
     :func:`verify_lane_token` fails without ever revealing which half
     differed.
+
+    R28-07: with *generation* the token is ATTEMPT-SCOPED —
+    ``HMAC(secret, work_id + ":" + generation)`` — minted at dispatch
+    time for the run's current retry/generation number, so a lane whose
+    generation was superseded holds bytes nothing accepts anymore.
+    ``generation=None`` derives exactly the legacy ``HMAC(secret,
+    work_id)`` (the migration default while dispatches still mint
+    work-scoped tokens).
     """
-    return hmac.new(secret.encode("utf-8"), work_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    material = work_id if generation is None else f"{work_id}:{generation}"
+    return hmac.new(secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def verify_lane_token(secret: str, token: str, work_id: str) -> bool:
-    """Constant-time check that *token* is THIS work's lane token."""
+def verify_lane_token(
+    secret: str, token: str, work_id: str, *, generation: int | None = None
+) -> bool:
+    """Constant-time check that *token* is THIS work's lane token.
+
+    With *generation* the expected bytes are the attempt-scoped
+    derivation; with ``None`` the legacy work-scoped one. Callers that
+    want both spellings compared do so explicitly (see
+    :func:`_authorize_lane`) — a generation-scoped token never matches
+    the legacy expectation and vice versa.
+    """
     if not secret or not token or not work_id:
         return False
-    return hmac.compare_digest(token, lane_control_token(secret, work_id))
+    return hmac.compare_digest(token, lane_control_token(secret, work_id, generation=generation))
+
+
+def _superseded_generation(
+    secret: str, token: str, work_id: str, current_generation: int | None
+) -> int | None:
+    """Which PREVIOUS generation a token belongs to, if any.
+
+    The stale-generation oracle behind the actionable 403: when the
+    token matches ``HMAC(secret, work_id:g)`` for some ``g`` BELOW the
+    run's current generation, the bearer is a retired lane holding a
+    once-valid credential — worth naming precisely, not lumping into
+    "does not scope this work". Only generations strictly below the
+    current one are stale; the scan is bounded by the current
+    generation (a small, monotonically managed counter on the run).
+    """
+    if current_generation is None:
+        return None
+    for generation in range(int(current_generation)):
+        if hmac.compare_digest(token, lane_control_token(secret, work_id, generation=generation)):
+            return generation
+    return None
+
+
+async def _current_generation(request: Request, work_id: str) -> int | None:
+    """The work's CURRENT runner generation, durably (R28-07).
+
+    The authority is ``FlowRun.cancellation_generation`` — the durable
+    per-run generation bumped whenever the run's execution authority is
+    superseded (a cancel today; retries as the dispatch grows
+    generation-minting). ``None`` means "no durable generation" — an
+    unknown work or an unreadable row — and the authorize ladder then
+    treats the work as pre-migration: the legacy token scheme is the
+    honest default, never a hard failure.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        return None
+    from sqlalchemy import select
+
+    try:
+        from forge.durable.models import FlowRun
+
+        async with session_factory() as session:
+            generation = await session.scalar(
+                select(FlowRun.cancellation_generation).where(FlowRun.id == work_id)
+            )
+    except Exception:  # noqa: BLE001 — an unreadable generation degrades to legacy
+        logger.warning("current-generation lookup for work %s failed", work_id, exc_info=True)
+        return None
+    return int(generation) if generation is not None else None
 
 
 def _secret(request: Request) -> str:
@@ -114,8 +201,15 @@ def _bearer(authorization: str | None) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
-def _authorize_lane(request: Request, authorization: str | None, work_id: str) -> str:
+async def _authorize_lane(request: Request, authorization: str | None, work_id: str) -> str:
     """The shared gate: secret configured, bearer present, token scoped.
+
+    Accepts the CURRENT generation's attempt-scoped token (R28-07) or
+    the legacy work-scoped one (the migration default — a token that
+    never carried a generation cannot be treated as stale). A token
+    from a SUPERSEDED generation is refused with an actionable 403 that
+    names the stale generation and the current one; anything else is
+    plain work-scoping refusal.
 
     Returns the verified secret (the caller never needs it beyond the
     check — returning it keeps the 503/401/403 ladder in ONE place).
@@ -127,11 +221,24 @@ def _authorize_lane(request: Request, authorization: str | None, work_id: str) -
     token = _bearer(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="missing lane bearer token")
-    if not verify_lane_token(secret, token, work_id):
-        # 403, not 401: the bearer holds A token, just not this work's —
-        # work-scoping refused, not authentication retried.
-        raise HTTPException(status_code=403, detail="lane token does not scope this work")
-    return secret
+    current_generation = await _current_generation(request, work_id)
+    if verify_lane_token(secret, token, work_id, generation=current_generation):
+        return secret
+    if verify_lane_token(secret, token, work_id):
+        return secret  # the legacy migration default, never "stale"
+    stale = _superseded_generation(secret, token, work_id, current_generation)
+    if stale is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"this credential belongs to a superseded runner generation ({stale}; "
+                f"the work is at generation {current_generation}) — the current "
+                "attempt must dial in with its own dispatch-issued token"
+            ),
+        )
+    # 403, not 401: the bearer holds A token, just not this work's —
+    # work-scoping refused, not authentication retried.
+    raise HTTPException(status_code=403, detail="lane token does not scope this work")
 
 
 def _mailbox(request: Request) -> PostgresMailbox:
@@ -152,6 +259,12 @@ class LaneAckBody(BaseModel):
     plan_revision: int | None = Field(default=None, ge=0)
     execution_epoch: int | None = Field(default=None, ge=0)
     vendor_correlation_id: str = ""
+    #: The runner generation this ack speaks for (R28-10). Optional and
+    #: omitted by pre-generation lanes (the migration default); when the
+    #: work's durable generation is known and this declares a SUPERSEDED
+    #: one, the ack is refused — the retired lane can still READ its
+    #: queue, but it cannot transition anyone's state.
+    generation: int | None = Field(default=None, ge=0)
 
     model_config = {"extra": "forbid"}
 
@@ -216,7 +329,7 @@ async def get_lane_controls(
     applies commands through the SAME discipline (a command that left the
     queue is never re-delivered; its fate is read from the row).
     """
-    _authorize_lane(request, authorization, work_id)
+    await _authorize_lane(request, authorization, work_id)
     mailbox = _mailbox(request)
     commands = [
         command for command in await mailbox.pending(work_id) if command.sequence > after_sequence
@@ -242,7 +355,12 @@ async def ack_lane_control(
     409 — the caller reloads and retries, never writes on top of a state
     it did not see). ``checkpointed`` climbs the observation rungs because
     the ack itself is the application evidence; an already-checkpointed
-    command is an idempotent no-op (a redelivered ack spends nothing).
+    command is an idempotent no-op — the replayed ack answers 200 with
+    the current state and spends nothing (R28-10: a lost response must
+    never make the lane re-drive the vendor effect). An ack that declares
+    a ``generation`` superseded by the work's durable current generation
+    is refused with 403 BEFORE any transition — the retired lane can
+    still read, it cannot move state.
     """
     if body.state not in LANE_ACK_STATES:
         raise HTTPException(
@@ -272,7 +390,22 @@ async def ack_lane_control(
         raise HTTPException(status_code=404, detail=f"unknown command_id {command_id!r}")
     # The token must scope THIS command's work (the path cannot cross
     # works even with a valid token for another run).
-    _authorize_lane(request, authorization, current.work_id)
+    await _authorize_lane(request, authorization, current.work_id)
+    if body.generation is not None:
+        # R28-10: an ack from a superseded generation never transitions
+        # state. Only a KNOWN durable generation can judge staleness —
+        # without one (unknown work, pre-migration row) the ack's
+        # generation is recorded trust-free and the ladder proceeds.
+        current_generation = await _current_generation(request, current.work_id)
+        if current_generation is not None and body.generation != current_generation:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"ack from a superseded runner generation ({body.generation}; the "
+                    f"work is at generation {current_generation}) — the command is "
+                    "unchanged; a retired lane may read, it cannot transition state"
+                ),
+            )
 
     try:
         updated = await _transition(mailbox, current, body)
@@ -317,7 +450,11 @@ async def _transition(mailbox: PostgresMailbox, current: ControlCommand, body: L
     if state == "applied":
         return await mailbox.observe(current.command_id)
     # checkpointed — the composite climb: the lane's ack IS the application
-    # observation (it drove the vendor effect and saw it land).
+    # observation (it drove the vendor effect and saw it land). The climb
+    # is IDEMPOTENT by construction (R28-10): a command already sitting at
+    # ``checkpointed`` matches no climb step and returns as-is — the
+    # replayed ack answers 200 with the current state, appends only its
+    # evidence row, and drives no vendor effect twice.
     command = current
     if command.status == "dispatching":
         command = await mailbox.vendor_accepted(command.command_id)

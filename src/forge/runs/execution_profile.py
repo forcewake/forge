@@ -45,18 +45,28 @@ tmpfs writable, a read-only rootfs elsewhere), ``cap_drop ALL`` with no
 added capabilities, and an env-carried egress allowlist hook
 (:data:`FORGE_EGRESS_ALLOWLIST_ENV`). HONESTY BOUND, stated plainly: this
 module ships that surface as DATA plus validators — the template declares
-it, the validators refuse malformed or half-declared selections, and
-nothing here claims the runner ENFORCES it. Mounts, capability drops and
-egress filtering act at the runner/container boundary; wiring them into a
-customer CI fleet is deployment work outside this package. A lane that
-declares v2 without runner-side enforcement is a declared intent, not an
-isolation claim — the profile records which surface a run was supposed
-to be bound to, so drift is detectable, never silent.
+it, the validators refuse malformed or half-declared selections, and the
+CONTAINER controls (mounts, capability drops, egress filtering) act at
+the runner boundary. What R28-24 adds on top is the measurable slice a
+process CAN verify about itself: :func:`validate_runtime` checks the
+ACTUAL runtime a v2-declared lane starts in — the egress allowlist hook
+present in the stage env, the root filesystem read-only per
+``/proc/mounts``, and no credential name present that the declared stage
+must not see — and the lane entry
+(:mod:`forge.harness_entry`) calls it at startup, FAILING CLOSED with an
+actionable error when v2 is declared but the runtime does not match:
+never a silent downgrade to the unstaged posture. ``cap_drop`` is
+deliberately NOT checked: capabilities are not observable from an
+unprivileged process, so an unverifiable claim is not made. A lane that
+declares v2 without runner-side mounts/egress enforcement therefore never
+starts — the declared contract and the deployed control cannot drift
+apart silently in either direction.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import tomllib
 from dataclasses import dataclass
@@ -73,6 +83,7 @@ __all__ = [
     "FORGE_BOOTSTRAP_FAILED_MARKER",
     "FORGE_EGRESS_ALLOWLIST_ENV",
     "FORGE_LANE_PROFILE_ENV",
+    "FORGE_LANE_STAGE_ENV",
     "LANE_CREDENTIAL_CAPABILITIES",
     "LANE_MCP_POLICY",
     "LANE_NETWORK_POLICY",
@@ -82,6 +93,7 @@ __all__ = [
     "LANE_PYTHON_VERSION",
     "LANE_STAGES",
     "LANE_TEST_COMMANDS",
+    "PROC_MOUNTS_PATH",
     "PROFILE_LOCK_FILE",
     "PROFILE_PYPROJECT_FILE",
     "TOOLCHAIN_PACKAGE_NAMES",
@@ -91,6 +103,7 @@ __all__ = [
     "LocalRepoSource",
     "MaterializedFiles",
     "ProfileSource",
+    "RuntimeViolation",
     "bootstrap_failed",
     "classify_bootstrap_failure",
     "credentials_at",
@@ -98,6 +111,7 @@ __all__ = [
     "derive_from_repo",
     "lane_profile",
     "validate_lane_profile_declaration",
+    "validate_runtime",
 ]
 
 #: Schema version of the profile record covered by the digest. A changed
@@ -457,6 +471,183 @@ def validate_lane_profile_declaration(variables: Mapping[str, Any]) -> tuple[boo
             "deny-all, which is valid; absent is a half-declaration)"
         )
     return True, "ok"
+
+
+# -- runner-side runtime enforcement (R28-24) ---------------------------------
+
+#: The lane stage identity the runner stamps into the stage env (v2's
+#: phase separation). Absent means the coding stage — the writable agent
+#: step the lane entry runs.
+FORGE_LANE_STAGE_ENV = "FORGE_LANE_STAGE"
+
+#: Where the read-only-rootfs posture is read from: the container's own
+#: mount table. Linux-only by design — a runtime that cannot show its
+#: mounts cannot prove the v2 boundary.
+PROC_MOUNTS_PATH = "/proc/mounts"
+
+
+@dataclass(frozen=True)
+class RuntimeViolation:
+    """One measurable non-compliance :func:`validate_runtime` found.
+
+    ``check`` names the axis (``egress_allowlist_declared`` /
+    ``root_filesystem_read_only`` / ``credential_staging`` /
+    ``stage_identity``); ``detail`` is the actionable sentence — what was
+    observed and which side (declared profile vs actual runtime) is
+    wrong. The lane entry renders these into its fail-closed refusal.
+    """
+
+    check: str
+    detail: str
+
+    def __str__(self) -> str:  # pragma: no cover — trivial rendering
+        return f"[{self.check}] {self.detail}"
+
+
+def _root_mount_options(proc_mounts: str) -> str | None:
+    """The mount option set of the ``/`` entry in a ``/proc/mounts`` text.
+
+    The LAST matching entry wins (later mounts over-mount earlier ones —
+    the overlay that actually backs the rootfs). ``None`` when no entry
+    mounts ``/`` at all.
+    """
+    options: str | None = None
+    for line in (proc_mounts or "").splitlines():
+        fields = line.split()
+        # device mountpoint fstype options...
+        if len(fields) >= 4 and fields[1] == "/":
+            options = fields[3]
+    return options
+
+
+def validate_runtime(
+    profile: LaneExecutionProfile,
+    *,
+    stage: str = "coding",
+    env: Mapping[str, str] | None = None,
+    proc_mounts: str | None = None,
+) -> tuple[RuntimeViolation, ...]:
+    """Check the ACTUAL runtime against *profile*'s declared surface (R28-24).
+
+    The enforcement slice a process can honestly measure about itself,
+    evaluated where the lane starts:
+
+    - **v1 declares no isolation** — the unstaged posture IS the declared
+      posture, so a v1 runtime is trivially compliant: no checks, no
+      violations. (This is not a downgrade path: v2 is the profile that
+      makes claims.)
+    - **v2 must be able to show its controls.** Three axes, fail-closed:
+
+      1. *egress_allowlist_declared* — :data:`FORGE_EGRESS_ALLOWLIST_ENV`
+         present in the stage env (empty = deny-all, which is valid; a
+         v2 without its documented hook is a half-deployment).
+      2. *root_filesystem_read_only* — the root mount is ``ro`` per
+         ``/proc/mounts`` (parameterizable for tests). An unreadable or
+         root-``rw`` runtime does not match the declared read-only
+         rootfs: unverifiable IS non-compliant here, because the
+         alternative is trusting the profile name.
+      3. *credential_staging* — no credential name the declared STAGE
+         must not see is present (non-empty) in the env: the union of
+         every OTHER stage's names minus this stage's allowance. A
+         bootstrap read token surviving into the coding step, or a
+         provider key reaching verification, is a staging leak. Absence
+         of an ALLOWED name is NOT a violation — a missing key is the
+         driver's own startup error, not an isolation breach (fail-closed
+         on isolation, never on availability).
+
+    ``cap_drop`` is deliberately not checked: Linux capabilities are not
+    observable from inside an unprivileged process, and an unverifiable
+    check would be decoration, not enforcement. Returns the violations;
+    empty means the measurable surface matches the declaration.
+    """
+    if profile.profile_id == LANE_PROFILE_V1.profile_id:
+        return ()
+    if stage not in _CREDENTIAL_STAGES:
+        return (
+            RuntimeViolation(
+                check="stage_identity",
+                detail=(
+                    f"lane stage {stage!r} is outside the vocabulary "
+                    f"{_CREDENTIAL_STAGES} — the runtime cannot be scoped to a "
+                    "declared stage"
+                ),
+            ),
+        )
+    source = os.environ if env is None else env
+    violations: list[RuntimeViolation] = []
+
+    # 1. The egress hook must ride the stage env the runner staged.
+    if profile.egress_allowlist_env not in source:
+        violations.append(
+            RuntimeViolation(
+                check="egress_allowlist_declared",
+                detail=(
+                    f"{profile.egress_allowlist_env} is not present in the "
+                    f"{stage} stage env — v2 declares deny-by-default egress "
+                    "enforced through this hook (empty value = deny-all is "
+                    "valid; absent is a half-deployment)"
+                ),
+            )
+        )
+
+    # 2. The root filesystem must actually be read-only.
+    mounts_text: str | None = proc_mounts
+    if mounts_text is None:
+        try:
+            mounts_text = Path(PROC_MOUNTS_PATH).read_text(errors="replace")
+        except OSError as exc:
+            mounts_text = None
+            violations.append(
+                RuntimeViolation(
+                    check="root_filesystem_read_only",
+                    detail=(
+                        f"{PROC_MOUNTS_PATH} unreadable ({exc}) — the read-only "
+                        "rootfs the profile declares cannot be verified, and an "
+                        "unverifiable boundary is treated as absent"
+                    ),
+                )
+            )
+    if mounts_text is not None:
+        options = _root_mount_options(mounts_text)
+        if options is None:
+            violations.append(
+                RuntimeViolation(
+                    check="root_filesystem_read_only",
+                    detail="no / mount in /proc/mounts — the rootfs posture cannot be verified",
+                )
+            )
+        elif "ro" not in options.split(","):
+            violations.append(
+                RuntimeViolation(
+                    check="root_filesystem_read_only",
+                    detail=(
+                        f"/ is mounted rw (options {options!r}) — the profile "
+                        "declares a read-only rootfs with only "
+                        f"{profile.writable_roots} writable"
+                    ),
+                )
+            )
+
+    # 3. Credential staging: nothing this stage must not see may be present.
+    allowed_here = set(credentials_at(profile, stage))
+    staged_elsewhere = {
+        name for other, names in profile.credential_staging if other != stage for name in names
+    }
+    leaked = sorted(
+        name for name in staged_elsewhere - allowed_here if str(source.get(name) or "").strip()
+    )
+    if leaked:
+        violations.append(
+            RuntimeViolation(
+                check="credential_staging",
+                detail=(
+                    f"credential(s) {leaked} are present in the {stage} stage env "
+                    f"but belong to other stages — the profile stages them away "
+                    "from this step"
+                ),
+            )
+        )
+    return tuple(violations)
 
 
 # -- reads -----------------------------------------------------------------

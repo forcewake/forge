@@ -140,6 +140,12 @@ from forge.harnesses.brief_envelope import (
     verify_brief_envelope,
 )
 from forge.harnesses.mcp import McpConfigError, parse_servers
+from forge.runs.execution_profile import (
+    FORGE_LANE_PROFILE_ENV,
+    FORGE_LANE_STAGE_ENV,
+    lane_profile,
+    validate_runtime,
+)
 
 
 def render_brief(issue_text: str, plan_text: str) -> str:
@@ -940,6 +946,34 @@ def main(argv: list[str] | None = None) -> int:
         if message:
             print(message, file=sys.stderr)
         return 0 if status == "completed" else 1
+
+    # R28-24: enforce the declared execution-security profile at lane
+    # startup, OUTSIDE the model process. A declared v2 that the actual
+    # runtime cannot show (egress hook absent, rootfs rw, a credential
+    # staged into the wrong step) fails the lane CLOSED with an
+    # actionable message — never a silent downgrade to the unstaged v1
+    # posture. An unset FORGE_LANE_PROFILE is the legacy/v1 dispatch:
+    # no check, behavior unchanged. An UNKNOWN id also fails closed.
+    declared_profile_id = str(os.environ.get(FORGE_LANE_PROFILE_ENV) or "").strip()
+    if declared_profile_id:
+        try:
+            declared_profile = lane_profile(declared_profile_id)
+        except ValueError as exc:
+            return _finish("failed", f"harness_entry: {exc}")
+        violations = validate_runtime(
+            declared_profile,
+            stage=str(os.environ.get(FORGE_LANE_STAGE_ENV) or "coding").strip() or "coding",
+        )
+        if violations:
+            listed = "; ".join(str(violation) for violation in violations)
+            return _finish(
+                "failed",
+                "harness_entry: FORGE_LANE_PROFILE="
+                f"{declared_profile_id} runtime NON-COMPLIANT — refusing to run "
+                f"(no silent downgrade): {listed}. Fix the runner container to "
+                "match the declared profile, or dispatch FORGE_LANE_PROFILE=v1 "
+                "explicitly.",
+            )
 
     if args.render_brief:
         repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "")

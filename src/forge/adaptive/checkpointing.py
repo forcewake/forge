@@ -14,21 +14,28 @@ drain can run:
    filename), deletions are recorded, the executable bit is recorded as
    a mode, and the whole state freezes into a versioned manifest
    (``forge.wip.manifest/2``) whose own content address is the
-   checkpoint reference. Every uploaded blob and the manifest itself
-   are then READ BACK through the store's verified read and re-hashed
-   to their addresses — a receipt is minted ``verified`` only after
-   that read-back, and the manifest + blobs are pinned with a retention
-   reference (``checkpoint:<work_id>``) so GC cannot delete the
-   checkpoint of an actively paused work on age alone.
+   checkpoint reference. The walk's scope is the agent's work tree
+   ONLY: ``.forge`` (the store never captures itself), ``.git``,
+   caches and ``node_modules`` are excluded (R28-04). Every uploaded
+   blob and the manifest itself are then READ BACK through the store's
+   verified read and re-hashed to their addresses — a receipt is minted
+   ``verified`` only after that read-back, and the manifest + blobs are
+   pinned with a retention reference (``checkpoint:<work_id>``) so GC
+   cannot delete the checkpoint of an actively paused work on age
+   alone.
 2. **Restore** (:func:`restore_wip`) — on a SECOND runner with a fresh
    store instance: fetch the manifest through the verified read, refuse
    unsupported/legacy schemas (a filename list without blobs restores
-   nothing), validate every path against escapes BEFORE writing, then
-   re-fetch every blob digest-verified and apply it — files written
-   (with modes), deletions applied — reporting per-file outcomes. A
-   missing or corrupt required blob FAILS the restore with the path and
-   digest named, instead of resurrecting half a workspace that looks
-   restored.
+   nothing), then verify EVERYTHING before touching the workspace
+   (R28-02): every path against escapes AND reserved namespaces
+   (``.git``, the checkpoint store, credential-shaped names), every
+   ancestor against symlink substitution (``lstat``, no following), the
+   manifest's own path set against duplicates/aliases and
+   file-versus-directory conflicts, every entry's kind/mode, and every
+   blob digest-verified from the store. Only when the whole plan passes
+   is the tree built in a STAGING directory and moved into the target
+   by atomic per-file renames — a failure anywhere leaves the target
+   untouched and the staging discarded, never a half-applied workspace.
 3. **Resume** (:func:`resume_from_checkpoint`) — NXT-18's gate: the
    CURRENT authorization is re-checked through a callable (no
    constructor-default ``permissions_valid=True``), the checkpoint
@@ -61,7 +68,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -98,6 +107,46 @@ MANIFEST_SCHEMA: Final = "forge.wip.manifest/2"
 #: only permission distinction a portable checkpoint promises.
 _MODE_EXECUTABLE: Final = 0o755
 _MODE_REGULAR: Final = 0o644
+_MODES: Final = frozenset({_MODE_EXECUTABLE, _MODE_REGULAR})
+
+#: Directories the capture walk NEVER descends into (R28-04): the
+#: capture scope is the agent's WORK TREE only. ``.git`` is runner
+#: infrastructure (and read-only packs fail on restore), ``.forge`` is
+#: the lane's own runtime state INCLUDING the checkpoint store — the
+#: store must never capture itself — and the rest are caches/build
+#: output no checkpoint may grow by re-capturing.
+_CAPTURE_EXCLUDED_DIRS: Final = frozenset(
+    {".git", ".forge", "__pycache__", ".pytest_cache", "node_modules"}
+)
+
+
+def _excluded_from_capture(name: str) -> bool:
+    """Whether one walk directory is outside the capture scope."""
+    return name in _CAPTURE_EXCLUDED_DIRS or name.endswith(".egg-info")
+
+
+def _reserved_manifest_path(pure: PurePosixPath) -> str | None:
+    """Why *pure* may not be restored, or None when it may (R28-02).
+
+    The consumer validates the manifest INDEPENDENTLY of the producer:
+    a checkpoint crossed a network boundary, so reserved namespaces are
+    refused here, not trusted to have been excluded at capture. Refused:
+    ``.git`` (repository/control infrastructure — config, hooks), the
+    ``.forge/checkpoints`` store itself, and credential-shaped paths
+    (a restored checkpoint must not drop private keys into a runner).
+    """
+    parts = pure.parts
+    if parts[0] == ".git":
+        return f"{pure.as_posix()!r} is inside the .git namespace — repository and control state is never restored over"
+    if len(parts) >= 2 and parts[0] == ".forge" and parts[1] == "checkpoints":
+        return f"{pure.as_posix()!r} is inside the checkpoint store itself — the store is never restored over"
+    name = parts[-1].lower()
+    if name.endswith(".pem") or name.endswith(".key"):
+        return f"{pure.as_posix()!r} is credential-shaped (private key material) — never restored"
+    if name == ".env" or name.startswith("credentials"):
+        return f"{pure.as_posix()!r} is credential-shaped (environment/credentials file) — never restored"
+    return None
+
 
 #: Roles a captured file can carry: ``modified`` (tracked, content
 #: differs from the baseline) or ``new`` (not in the tracked baseline —
@@ -267,6 +316,7 @@ def capture_wip(
     root: Path,
     store: ContentAddressedStore,
     tracked_baseline: Mapping[str, str],
+    baseline_modes: Mapping[str, int] | None = None,
     source_oids: Mapping[str, str] | None = None,
     sequence: int = 0,
     upload: WipUploadChannel | None = None,
@@ -276,13 +326,25 @@ def capture_wip(
     ``tracked_baseline`` maps path -> content digest for the source
     snapshot/revision the WIP applies on top of (the caller's durable
     authority — :class:`forge.adaptive.models.SnapshotSet` digests in
-    production). Files whose digest still matches the baseline are NOT
-    re-uploaded (the baseline reconstructs them); modified, new and
-    untracked files are uploaded as content-addressed blobs; paths in
-    the baseline that vanished from the tree are recorded as
-    deletions. The manifest freezes all of it plus source OIDs and the
-    applied-command ``sequence``, and its own content address becomes
-    the checkpoint reference.
+    production). The digest scheme is CANONICAL: the baseline stores the
+    sha256 of RAW file bytes, the same identity the walk computes
+    (R28-04) — git blob OIDs are a different hash of a different
+    wrapping and never matched here. ``baseline_modes`` (optional, the
+    git index's executable bit in production) extends the comparison to
+    MODES: a file whose content matches but whose executable bit
+    changed is captured as a ``modified`` entry, not silently skipped.
+
+    Files whose digest still matches the baseline are NOT re-uploaded
+    (the baseline reconstructs them); modified, new and untracked files
+    are uploaded as content-addressed blobs; paths in the baseline that
+    vanished from the tree are recorded as deletions. The walk's scope
+    is the agent's work tree only: ``.forge/`` (the store itself),
+    ``.git/``, ``__pycache__/``, ``.pytest_cache/``, ``*.egg-info/``
+    and ``node_modules/`` are excluded (R28-04) — repeated captures
+    never include the previous checkpoint store and cannot grow from
+    self-capture. The manifest freezes all of it plus source OIDs and
+    the applied-command ``sequence``, and its own content address
+    becomes the checkpoint reference.
 
     Verification is part of the capture, not an afterthought: every
     blob and the manifest are READ BACK through
@@ -310,10 +372,7 @@ def capture_wip(
             name
             for name in dirnames
             if not (Path(dirpath) / name).is_symlink()
-            # LIVE-found (wave D): .git internals are runner infrastructure
-            # (read-only pack files Permission-denied on restore), never WIP.
-            # The agent's work tree excludes them; the checkpoint must too.
-            and name != ".git"
+            and not _excluded_from_capture(name)  # R28-04: work tree only
         )
         for name in sorted(filenames):
             path = Path(dirpath) / name
@@ -326,12 +385,15 @@ def capture_wip(
             data = path.read_bytes()
             digest = _sha256(data)
             baseline = tracked_baseline.get(rel)
-            if baseline == digest:
+            mode = _mode_of(path)
+            unchanged_content = baseline == digest
+            unchanged_mode = baseline_modes is None or baseline_modes.get(rel) == mode
+            if unchanged_content and unchanged_mode:
                 continue  # unchanged: the tracked baseline reconstructs it
             store.put(data)
             files[rel] = {
                 "digest": digest,
-                "mode": _mode_of(path),
+                "mode": mode,
                 "role": "modified" if baseline is not None else "new",
             }
     deletions = sorted(rel for rel in tracked_baseline if not _tree_path(root, rel).exists())
@@ -432,6 +494,7 @@ def cooperative_capture(
     root: Path,
     store: ContentAddressedStore,
     tracked_baseline: Mapping[str, str],
+    baseline_modes: Mapping[str, int] | None = None,
     source_oids: Mapping[str, str] | None = None,
     sequence: int = 0,
     upload: WipUploadChannel | None = None,
@@ -453,6 +516,7 @@ def cooperative_capture(
         root=root,
         store=store,
         tracked_baseline=tracked_baseline,
+        baseline_modes=baseline_modes,
         source_oids=source_oids,
         sequence=sequence,
         upload=upload,
@@ -479,6 +543,74 @@ def book_checkpoint(mailbox: MailboxSurface, command_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _PlannedFile:
+    """One fully verified manifest file, ready to stage and move."""
+
+    rel: str
+    parts: tuple[str, ...]
+    digest: str
+    mode: int
+
+
+def _symlink_free_target_path(
+    target: Path, pure: PurePosixPath, *, final_is_file: bool
+) -> str | None:
+    """Why *pure* cannot be applied under *target*, or None when it can.
+
+    R28-02's containment rule: every component of the path is
+    ``lstat``-ed in the EXISTING target — a symlink anywhere along the
+    way means the restore would follow it outside the workspace, and is
+    refused (never resolved, never written through). Kind conflicts the
+    filesystem would later reject are also named precisely here: an
+    intermediate component that exists as a regular file, and (for a
+    planned file) a final component that exists as a directory.
+    """
+    current = target
+    parts = pure.parts
+    for index, part in enumerate(parts):
+        current = current / part
+        final = index == len(parts) - 1
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            if final and not final_is_file:
+                return None  # already absent — nothing to delete, nothing to check
+            continue  # a missing component is created by the restore itself
+        except OSError as exc:
+            return f"{current}: {exc}"
+        if stat.S_ISLNK(info.st_mode):
+            return (
+                f"{current} is a symlink — the restore refuses to follow it outside the workspace"
+            )
+        if final:
+            if final_is_file and stat.S_ISDIR(info.st_mode):
+                return f"{current} exists as a directory — a file cannot replace it"
+            if not final_is_file and stat.S_ISDIR(info.st_mode):
+                return f"{current} exists as a directory — only file deletions are supported"
+        elif not stat.S_ISDIR(info.st_mode):
+            return f"{current} exists as a non-directory — it cannot carry {pure.as_posix()!r}"
+    return None
+
+
+def _staging_dir(target: Path) -> Path:
+    """A scratch directory for the staged tree — beside the target.
+
+    ``target.parent`` keeps the staging OUTSIDE the workspace (a failure
+    leaves the tree clean and nothing half-applied inside it) and on the
+    same filesystem as the target (the per-file ``os.replace`` moves are
+    atomic). A read-only parent falls back to ``.forge/`` INSIDE the
+    target — excluded from every capture walk, and still discarded
+    whole on any failure.
+    """
+    try:
+        return Path(tempfile.mkdtemp(dir=target.parent, prefix=".forge-restore-"))
+    except OSError:
+        inside = target / ".forge"
+        inside.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(dir=inside, prefix="restore-"))
+
+
 def restore_wip(
     *,
     artifact_id: str,
@@ -492,13 +624,18 @@ def restore_wip(
     The manifest is fetched through the store's VERIFIED read under
     *principal* — an ungranted principal learns nothing (``None``, the
     same as absence) and tampered bytes raise before anything is
-    written. Every file path is validated against escapes BEFORE the
-    first write, every blob is re-fetched digest-verified, modes are
-    reapplied, deletions are applied (an already-absent deletion is
-    recorded, not an error), and every outcome is reported per file. A
-    missing or corrupt required blob fails the restore with the path
-    and digest named — resume must be blocked with evidence, never
-    handed a half-alive workspace.
+    written. Then the restore is TRANSACTIONAL (R28-02): every path,
+    kind, mode, blob and conflict is verified BEFORE the first write —
+    escapes, reserved namespaces (``.git``, the checkpoint store,
+    credential-shaped names), symlinked ancestors (``lstat``, never
+    followed), duplicate/aliasing normalized paths and
+    file-versus-directory conflicts each refuse the WHOLE restore with
+    the precise reason. Only a fully verified plan is materialized: the
+    complete tree is built in a STAGING directory beside the target and
+    moved in by atomic per-file renames, with deletions applied from
+    the same verified plan — a failure anywhere leaves the target
+    untouched and the staging discarded, never a half-applied workspace
+    resume could mistake for a restored one.
 
     ``download`` (wave C/D, optional): a transport channel — when
     given, ``artifact_id`` is read as the REMOTE durable reference
@@ -575,66 +712,180 @@ def restore_wip(
             failures=("manifest is malformed: files/deletions sections missing",),
         )
 
-    # Validate EVERY path before writing anything: an escape attempt must
-    # fail the whole restore, not leave a half-written target behind.
-    try:
-        safe_files = [(str(rel), _safe_manifest_path(str(rel))) for rel in sorted(files)]
-        safe_deletions = [
-            (str(rel), _safe_manifest_path(str(rel))) for rel in sorted(map(str, deletions))
-        ]
-    except ValueError as exc:
-        return RestoreReport(
-            artifact_id=artifact_id,
-            ok=False,
-            files=(),
-            failures=(str(exc),),
-        )
-
+    # -- verify the ENTIRE plan before touching the target (R28-02) ------
     outcomes: list[FileRestore] = []
     failures: list[str] = []
-    for rel, pure in safe_files:
+    planned: list[_PlannedFile] = []
+    planned_deletions: list[tuple[str, PurePosixPath]] = []
+    # Occupancy by NORMALIZED parts — catches path aliases (``src//a``,
+    # ``src/./a``) and file-versus-directory conflicts inside the plan.
+    occupied: dict[tuple[str, ...], str] = {}
+    dir_prefixes: set[tuple[str, ...]] = set()
+
+    def _claim(parts: tuple[str, ...], rel: str) -> str | None:
+        if parts in occupied:
+            return (
+                f"{rel!r} normalizes to the same path as {occupied[parts]!r} — "
+                "a manifest may not alias one path twice"
+            )
+        for index in range(1, len(parts)):
+            prefix = parts[:index]
+            if prefix in occupied:
+                return (
+                    f"{rel!r} needs {PurePosixPath(*prefix).as_posix()!r} as a directory, "
+                    f"but the plan already places a file there ({occupied[prefix]!r})"
+                )
+        if parts in dir_prefixes:
+            return (
+                f"{rel!r} would have to be a directory, but the plan already "
+                "places a file underneath it"
+            )
+        occupied[parts] = rel
+        for index in range(1, len(parts)):
+            dir_prefixes.add(parts[:index])
+        return None
+
+    for rel in sorted(files):
         entry = files[rel]
         if not isinstance(entry, dict):
-            outcomes.append(FileRestore(rel, "failed", reason="manifest entry is not an object"))
+            outcomes.append(
+                FileRestore(str(rel), "failed", reason="manifest entry is not an object")
+            )
             failures.append(f"{rel}: manifest entry is not an object")
             continue
-        digest = str(entry.get("digest", ""))
-        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        digest = entry.get("digest")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
             outcomes.append(
-                FileRestore(rel, "failed", digest=digest, reason="entry carries no content digest")
+                FileRestore(
+                    str(rel), "failed", digest=str(digest), reason="entry carries no content digest"
+                )
             )
             failures.append(
                 f"{rel}: entry carries no content digest — a bare filename restores nothing"
             )
             continue
+        mode = entry.get("mode", _MODE_REGULAR)
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode not in _MODES:
+            outcomes.append(
+                FileRestore(
+                    str(rel), "failed", digest=digest, reason=f"unsupported file mode {mode!r}"
+                )
+            )
+            failures.append(
+                f"{rel}: unsupported file kind/mode {mode!r} — restore carries regular "
+                f"files as {_MODE_REGULAR:o} or {_MODE_EXECUTABLE:o} only"
+            )
+            continue
         try:
-            blob = store.get_verified(digest, principal=principal)
+            pure = _safe_manifest_path(str(rel))
+        except ValueError as exc:
+            outcomes.append(FileRestore(str(rel), "failed", digest=digest, reason=str(exc)))
+            failures.append(str(exc))
+            continue
+        reserved = _reserved_manifest_path(pure)
+        if reserved is not None:
+            outcomes.append(FileRestore(str(rel), "failed", digest=digest, reason=reserved))
+            failures.append(f"{rel}: {reserved}")
+            continue
+        conflict = _claim(pure.parts, str(rel))
+        if conflict is not None:
+            outcomes.append(FileRestore(str(rel), "failed", digest=digest, reason=conflict))
+            failures.append(conflict)
+            continue
+        unsafe = _symlink_free_target_path(target, pure, final_is_file=True)
+        if unsafe is not None:
+            outcomes.append(FileRestore(str(rel), "failed", digest=digest, reason=unsafe))
+            failures.append(f"{rel}: {unsafe}")
+            continue
+        planned.append(_PlannedFile(str(rel), pure.parts, digest, int(mode)))
+
+    for rel in sorted(map(str, deletions)):
+        try:
+            pure = _safe_manifest_path(rel)
+        except ValueError as exc:
+            failures.append(str(exc))
+            continue
+        reserved = _reserved_manifest_path(pure)
+        if reserved is not None:
+            failures.append(f"{rel}: {reserved}")
+            continue
+        conflict = _claim(pure.parts, rel)
+        if conflict is not None:
+            failures.append(conflict)
+            continue
+        unsafe = _symlink_free_target_path(target, pure, final_is_file=False)
+        if unsafe is not None:
+            failures.append(f"{rel}: {unsafe}")
+            continue
+        planned_deletions.append((rel, pure))
+
+    # Every blob is fetched digest-verified BEFORE any write: a missing
+    # or corrupt final blob refuses the WHOLE restore (the target stays
+    # clean — never a half-restored workspace marked usable).
+    blobs: dict[str, bytes] = {}
+    for item in planned:
+        try:
+            blob = store.get_verified(item.digest, principal=principal)
         except CorruptArtifactError as exc:
-            outcomes.append(FileRestore(rel, "failed", digest=digest, reason=str(exc)))
-            failures.append(f"{rel}: blob {digest} is corrupt: {exc}")
+            outcomes.append(FileRestore(item.rel, "failed", digest=item.digest, reason=str(exc)))
+            failures.append(f"{item.rel}: blob {item.digest} is corrupt: {exc}")
             continue
         if blob is None:
             outcomes.append(
                 FileRestore(
-                    rel, "failed", digest=digest, reason="required blob absent from the store"
+                    item.rel,
+                    "failed",
+                    digest=item.digest,
+                    reason="required blob absent from the store",
                 )
             )
-            failures.append(f"{rel}: required blob {digest} is absent — resume is blocked")
+            failures.append(
+                f"{item.rel}: required blob {item.digest} is absent — resume is blocked"
+            )
             continue
-        destination = target.joinpath(*pure.parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(blob)
-        mode = entry.get("mode", _MODE_REGULAR)
-        os.chmod(destination, int(mode) if isinstance(mode, int) else _MODE_REGULAR)
-        outcomes.append(FileRestore(rel, "restored", digest=digest))
+        blobs[item.digest] = blob
+    if failures:
+        return RestoreReport(
+            artifact_id=artifact_id,
+            ok=False,
+            files=tuple(outcomes),
+            failures=tuple(failures),
+        )
 
-    for rel, pure in safe_deletions:
-        doomed = target.joinpath(*pure.parts)
-        if doomed.exists():
-            doomed.unlink()
-            outcomes.append(FileRestore(rel, "deleted"))
-        else:
-            outcomes.append(FileRestore(rel, "already-absent"))
+    # -- stage the whole tree, then move it in atomically -----------------
+    staging = _staging_dir(target)
+    try:
+        for item in planned:
+            staged = staging.joinpath(*item.parts)
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(blobs[item.digest])
+            os.chmod(staged, item.mode)
+        for item in planned:
+            destination = target.joinpath(*item.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging.joinpath(*item.parts), destination)
+            outcomes.append(FileRestore(item.rel, "restored", digest=item.digest))
+        for rel, pure in planned_deletions:
+            doomed = target.joinpath(*pure.parts)
+            if doomed.exists():
+                doomed.unlink()
+                outcomes.append(FileRestore(rel, "deleted"))
+            else:
+                outcomes.append(FileRestore(rel, "already-absent"))
+    except OSError as exc:
+        failures.append(f"applying the verified checkpoint failed: {exc}")
+        return RestoreReport(
+            artifact_id=artifact_id,
+            ok=False,
+            files=tuple(outcomes),
+            failures=tuple(failures),
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     return RestoreReport(
         artifact_id=artifact_id,

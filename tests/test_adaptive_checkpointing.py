@@ -380,8 +380,10 @@ class TestRestoreOnASecondRunner:
         assert any(
             "notes.md" in failure and _digest(_WIP_NOTES) in failure for failure in report.failures
         )
-        # The OTHER files still restored — the report says exactly which leg failed.
-        assert (tmp_path / "runner-b" / "src" / "app.py").exists()
+        # R28-02: a missing blob refuses the WHOLE restore — the target
+        # stays clean (no half-applied workspace), and the report names
+        # exactly which leg failed.
+        assert not (tmp_path / "runner-b" / "src" / "app.py").exists()
         assert not (tmp_path / "runner-b" / "notes.md").exists()
 
     def test_tampered_blob_bytes_are_refused_not_returned(self, tmp_path: Path):
@@ -450,6 +452,330 @@ class TestRestoreOnASecondRunner:
         assert report.ok is False
         assert any("escapes the restore target" in failure for failure in report.failures)
         assert not (tmp_path / "evil.txt").exists()
+
+
+class TestTransactionalRestoreSafety:
+    """R28-02: the restore is path-safe, reserved-path-safe and transactional.
+
+    The reviewed defects: a lexical in-root path under a pre-existing
+    symlink ancestor wrote/deleted OUTSIDE the workspace; ``.git/config``
+    passed the lexical validator; a failing later blob left the earlier
+    files applied. The contract pinned here: lstat every ancestor
+    (symlink → refuse, never follow), refuse reserved namespaces and
+    credential-shaped names, refuse aliases/conflicts/unsupported kinds
+    with precise reasons, and apply NOTHING until the whole plan is
+    verified — staged, then moved, staging discarded on any failure."""
+
+    @staticmethod
+    def _manifest_for(files: dict[str, tuple[bytes, int]], deletions: list[str] | None = None):
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": WORK_ID,
+            "sequence": 0,
+            "source_oids": {},
+            "files": {
+                rel: {"digest": _digest(data), "mode": mode, "role": "new"}
+                for rel, (data, mode) in files.items()
+            },
+            "deletions": deletions or [],
+        }
+        blobs = {_digest(data): data for _rel, (data, _mode) in files.items()}
+        return manifest, blobs
+
+    def _restore_manifest(
+        self,
+        tmp_path: Path,
+        manifest: dict,
+        target: Path,
+        blobs: dict[str, bytes] | None = None,
+    ) -> object:
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        for digest, data in (blobs or {}).items():
+            store.put(data)
+        artifact_id = store.put(json.dumps(manifest).encode(), content_type="application/json")
+        return restore_wip(artifact_id=artifact_id, store=store, target=target, principal=TENANT)
+
+    def test_a_symlinked_ancestor_writes_and_deletes_nothing_outside(self, tmp_path: Path):
+        """The reviewer's P05 repro: a sibling directory reached through a
+        symlink INSIDE the workspace — zero writes and zero deletes may
+        land through it."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_bytes(b"precious\n")
+        (outside / "doomed.txt").write_bytes(b"stale\n")
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        (target / "link").symlink_to(outside)
+
+        manifest, blobs = self._manifest_for(
+            {"link/escape.txt": (b"escaped\n", 0o644)}, deletions=["link/doomed.txt"]
+        )
+        report = self._restore_manifest(tmp_path, manifest, target, blobs)
+
+        assert report.ok is False
+        assert any("symlink" in failure for failure in report.failures)
+        # Zero outside writes AND zero outside deletes:
+        assert (outside / "keep.txt").read_bytes() == b"precious\n"
+        assert (outside / "doomed.txt").read_bytes() == b"stale\n"
+        assert not (outside / "escape.txt").exists()
+        assert not (target / "link" / "escape.txt").exists()  # not even via the link
+
+    def test_reserved_namespaces_and_credentials_are_refused(self, tmp_path: Path):
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        (target / ".git").mkdir()
+        reserved = {
+            ".git/config": b"[core]\n",
+            ".forge/checkpoints/ab/sentinel": b"store poison\n",
+            "deploy.pem": b"PRIVATE KEY MATERIAL\n",
+            "secrets/tenant.key": b"PRIVATE KEY MATERIAL\n",
+            ".env": b"TOKEN=1\n",
+            "credentials.json": b"{}\n",
+        }
+        manifest, blobs = self._manifest_for({rel: (data, 0o644) for rel, data in reserved.items()})
+
+        report = self._restore_manifest(tmp_path, manifest, target, blobs)
+
+        assert report.ok is False
+        joined = "\n".join(report.failures)
+        for rel in reserved:
+            assert rel in joined, f"{rel} must be named in the refusal"
+        assert ".git namespace" in joined
+        assert "checkpoint store itself" in joined
+        assert "credential-shaped" in joined
+        assert not (target / ".git" / "config").exists()
+        assert not (target / "deploy.pem").exists()
+
+    def test_a_corrupt_later_blob_leaves_the_target_untouched(self, tmp_path: Path):
+        """The reviewer's rollback case: a valid FIRST file and a corrupt
+        SECOND blob — nothing is applied, no staging remains, the
+        workspace stays clean."""
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        manifest, blobs = self._manifest_for(
+            {"a_first.txt": (b"first\n", 0o644), "b_second.txt": (b"second\n", 0o644)}
+        )
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        for data in blobs.values():
+            store.put(data)
+        artifact_id = store.put(json.dumps(manifest).encode(), content_type="application/json")
+        # Rot the SECOND blob (sorted file order) after the put.
+        second_digest = manifest["files"]["b_second.txt"]["digest"]
+        (tmp_path / "store" / second_digest[:2] / second_digest).write_bytes(b"EVIL")
+
+        report = restore_wip(artifact_id=artifact_id, store=store, target=target, principal=TENANT)
+
+        assert report.ok is False
+        assert not (target / "a_first.txt").exists()  # the valid first file was NOT applied
+        assert not (target / "b_second.txt").exists()
+        assert list(target.parent.glob(".forge-restore-*")) == []  # staging discarded
+
+    def test_path_aliases_and_file_directory_conflicts_are_refused(self, tmp_path: Path):
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        alias, blobs = self._manifest_for(
+            {"src/app.py": (b"one\n", 0o644), "src//app.py": (b"two\n", 0o644)}
+        )
+        report = self._restore_manifest(tmp_path, alias, target, blobs)
+        assert report.ok is False
+        assert any("normalizes to the same path" in failure for failure in report.failures)
+        assert not (target / "src").exists()
+
+        conflict, blobs = self._manifest_for(
+            {"a": (b"file\n", 0o644), "a/b.txt": (b"under\n", 0o644)}
+        )
+        report = self._restore_manifest(tmp_path, conflict, tmp_path / "runner-c", blobs)
+        assert report.ok is False
+        assert any("as a directory" in failure for failure in report.failures)
+        runner_c = tmp_path / "runner-c"
+        assert not runner_c.exists() or not any(runner_c.iterdir())
+
+    def test_a_manifest_file_cannot_replace_a_target_directory(self, tmp_path: Path):
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        (target / "notes.md").mkdir()
+        (target / "notes.md" / "inner.txt").write_bytes(b"inner\n")
+        manifest, blobs = self._manifest_for({"notes.md": (b"file content\n", 0o644)})
+
+        report = self._restore_manifest(tmp_path, manifest, target, blobs)
+
+        assert report.ok is False
+        assert any("exists as a directory" in failure for failure in report.failures)
+        assert (target / "notes.md" / "inner.txt").read_bytes() == b"inner\n"
+
+    def test_a_deletion_of_a_directory_is_refused_with_the_reason(self, tmp_path: Path):
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        (target / "olddir").mkdir()
+        (target / "olddir" / "x.txt").write_bytes(b"x\n")
+        manifest, blobs = self._manifest_for({}, deletions=["olddir"])
+
+        report = self._restore_manifest(tmp_path, manifest, target, blobs)
+
+        assert report.ok is False
+        assert any("olddir" in failure and "directory" in failure for failure in report.failures)
+        assert (target / "olddir" / "x.txt").exists()
+
+    def test_an_unsupported_mode_is_refused_with_a_precise_reason(self, tmp_path: Path):
+        data = b"#!/bin/sh\n"
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": WORK_ID,
+            "sequence": 0,
+            "source_oids": {},
+            "files": {"unsafe.sh": {"digest": _digest(data), "mode": 0o777, "role": "new"}},
+            "deletions": [],
+        }
+        report = self._restore_manifest(
+            tmp_path, manifest, tmp_path / "runner-b", {_digest(data): data}
+        )
+        assert report.ok is False
+        assert any("unsupported file kind/mode" in failure for failure in report.failures)
+        assert not (tmp_path / "runner-b" / "unsafe.sh").exists()
+
+    def test_a_mode_only_change_survives_the_restore(self, tmp_path: Path):
+        """A mode-only delta (content identical to the baseline, executable
+        bit changed) restores the mode — the transactional apply keeps
+        chmod off the symlink-checked path."""
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        script = target / "run.sh"
+        script.write_bytes(b"#!/bin/sh\necho hi\n")
+        manifest, blobs = self._manifest_for({"run.sh": (b"#!/bin/sh\necho hi\n", 0o755)})
+
+        report = self._restore_manifest(tmp_path, manifest, target, blobs)
+
+        assert report.ok is True
+        assert os.stat(script).st_mode & 0o111
+
+
+class TestBoundedCaptureScope:
+    """R28-04: the capture scope is the agent's work tree only, the delta
+    is bounded by ONE canonical digest scheme, and repeated captures
+    cannot grow from self-capture."""
+
+    def test_runtime_dirs_caches_and_the_store_are_never_captured(self, tmp_path: Path):
+        tree = _wip_tree(tmp_path / "runner-a")
+        # The store itself, caches, egg-info and node_modules inside the tree:
+        (tree / ".forge" / "checkpoints" / "ab").mkdir(parents=True)
+        (tree / ".forge" / "checkpoints" / "ab" / ("c" * 64)).write_bytes(b"self capture\n")
+        (tree / "src" / "__pycache__").mkdir()
+        (tree / "src" / "__pycache__" / "app.cpython-313.pyc").write_bytes(b"\x00pyc")
+        (tree / ".pytest_cache").mkdir()
+        (tree / ".pytest_cache" / "v").write_bytes(b"cache")
+        (tree / "node_modules").mkdir()
+        (tree / "node_modules" / "dep.js").write_bytes(b"dep")
+        (tree / "lib.egg-info").mkdir()
+        (tree / "lib.egg-info" / "meta").write_bytes(b"meta")
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+
+        receipt = capture_wip(
+            work_id=WORK_ID,
+            root=tree,
+            store=store,
+            tracked_baseline=_baseline(),
+            sequence=1,
+        )
+
+        manifest = json.loads(store.get(receipt.artifact_id))
+        assert sorted(manifest["files"]) == ["notes.md", "scripts/run.sh", "src/app.py"]
+        assert not any(
+            rel.startswith((".forge/", "node_modules/", ".pytest_cache/"))
+            or "__pycache__" in rel
+            or ".egg-info" in rel
+            for rel in manifest["files"]
+        )
+
+    def test_repeated_capture_is_stable_and_never_grows_from_self_capture(self, tmp_path: Path):
+        """Capture twice with the store INSIDE the walked tree (the lane's
+        real layout): the second manifest is byte-identical — the store
+        never captures itself."""
+        tree = _wip_tree(tmp_path / "runner-a")
+        inside = ContentAddressedStore(tree / ".forge" / "checkpoints", tenant=TENANT)
+
+        first = capture_wip(
+            work_id=WORK_ID, root=tree, store=inside, tracked_baseline=_baseline(), sequence=1
+        )
+        second = capture_wip(
+            work_id=WORK_ID, root=tree, store=inside, tracked_baseline=_baseline(), sequence=1
+        )
+
+        assert first.artifact_id == second.artifact_id
+        manifest = json.loads(inside.get(first.artifact_id))
+        assert not any(rel.startswith(".forge/") for rel in manifest["files"])
+
+    def test_a_git_oid_shaped_baseline_never_matches_so_nothing_is_skipped(self, tmp_path: Path):
+        """The reviewed defect from the other side: a baseline carrying git
+        blob OIDs (40-hex, different hash scheme) must not silently match
+        anything — the capture is honest about what it carries — while
+        the SAME digest scheme (raw sha256) skips unchanged files."""
+        tree = _wip_tree(tmp_path / "runner-a")
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+
+        git_shaped = {"src/app.py": "0" * 40, "README.md": "1" * 40, "src/old.py": "2" * 40}
+        oid_receipt = capture_wip(
+            work_id=WORK_ID, root=tree, store=store, tracked_baseline=git_shaped, sequence=1
+        )
+        oid_manifest = json.loads(store.get(oid_receipt.artifact_id))
+        assert (
+            "README.md" in oid_manifest["files"]
+        )  # unchanged content NOT skipped under a foreign scheme
+
+        canonical_receipt = capture_wip(
+            work_id=WORK_ID, root=tree, store=store, tracked_baseline=_baseline(), sequence=2
+        )
+        canonical_manifest = json.loads(store.get(canonical_receipt.artifact_id))
+        assert "README.md" not in canonical_manifest["files"]  # the canonical scheme skips it
+        assert sorted(canonical_manifest["files"]) == ["notes.md", "scripts/run.sh", "src/app.py"]
+
+    def test_a_mode_only_change_is_captured_exactly_once(self, tmp_path: Path):
+        tree = _wip_tree(tmp_path / "runner-a")
+        script = tree / "scripts" / "run.sh"
+        script.chmod(0o644)  # content identical to the baseline, mode differs
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        baseline = {**_baseline(), "scripts/run.sh": _digest(_WIP_SCRIPT)}
+
+        receipt = capture_wip(
+            work_id=WORK_ID,
+            root=tree,
+            store=store,
+            tracked_baseline=baseline,
+            baseline_modes={
+                "src/app.py": 0o644,
+                "src/old.py": 0o644,
+                "README.md": 0o644,
+                "scripts/run.sh": 0o755,  # the baseline says executable; the tree says not
+            },
+            sequence=1,
+        )
+
+        manifest = json.loads(store.get(receipt.artifact_id))
+        assert sorted(manifest["files"]) == ["notes.md", "scripts/run.sh", "src/app.py"]
+        assert manifest["files"]["scripts/run.sh"]["mode"] == 0o644
+        assert manifest["files"]["scripts/run.sh"]["role"] == "modified"
+
+    def test_content_and_mode_unchanged_is_fully_skipped(self, tmp_path: Path):
+        tree = _wip_tree(tmp_path / "runner-a")
+        tree.joinpath("scripts/run.sh").chmod(0o755)  # matches the baseline mode too
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        baseline = {**_baseline(), "scripts/run.sh": _digest(_WIP_SCRIPT)}
+
+        receipt = capture_wip(
+            work_id=WORK_ID,
+            root=tree,
+            store=store,
+            tracked_baseline=baseline,
+            baseline_modes={
+                "src/app.py": 0o644,
+                "src/old.py": 0o644,
+                "README.md": 0o644,
+                "scripts/run.sh": 0o755,
+            },
+            sequence=1,
+        )
+
+        manifest = json.loads(store.get(receipt.artifact_id))
+        assert sorted(manifest["files"]) == ["notes.md", "src/app.py"]  # run.sh fully unchanged
 
 
 class TestReferenceAwareRetention:

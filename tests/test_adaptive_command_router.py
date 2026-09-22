@@ -253,8 +253,38 @@ async def test_pause_records_a_work_scoped_mailbox_command(
     assert RUN_A[:8] in posted.bodies[0]
     rows = await _journal(session_factory)
     assert [row.status for row in rows] == ["succeeded"]
-    assert rows[0].idempotency_key == "adaptive-note:gitlab:5001"
+    # R28-09: the reply key carries the SUBJECT namespace (provider +
+    # project + issue) — equal numeric note ids on different works never
+    # suppress one another.
+    assert rows[0].idempotency_key == "adaptive-note:gitlab:42:7:5001"
     assert rows[0].flow_run_id == RUN_A
+
+
+async def test_pause_raises_the_durable_publication_fence_resume_clears_it(
+    router, session_factory, control
+):
+    """R28-08: control processing leaves ONE persisted authority state the
+    publisher reads — raised with the epoch the pause bumped, cleared by
+    resume under a NEW epoch."""
+    from forge.adaptive.pause_fence import pause_fence_decision
+
+    await _seed_run(session_factory, RUN_A)
+    await router.handle(_gitlab_note("/pause", note_id=5013))
+
+    decision = await pause_fence_decision(session_factory, RUN_A)
+    assert decision.fenced is True
+    assert decision.publication_epoch_bumped == 1  # the epoch CTL-05 bumped to
+
+    # CTL-06's gate: resume only from a confirmed checkpoint — until then
+    # the fence stands even though the mailbox holds the pause.
+    state = control.pause_states[RUN_A]
+    control.pause_states[RUN_A] = replace(state, checkpoint_captured=True)
+    applied = await router.handle(_gitlab_note("/resume", verb="resume", note_id=5018))
+    assert applied["status"] == "applied"
+
+    cleared = await pause_fence_decision(session_factory, RUN_A)
+    assert cleared.fenced is False
+    assert cleared.resumed_publication_epoch == 2  # the NEW epoch resume opened
 
 
 async def test_pause_short_id_resolves_like_go(router, session_factory, control):
@@ -500,6 +530,97 @@ async def test_provider_scoped_approvers_apply_github_and_azure(session_factory,
     note["note_id"] = 9012
     assert (await github_router.handle(note))["status"] == "refused"
     assert "ignored" in posted.bodies[-1]
+
+
+async def test_a_redelivered_steer_after_a_failed_reply_records_one_command(
+    session_factory, control
+):
+    """R28-09: the crash/reply-failure window after the mailbox commit.
+
+    The first delivery's mailbox insert SUCCEEDS but the operator reply
+    FAILS, so the reply-journal dedup (which keys on a SUCCEEDED reply)
+    cannot suppress the redelivery — the router re-runs steer. The
+    mailbox must still hold ONE steer command: its idempotency key is
+    the NATIVE event identity (verb + work + delivery id), not a fresh
+    random key per attempt. Replacing the native key with uuid4 fails
+    the count assertion (mutation)."""
+    await _seed_run(session_factory, RUN_A)
+
+    class FailingThenWorking:
+        def __init__(self) -> None:
+            self.bodies: list[str] = []
+            self.failed_once = False
+
+        async def __call__(self, body: str) -> dict[str, int]:
+            if not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("provider unreachable")  # the FIRST reply leg dies
+            self.bodies.append(body)
+            return {"id": 1}
+
+    poster = FailingThenWorking()
+    flaky_router = ControlCommandRouter(
+        session_factory=session_factory, settings=_settings(), post_note=poster, control=control
+    )
+    note = _gitlab_note("/steer fix the parser first", verb="steer", note_id=5031)
+
+    first = await flaky_router.handle(note)
+    replay = await flaky_router.handle(note)
+
+    assert first["status"] == "applied"  # the mailbox record stood
+    assert replay["status"] == "applied"  # the redelivery completed the reply
+    steers = [c for c in control.mailbox.commands.values() if c.kind == "steer"]
+    assert len(steers) == 1  # ONE logical steer — the native identity deduped it
+    assert len(poster.bodies) == 1  # and ONE eventual operator reply
+
+
+#: A run of ANOTHER issue in the same project (the equal-note-id subject).
+RUN_OTHER_SUBJECT = "abcd0002" + "5" * 24
+
+
+async def test_equal_note_ids_on_different_works_never_suppress_one_another(
+    router, session_factory, control, posted
+):
+    """R28-09's namespace rule: the dedup keys carry the WORK (mailbox) and
+    the SUBJECT (reply journal), so two works receiving notes with the
+    SAME numeric delivery id are two independent commands with two
+    replies — equal note ids alone must not dedup either effect."""
+    await _seed_run(session_factory, RUN_A)
+    await _seed_run(session_factory, RUN_OTHER_SUBJECT, issue=8)
+
+    first = await router.handle(
+        _gitlab_note(f"/steer {RUN_A} fix the parser", verb="steer", note_id=5032)
+    )
+    second_note = _gitlab_note(
+        f"/steer {RUN_OTHER_SUBJECT} fix the docs", verb="steer", note_id=5032
+    )
+    second_note["issue_iid"] = 8
+    second = await router.handle(second_note)
+
+    assert first["status"] == second["status"] == "applied"
+    steer_a = [c for c in control.mailbox.commands.values() if c.work_id == RUN_A]
+    steer_b = [c for c in control.mailbox.commands.values() if c.work_id == RUN_OTHER_SUBJECT]
+    assert len(steer_a) == 1 and len(steer_b) == 1
+    assert len(posted.bodies) == 2  # both subjects earned their reply
+
+
+async def test_the_steer_key_is_the_stable_native_identity_not_a_random_one(
+    router, session_factory, control
+):
+    """The key the router hands the mailbox is DERIVED (verb + work +
+    note id) — deterministic across calls, so a durable mailbox index
+    can actually dedup on it."""
+    await _seed_run(session_factory, RUN_A)
+    note = _gitlab_note("/steer keep going", verb="steer", note_id=5033)
+
+    assert (
+        ControlCommandRouter._idempotency_key("steer", note, RUN_A)
+        == ControlCommandRouter._idempotency_key("steer", note, RUN_A)
+        == f"adaptive:steer:{RUN_A}:5033"
+    )
+    await router.handle(note)
+    (command,) = await control.pending(RUN_A)
+    assert command.idempotency_key == f"adaptive:steer:{RUN_A}:5033"
 
 
 # ---------------------------------------------------------------------------

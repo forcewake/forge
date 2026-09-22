@@ -59,6 +59,7 @@ from forge.adaptive.wiring import OperatorControlService
 __all__ = [
     "DEFAULT_ACK_TIMEOUT_S",
     "DEFAULT_POLL_INTERVAL_S",
+    "LANE_CONTROL_GENERATION_ENV",
     "LANE_CONTROL_POLL_ENV",
     "LANE_CONTROL_TOKEN_ENV",
     "LANE_CONTROL_URL_ENV",
@@ -76,6 +77,14 @@ LANE_CONTROL_TOKEN_ENV: Final = "FORGE_LANE_CONTROL_TOKEN"
 #: The fetch cadence override (seconds; malformed fails CLOSED to the
 #: default rather than guessing a cadence the operator did not set).
 LANE_CONTROL_POLL_ENV: Final = "FORGE_LANE_CONTROL_POLL_SECONDS"
+
+#: The runner generation this lane speaks for (R28-07/R28-10): the
+#: dispatch injects the run's CURRENT generation and the lane's acks
+#: carry it, so a superseded generation's ack is refused by the control
+#: plane instead of moving the new attempt's state. Malformed or unset
+#: means "no generation declared" — the honest migration default (the
+#: pre-generation control plane accepts exactly that).
+LANE_CONTROL_GENERATION_ENV: Final = "FORGE_LANE_CONTROL_GENERATION"
 
 #: The fetch loop's cadence — an order slower than the drain's own poll:
 #: the buffer decouples them, and the control plane is not hot.
@@ -122,6 +131,7 @@ class LaneControlChannel:
         run_id: str = "",
         poll_interval: float = DEFAULT_POLL_INTERVAL_S,
         ack_timeout: float = DEFAULT_ACK_TIMEOUT_S,
+        generation: int | None = None,
     ) -> None:
         if not base_url or not token or not work_id:
             raise ValueError("base_url, token and work_id must be non-empty")
@@ -133,6 +143,11 @@ class LaneControlChannel:
         self.run_id = run_id
         self.poll_interval = poll_interval
         self.ack_timeout = ack_timeout
+        #: The runner generation this lane's acks declare (R28-10): the
+        #: dispatch minted the token FOR this generation, and the control
+        #: plane refuses an ack whose declared generation the work has
+        #: superseded. ``None`` declares nothing (pre-generation lanes).
+        self.generation = generation
         self.vendor_session_id = ""
         #: The lane's delivery cursor — the highest sequence handed to the
         #: drain through :meth:`pending`. The next fetch asks for
@@ -360,6 +375,8 @@ class LaneControlChannel:
             "state": state,
             "at": _now_iso(),
         }
+        if self.generation is not None:
+            row["generation"] = self.generation
         if self.vendor_session_id:
             row["vendor_session_id"] = self.vendor_session_id
         if self.run_id:
@@ -375,6 +392,11 @@ class LaneControlChannel:
         An unreachable API journals the error and raises ``ValueError`` —
         the command is refused THIS cycle and stays pending server-side
         for the reconciler, never optimistically booked.
+
+        R28-10: when the channel knows its runner ``generation`` the ack
+        body DECLARES it — the control plane refuses a superseded
+        generation's ack with 403 (surfaced here as ``PermissionError``),
+        so a retired lane can never move the new attempt's state.
         """
         url = f"{self.base_url}/lane/controls/{_urlquote(command_id, safe='')}/ack"
         body: dict[str, Any] = {
@@ -382,6 +404,8 @@ class LaneControlChannel:
             "journal_row": self._ack_row(state),
             **extra,
         }
+        if self.generation is not None:
+            body["generation"] = self.generation
         try:
             response = httpx.post(
                 url,
@@ -424,7 +448,10 @@ def lane_channel_from_env(
     AND a work id can be derived (``FORGE_WORK_ID``, else ``FORGE_RUN_ID``
     — the same derivation the steering attach uses; nothing to scope to,
     nothing to dial). A malformed ``FORGE_LANE_CONTROL_POLL_SECONDS``
-    fails CLOSED to the default cadence.
+    fails CLOSED to the default cadence; a malformed
+    ``FORGE_LANE_CONTROL_GENERATION`` fails OPEN to "no generation
+    declared" (the migration default — a typo must not brick the lane's
+    acks against a pre-generation control plane).
     """
     source = os.environ if env is None else env
     base_url = (source.get(LANE_CONTROL_URL_ENV) or "").strip()
@@ -443,10 +470,20 @@ def lane_channel_from_env(
             poll_interval = DEFAULT_POLL_INTERVAL_S
         if poll_interval <= 0:
             poll_interval = DEFAULT_POLL_INTERVAL_S
+    generation = None
+    raw_generation = (source.get(LANE_CONTROL_GENERATION_ENV) or "").strip()
+    if raw_generation:
+        try:
+            generation = int(raw_generation)
+        except ValueError:
+            generation = None
+        if generation is not None and generation < 0:
+            generation = None
     return LaneControlChannel(
         base_url=base_url,
         token=token,
         work_id=work_id,
         run_id=(source.get("FORGE_RUN_ID") or "").strip(),
         poll_interval=poll_interval,
+        generation=generation,
     )

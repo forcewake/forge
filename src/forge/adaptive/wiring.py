@@ -335,7 +335,13 @@ class OperatorControlService:
             return False
 
     async def steer(
-        self, work_id: str, actor: str, text: str, *, run_id: str = ""
+        self,
+        work_id: str,
+        actor: str,
+        text: str,
+        *,
+        run_id: str = "",
+        idempotency_key: str = "",
     ) -> dict[str, Any]:
         """CTL-07: bounded steering — acceptance-policy changes are rejected.
 
@@ -347,6 +353,14 @@ class OperatorControlService:
         note to one lane) — the record a running lane's
         :class:`~forge.adaptive.lane_control.LaneSteeringSession` drains
         and delivers; a rejected one never reaches the mailbox.
+
+        ``idempotency_key`` (R28-09): the NATIVE event identity the
+        caller derived (verb + work + the provider delivery id). With it,
+        a redelivered native steer lands on the SAME mailbox row — one
+        command, one logical effect — even when the first attempt died
+        between the mailbox commit and the operator reply. Without it a
+        fresh random key is generated per call, kept only for direct
+        programmatic callers with no native identity to derive.
         """
         classification = classify_instruction(text)
         if classification == "acceptance_change":
@@ -365,7 +379,7 @@ class OperatorControlService:
             kind="steer",
             actor_ref=actor,
             actor_origin="server_authenticated_human",
-            idempotency_key=f"steer:{uuid.uuid4().hex[:12]}",
+            idempotency_key=idempotency_key or f"steer:{uuid.uuid4().hex[:12]}",
             status="received",
             payload=payload,
         )

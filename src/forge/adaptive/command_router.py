@@ -51,6 +51,7 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.adaptive.pause_fence import clear_pause_fence, raise_pause_fence
 from forge.adaptive.wiring import OperatorControlService, control_service_from_env
 from forge.durable.controller import TERMINAL_STATUSES
 from forge.durable.models import ActionLog, FlowRun
@@ -429,15 +430,44 @@ class ControlCommandRouter:
             state = await self.control.pause(
                 run_id, author, self._idempotency_key(verb, note, run_id)
             )
+            # R28-08: the pause's publication authority is ONE persisted
+            # state read by every publisher — raise the durable fence with
+            # the epoch the pause just bumped to. Raised BEFORE the reply
+            # note: a crash in between leaves the pause on record without
+            # its fence, and the provider's redelivery (the mailbox dedup
+            # refuses the command a second spend, the state comes back)
+            # heals by raising it here again.
+            await raise_pause_fence(
+                self.session_factory,
+                run_id,
+                publication_epoch_bumped=state.publication_epoch,
+            )
             body = _pause_applied_body(run_id, state.pause_status)
         elif verb == "resume":
             resumed = await self.control.resume(
                 run_id, author, self._idempotency_key(verb, note, run_id)
             )
             applied = resumed
+            if resumed:
+                # R28-08: resume reopens publication under a NEW epoch —
+                # the durable fence is cleared, never deleted, so the
+                # pause/resume history stays auditable and the old
+                # epoch's grants stay dead.
+                await clear_pause_fence(self.session_factory, run_id)
             body = _resume_applied_body(run_id) if resumed else _resume_refused_body(run_id)
         elif verb == "steer":
-            outcome = await self.control.steer(run_id, author, parsed.text, run_id=run_id)
+            # R28-09: the mailbox command dedups by the NATIVE event
+            # identity — the SAME key pause/resume use — so a redelivered
+            # native steer (crash or reply failure after the mailbox
+            # commit) lands on the SAME command row, never a second
+            # logical steer with a fresh random key.
+            outcome = await self.control.steer(
+                run_id,
+                author,
+                parsed.text,
+                run_id=run_id,
+                idempotency_key=self._idempotency_key(verb, note, run_id),
+            )
             if outcome.get("status") == "rejected":
                 applied = False
                 body = _steer_rejected_body(run_id)
@@ -555,9 +585,22 @@ class ControlCommandRouter:
 
     @staticmethod
     def _note_key(note: dict[str, Any]) -> str:
+        """The reply-journal dedup key: provider + SUBJECT + delivery id.
+
+        R28-09's namespace rule: the provider name plus the bare note
+        integer is NOT a sufficient identity — two subjects (projects /
+        issues, e.g. behind two installs of one provider type) can mint
+        notes with equal numeric ids, and equal ids alone must never
+        suppress one another's reply. The key therefore carries the
+        note's full subject namespace.
+        """
         note_id = str(note.get("note_id") or "")
+        if not note_id:
+            return ""
         provider = str(note.get("provider") or "")
-        return f"adaptive-note:{provider}:{note_id}" if note_id else ""
+        project = str(note.get("project_id") or "")
+        issue = str(note.get("issue_iid") or note.get("issue_number") or "")
+        return f"adaptive-note:{provider}:{project}:{issue}:{note_id}"
 
     @staticmethod
     def _idempotency_key(verb: str, note: dict[str, Any], run_id: str) -> str:

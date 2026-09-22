@@ -1752,3 +1752,199 @@ class TestSdkLaneProfileBlock:
 
         assert variables["FORGE_LANE_PROFILE"] == "v1"
         assert "FORGE_EGRESS_ALLOWLIST" in variables
+
+
+# ---------------------------------------------------------------------------
+# R28-03 — the required WIP-restore gate: a resume dispatch whose restore
+# did not land starts ZERO vendor turns; a fresh run is never blocked by
+# an absent checkpoint
+# ---------------------------------------------------------------------------
+
+
+class TestWipRestoreGate:
+    def test_the_resume_flag_parses_only_truthy_spellings(self):
+        assert lane_driver.resume_requested({}) is False
+        assert lane_driver.resume_requested({lane_driver.RESUME_ENV: "0"}) is False
+        assert lane_driver.resume_requested({lane_driver.RESUME_ENV: "whenever"}) is False
+        for value in ("1", "true", "YES", " On "):
+            assert lane_driver.resume_requested({lane_driver.RESUME_ENV: value}) is True
+
+    def test_a_failed_required_restore_starts_zero_vendor_turns(
+        self, lane_env, monkeypatch, capsys
+    ):
+        """The R28-03 core: FORGE_LANE_RESUME marks a dispatch whose WIP
+        continuity is REQUIRED. A restore that reports failure must mean
+        ZERO model turns — no client is even constructed, the meta says
+        wip_restore_failed, the sidecar carries the evidence, exit 1."""
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setenv(lane_driver.RESUME_ENV, "1")
+        monkeypatch.setattr(
+            lane_driver,
+            "_maybe_restore_wip",
+            lambda work_id: {
+                "restored": False,
+                "files_restored": 1,
+                "failures": ["notes.md: required blob <digest> is absent — resume is blocked"],
+            },
+        )
+        sdk = FakeSDK(CompletedTurnClient)
+
+        assert main(sdk=sdk.module) == 1
+
+        assert sdk.clients == []  # ZERO vendor starts — not even a client object
+        meta = read_meta(lane_env)
+        assert meta["exit"] == "failed"
+        assert meta["terminal_reason"] == "wip_restore_failed"
+        assert "resume is blocked" in meta["error"]
+        sidecar = json.loads((lane_env / ".forge" / "steering.json").read_text())
+        assert sidecar["wip_restore"]["restored"] is False
+        assert "wip_restore_failed" in capsys.readouterr().err
+
+    def test_a_required_resume_without_any_channel_halts_before_the_driver(
+        self, lane_env, monkeypatch
+    ):
+        """No channel env at all: the required restore was never even
+        attempted — that is a halt, not a silent fresh start."""
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setenv(lane_driver.RESUME_ENV, "1")
+        monkeypatch.setattr(lane_driver, "_maybe_restore_wip", lambda work_id: None)
+        sdk = FakeSDK(CompletedTurnClient)
+
+        assert main(sdk=sdk.module) == 1
+
+        assert sdk.clients == []
+        assert read_meta(lane_env)["terminal_reason"] == "wip_restore_failed"
+        sidecar = json.loads((lane_env / ".forge" / "steering.json").read_text())
+        assert sidecar["wip_restore"]["failures"] == [
+            "the resume channel is not configured (FORGE_LANE_CONTROL_URL/TOKEN "
+            "absent or steering disabled) — the required WIP restore was never attempted"
+        ]
+
+    def test_a_fresh_run_is_never_blocked_by_an_absent_checkpoint(self, lane_env, monkeypatch):
+        """Without the resume marker a 404-shaped restore failure is NORMAL
+        (a first run): the turn drives, the report still rides the sidecar."""
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setattr(
+            lane_driver,
+            "_maybe_restore_wip",
+            lambda work_id: {
+                "restored": False,
+                "files_restored": 0,
+                "failures": ["checkpoint download failed: 404 — no checkpoint held"],
+            },
+        )
+        sdk = FakeSDK(CompletedTurnClient)
+
+        assert main(sdk=sdk.module) == 0
+
+        assert len(sdk.clients) == 1  # the turn DID run on the fresh base
+        assert read_meta(lane_env)["exit"] == "completed"
+        sidecar = json.loads((lane_env / ".forge" / "steering.json").read_text())
+        assert sidecar["wip_restore"]["restored"] is False
+
+    def test_a_successful_required_restore_precedes_the_turn(self, lane_env, monkeypatch):
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setenv(lane_driver.RESUME_ENV, "1")
+        monkeypatch.setattr(
+            lane_driver,
+            "_maybe_restore_wip",
+            lambda work_id: {"restored": True, "files_restored": 12, "failures": []},
+        )
+        sdk = FakeSDK(CompletedTurnClient)
+
+        assert main(sdk=sdk.module) == 0
+
+        assert len(sdk.sole_client.queries) >= 1  # exactly the driven turn
+        assert read_meta(lane_env)["exit"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# R28-04 — the tracked baseline in ONE canonical digest scheme: raw-content
+# sha256 read from the git index, plus modes, over a REAL git repository
+# ---------------------------------------------------------------------------
+
+
+def _git_repo(root: Path) -> Path:
+    """A real temporary git repository with one commit on disk."""
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    root.mkdir(parents=True, exist_ok=True)
+    git("init", "-q")
+    git("config", "user.email", "lane@test")
+    git("config", "user.name", "lane test")
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_bytes(b'print("v1")\n')
+    (root / "README.md").write_bytes(b"# readme\n")
+    script = root / "run.sh"
+    script.write_bytes(b"#!/bin/sh\necho hi\n")
+    script.chmod(0o755)
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    return root
+
+
+class TestTrackedBaseline:
+    def test_the_baseline_stores_raw_content_sha256_not_git_oids(self, tmp_path, monkeypatch):
+        import hashlib
+        import subprocess
+
+        repo = _git_repo(tmp_path / "repo")
+        monkeypatch.chdir(repo)  # _tracked_baseline reads the checkout at cwd
+
+        digests, modes = lane_driver._tracked_baseline()
+
+        assert digests == {
+            "README.md": hashlib.sha256(b"# readme\n").hexdigest(),
+            "run.sh": hashlib.sha256(b"#!/bin/sh\necho hi\n").hexdigest(),
+            "src/app.py": hashlib.sha256(b'print("v1")\n').hexdigest(),
+        }
+        assert modes == {"README.md": 0o644, "run.sh": 0o755, "src/app.py": 0o644}
+        # The exact reviewed mismatch: a git blob OID (40-hex, its own
+        # wrapping) is NOT what the baseline stores.
+        listed = subprocess.run(
+            ["git", "ls-files", "-s"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout
+        oid = next(line.split()[1] for line in listed.splitlines() if line.endswith("src/app.py"))
+        assert digests["src/app.py"] != oid
+
+    def test_an_unchanged_repository_captures_no_delta_with_the_store_inside(
+        self, tmp_path, monkeypatch
+    ):
+        """The R28-04 flagship: unchanged tree + the CANONICAL baseline =
+        an EMPTY content delta — and the store living under .forge/ inside
+        the walked tree never turns the capture into self-capture."""
+        from forge.adaptive.artifact_store import ContentAddressedStore
+        from forge.adaptive.checkpointing import capture_wip
+
+        repo = _git_repo(tmp_path / "repo")
+        monkeypatch.chdir(repo)  # _tracked_baseline reads the checkout at cwd
+        (repo / ".forge").mkdir()
+        (repo / ".forge" / "brief.md").write_text("PLAN: the thing")
+
+        digests, modes = lane_driver._tracked_baseline()
+        store = ContentAddressedStore(repo / ".forge" / "checkpoints", tenant="wp")
+        receipt = capture_wip(
+            work_id="wp",
+            root=repo,
+            store=store,
+            tracked_baseline=digests,
+            baseline_modes=modes,
+            sequence=0,
+        )
+
+        assert receipt.files == 0  # nothing re-uploaded: every file matched
+        assert receipt.deletions == 0
+        manifest = json.loads(store.get(receipt.artifact_id))
+        assert manifest["files"] == {}
+        assert not any(rel.startswith(".forge/") for rel in manifest["deletions"])

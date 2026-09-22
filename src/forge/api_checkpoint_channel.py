@@ -8,11 +8,14 @@ runner restores from. Three endpoints, one storage discipline:
 - ``PUT /lane/checkpoints/{work_id}`` — accept a checkpoint (JSON-base64
   manifest + blobs), verify EVERY promise against the bytes (the
   manifest must hash to its own content address, belong to the path's
-  work, and every blob must reproduce its digest — a tampered upload is
+  work, every blob must reproduce its digest — a tampered upload is
   refused with 400 naming the blob), enforce the per-blob size cap
-  (413, an honest refusal), and land everything in a content-addressed
-  directory via atomic temp+rename so a crash mid-write never exposes a
-  partial artifact.
+  (413, an honest refusal), the aggregate decoded-size and entry-count
+  caps, and require the blob set to be EXACTLY the manifest's
+  referenced digests — extra path-shaped or otherwise malformed keys
+  are refused BEFORE any write (R28-01) — then land everything in a
+  content-addressed directory via atomic temp+rename so a crash
+  mid-write never exposes a partial artifact.
 - ``GET /lane/checkpoints/{work_id}`` — serve the work's latest
   checkpoint (or a specific ``checkpoint_id``), digest-verified ON READ:
   bytes that no longer hash to their address answer 500 naming the
@@ -50,11 +53,18 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
 from fastapi import APIRouter, Header, HTTPException, Request
+
+try:  # POSIX process-level advisory locking (Linux CI, macOS dev boxes).
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX platform without flock
+    fcntl = None  # type: ignore[assignment]
 
 from forge.adaptive.checkpoint_channel import (
     CHECKPOINT_LIST_SCOPE,
@@ -68,8 +78,12 @@ __all__ = [
     "CHECKPOINT_STORE_DIR_ENV",
     "DEFAULT_CHECKPOINT_ROOT",
     "DEFAULT_MAX_BLOB_BYTES",
+    "DEFAULT_MAX_BLOB_ENTRIES",
+    "DEFAULT_MAX_TOTAL_BLOB_BYTES",
     "LANE_CONTROL_SECRET_ENV",
     "MAX_BLOB_BYTES_ENV",
+    "MAX_BLOB_ENTRIES_ENV",
+    "MAX_TOTAL_BLOB_BYTES_ENV",
     "CheckpointCorruptError",
     "CheckpointStore",
     "checkpoint_channel_router",
@@ -88,6 +102,20 @@ DEFAULT_CHECKPOINT_ROOT: Final = "data/checkpoints"
 #: a truncated store.
 MAX_BLOB_BYTES_ENV: Final = "FORGE_CHECKPOINT_MAX_BLOB_BYTES"
 DEFAULT_MAX_BLOB_BYTES: Final = 32 * 1024 * 1024
+
+#: The server's aggregate cap (R28-01): the TOTAL decoded size of one
+#: upload — manifest plus every blob — accepted before anything is
+#: written. Over it the PUT is refused with 413; the channel is a
+#: control-plane surface, not a bulk file transport.
+MAX_TOTAL_BLOB_BYTES_ENV: Final = "FORGE_CHECKPOINT_MAX_TOTAL_BLOB_BYTES"
+DEFAULT_MAX_TOTAL_BLOB_BYTES: Final = 256 * 1024 * 1024
+
+#: The server's per-upload entry cap (R28-01): how many blob entries one
+#: PUT may carry. A checkpoint is a bounded WIP delta, not an arbitrary
+#: key-value dump; an over-count upload is refused with 413 before its
+#: body is even decoded.
+MAX_BLOB_ENTRIES_ENV: Final = "FORGE_CHECKPOINT_MAX_BLOB_ENTRIES"
+DEFAULT_MAX_BLOB_ENTRIES: Final = 4096
 
 #: How many checkpoints per work to keep beyond the latest (0 = all).
 #: The LATEST is exempt whatever this says — see apply_retention.
@@ -138,7 +166,12 @@ class CheckpointStore:
     half-written artifact under an address whose digest promises
     integrity); reads re-hash the bytes to the address and raise
     :class:`CheckpointCorruptError` on disagreement. The per-work index
-    orders the checkpoints; retention never touches the latest.
+    orders the checkpoints by ``(sequence, checkpoint_id)`` under an
+    exclusive per-work ``flock`` (R28-06): the ACTIVE checkpoint is the
+    highest sequence — never the last arrival — a lower-sequence upload
+    lands as superseded history without demoting it, and two
+    concurrent writers can never lose an append; retention never
+    touches the active checkpoint.
     """
 
     def __init__(self, root: Path, *, max_blob_bytes: int = DEFAULT_MAX_BLOB_BYTES) -> None:
@@ -149,13 +182,41 @@ class CheckpointStore:
     # -- content-addressed files --------------------------------------------
 
     def _cas_path(self, digest: str) -> Path:
+        """The CAS address of *digest* — refusing anything else.
+
+        R28-01's storage-primitive rule: the ONLY strings that may become
+        filesystem paths here are 64-lowercase-hex content addresses. A
+        traversal-shaped key (``../../x``), an absolute path, or any
+        other non-address raises :class:`ValueError` BEFORE the path is
+        constructed — defense in depth, so even a caller that forgot to
+        validate its inputs cannot write outside the CAS through this
+        store.
+        """
+        if not _HEX64.fullmatch(digest):
+            raise ValueError(
+                f"not a content address (expected 64 lowercase hex chars): {digest!r} "
+                "— the store refuses to construct a path from it"
+            )
         return self._root / digest[:2] / digest
 
     def _write_cas(self, digest: str, data: bytes) -> None:
         """Land *data* under its address atomically (temp + rename)."""
+        if _sha256(data) != digest:
+            raise ValueError(
+                f"bytes hash to {_sha256(data)}, not {digest!r} — the store refuses "
+                "to poison a content address with bytes it does not back"
+            )
         target = self._cas_path(digest)
         if target.exists():
-            return  # content addressing: same bytes are already there, immutably
+            # Content addressing means same address = same bytes — but a
+            # rotted file under a live address is never SILENTLY adopted
+            # (R28-01): re-hash what is there and refuse on disagreement,
+            # so an idempotent re-put cannot hand out a "stored" verdict
+            # for bytes the address does not back.
+            actual = _sha256(target.read_bytes())
+            if actual != digest:
+                raise CheckpointCorruptError(digest, actual)
+            return  # same bytes are already there, immutably
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".tmp-")
         try:
@@ -184,6 +245,36 @@ class CheckpointStore:
     def _index_path(self, work_id: str) -> Path:
         return self._root / "works" / f"{work_id}.json"
 
+    def _lock_path(self, work_id: str) -> Path:
+        return self._root / "works" / f"{work_id}.lock"
+
+    @contextmanager
+    def _index_lock(self, work_id: str) -> Iterator[None]:
+        """Serialize the index read-modify-write across PROCESSES (R28-06).
+
+        ``_save_index``'s atomic rename prevents torn bytes, not lost
+        updates: two writers can both read the same predecessor and the
+        second rename silently drops the first's append. An exclusive
+        ``flock`` on ``works/<work_id>.lock`` makes load-append-save one
+        critical section — the lock is released by closing the fd, so a
+        crashed writer never leaves it held. Holders open the lock file
+        separately (never the index itself), so separate descriptors —
+        including two threads of one process — exclude each other
+        exactly as two processes do. Non-POSIX platforms without
+        ``flock`` degrade to the rename-only discipline (documented,
+        never silent: the deployment target is POSIX).
+        """
+        if fcntl is None:  # pragma: no cover — guarded import above
+            yield
+            return
+        self._lock_path(work_id).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._lock_path(work_id), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # releases the advisory lock, held or not
+
     def _load_index(self, work_id: str) -> dict[str, Any]:
         path = self._index_path(work_id)
         if not path.is_file():
@@ -197,7 +288,12 @@ class CheckpointStore:
         return document
 
     def _save_index(self, work_id: str, document: dict[str, Any]) -> None:
-        """Write the index atomically — same crash discipline as the blobs."""
+        """Write the index atomically — same crash discipline as the blobs.
+
+        Callers hold :meth:`_index_lock` for the read-modify-write this
+        write closes; the rename stays atomic regardless, so even a
+        caller that forgot the lock can never expose torn bytes.
+        """
         path = self._index_path(work_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tmp-index-")
@@ -210,6 +306,24 @@ class CheckpointStore:
         except BaseException:
             os.unlink(tmp_name)
             raise
+
+    @staticmethod
+    def _entry_order(entry: dict[str, Any]) -> tuple[int, str]:
+        """The deterministic selection key: (sequence, checkpoint_id).
+
+        R28-06: arrival order is not authority. Uploads can land out of
+        order (a delayed runner's sequence 10 arriving after sequence
+        20), so every "which checkpoint is active" decision compares the
+        entry's own ``sequence`` — ties broken by content address, so
+        two views of the same index always agree.
+        """
+        sequence = entry.get("sequence")
+        return (sequence if isinstance(sequence, int) else 0, str(entry.get("checkpoint_id") or ""))
+
+    @classmethod
+    def _latest_entry(cls, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """The ACTIVE checkpoint: the highest-sequence entry, not the last arrival."""
+        return max(entries, key=cls._entry_order) if entries else None
 
     @staticmethod
     def _entry_files(manifest_bytes: bytes) -> set[str]:
@@ -237,50 +351,87 @@ class CheckpointStore:
         blobs: dict[str, bytes],
         sequence: int,
     ) -> dict[str, Any]:
-        """Store one verified checkpoint and make it the work's latest.
+        """Store one verified checkpoint; promote it ONLY if it outranks.
 
-        Callers verify the digests BEFORE this (the endpoint does); here
-        the landing order is blobs-then-manifest-then-index, each atomic
-        — a crash between them leaves unreferenced CAS content
-        (harmless, collectable), never an index entry whose bytes are
-        missing. Re-putting an identical checkpoint is idempotent: the
-        addresses exist and the index does not duplicate the entry.
+        Callers verify the digests BEFORE this (the endpoint does); the
+        store re-asserts the same invariants as defense in depth (R28-01)
+        — every supplied key AND every digest the manifest references
+        must be a 64-hex content address, and the blob set must be
+        EXACTLY the manifest's referenced digests (extra entries refused,
+        missing entries refused) — all BEFORE the first write, so a
+        refused upload leaves the store byte-identical. With the checks
+        passed, the landing order is blobs-then-manifest-then-index,
+        each atomic — a crash between them leaves unreferenced CAS
+        content (harmless, collectable), never an index entry whose
+        bytes are missing. Re-putting an identical checkpoint is
+        idempotent: the addresses exist and the index does not duplicate
+        the entry.
+
+        R28-06 promotion: the index's read-modify-write runs under the
+        per-work OS lock, entries are kept sorted by ``(sequence,
+        checkpoint_id)``, and a lower-sequence upload NEVER demotes the
+        active checkpoint — it lands as superseded history only (the
+        response says ``latest: false``), so a delayed runner arriving
+        late cannot roll the work's resume point back.
         """
         checkpoint_id = _sha256(manifest_bytes)
+        referenced = self._entry_files(manifest_bytes)
+        supplied = set(blobs)
+        malformed = sorted(
+            digest for digest in referenced | supplied if not _HEX64.fullmatch(digest)
+        )
+        if malformed:
+            raise ValueError(
+                f"checkpoint for {work_id} carries non-address blob keys "
+                f"(e.g. {malformed[0]!r}) — refusing before any write"
+            )
+        if supplied != referenced:
+            raise ValueError(
+                f"checkpoint for {work_id} must carry EXACTLY the manifest's referenced "
+                f"blobs — missing {sorted(referenced - supplied)[:3]}, "
+                f"extra {sorted(supplied - referenced)[:3]}; refusing before any write"
+            )
         for digest, data in blobs.items():
             self._write_cas(digest, data)
         self._write_cas(checkpoint_id, manifest_bytes)
 
-        document = self._load_index(work_id)
-        entries: list[dict[str, Any]] = [
-            entry for entry in document["checkpoints"] if isinstance(entry, dict)
-        ]
-        existing = next(
-            (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id), None
-        )
-        if existing is None:
-            entries.append(
-                {
+        with self._index_lock(work_id):
+            document = self._load_index(work_id)
+            entries: list[dict[str, Any]] = [
+                entry for entry in document["checkpoints"] if isinstance(entry, dict)
+            ]
+            own = next(
+                (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id), None
+            )
+            if own is None:
+                own = {
                     "checkpoint_id": checkpoint_id,
                     "sequence": sequence,
                     "files": len(blobs),
                     "uploaded_at": _now_iso(),
                 }
-            )
-        document = {"work_id": work_id, "checkpoints": entries}
-        self._save_index(work_id, document)
-        latest = entries[-1]
-        return {
-            "work_id": work_id,
-            "checkpoint_id": checkpoint_id,
-            "sequence": sequence,
-            "files": len(blobs),
-            "uploaded_at": str(latest.get("uploaded_at") or ""),
-            "latest": latest.get("checkpoint_id") == checkpoint_id,
-        }
+                entries.append(own)
+            entries.sort(key=self._entry_order)
+            self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
+            latest = self._latest_entry(entries)
+            return {
+                "work_id": work_id,
+                "checkpoint_id": checkpoint_id,
+                "sequence": sequence,
+                "files": len(blobs),
+                "uploaded_at": str(own.get("uploaded_at") or ""),
+                "latest": latest is not None and latest.get("checkpoint_id") == checkpoint_id,
+            }
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
-        """The work's LATEST index entry, or the one named by *checkpoint_id*."""
+        """The work's ACTIVE entry (highest sequence), or the named one.
+
+        R28-06: "latest" is the highest-``sequence`` entry — never
+        ``entries[-1]`` — because arrival order is not authority. The
+        comparison is deterministic (ties break by content address), so
+        every reader of the same index agrees on which checkpoint a
+        resume stands on.
+        """
         entries = [
             entry
             for entry in self._load_index(work_id)["checkpoints"]
@@ -289,7 +440,7 @@ class CheckpointStore:
         if not entries:
             return None
         if checkpoint_id is None:
-            return entries[-1]
+            return self._latest_entry(entries)
         return next((entry for entry in entries if entry["checkpoint_id"] == checkpoint_id), None)
 
     def read_checkpoint(self, entry: dict[str, Any]) -> tuple[bytes, dict[str, bytes]]:
@@ -303,10 +454,19 @@ class CheckpointStore:
             }
         except FileNotFoundError as exc:
             raise CheckpointCorruptError(str(exc), "") from exc
+        except ValueError as exc:  # a rotted/tampered manifest naming non-addresses
+            raise CheckpointCorruptError(checkpoint_id, "") from exc
         return manifest_bytes, blobs
 
     def list_entries(self) -> list[dict[str, Any]]:
-        """Every held checkpoint entry, newest-last per work, latest-flagged."""
+        """Every held checkpoint entry, sequence order per work, latest-flagged.
+
+        The ``latest`` flag names the highest-sequence entry of each
+        work (R28-06), and the listing is sequence-ordered — never
+        arrival-ordered — so the operator view agrees with what
+        :meth:`entry` would resume from even when uploads landed out of
+        order.
+        """
         listed: list[dict[str, Any]] = []
         works_dir = self._root / "works"
         if not works_dir.is_dir():
@@ -321,13 +481,17 @@ class CheckpointStore:
             if not isinstance(document, dict):
                 continue
             work_id = str(document.get("work_id") or index_file.stem)
-            entries = [
-                dict(entry, work_id=work_id)
-                for entry in document.get("checkpoints", [])
-                if isinstance(entry, dict)
-            ]
-            for position, entry in enumerate(entries):
-                entry["latest"] = position == len(entries) - 1
+            entries = sorted(
+                (
+                    dict(entry, work_id=work_id)
+                    for entry in document.get("checkpoints", [])
+                    if isinstance(entry, dict)
+                ),
+                key=self._entry_order,
+            )
+            latest = self._latest_entry(entries)
+            for entry in entries:
+                entry["latest"] = latest is not None and entry is latest
             listed.extend(entries)
         return listed
 
@@ -335,67 +499,74 @@ class CheckpointStore:
         """Drop the OLDEST checkpoints beyond *keep_last* — never the latest.
 
         The rule that makes retention safe to run at any moment: even
-        ``keep_last=0`` keeps the work's LATEST checkpoint — a live
-        pause stands on it, and no age/count policy may delete the
-        thing resume needs. Older entries are removed from the index
-        and their blobs (manifest + files) are deleted from the CAS
-        ONLY when no retained checkpoint of ANY work still references
-        them — shared content survives its sharers. Returns how many
-        checkpoint entries were removed.
+        ``keep_last=0`` keeps the work's ACTIVE checkpoint (the highest
+        SEQUENCE, R28-06 — not the last arrival) — a live pause stands
+        on it, and no age/count policy may delete the thing resume
+        needs. Older entries are removed from the index and their blobs
+        (manifest + files) are deleted from the CAS ONLY when no
+        retained checkpoint of ANY work still references them — shared
+        content survives its sharers. The index read-modify-write runs
+        under the per-work OS lock (R28-06), so a concurrent
+        :meth:`put_checkpoint` can never be dropped by this pass.
+        Returns how many checkpoint entries were removed.
         """
-        document = self._load_index(work_id)
-        entries = [
-            entry
-            for entry in document["checkpoints"]
-            if isinstance(entry, dict) and isinstance(entry.get("checkpoint_id"), str)
-        ]
-        if not entries:
-            return 0
-        keep_count = max(1, min(keep_last, len(entries))) if keep_last > 0 else 1
-        retained, removed = entries[-keep_count:], entries[:-keep_count]
-        if not removed:
-            return 0
+        with self._index_lock(work_id):
+            document = self._load_index(work_id)
+            entries = sorted(
+                (
+                    entry
+                    for entry in document["checkpoints"]
+                    if isinstance(entry, dict) and isinstance(entry.get("checkpoint_id"), str)
+                ),
+                key=self._entry_order,
+            )
+            if not entries:
+                return 0
+            keep_count = max(1, min(keep_last, len(entries))) if keep_last > 0 else 1
+            retained, removed = entries[-keep_count:], entries[:-keep_count]
+            if not removed:
+                return 0
 
-        # Everything the removed checkpoints own — manifest plus blobs. A
-        # manifest that can no longer be read contributes only its own
-        # address: its blobs are kept, conservatively.
-        removed_ids = {str(entry["checkpoint_id"]) for entry in removed}
-        doomed_digests = set(removed_ids)
-        for checkpoint_id in removed_ids:
-            try:
-                doomed_digests.update(self._entry_files(self._read_verified(checkpoint_id)))
-            except (FileNotFoundError, CheckpointCorruptError):
-                continue
-
-        # Everything ANY retained checkpoint of ANY work still needs — the
-        # set that decides whether a doomed digest may actually be deleted.
-        referenced: set[str] = set()
-        works_dir = self._root / "works"
-        index_files = sorted(works_dir.glob("*.json")) if works_dir.is_dir() else []
-        for index_file in index_files:
-            try:
-                other = json.loads(index_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(other, dict):
-                continue
-            for entry in other.get("checkpoints", []):
-                if not isinstance(entry, dict):
-                    continue
-                checkpoint_id = entry.get("checkpoint_id")
-                if checkpoint_id in removed_ids:
-                    continue  # this exact entry is being removed in THIS work
-                referenced.add(str(checkpoint_id))
+            # Everything the removed checkpoints own — manifest plus blobs. A
+            # manifest that can no longer be read contributes only its own
+            # address: its blobs are kept, conservatively.
+            removed_ids = {str(entry["checkpoint_id"]) for entry in removed}
+            doomed_digests = set(removed_ids)
+            for checkpoint_id in removed_ids:
                 try:
-                    manifest_bytes = self._read_verified(str(checkpoint_id))
+                    doomed_digests.update(self._entry_files(self._read_verified(checkpoint_id)))
                 except (FileNotFoundError, CheckpointCorruptError):
                     continue
-                referenced.update(self._entry_files(manifest_bytes))
 
-        for digest in sorted(doomed_digests - referenced):
-            self._cas_path(digest).unlink(missing_ok=True)
-        self._save_index(work_id, {"work_id": work_id, "checkpoints": retained})
-        return len(removed)
+            # Everything ANY retained checkpoint of ANY work still needs — the
+            # set that decides whether a doomed digest may actually be deleted.
+            referenced: set[str] = set()
+            works_dir = self._root / "works"
+            index_files = sorted(works_dir.glob("*.json")) if works_dir.is_dir() else []
+            for index_file in index_files:
+                try:
+                    other = json.loads(index_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(other, dict):
+                    continue
+                for entry in other.get("checkpoints", []):
+                    if not isinstance(entry, dict):
+                        continue
+                    checkpoint_id = entry.get("checkpoint_id")
+                    if checkpoint_id in removed_ids:
+                        continue  # this exact entry is being removed in THIS work
+                    referenced.add(str(checkpoint_id))
+                    try:
+                        manifest_bytes = self._read_verified(str(checkpoint_id))
+                    except (FileNotFoundError, CheckpointCorruptError):
+                        continue
+                    referenced.update(self._entry_files(manifest_bytes))
+
+            for digest in sorted(doomed_digests - referenced):
+                self._cas_path(digest).unlink(missing_ok=True)
+            self._save_index(work_id, {"work_id": work_id, "checkpoints": retained})
+            return len(removed)
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +590,22 @@ def _max_blob_bytes() -> int:
         return int(raw) if raw else DEFAULT_MAX_BLOB_BYTES
     except ValueError:
         return DEFAULT_MAX_BLOB_BYTES
+
+
+def _max_total_blob_bytes() -> int:
+    raw = os.environ.get(MAX_TOTAL_BLOB_BYTES_ENV, "").strip()
+    try:
+        return int(raw) if raw else DEFAULT_MAX_TOTAL_BLOB_BYTES
+    except ValueError:
+        return DEFAULT_MAX_TOTAL_BLOB_BYTES
+
+
+def _max_blob_entries() -> int:
+    raw = os.environ.get(MAX_BLOB_ENTRIES_ENV, "").strip()
+    try:
+        return int(raw) if raw else DEFAULT_MAX_BLOB_ENTRIES
+    except ValueError:
+        return DEFAULT_MAX_BLOB_ENTRIES
 
 
 def _retention_keep() -> int:
@@ -471,16 +658,31 @@ def _decode_payload(document: dict[str, Any], work_id: str) -> tuple[bytes, dict
     """Decode and VERIFY a checkpoint upload against its own bytes.
 
     Every promise the payload makes is checked before anything is
-    stored: strict base64, the manifest's schema and work ownership
-    (a manifest belonging to ANOTHER work is refused — the upload
-    address and the checkpoint must agree), a blob for every manifest
-    entry, every blob digest reproduced, and the per-blob size cap.
-    Refusals name the exact blob — honest, not generic.
+    stored: strict base64, the entry-count and aggregate decoded-size
+    caps (413 — a checkpoint is a bounded delta, not a dump), the
+    manifest's schema and work ownership (a manifest belonging to
+    ANOTHER work is refused — the upload address and the checkpoint
+    must agree), EVERY blob key — referenced or not — must be a
+    64-hex content address (a path-shaped key is refused before any
+    path could be constructed from it, R28-01), the blob set must be
+    EXACTLY the manifest's referenced digests (extra entries refused,
+    missing entries refused), every blob digest reproduced, and the
+    per-blob size cap. Refusals name the exact key — honest, not
+    generic.
     """
     manifest_field = document.get("manifest")
     blobs_field = document.get("blobs")
     if not isinstance(manifest_field, str) or not isinstance(blobs_field, dict):
         raise HTTPException(status_code=400, detail="payload needs manifest and blobs sections")
+    max_entries = _max_blob_entries()
+    if len(blobs_field) > max_entries:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"upload carries {len(blobs_field)} blob entries; this channel accepts "
+                f"at most {max_entries} — the upload is refused rather than stored"
+            ),
+        )
     try:
         manifest_bytes = base64.b64decode(manifest_field, validate=True)
         blobs = {
@@ -489,6 +691,18 @@ def _decode_payload(document: dict[str, Any], work_id: str) -> tuple[bytes, dict
         }
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid base64 content: {exc}") from exc
+    # R28-01: EVERY supplied key — referenced or not — is a content
+    # address or the upload dies here, before the store could ever turn
+    # a key into a filesystem path.
+    for digest in sorted(blobs):
+        if not _HEX64.fullmatch(digest):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"blob key {digest!r} is not a content address (64 lowercase hex "
+                    "chars) — the upload is refused before any write"
+                ),
+            )
     sequence = document.get("sequence") or 0
 
     try:
@@ -521,12 +735,14 @@ def _decode_payload(document: dict[str, Any], work_id: str) -> tuple[bytes, dict
                 f"{cap} bytes per blob — the upload is refused rather than truncated"
             ),
         )
+    referenced: set[str] = set()
     for rel, entry in sorted(files.items()):
         digest = entry.get("digest") if isinstance(entry, dict) else None
         if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
             raise HTTPException(
                 status_code=400, detail=f"manifest entry {rel!r} carries no valid content digest"
             )
+        referenced.add(digest)
         data = blobs.get(digest)
         if data is None:
             raise HTTPException(
@@ -550,6 +766,30 @@ def _decode_payload(document: dict[str, Any], work_id: str) -> tuple[bytes, dict
                     f"(hashes to {_sha256(data)}) — a tampered upload is refused"
                 ),
             )
+    # Exact closure (R28-01): the upload may carry NOTHING the manifest
+    # does not reference — an extra entry is refused before any write,
+    # whatever its shape.
+    extra = sorted(set(blobs) - referenced)
+    if extra:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"upload carries {len(extra)} blob(s) the manifest does not reference "
+                f"(first: {extra[0]!r}) — the blob set must be exactly the manifest's "
+                "files; the upload is refused before any write"
+            ),
+        )
+    total_cap = _max_total_blob_bytes()
+    total = len(manifest_bytes) + sum(len(data) for data in blobs.values())
+    if total > total_cap:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"upload decodes to {total} bytes total; this channel accepts at most "
+                f"{total_cap} bytes per checkpoint — the upload is refused rather than "
+                "stored"
+            ),
+        )
     return manifest_bytes, blobs, int(sequence)
 
 
@@ -574,12 +814,17 @@ async def put_checkpoint(
     manifest_bytes, blobs, sequence = _decode_payload(document, work_id)
 
     store = CheckpointStore(_store_dir(), max_blob_bytes=_max_blob_bytes())
-    result = store.put_checkpoint(
-        work_id=work_id,
-        manifest_bytes=manifest_bytes,
-        blobs=blobs,
-        sequence=sequence,
-    )
+    try:
+        result = store.put_checkpoint(
+            work_id=work_id,
+            manifest_bytes=manifest_bytes,
+            blobs=blobs,
+            sequence=sequence,
+        )
+    except ValueError as exc:  # the store's own defense-in-depth refusal
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CheckpointCorruptError as exc:  # a rotted address is never adopted
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     keep = _retention_keep()
     if keep:
         store.apply_retention(work_id, keep)
@@ -613,6 +858,8 @@ async def get_checkpoint(
     try:
         manifest_bytes, blobs = store.read_checkpoint(entry)
     except CheckpointCorruptError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except ValueError as exc:  # an index/manifest naming non-addresses
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {
         "work_id": work_id,

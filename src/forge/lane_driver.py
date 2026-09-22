@@ -129,6 +129,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -160,6 +161,7 @@ __all__ = [
     "LANE_DRIVER_IDS",
     "NO_COMMIT_ADDENDUM",
     "OPENCODE_LANE_DRIVER_ID",
+    "RESUME_ENV",
     "STEERING_ENV",
     "LaneOutcome",
     "build_task",
@@ -171,6 +173,7 @@ __all__ = [
     "drive_lane",
     "main",
     "opencode_usage_receipt",
+    "resume_requested",
     "run_opencode_lane",
     "steering_enabled",
     "steering_service_from_env",
@@ -269,6 +272,17 @@ def _episode(
 STEERING_ENV = "FORGE_STEERING_ENABLED"
 _STEERING_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
+#: The explicit WIP-continuity marker (R28-03). A dispatch that sets it
+#: (the ``/retry`` after a pause) declares this run MUST continue from
+#: the control-plane checkpoint: the pre-turn restore is REQUIRED, and a
+#: failed download or restore halts the lane BEFORE any vendor client or
+#: session exists — exit nonzero, the failure in the meta and the
+#: steering sidecar, zero model turns. A run WITHOUT the marker is a
+#: fresh attempt: no held checkpoint (404) is normal there, the restore
+#: is best-effort, and its report rides the sidecar either way.
+RESUME_ENV = "FORGE_LANE_RESUME"
+_RESUME_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
 #: driver key -> the adapter that wraps the SAME client object the lane
 #: drives (the pairing rule the bridge checks at construction).
 _STEERING_ADAPTERS: dict[str, type] = {
@@ -282,6 +296,12 @@ def steering_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Whether ``FORGE_STEERING_ENABLED`` is truthy in *env* (default: off)."""
     source = os.environ if env is None else env
     return source.get(STEERING_ENV, "").strip().lower() in _STEERING_TRUTHY
+
+
+def resume_requested(env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``FORGE_LANE_RESUME`` is truthy in *env* (default: off)."""
+    source = os.environ if env is None else env
+    return source.get(RESUME_ENV, "").strip().lower() in _RESUME_TRUTHY
 
 
 def steering_service_from_env(
@@ -365,16 +385,21 @@ def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
 
     None (the honest absent capability → paused_partial) when the git
     baseline is unreadable; the upload channel rides when the control
-    URL+token are in env (the same env the steering channel uses).
+    URL+token are in env (the same env the steering channel uses). The
+    manifest's ``source_oids`` names the APPROVED base the lane works
+    on (``FORGE_ATTEMPT_BASE``) — the checkpoint declares what tree its
+    delta applies on top of, and a later reader can verify it (R28-04).
     """
     from pathlib import Path as _P
 
     from forge.adaptive.artifact_store import ContentAddressedStore
     from forge.adaptive.checkpointing import cooperative_capture
 
-    baseline = _tracked_baseline()
+    baseline, baseline_modes = _tracked_baseline()
     if not baseline:
         return None
+    attempt_base = (os.environ.get("FORGE_ATTEMPT_BASE") or "").strip()
+    source_oids = {"attempt_base": attempt_base} if attempt_base else None
     store_dir = _P(".forge/checkpoints")
     store_dir.mkdir(parents=True, exist_ok=True)
     store = ContentAddressedStore(root=store_dir, tenant=work_id)
@@ -394,31 +419,88 @@ def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
         root=_P.cwd(),
         store=store,
         tracked_baseline=baseline,
+        baseline_modes=baseline_modes,
+        source_oids=source_oids,
         upload=upload,
     )
 
 
-def _tracked_baseline() -> dict[str, str]:
-    """The lane checkout's tracked baseline: path -> content sha256.
+def _tracked_baseline() -> tuple[dict[str, str], dict[str, int]]:
+    """The lane checkout's tracked baseline in ONE canonical digest scheme.
 
     The caller's durable authority in production is the SnapshotSet; in
     the lane job the git index IS that authority (the attempt base's
-    tree): every tracked file's blob hash. capture_wip compares the
-    working tree against this to decide modified/new/deleted.
+    tree). R28-04: the DIGEST stored is the sha256 of the RAW file
+    bytes — read through ONE ``git cat-file --batch`` over the index's
+    blob OIDs — because that is the identity ``capture_wip`` compares
+    the working tree against; a git blob OID is a different hash of a
+    different wrapping and would make every unchanged file look changed
+    (and drag the whole tree, the checkpoint store included, into every
+    capture). The executable bit from the index rides beside it, so a
+    mode-only change is still a captured delta.
+
+    Returns ``(digests, modes)`` — path -> raw-content sha256 and path
+    -> ``0o755``/``0o644``; both empty when the index is unreadable (the
+    caller's honest no-capability).
     """
+    import hashlib
     import subprocess
 
-    out = subprocess.run(["git", "ls-files", "-s"], capture_output=True, text=True, timeout=30)
-    baseline: dict[str, str] = {}
-    for line in out.stdout.splitlines():
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-s"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, {}
+    entries: list[tuple[str, str, bool]] = []  # (path, blob oid, executable)
+    for line in listed.stdout.splitlines():
         # <mode> <sha> <stage>\t<path>
         parts = line.split("\t", 1)
         if len(parts) != 2:
             continue
         meta = parts[0].split()
         if len(meta) >= 2:
-            baseline[parts[1]] = meta[1]  # the git blob sha
-    return baseline
+            entries.append((parts[1], meta[1], meta[0] == "100755"))
+    if not entries:
+        return {}, {}
+
+    # One batched read of every distinct blob's raw bytes (the same
+    # content may back many paths — read it once).
+    oids = sorted({oid for _path, oid, _executable in entries})
+    try:
+        batch = subprocess.run(
+            ["git", "cat-file", "--batch"],
+            input="".join(f"{oid}\n" for oid in oids).encode(),
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, {}
+    raw: dict[str, bytes] = {}
+    buffer = batch.stdout
+    position = 0
+    while position < len(buffer):
+        newline = buffer.find(b"\n", position)
+        if newline < 0:
+            break
+        header = buffer[position:newline].decode("utf-8", errors="replace").split()
+        position = newline + 1
+        if len(header) < 3 or not header[2].isdigit():
+            break  # "<oid> missing" or malformed — the rest cannot be framed
+        size = int(header[2])
+        raw[header[0]] = buffer[position : position + size]
+        position += size + 1  # payload + the terminating newline
+
+    digests: dict[str, str] = {}
+    modes: dict[str, int] = {}
+    for path, oid, executable in entries:
+        data = raw.get(oid)
+        if data is None:
+            continue
+        digests[path] = hashlib.sha256(data).hexdigest()
+        modes[path] = 0o755 if executable else 0o644
+    return digests, modes
 
 
 def _steering_journal(steering: LaneSteeringSession) -> list[dict[str, Any]]:
@@ -618,19 +700,133 @@ async def _drain_until_result(
         await asyncio.sleep(poll_s)
 
 
+#: A bare checkpoint id in a resume payload must be a 64-hex content
+#: address — the same shape the remote ref's tail carries.
+_RESUME_CHECKPOINT_ID = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _resume_checkpoint_target(work_id: str, url: str, token: str) -> dict[str, Any]:
+    """Resolve WHICH checkpoint the pending resume command binds (R28-05).
+
+    Reads the work's pending commands off the control plane (the same
+    ``GET /lane/controls`` surface the steering channel polls) and looks
+    for the newest ``resume`` command. Its payload may carry the EXACT
+    approved checkpoint — ``checkpoint_ref`` as the durable
+    ``<work_id>@<checkpoint_id>`` reference, or ``checkpoint_id`` as the
+    bare digest — and that exact id is what the restore must download,
+    never "whatever is latest now".
+
+    Returns ``{"checkpoint_id": str | None, "resume_command": str | None,
+    "note": str, "refused": bool}``:
+
+    - an explicit, well-formed, same-work reference → its checkpoint_id
+      (``refused`` False, the exact binding);
+    - a resume command WITHOUT a reference (the pre-R28-05 payload), no
+      resume command at all, or an unreachable control plane →
+      ``checkpoint_id`` None with an honest note — the caller falls
+      back to the ACTIVE checkpoint and RECORDS that it did;
+    - a malformed or cross-work reference → ``refused`` True: an
+      explicit binding that cannot be honored is a refusal with
+      evidence, never a silent "latest" substitute.
+    """
+    from forge.adaptive.lane_channel import LaneControlChannel
+
+    fallback = {
+        "checkpoint_id": None,
+        "resume_command": None,
+        "note": "",
+        "refused": False,
+    }
+    try:
+        channel = LaneControlChannel(base_url=url, token=token, work_id=work_id)
+        commands = channel.pending(work_id)
+    except Exception:  # noqa: BLE001 — the resume selection degrades honestly
+        fallback["note"] = (
+            "resume command lookup unavailable — the ACTIVE checkpoint is the fallback"
+        )
+        return fallback
+    resumes = sorted(
+        (command for command in commands if command.kind == "resume"),
+        key=lambda command: command.sequence,
+    )
+    if not resumes:
+        fallback["note"] = (
+            "no pending resume command carries an explicit checkpoint reference — "
+            "the ACTIVE checkpoint is the fallback"
+        )
+        return fallback
+    command = resumes[-1]
+    fallback["resume_command"] = command.command_id
+    payload = command.payload or {}
+    raw_ref = str(payload.get("checkpoint_ref") or "").strip()
+    raw_id = str(payload.get("checkpoint_id") or "").strip()
+    if not raw_ref and not raw_id:
+        fallback["note"] = (
+            f"resume command {command.command_id!r} carries no explicit checkpoint "
+            "reference — the ACTIVE checkpoint is the fallback"
+        )
+        return fallback
+
+    from forge.adaptive.checkpoint_channel import parse_checkpoint_ref
+
+    if raw_ref:
+        try:
+            ref_work, checkpoint_id = parse_checkpoint_ref(raw_ref)
+        except ValueError:
+            return {
+                "checkpoint_id": None,
+                "resume_command": command.command_id,
+                "note": f"resume command carries a malformed checkpoint reference ({raw_ref!r})",
+                "refused": True,
+            }
+        if ref_work != work_id:
+            return {
+                "checkpoint_id": None,
+                "resume_command": command.command_id,
+                "note": (
+                    f"resume command names work {ref_work!r}'s checkpoint — not this "
+                    f"work's ({work_id!r}); an explicit binding to another work is refused"
+                ),
+                "refused": True,
+            }
+        return {
+            "checkpoint_id": checkpoint_id,
+            "resume_command": command.command_id,
+            "note": "exact",
+            "refused": False,
+        }
+    if not _RESUME_CHECKPOINT_ID.fullmatch(raw_id):
+        return {
+            "checkpoint_id": None,
+            "resume_command": command.command_id,
+            "note": f"resume command carries a malformed checkpoint id ({raw_id!r})",
+            "refused": True,
+        }
+    return {
+        "checkpoint_id": raw_id,
+        "resume_command": command.command_id,
+        "note": "exact",
+        "refused": False,
+    }
+
+
 def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
     """Wave D: restore WIP from the control-plane checkpoint BEFORE the turn.
 
-    When the durable mailbox holds a pending resume command AND the
-    control plane has a checkpoint for this work, the lane downloads the
-    verified checkpoint, restores the WIP into the checkout, and the
-    next turn continues from it — the file changes the previous runner
-    made are on disk before the agent starts.
+    R28-05: the restore is BOUND to a checkpoint, not to "whatever is
+    latest". The pending resume command's exact reference
+    (``work_id@checkpoint_id``) decides which checkpoint downloads; when
+    the command carries no explicit reference — the migration-shaped
+    payload — the ACTIVE checkpoint is the fallback and the report SAYS
+    so (``checkpoint_selection: "latest"`` plus the note), so no restore
+    ever claims an exactness it did not have. A resume command whose
+    explicit reference is malformed or names another work is a REFUSAL
+    (``checkpoint_selection: "refused"`` + failures) — restoring
+    something the operator did not approve is worse than not restoring.
 
-    Returns the restore report (evidence for the meta) or None when
-    there is nothing to resume from. A failed restore is RETURNED (the
-    report carries ok=False + failures) — the lane runs the turn on the
-    base, never silently pretends the WIP landed.
+    A failed restore is RETURNED (the report carries ok=False +
+    failures) — the lane runs the turn on the base, never silently
+    pretends the WIP landed.
     """
 
     url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
@@ -640,34 +836,59 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
     from pathlib import Path as _P
 
     from forge.adaptive.artifact_store import ContentAddressedStore
-    from forge.adaptive.checkpoint_channel import LaneControlAPI, download_checkpoint
+    from forge.adaptive.checkpoint_channel import (
+        LaneControlAPI,
+        download_checkpoint,
+        format_checkpoint_ref,
+    )
     from forge.adaptive.checkpointing import restore_wip
 
+    target = _resume_checkpoint_target(work_id, url, token)
+    selection = "exact" if target["checkpoint_id"] else "latest"
+    if target["refused"]:
+        return {
+            "restored": False,
+            "files_restored": 0,
+            "failures": [f"resume checkpoint binding refused: {target['note']}"],
+            "checkpoint_selection": "refused",
+            "resume_command": target["resume_command"],
+        }
     try:
         api = LaneControlAPI(base_url=url, work_token=token)
         store_dir = _P(".forge/checkpoints")
         store_dir.mkdir(parents=True, exist_ok=True)
         store = ContentAddressedStore(root=store_dir, tenant=work_id)
-        downloaded = download_checkpoint(work_id, api, store)
+        downloaded = download_checkpoint(work_id, api, store, checkpoint_id=target["checkpoint_id"])
         report = restore_wip(
             artifact_id=downloaded.artifact_id,
             store=store,
             target=_P.cwd(),
             principal=work_id,
         )
-        return {
+        restored: dict[str, Any] = {
             "restored": report.ok,
             "files_restored": len([f for f in report.files if f.outcome == "restored"])
             if report.files
             else 0,
             "failures": list(report.failures[:5]) if report.failures else [],
             "artifact": downloaded.artifact_id[:16] + "...",
+            "checkpoint_ref": format_checkpoint_ref(work_id, downloaded.artifact_id),
+            "checkpoint_sequence": downloaded.sequence,
+            "checkpoint_selection": selection,
+            "resume_command": target["resume_command"],
         }
+        if selection == "latest":
+            # The honest fallback record: this restore was NOT bound to an
+            # approved checkpoint — it took the active one by default.
+            restored["selection_note"] = target["note"]
+        return restored
     except Exception as exc:  # noqa: BLE001 — the report, never a crash
         return {
             "restored": False,
             "failures": [f"checkpoint download failed: {exc}"],
             "files_restored": 0,
+            "checkpoint_selection": selection,
+            "resume_command": target["resume_command"],
         }
 
 
@@ -1273,6 +1494,26 @@ def write_artifacts(
     return meta
 
 
+def _write_wip_restore_sidecar(report: dict[str, Any]) -> None:
+    """Land the wip-restore report in ``.forge/steering.json`` (R28-03).
+
+    The report rides the STEERING SIDECAR (the same ``.forge/steering.json``
+    the emit step passes through — writing to the meta directly never
+    reaches the uploaded artifact because the emit step rebuilds it at
+    forge-output/). LIVE-found. Used by BOTH the halted-required-restore
+    path (the failure IS the lane's verdict) and the normal post-turn
+    record.
+    """
+    sidecar = Path(".forge/steering.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+    except ValueError:
+        existing = {}
+    existing["wip_restore"] = report
+    sidecar.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n")
+
+
 def _env_seconds(name: str, default: float) -> float:
     """A positive seconds value from env, or *default*; malformed fails CLOSED.
 
@@ -1373,6 +1614,41 @@ def main(
     except ValueError as exc:
         return _fail("driver_setup_error", str(exc))
 
+    # Wave D + R28-03: a pending resume + a stored checkpoint restores
+    # the WIP BEFORE any vendor client or session exists — the agent
+    # continues from the previous runner's files. FORGE_LANE_RESUME
+    # marks a dispatch whose WIP continuity is REQUIRED: there, a
+    # restore that did not land (failed download, refused binding,
+    # corrupt manifest, missing blob) halts the lane with ZERO model
+    # turns — nonzero exit, the evidence in the meta and the sidecar —
+    # never a silent start-over on a base that may be half-restored. A
+    # fresh run (no marker) proceeds: a 404 is normal for it.
+    resume_report: dict[str, Any] | None = None
+    work_id_for_resume = (
+        os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or ""
+    ).strip()
+    if work_id_for_resume and steering_enabled():
+        resume_report = _maybe_restore_wip(work_id_for_resume)
+    if resume_requested():
+        required_ok = bool((resume_report or {}).get("restored"))
+        if not required_ok:
+            detail = "; ".join((resume_report or {}).get("failures") or []) or (
+                "the resume channel is not configured (FORGE_LANE_CONTROL_URL/TOKEN "
+                "absent or steering disabled) — the required WIP restore was "
+                "never attempted"
+            )
+            _write_wip_restore_sidecar(
+                resume_report
+                if resume_report is not None
+                else {
+                    "restored": False,
+                    "required": True,
+                    "files_restored": 0,
+                    "failures": [detail],
+                }
+            )
+            return _fail("wip_restore_failed", detail)
+
     # NXT-11: the lane-local control consumer, honestly OFF unless the
     # dispatch env turned it on (see steering_service_from_env).
     control = steering_service_from_env()
@@ -1423,36 +1699,16 @@ def main(
             control=control,
         )
 
-    # Wave D: a pending resume + a stored checkpoint restores the WIP
-    # before the turn — the agent continues from the previous runner's files.
-    resume_report: dict[str, Any] | None = None
-    work_id_for_resume = (
-        os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or ""
-    ).strip()
-    if work_id_for_resume and steering_enabled():
-        resume_report = _maybe_restore_wip(work_id_for_resume)
-
+    # Wave D: the restore report (attempted above, BEFORE any vendor
+    # client existed) rides the steering sidecar.
     try:
         outcome = asyncio.run(drive())
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
     write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
-    # The wip_restore report rides the STEERING SIDECAR (the same
-    # .forge/steering.json emit-meta passes through — writing to the
-    # meta directly never reaches the uploaded artifact because the
-    # emit step rebuilds it at forge-output/). LIVE-found.
     if resume_report is not None:
-        sidecar = Path(".forge/steering.json")
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        import json as _json
-
-        try:
-            existing = _json.loads(sidecar.read_text()) if sidecar.is_file() else {}
-        except ValueError:
-            existing = {}
-        existing["wip_restore"] = resume_report
-        sidecar.write_text(_json.dumps(existing, indent=2, sort_keys=True) + "\n")
+        _write_wip_restore_sidecar(resume_report)
     print(
         f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,

@@ -109,6 +109,7 @@ from forge.adaptive.discovery_stage import (
     DiscoveryStageError,
     maybe_run_discovery,
 )
+from forge.adaptive.pause_fence import pause_fence_decision
 from forge.factory.planner import PLAN_SUMMARY_CHARS
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError
@@ -487,6 +488,17 @@ class GitHubRunService:
         recovery pass; ends at ``waiting_approval`` (or parks the run
         ``blocked(config_…)`` BEFORE any paid call).
         """
+        # R28-15: freeze the source set FIRST. The target branch NAME is
+        # movable; the SHA is not. One resolved base SHA now binds every
+        # read of the planning leg — the authority config below, the
+        # discovery snapshot and the attempt base frozen into the spec —
+        # so a plan, its config and its evidence cannot come from two
+        # snapshots of a branch that moved mid-planning. An unreadable
+        # head keeps the legacy honesty: ``_read_base_sha`` logs and
+        # returns "" (the run freezes no base), and the reads fall back
+        # to the movable name — no worse than before, never fatal.
+        base_sha = await self._read_base_sha()
+        frozen_ref = base_sha or self._target_branch()
         # v0.7 monorepo path scoping, A13: the repo's `.forge.yml`
         # ``implement.paths`` globs shape the plan prompt and are frozen into
         # the RunSpec the candidate validation enforces. The repository
@@ -496,9 +508,7 @@ class GitHubRunService:
         # documented default profile; an unreadable or invalid config parks
         # the run blocked(config_…) — a read failure must never WIDEN the
         # run's scope, and nothing was paid or committed while it waits.
-        config_read = await read_project_config(
-            self._stack.reader, project_id, ref=self._target_branch()
-        )
+        config_read = await read_project_config(self._stack.reader, project_id, ref=frozen_ref)
         if config_read.needs_block:
             await self._park_config_blocked(
                 run_id,
@@ -530,21 +540,31 @@ class GitHubRunService:
                 )
                 await session.commit()
         await self._apply_run_budget(run_id)
-        # NXT-05: optional durable discovery before planning — OFF by default
-        # (FORGE_DISCOVERY_ENABLED); see docs/adaptive/discovery-splice.md.
-        issue_description = await maybe_run_discovery(
-            DiscoveryRunContext.from_reader(
-                run_id=run_id,
-                project_id=project_id,
-                session_factory=self._session_factory,
-                reader=self._stack.reader,
-                ref=self._target_branch(),
-                repository_id=self._repo_full_name,
-                allowed_globs=path_scope or None,
-            ),
-            issue_description,
-        )
         try:
+            # NXT-05/R28-15: optional durable discovery before planning —
+            # OFF by default (FORGE_DISCOVERY_ENABLED); see
+            # docs/adaptive/discovery-splice.md. INSIDE the planning try
+            # (the review's finding: the splice sat before it, so a
+            # DiscoveryStageError escaped to the webhook wrapper instead
+            # of the deliberate planning-failed handling — a stuck
+            # preflight run): a failed stage or an unanswered question
+            # parks the run through the same visible path as a planner
+            # failure, never a silent fallback to an unresearched plan.
+            # The snapshot ref is the SAME frozen SHA resolved above —
+            # discovery evidence and the attempt base are one immutable
+            # source set.
+            issue_description = await maybe_run_discovery(
+                DiscoveryRunContext.from_reader(
+                    run_id=run_id,
+                    project_id=project_id,
+                    session_factory=self._session_factory,
+                    reader=self._stack.reader,
+                    ref=frozen_ref,
+                    repository_id=self._repo_full_name,
+                    allowed_globs=path_scope or None,
+                ),
+                issue_description,
+            )
             plan = await self._stack.planner.plan(
                 issue_title,
                 issue_description,
@@ -607,7 +627,11 @@ class GitHubRunService:
         digest = plan_digest_of(plan)
         task_digest = task_digest_of(issue_title, issue_description)
         now = datetime.now(timezone.utc)
-        base_sha = await self._read_base_sha()
+        # R28-15: NO second base read — the base_sha resolved at the top of
+        # this leg is the one immutable SHA the config, the discovery
+        # snapshot and this freeze all share. Re-reading the movable branch
+        # here is exactly how a plan approved against one snapshot could be
+        # executed against another.
         plan_summary = self._plan_summary(plan)
         plan_files_hint = self._plan_files_hint()
         # A18: derive the execution profile from the TARGET repo at freeze
@@ -620,7 +644,7 @@ class GitHubRunService:
             await derive_from_reader(
                 self._stack.reader,
                 project_id=project_id,
-                ref=base_sha or self._target_branch(),
+                ref=frozen_ref,
             )
         ).profile_digest
 
@@ -3772,14 +3796,48 @@ class GitHubRunService:
                 branch=github_factory_branch(issue_number, run_id),
             )
 
+        # R28-08: the durable PAUSE fence — the same persisted authority
+        # the control plane raised when the pause landed. Checked here
+        # (before any paid validation work) AND re-read by the transport
+        # at the native-effect boundary via the injected fence callable:
+        # a pause that survives an API restart refuses a late candidate
+        # from the old lane at BOTH points.
+        fence = await pause_fence_decision(self._session_factory, run_id)
+        if fence.fenced:
+            from forge.integrations.github_flow import GitHubPublishOutcome as _Outcome
+
+            logger.warning(
+                "GitHub run %s publication REFUSED by the durable pause fence — zero native writes",
+                run_id[:8],
+            )
+            return _Outcome(
+                ok=False,
+                reason=f"publication_refused: {fence.reason}",
+                expected_head_oid=expected_head or "",
+                branch=github_factory_branch(issue_number, run_id),
+                fenced=True,
+            )
+
+        async def _publication_fence(work_id: str):
+            """R28-08: the durable fence read the transport evaluates at
+            the final boundary — committed storage, never process memory."""
+            return await pause_fence_decision(self._session_factory, work_id)
+
         async def _final_boundary_guard() -> bool:
-            """FND-02: re-check the grant at the NATATIVE-effect boundary —
+            """FND-02: re-check the grant at the NATIVE-effect boundary —
             after the bridge's awaited reads (branch head, blob hydration)
             and branch setup, immediately before the commit-API call."""
             if await self._publication_revoked(run_id):
                 logger.warning(
                     "GitHub run %s cancelled during publish reads — native "
                     "write refused at the final boundary",
+                    run_id[:8],
+                )
+                return False
+            if (await pause_fence_decision(self._session_factory, run_id)).fenced:
+                logger.warning(
+                    "GitHub run %s fenced by a pause during publish reads — "
+                    "native write refused at the final boundary",
                     run_id[:8],
                 )
                 return False
@@ -3796,6 +3854,7 @@ class GitHubRunService:
             operation_key=operation_key,
             allowed_paths=allowed_paths,
             pre_dispatch_guard=_final_boundary_guard,
+            publication_fence=_publication_fence,
         )
 
     async def _finish_harness_publish_leg(
