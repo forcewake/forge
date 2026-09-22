@@ -43,6 +43,10 @@ on:
         type: string
       issue_number:
         description: "issue whose forge plan comment carries the approved plan"
+      lane_control_token:
+        description: "per-work HMAC lane-control token (dispatch-computed)"
+        required: false
+        default: ""
         required: true
         type: string
       plan_note_id:

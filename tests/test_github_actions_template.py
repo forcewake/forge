@@ -54,6 +54,8 @@ class TestWorkflowTemplateContract:
             # (empty on a legacy replay = live task bytes, unenforced).
             "envelope_digest",
             "spec_digest",
+            # NXT-10: the per-work lane-control HMAC (empty default).
+            "lane_control_token",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
