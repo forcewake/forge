@@ -42,6 +42,7 @@ every lane, and the limits come from the same settings.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1209,16 +1210,41 @@ def retry_rejection(run: FlowRun | None, *, other_active: bool = False) -> str:
 
 
 def _has_durable_checkpoint(run_id: str) -> bool:
-    """The control plane holds a verified checkpoint for this work."""
-    try:
-        from pathlib import Path as _P
+    """The control plane holds a verified checkpoint for this work.
 
+    LIVE-found (wave D): the /retry handler runs in the WORKER process,
+    which has NO data/ mount — the checkpoint store lives on the APP.
+    The honest check is the CHECKPOINT API (the same authority the lane
+    dials), not the local filesystem.
+    """
+    # 1. The local filesystem (the APP process sees it directly).
+    try:
         from forge.api_checkpoint_channel import CheckpointStore, _store_dir
 
         index = CheckpointStore(_store_dir())._load_index(run_id)
-        return bool(index.get("checkpoints"))
-    except Exception:  # noqa: BLE001 — no store, no checkpoint, no resume
-        return False
+        if index.get("checkpoints"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. The checkpoint API (the WORKER crosses the process boundary).
+    url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
+    secret = os.environ.get("FORGE_LANE_CONTROL_SECRET") or ""
+    if url and secret:
+        try:
+            import httpx
+
+            from forge.api_lane_control import lane_control_token
+
+            token = lane_control_token(secret, run_id)
+            resp = httpx.get(
+                f"{url}/lane/checkpoints/{run_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            return resp.status_code == 200
+        except Exception:  # noqa: BLE001 — unreachable API = no checkpoint
+            return False
+    return False
 
 
 def retry_in_flight_rejection(run_id: str) -> str:
