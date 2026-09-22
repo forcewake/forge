@@ -153,6 +153,10 @@ jobs:
           # The run id the plan comment must mention (tamper guard: another
           # run's plan can never ride this lane's brief).
           FORGE_RUN_ID: ${{ inputs.run_id }}
+          # NXT-11: the lane attaches the steering session when enabled —
+          # rides the workflow's env (a repo VARIABLE can override).
+          FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
+          FORGE_WORK_ID: ${{ inputs.run_id }}
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
           # Same source the driver reads: when it carries the `codegraph`
           # server, the brief names its tools AND this step indexes the

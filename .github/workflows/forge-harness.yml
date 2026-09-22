@@ -161,6 +161,10 @@ jobs:
           # The run id the plan comment must mention (tamper guard: another
           # run's plan can never ride this lane's brief).
           FORGE_RUN_ID: ${{ inputs.run_id }}
+          # NXT-11: the lane attaches the steering session when enabled —
+          # rides the workflow's env (a repo VARIABLE can override).
+          FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
+          FORGE_WORK_ID: ${{ inputs.run_id }}
           # Bounded verification-failure context on a repair re-dispatch
           # (empty on cycle 1).
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
