@@ -348,17 +348,16 @@ def _steering_session(
     )
 
 
-def _make_upload(api: Any) -> Any:
-    """Bind the API into the WipUploadChannel protocol — a real
-    callable (store, work_id) -> remote ref (NOT a lambda: the
-    checkpoint channel calls methods on the bound object)."""
+class _LaneUploadChannel:
+    """The WipUploadChannel protocol over the lane's checkpoint API."""
 
-    def _upload(store: Any, work_id: str) -> str:
+    def __init__(self, api: Any) -> None:
+        self._api = api
+
+    def upload_checkpoint(self, store: Any, work_id: str) -> object:
         from forge.adaptive.checkpoint_channel import upload_checkpoint
 
-        return str(upload_checkpoint(store, work_id, api).remote_ref or "")
-
-    return _upload
+        return upload_checkpoint(store, work_id, self._api)
 
 
 def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
@@ -384,10 +383,10 @@ def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
     token = (os.environ.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
     if url and token:
         try:
-            from forge.adaptive.checkpoint_channel import LaneControlAPI, upload_checkpoint
+            from forge.adaptive.checkpoint_channel import LaneControlAPI
 
             api = LaneControlAPI(base_url=url, work_token=token)
-            upload = _make_upload(api)
+            upload = _LaneUploadChannel(api)
         except Exception:  # noqa: BLE001 — the checkpoint survives locally
             upload = None
     return cooperative_capture(
