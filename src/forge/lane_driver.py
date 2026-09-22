@@ -661,9 +661,7 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
             if report.files
             else 0,
             "failures": list(report.failures[:5]) if report.failures else [],
-            "artifact": downloaded.artifact_id[:16] + "..."
-            if downloaded.checkpoint_id
-            else "?",
+            "artifact": downloaded.artifact_id[:16] + "...",
         }
     except Exception as exc:  # noqa: BLE001 — the report, never a crash
         return {
