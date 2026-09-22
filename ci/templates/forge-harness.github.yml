@@ -161,9 +161,8 @@ jobs:
           # NXT-11: the lane attaches the steering session when enabled —
           # rides the workflow's env (a repo VARIABLE can override).
           FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
-          # The steering attach scopes to the work id (FORGE_RUN_ID —
-          # the same id the control plane books commands under).
-          FORGE_RUN_ID: ${{ inputs.run_id }}
+          # The steering attach scopes to the work id — FORGE_WORK_ID,
+          # falling back to the FORGE_RUN_ID already on this block.
           FORGE_WORK_ID: ${{ inputs.run_id }}
           FORGE_REPAIR_CONTEXT: ${{ inputs.repair_context }}
           # Same source the driver reads: when it carries the `codegraph`
