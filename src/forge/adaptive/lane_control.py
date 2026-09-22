@@ -702,6 +702,8 @@ class LaneSteeringSession:
             self._pause = drain_turn(self._pause, cooperative=True, capture=self._capture)
             detail["pause"] = "interrupt-sent"
             detail["pause_status"] = self._pause.pause_status
+            if self._pause.failure_reason:
+                detail["pause_failure"] = self._pause.failure_reason[:300]
             detail["wip_artifact_id"] = self._pause.wip_artifact_id
             if self._pause.checkpoint_receipt is not None:
                 detail["checkpoint_receipt"] = {
