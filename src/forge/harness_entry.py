@@ -966,6 +966,10 @@ def render_driver_script(
             "  sleep $((attempt * 5))\n"
             "done\n"
             "claude --version\n"
+            "# The bootstrap installs forge WITHOUT extras; the claude lane\n"
+            "# needs the interactive extra's SDK (LIVE-found on the Actions\n"
+            "# runner: sdk_missing with a green bootstrap).\n"
+            "pip install --quiet 'claude-agent-sdk>=0.2.118'\n"
             "# GitLab docker executors run as root; claude refuses the bypass\n"
             "# posture for root unless told it is sandboxed (ADR-0002).\n"
             'export IS_SANDBOX="${IS_SANDBOX:-1}"\n'
