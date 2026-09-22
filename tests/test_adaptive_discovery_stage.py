@@ -14,7 +14,13 @@ These tests pin the integration slice's behavior:
 - failure is loud: a failed discovery never silently falls back;
 - the NXT-06 citation contract: ``evidence:<id>`` citations validated
   against the durable record's evidence ids — invalid citations reject
-  the plan, uncited claims stay allowed.
+  the plan, uncited claims stay allowed;
+- the NXT-07 answer gate: persisted clarification questions refuse
+  planning with a typed :class:`QuestionsOutstanding` until every
+  question id has a durably recorded answer; answers arrive through the
+  ``OperatorControlService`` mailbox and unblock planning across a
+  second process, with the bounded answers section injected beside the
+  evidence digest.
 """
 
 from __future__ import annotations
@@ -35,6 +41,8 @@ from sqlalchemy.ext.asyncio import (
 from forge.adaptive.artifact_store import ContentAddressedStore
 from forge.adaptive.discovery import dispatch_target
 from forge.adaptive.discovery_stage import (
+    ANSWERS_BEGIN,
+    ANSWERS_END,
     DIGEST_BEGIN,
     DIGEST_END,
     FORGE_DISCOVERY_ENABLED_ENV,
@@ -42,7 +50,11 @@ from forge.adaptive.discovery_stage import (
     DiscoveryRunContext,
     DiscoveryStageError,
     InvalidPlanCitation,
+    QuestionsOutstanding,
+    attach_answers,
     attach_digest,
+    apply_answer_command,
+    apply_answer_commands,
     discovery_enabled,
     enforce_plan_citations,
     extract_citations,
@@ -51,11 +63,17 @@ from forge.adaptive.discovery_stage import (
     frozen_input_digest,
     load_snapshot_files,
     maybe_run_discovery,
+    open_question_ids_of,
+    open_questions_of,
+    record_answer,
+    record_answers,
+    render_answers_section,
     render_digest_section,
     run_discovery_stage,
     snapshot_set_digest,
     validate_plan_citations,
 )
+from forge.adaptive.wiring import OperatorControlService
 from forge.durable import FlowRun, Outbox
 from forge.factory.planner import PLANNER_MAX_INPUT_CHARS
 from forge.models.base import Base
@@ -141,6 +159,7 @@ def _ctx(
     files: dict[str, str] | None = None,
     store: ContentAddressedStore | None = None,
     max_digest_chars: int | None = None,
+    questions=None,
 ) -> DiscoveryRunContext:
     kwargs: dict = {}
     if max_digest_chars is not None:
@@ -153,6 +172,7 @@ def _ctx(
         repository_id="example/repo",
         source_oid="f" * 40,
         store=store,
+        question_source=questions,
         **kwargs,
     )
 
@@ -162,6 +182,64 @@ def _digest_of(augmented: str) -> dict:
     body = augmented[augmented.index(DIGEST_BEGIN) + len(DIGEST_BEGIN) :]
     body = body[: body.index(DIGEST_END)]
     return json.loads(body.strip())
+
+
+def _answers_of(augmented: str) -> dict:
+    """Parse the delimited answers section out of an augmented input."""
+    body = augmented[augmented.index(ANSWERS_BEGIN) + len(ANSWERS_BEGIN) :]
+    body = body[: body.index(ANSWERS_END)]
+    return json.loads(body.strip())
+
+
+def _question_source(*specs: dict):
+    """A deterministic question source; ``lambda:``-free for readability.
+
+    Each spec is ``{"text", "criticality", "citations", "options"}``;
+    ``citations="first-evidence"`` is replaced by the first recorded
+    evidence id at emission time so tests cite REAL ids.
+    """
+
+    def _source(planner_input: str, evidence: list[dict]) -> list[dict]:
+        first = evidence[0]["id"] if evidence else "ev-1"
+        out = []
+        for spec in specs:
+            resolved = dict(spec)
+            if resolved.get("citations") == "first-evidence":
+                resolved["citations"] = [first]
+            out.append(resolved)
+        return out
+
+    return _source
+
+
+def _two_q_source():
+    return _question_source(
+        {
+            "text": "Which database version should the migration target?",
+            "criticality": "critical",
+            "citations": "first-evidence",
+            "options": ["postgres:15", "postgres:16"],
+        },
+        {
+            "text": "Should start_run stay batch-driven or move to the SDK lane?",
+            "criticality": "critical",
+            "citations": [],
+        },
+    )
+
+
+def _answer_command(question_id: str, text: str, *, key: str = "", run_scope: str = "") -> dict:
+    """A mailbox answer command in its plain dict shape."""
+    payload: dict = {"question_id": question_id, "text": text}
+    if run_scope:
+        payload["run_id"] = run_scope
+    return {
+        "command_id": f"cmd-{question_id}-{key or 'base'}",
+        "kind": "answer",
+        "actor_ref": "operator",
+        "idempotency_key": key or f"answer:{RUN_ID}:{question_id}",
+        "payload": payload,
+    }
 
 
 def _enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -582,3 +660,373 @@ class TestHelpers:
             assert await _discovery_record(factory) != {}
         finally:
             await engine.dispose()
+
+
+class TestQuestionEmission:
+    """NXT-07: the stage emits bounded, citation-validated questions."""
+
+    async def test_open_questions_refuse_planning_with_the_typed_error(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            error = excinfo.value
+            assert isinstance(error, DiscoveryStageError)  # loud for old callers too
+            assert len(error.questions) == 2
+            assert all(q["question_id"].startswith("q-") for q in error.questions)
+            assert error.questions[0]["criticality"] == "critical"
+            assert error.questions[0]["citations"]  # the question cites its evidence
+            assert error.summaries()[0].startswith("[critical] q-")
+            record = await _discovery_record(factory)
+            assert record["status"] == "waiting_question"
+            assert [q["status"] for q in record["questions"]] == ["open", "open"]
+            assert record["repository_researched"] is True  # the evidence is durable
+            counts = await _outbox_counts(factory)
+            assert counts.get("discovery.questions_raised") == 1
+        finally:
+            await engine.dispose()
+
+    async def test_a_question_citing_unknown_evidence_is_dropped(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            source = _question_source(
+                {"text": "leans on nothing", "criticality": "critical", "citations": ["ev-404"]},
+                {"text": "which timeout?", "criticality": "advisory", "citations": []},
+            )
+            await run_discovery_stage(_ctx(factory, questions=source), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            texts = [q["text"] for q in record["questions"]]
+            assert texts == ["which timeout?"]  # the bad-citation question never persisted
+        finally:
+            await engine.dispose()
+
+    async def test_emission_is_bounded_and_deduped(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            same = {"text": "duplicated proposal", "criticality": "critical", "citations": []}
+            source = _question_source(
+                same,
+                {"text": "second", "criticality": "critical", "citations": []},
+                same,  # identical content: ONE durable identity, not two
+                {"text": "third", "criticality": "advisory", "citations": []},
+                {"text": "fourth — over the bound", "criticality": "critical", "citations": []},
+            )
+            await run_discovery_stage(_ctx(factory, questions=source), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            texts = [q["text"] for q in record["questions"]]
+            assert texts == ["duplicated proposal", "second", "third"]
+            ids = [q["question_id"] for q in record["questions"]]
+            assert len(set(ids)) == 3  # durable identities are unique
+        finally:
+            await engine.dispose()
+
+    async def test_a_replayed_waiting_record_does_not_re_emit_or_re_probe(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding):
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            # the second pass adopts the waiting record — even with the
+            # question source absent, the durable questions persist.
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+            assert len(excinfo.value.questions) == 2
+            counts = await _outbox_counts(factory)
+            assert counts.get("discovery.started") == 1  # probes paid once
+            assert counts.get("discovery.questions_raised") == 1  # questions emitted once
+            assert counts.get("discovery.replayed") == 1
+            assert counts.get("discovery.waiting") == 1
+        finally:
+            await engine.dispose()
+
+
+class TestAnswerGate:
+    """NXT-07: answers unblock planning, durably; refusals stay typed."""
+
+    async def test_answering_q2_does_not_close_q1(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            q1, q2 = [q["question_id"] for q in excinfo.value.questions]
+
+            service = OperatorControlService()
+            assert service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.") is True
+            drain = await record_answers(factory, RUN_ID, service.pending(RUN_ID))
+            assert drain.applied_count == 1
+
+            with pytest.raises(QuestionsOutstanding) as again:
+                await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+            assert [q["question_id"] for q in again.value.questions] == [q1]
+            record = await _discovery_record(factory)
+            assert record["status"] == "waiting_question"  # not resolved by one answer
+            counts = await _outbox_counts(factory)
+            assert "discovery.questions_resolved" not in counts
+        finally:
+            await engine.dispose()
+
+    async def test_answers_unblock_planning_durably_across_a_second_session(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        db = tmp_path / "runs.db"
+        factory_a, engine_a = await _new_process(db)
+        await _seed_run(factory_a)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory_a, questions=_two_q_source()), PLANNER_INPUT)
+            q1, q2 = [q["question_id"] for q in excinfo.value.questions]
+        finally:
+            await engine_a.dispose()
+
+        # A brand-new process: the answers land on the DURABLE record.
+        factory_b, engine_b = await _new_process(db)
+        try:
+            service = OperatorControlService()
+            service.answer(RUN_ID, "pavel", q2, "Move it to the SDK lane.")
+            service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
+            drain = await record_answers(factory_b, RUN_ID, service.pending(RUN_ID))
+            assert drain.applied_count == 2
+            assert drain.open_question_ids == ()
+
+            record = await _discovery_record(factory_b)
+            assert record["status"] == "complete"  # the flip rode the last answer's commit
+            answers = {q["question_id"]: q["answer"] for q in record["questions"]}
+            assert answers[q1]["text"] == "Target postgres:16."
+            assert answers[q1]["actor"] == "pavel"
+            counts = await _outbox_counts(factory_b)
+            assert counts.get("discovery.answer_recorded") == 2
+            assert counts.get("discovery.questions_resolved") == 1
+            assert counts.get("discovery.started") == 1  # still one discovery, one probe pass
+
+            # Planning resumes: digest AND answers injected, bounded.
+            augmented = await maybe_run_discovery(_ctx(factory_b), PLANNER_INPUT)
+            assert augmented.startswith(PLANNER_INPUT)
+            assert DIGEST_BEGIN in augmented
+            parsed = _answers_of(augmented)
+            assert parsed["schema"] == "forge.discovery.answers/1"
+            assert {a["question_id"] for a in parsed["answers"]} == {q1, q2}
+            by_id = {a["question_id"]: a for a in parsed["answers"]}
+            assert by_id[q1]["answer"] == "Target postgres:16."
+            assert by_id[q1]["citations"]  # answers carry their question's citations
+            assert len(augmented) <= PLANNER_INPUT_CAP_CHARS
+            counts = await _outbox_counts(factory_b)
+            assert counts.get("plan.research_mode") >= 1  # announced only once plannable
+        finally:
+            await engine_b.dispose()
+
+    async def test_unanswered_questions_keep_the_typed_refusal(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding):
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            with pytest.raises(QuestionsOutstanding):
+                await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)  # nothing answered
+        finally:
+            await engine.dispose()
+
+    async def test_duplicate_answer_is_an_idempotent_no_op(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            q1 = excinfo.value.questions[0]["question_id"]
+
+            service = OperatorControlService()
+            service.answer(RUN_ID, "pavel", q1, "Target postgres:16.")
+            commands = service.pending(RUN_ID)
+            first = await record_answers(factory, RUN_ID, commands)
+            assert first.applied_count == 1
+            # the SAME command redelivered: duplicate, no second effect
+            again = await record_answers(factory, RUN_ID, commands)
+            assert again.applied_count == 0
+            assert again.applications[0].status == "duplicate"
+            counts = await _outbox_counts(factory)
+            assert counts.get("discovery.answer_recorded") == 1
+        finally:
+            await engine.dispose()
+
+    async def test_a_second_different_answer_is_rejected_first_stands(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            q1 = excinfo.value.questions[0]["question_id"]
+
+            await record_answer(factory, RUN_ID, _answer_command(q1, "postgres:16"))
+            raced = await record_answer(
+                factory, RUN_ID, _answer_command(q1, "postgres:15", key="answer:other:key")
+            )
+            assert raced.status == "rejected"
+            assert "first recorded answer stands" in raced.reason
+            record = await _discovery_record(factory)
+            assert record["questions"][0]["answer"]["text"] == "postgres:16"
+        finally:
+            await engine.dispose()
+
+    async def test_foreign_unknown_and_empty_answers_have_no_effect(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding) as excinfo:
+                await maybe_run_discovery(_ctx(factory, questions=_two_q_source()), PLANNER_INPUT)
+            q1 = excinfo.value.questions[0]["question_id"]
+
+            foreign = await record_answer(
+                factory,
+                RUN_ID,
+                _answer_command(q1, "irrelevant", run_scope="run-someone-else"),
+            )
+            assert foreign.status == "rejected" and "scoped to run" in foreign.reason
+            unknown = await record_answer(factory, RUN_ID, _answer_command("q-ghost", "hello"))
+            assert unknown.status == "rejected" and "unknown question id" in unknown.reason
+            empty = await record_answer(factory, RUN_ID, _answer_command(q1, "   "))
+            assert empty.status == "rejected"
+            record = await _discovery_record(factory)
+            assert [q["status"] for q in record["questions"]] == ["open", "open"]
+            counts = await _outbox_counts(factory)
+            assert "discovery.answer_recorded" not in counts
+        finally:
+            await engine.dispose()
+
+    async def test_answering_a_run_without_discovery_is_rejected_not_fatal(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            application = await record_answer(factory, RUN_ID, _answer_command("q-any", "any"))
+            assert application.status == "rejected"
+            assert "no persisted discovery record" in application.reason
+        finally:
+            await engine.dispose()
+
+
+class TestAnswerHelpers:
+    """The pure answer fold — the seam the /answer surface consumes."""
+
+    def _record(self) -> dict:
+        return {
+            "run_id": RUN_ID,
+            "discovery_id": "disc-q",
+            "evidence": [{"id": "ev-1"}, {"id": "ev-2"}],
+            "questions": [
+                {"question_id": "q-1", "text": "Q1?", "status": "open", "answer": None},
+                {"question_id": "q-2", "text": "Q2?", "status": "open", "answer": None},
+            ],
+        }
+
+    def test_one_command_resolves_exactly_its_question(self):
+        drain = apply_answer_command(self._record(), _answer_command("q-2", "B"))
+        assert drain.status == "applied"
+        assert open_question_ids_of(drain.record) == ("q-1",)  # Q1 untouched
+        answered = drain.record["questions"][1]
+        assert answered["status"] == "answered"
+        assert answered["answer"]["actor"] == "operator"
+
+    def test_a_non_answer_command_is_rejected(self):
+        application = apply_answer_command(
+            self._record(), {"kind": "pause", "payload": {}, "idempotency_key": "k"}
+        )
+        assert application.status == "rejected"
+
+    def test_fold_applies_in_sequence_order(self):
+        commands = [_answer_command("q-1", "A"), _answer_command("q-2", "B")]
+        # a redelivery of the first command arriving last changes nothing
+        result = apply_answer_commands(self._record(), [commands[1], commands[0], commands[0]])
+        assert result.applied_count == 2
+        assert result.open_question_ids == ()
+        assert [a.status for a in result.applications] == ["applied", "applied", "duplicate"]
+
+    def test_open_questions_read_from_the_record_shape(self):
+        assert open_question_ids_of(self._record()) == ("q-1", "q-2")
+        assert open_questions_of({}) == ()
+        assert (
+            open_questions_of({"questions": [{"question_id": "q-x", "status": "answered"}]}) == ()
+        )
+
+
+class TestAnswersSection:
+    """The bounded, citation-validated answers injection."""
+
+    def _answered_record(self, count: int = 3, *, long_text: bool = False) -> dict:
+        return {
+            "discovery_id": "disc-a",
+            "evidence": [{"id": f"ev-{i}"} for i in range(1, count + 1)],
+            "questions": [
+                {
+                    "question_id": f"q-{i}",
+                    "text": f"Question {i}?" + (" very long " * 60 if long_text else ""),
+                    "criticality": "critical",
+                    "citations": [f"ev-{i}"],
+                    "status": "answered",
+                    "answer": {"text": f"Answer {i}." + (" very long " * 60 if long_text else "")},
+                }
+                for i in range(1, count + 1)
+            ],
+        }
+
+    def test_nothing_answered_renders_nothing(self):
+        assert render_answers_section({"questions": []}) == ""
+        assert (
+            render_answers_section(
+                {"questions": [{"question_id": "q-1", "status": "open", "answer": None}]}
+            )
+            == ""
+        )
+
+    def test_the_section_is_delimited_deterministic_and_citation_validated(self):
+        section = render_answers_section(self._answered_record())
+        assert section.startswith(ANSWERS_BEGIN) and section.endswith(ANSWERS_END)
+        parsed = json.loads(section[len(ANSWERS_BEGIN) + 1 : -len(ANSWERS_END) - 1])
+        assert parsed["schema"] == "forge.discovery.answers/1"
+        assert [a["question_id"] for a in parsed["answers"]] == ["q-1", "q-2", "q-3"]
+        assert parsed["answers"][0]["citations"] == ["ev-1"]
+
+        # a question whose citations no longer resolve is dropped, not rendered
+        stale = self._answered_record()
+        stale["evidence"] = [{"id": "ev-9"}]
+        dropped = json.loads(
+            render_answers_section(stale)[len(ANSWERS_BEGIN) + 1 : -len(ANSWERS_END) - 1]
+        )
+        assert dropped["answers"] == []
+        assert dropped["dropped"] == 3
+
+    def test_the_section_respects_its_budget_and_marks_truncation(self):
+        section = render_answers_section(self._answered_record(long_text=True), max_chars=600)
+        assert len(section) <= 600
+        parsed = json.loads(section[len(ANSWERS_BEGIN) + 1 : -len(ANSWERS_END) - 1])
+        assert parsed["truncated"] is True
+        assert parsed["dropped"] > 0
+        assert len(parsed["answers"]) < 3
+
+    def test_attach_answers_keeps_the_planner_cap(self):
+        section = f"{ANSWERS_BEGIN}\n" + ("x" * 3000) + f"\n{ANSWERS_END}"
+        base = "issue text " * 900  # long enough to crowd the section out
+        combined = attach_answers(base, section)
+        assert len(combined) <= PLANNER_INPUT_CAP_CHARS
+        assert combined.endswith(section)  # the section is never the thing cut
+        assert "input truncated to" in combined
+
+    def test_attach_answers_short_base_has_no_marker(self):
+        section = f"{ANSWERS_BEGIN}\n{{}}\n{ANSWERS_END}"
+        assert attach_answers("short issue", section) == f"short issue\n\n{section}"
