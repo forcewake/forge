@@ -196,7 +196,11 @@ class TestRenderSdkLanes:
     def test_the_sdk_lane_ids_are_the_registered_lane_driver_ids(self):
         from forge.lane_driver import LANE_DRIVER_IDS
 
-        assert LANE_DRIVERS == (LANE_DRIVER_IDS["codex"], LANE_DRIVER_IDS["opencode"])
+        assert LANE_DRIVERS == (
+        LANE_DRIVER_IDS["claude"],
+        LANE_DRIVER_IDS["codex"],
+        LANE_DRIVER_IDS["opencode"],
+    )
 
 
 # ----------------------------------------------------------------------
@@ -210,6 +214,7 @@ _PACKAGES = {
     "grok-build": ("@xai-official/grok", "grok"),
     "opencode": ("opencode-ai", "opencode"),
     "copilot": ("@github/copilot", "copilot"),
+    "claude-sdk-lane": ("@anthropic-ai/claude-code", "claude"),
     "codex-sdk-lane": ("@openai/codex", "codex"),
     "opencode-sdk-lane": ("opencode-ai", "opencode"),
 }

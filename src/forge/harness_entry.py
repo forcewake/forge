@@ -203,7 +203,7 @@ _CLAUDE_TOOL_RULES: tuple[str, ...] = (
 #: the rendered script only provisions the CLI and hands the lane over
 #: (the Actions/AzDO mirror of the codex/opencode GitLab sdk-lane
 #: templates).
-LANE_DRIVERS = ("codex-sdk-lane", "opencode-sdk-lane")
+LANE_DRIVERS = ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane")
 
 #: The SCRIPTED drivers: a rendered one-shot CLI invocation with the
 #: shared ``-p`` prompt pointer and the tee'd event stream.
@@ -233,6 +233,9 @@ DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
     # CORRECTION + codex-live.json): the app-server wire the codex driver
     # client speaks — the sandbox spellings and turn-completion semantics
     # this lane depends on.
+    # LIVE-verified 2026-09-21 (claude-live.json: "claude 2.1.273 (Claude
+    # Code)") — the SDK lane drives the bundled CLI.
+    "claude-sdk-lane": "2.1.273",
     "codex-sdk-lane": "0.153.4",
     # LIVE-verified 2026-09-21 (opencode-live.json: "opencode v2.0.10") —
     # the serve wire layer the opencode driver client targets.
@@ -954,6 +957,25 @@ def render_driver_script(
             "  --deny-tool 'shell(git commit)' --deny-tool 'shell(git push)' 2>&1"
         )
         return preamble + mcp_provision + f"{invocation} | tee -a {events} | $FORGE_FILTER_PIPE"
+
+    if driver == "claude-sdk-lane":
+        preamble = (
+            "for attempt in 1 2 3; do\n"
+            f"  {_npm_pin('@anthropic-ai/claude-code', pins['claude-sdk-lane'])} && break\n"
+            '  echo "npm install of claude-code failed (attempt $attempt), retrying..."\n'
+            "  sleep $((attempt * 5))\n"
+            "done\n"
+            "claude --version\n"
+            "# GitLab docker executors run as root; claude refuses the bypass\n"
+            "# posture for root unless told it is sandboxed (ADR-0002).\n"
+            'export IS_SANDBOX="${IS_SANDBOX:-1}"\n'
+        )
+        # The SDK lane drives the REAL claude-agent-sdk client (EXE-02):
+        # gateway env rides the ambient environment (the driver merges
+        # options.env over it); the runner writes the candidate artifacts
+        # itself; a nonzero exit classifies through the same .forge/exit.
+        invocation = 'python -m forge.lane_driver --driver claude'
+        return preamble + invocation
 
     if driver == "codex-sdk-lane":
         preamble = (
