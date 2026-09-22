@@ -43,3 +43,20 @@ is the last assembly slice (agent dispatched). En-route live findings:
 env-file line gluing strikes twice (HOME=...FORGE_ADAPTIVE — always
 terminate env files with a newline before appending); the ingress flags
 must ride the APP container, not only the worker.
+
+## WAVE B — /steer end-to-end LIVE (2026-09-22, run 9982b655)
+
+GitHub issue comment → authenticated ingress → ControlCommandRouter →
+PostgresMailbox (steer/received) → the Actions lane job polls the
+outbound /lane/controls API (work-scoped HMAC token computed by the
+DISPATCH, SecretStr unmasked) → LaneControlChannel feeds the real
+LaneSteeringSession drain → vendor steer delivered to the RUNNING
+Claude agent → ack ladder all the way home in Postgres:
+
+received → authorized → dispatching → vendor_accepted → applied → checkpointed
+
+The candidate meta carries steering_journal (steer → applied) +
+episode timings (turn 211s). Live-found en route: SecretStr str() is
+the MASK not the value (get_secret_value); FORGE_RUN_ID needed on the
+DRIVER step too; emit-meta rebuilt the v2 dict and dropped the journal
+(sidecar pass-through now).
