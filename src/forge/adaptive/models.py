@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import re
 import warnings
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Every contract redeclares ``schema`` with its own Literal tag — the
 # discriminator pattern. Pydantic warns about the shadow; it is the design.
@@ -47,6 +48,58 @@ def _digest64(value: str) -> str:
 def _oid40(value: str) -> str:
     if not _HEX40.fullmatch(value or ""):
         raise ValueError("oid must be a lowercase 40-hex git sha")
+    return value
+
+
+#: The explicit sentinel for an image whose exact artifact is NOT yet
+#: recorded (NXT-22): a member may legitimately ride along unresolved,
+#: but it must SAY so — a mutable tag or bare name silently standing in
+#: for an exact artifact is exactly what the validator refuses.
+UNRESOLVED_IMAGE_DIGEST = "unresolved"
+
+#: The registry digest algorithms Forge understands, with their hex
+#: length. Deliberately a CLOSED set (NXT-22: "validate supported
+#: schemes explicitly"): an unknown algorithm is refused, not
+#: hashed-and-hoped.
+_IMAGE_DIGEST_ALGORITHMS: dict[str, int] = {"sha256": 64, "sha512": 128}
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def validate_image_digest(value: str, *, allow_unresolved: bool = True) -> str:
+    """An EXACT image artifact reference — never a mutable tag (NXT-22).
+
+    Accepts the registry spelling ``<algorithm>:<lowercase hex>`` for
+    the supported algorithms (``sha256:<64 hex>``, ``sha512:<128
+    hex>``), plus — only when *allow_unresolved* — the explicit
+    :data:`UNRESOLVED_IMAGE_DIGEST` sentinel for a not-yet-recorded
+    artifact. REJECTS everything a mutable deployment might write in
+    place of an identity: bare names (``nginx``), tags (``nginx:latest``
+    and ``nginx:1.21`` — a tag after the colon is not hex), uppercase
+    hex, unknown or missing algorithms, and wrong-length digests.
+    Verification identity must name an EXACT artifact; ``latest`` is a
+    promise about the future, not an artifact.
+    """
+    if value == UNRESOLVED_IMAGE_DIGEST:
+        if allow_unresolved:
+            return value
+        raise ValueError(
+            f"the {UNRESOLVED_IMAGE_DIGEST!r} sentinel is not an exact pin here:"
+            " an environment pin must name a recorded artifact"
+        )
+    algorithm, _, hex_part = (value or "").partition(":")
+    expected_len = _IMAGE_DIGEST_ALGORITHMS.get(algorithm)
+    if (
+        expected_len is None
+        or len(hex_part) != expected_len
+        or any(char not in _HEX_DIGITS for char in hex_part)
+    ):
+        raise ValueError(
+            f"image digest must be an exact <algorithm>:<hex> reference"
+            f" (supported: {sorted(_IMAGE_DIGEST_ALGORITHMS)})"
+            f" or the explicit {UNRESOLVED_IMAGE_DIGEST!r} sentinel;"
+            f" mutable tags and bare names are not verification identity: {value!r}"
+        )
     return value
 
 
@@ -244,31 +297,118 @@ class CandidateSetMember(_Contract):
     image_digest: str = Field(min_length=1)
     role: Literal["changed", "baseline"]
 
+    @field_validator("base_oid", "candidate_oid")
+    @classmethod
+    def _oids(cls, value: str) -> str:
+        # The same git-sha discipline Snapshot.source_oid already had
+        # (NXT-22): a member OID is a verification identity — garbage
+        # spelled like an oid must not flow through a frozen set.
+        return _oid40(value)
+
+    @field_validator("image_digest")
+    @classmethod
+    def _image(cls, value: str) -> str:
+        return validate_image_digest(value)
+
 
 class CandidateSet(_Contract):
-    """The unit of system verification — a result binds to THIS set."""
+    """The unit of system verification — a result binds to THIS set.
+
+    Two NXT-22 hardenings on top of the frozen-model discipline:
+
+    - ``members`` is a TUPLE. A frozen pydantic model holding a mutable
+      list let any caller holding the set mutate the stored membership
+      after the fact — precisely the authority boundary a freeze
+      exists to draw. A list input is still accepted and converted at
+      validation.
+    - The persisted world fields (``environment_pins``,
+      ``policy_refs``, ``tested_world_digest``,
+      ``applicability_digest``) record the world binding AT FREEZE
+      TIME: once set, verification results bind to the digest that was
+      persisted — never to whatever a later call-time recomputation
+      against the then-current world would produce. Empty defaults
+      keep pre-existing constructors working unchanged.
+    """
 
     schema: Literal["forge.proposal.candidate-set/1"] = "forge.proposal.candidate-set/1"  # type: ignore[assignment]
     work_id: str = Field(min_length=1)
     plan_revision: int = Field(ge=1)
     work_contract_digest: str
-    members: list[CandidateSetMember] = Field(min_length=1)
+    members: tuple[CandidateSetMember, ...] = Field(min_length=1)
     contract_bundle_digest: str | None = None
     test_bundle_digest: str | None = None
     environment_profile_digest: str | None = None
+    environment_pins: tuple[tuple[str, str], ...] = ()
+    policy_refs: tuple[str, ...] = ()
+    tested_world_digest: str | None = None
+    applicability_digest: str | None = None
 
     @field_validator("work_contract_digest")
     @classmethod
     def _digest(cls, value: str) -> str:
         return _digest64(value)
 
+    @field_validator("tested_world_digest", "applicability_digest")
+    @classmethod
+    def _persisted_digests(cls, value: str | None) -> str | None:
+        return _digest64(value) if value is not None else value
+
     @field_validator("members")
     @classmethod
-    def _unique_repos(cls, value: list[CandidateSetMember]) -> list[CandidateSetMember]:
+    def _unique_repos(cls, value: tuple[CandidateSetMember, ...]) -> tuple[CandidateSetMember, ...]:
         ids = [member.repository_id for member in value]
         if len(ids) != len(set(ids)):
             raise ValueError("a repository appears twice in one candidate set")
         return value
+
+    @field_validator("environment_pins", mode="before")
+    @classmethod
+    def _pins_accept_mapping(cls, value: object) -> object:
+        # A mapping input (the natural spelling) becomes sorted pairs —
+        # the canonical tuple form the frozen set stores.
+        if isinstance(value, Mapping):
+            return sorted(value.items())
+        return value
+
+    @field_validator("environment_pins")
+    @classmethod
+    def _exact_pins(cls, value: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        seen: set[str] = set()
+        normalized: list[tuple[str, str]] = []
+        for service, digest in value:
+            if not service or not service.strip():
+                raise ValueError("an environment pin needs a service name")
+            if service in seen:
+                raise ValueError(f"service {service} is pinned twice with different digests")
+            seen.add(service)
+            normalized.append((service, validate_image_digest(digest, allow_unresolved=False)))
+        return tuple(sorted(normalized))
+
+    @field_validator("policy_refs", mode="before")
+    @classmethod
+    def _refs_accept_iterable(cls, value: object) -> object:
+        if isinstance(value, (str, bytes)) or value is None:
+            return value
+        if isinstance(value, Iterable):
+            return tuple(value)
+        return value
+
+    @field_validator("policy_refs")
+    @classmethod
+    def _normalized_refs(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for ref in value:
+            if not ref or not ref.strip():
+                raise ValueError("a policy ref must be a non-blank reference")
+        return tuple(sorted(set(value)))
+
+    @model_validator(mode="after")
+    def _world_freeze_is_all_or_nothing(self) -> CandidateSet:
+        # Freeze binds the COMPLETE world (both digests over the same
+        # pins/refs) or nothing: half a binding is a set that claims a
+        # recorded world it cannot reconstruct.
+        if (self.tested_world_digest is None) != (self.applicability_digest is None):
+            raise ValueError("persisted world digests come as a pair: freeze binds both or neither")
+        return self
 
 
 class Checkpoint(_Contract):
