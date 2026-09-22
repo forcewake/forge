@@ -650,7 +650,7 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
         store = ContentAddressedStore(root=store_dir, tenant=work_id)
         downloaded = download_checkpoint(work_id, api, store)
         report = restore_wip(
-            artifact_id=downloaded.manifest_id,
+            artifact_id=downloaded.artifact_id,
             store=store,
             target=_P.cwd(),
             principal=work_id,
@@ -661,7 +661,7 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
             if report.files
             else 0,
             "failures": list(report.failures[:5]) if report.failures else [],
-            "checkpoint_id": downloaded.checkpoint_id[:16] + "..."
+            "checkpoint_id": (downloaded.artifact_id[:16] + "...")
             if downloaded.checkpoint_id
             else "?",
         }
