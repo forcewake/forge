@@ -677,11 +677,29 @@ class LaneSteeringSession:
             # interrupt is sent; the drain is cooperative (the drivers
             # bind interrupt completion to the vendor's own signal).
             self._pause = request_pause(self._pause)
-            await self._interrupt_vendor()
+            # NXT-14: typed interrupt outcome + measured latency. A clean
+            # vendor return is ONLY an acknowledgment — the pause's truth
+            # stays the quiescence/checkpoint state below, never this ack
+            # (a timed-out interrupt cannot produce paused success).
+            import time as _time
+
+            started = _time.monotonic()
+            try:
+                await self._interrupt_vendor()
+                detail["interrupt_outcome"] = "acknowledged"
+            except (TimeoutError, ConnectionError) as exc:
+                # The vendor never proved receipt — unknown, honestly.
+                detail["interrupt_outcome"] = "unknown"
+                detail["interrupt_error"] = f"{type(exc).__name__}"
+            detail["interrupt_latency_s"] = round(_time.monotonic() - started, 3)
             self._pause = send_interrupt(self._pause)
             self._pause = drain_turn(self._pause, cooperative=True)
             detail["pause"] = "interrupt-sent"
             detail["wip_artifact_id"] = self._pause.wip_artifact_id
+            # NXT-14: queued guidance is RETAINED explicitly when an
+            # urgent control wins — never silently dropped nor lost in
+            # ordering; the resume turn carries it.
+            detail["retained_guidance"] = list(self.queued_guidance)
 
         return await self._run(command, effect=effect, detail={})
 

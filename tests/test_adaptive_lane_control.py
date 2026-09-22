@@ -972,3 +972,55 @@ class TestTeardownGuard:
 
         assert client.calls == [("steer", "sess-1", "last word")]
         assert [a.outcome for a in session.journal] == ["applied"]
+
+
+class TestNxt14UrgentControlPath:
+    """The review's second half: typed interrupt outcomes, measured
+    latency, explicit guidance retention when an urgent control wins."""
+
+    async def test_pause_records_acknowledged_outcome_and_latency(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client)
+        session.bind("sess-1")
+        _submit(svc, _cmd("pause", 1))
+
+        actions = await session.drain_once()
+
+        detail = actions[0].detail
+        assert detail["interrupt_outcome"] == "acknowledged"
+        assert isinstance(detail["interrupt_latency_s"], float)
+        assert detail["retained_guidance"] == []
+
+    async def test_timed_out_interrupt_is_unknown_never_success(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+
+        async def hang(session_id):
+            raise TimeoutError("interrupt never acked")
+
+        client.interrupt = hang
+        session = _session(svc, "claude", client)
+        session.bind("sess-1")
+        _submit(svc, _cmd("pause", 1))
+
+        actions = await session.drain_once()
+
+        # The vendor outcome is honestly unknown — never an inferred
+        # clean pause (the pause state's checkpoint truth is separate).
+        assert actions[0].detail["interrupt_outcome"] == "unknown"
+        assert actions[0].detail["interrupt_error"] == "TimeoutError"
+
+    async def test_queued_guidance_is_retained_when_pause_wins(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client)
+        session.bind("sess-1")
+        # Guidance queued (as the bridge does while paused) before the
+        # urgent pause lands in the same cycle.
+        session._queued.append("go west")
+        _submit(svc, _cmd("pause", 1))
+
+        actions = await session.drain_once()
+
+        assert actions[0].detail["retained_guidance"] == ["go west"]
