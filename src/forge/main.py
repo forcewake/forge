@@ -154,6 +154,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(lane_control_router)
 
+    from forge.api_checkpoint_channel import checkpoint_channel_router
+
+    application.include_router(checkpoint_channel_router)
+
     # Mount MCP server at /mcp — fail closed: only with an auth key, since
     # an unauthenticated endpoint is never exposed. Scoped principals
     # (FORGE_MCP_SCOPED_TOKENS) get per-call scope enforcement on the run
