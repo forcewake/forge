@@ -93,12 +93,12 @@ def upgrade() -> None:
         sa.text(
             """
             INSERT INTO control_command_deliveries (command_id, work_id, recipient, journal)
-            SELECT c.id, c.work_id, r.value, '[]'::json
+            SELECT c.id, c.work_id, r.value, '[]'::jsonb
               FROM control_commands c
-             CROSS JOIN LATERAL json_array_elements_text(
-                  CASE json_typeof(c.payload -> 'recipients')
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+                  CASE jsonb_typeof(c.payload -> 'recipients')
                     WHEN 'array' THEN c.payload -> 'recipients'
-                    ELSE '[]'::json
+                    ELSE '[]'::jsonb
                   END) AS r(value)
              WHERE c.payload ->> 'scope' = 'work'
             ON CONFLICT DO NOTHING

@@ -22,9 +22,22 @@ the integration slice that connects them:
   entries carry ``file:line`` citations, capped so the planner's input
   budget is respected.
 - :func:`validate_plan_citations` / :func:`enforce_plan_citations` —
-  the NXT-06 slice: plan steps may cite ``evidence:<id>``; a citation
-  that does not resolve to the digest's recorded evidence is REJECTED
-  (fail-closed), while uncited claims stay allowed.
+  the committed NXT-06 slice: plan steps may cite ``evidence:<id>``; a
+  citation that does not resolve to the digest's recorded evidence is
+  REJECTED (fail-closed), while uncited claims stay allowed.
+- :func:`snapshot_tree_of` / :class:`CitationAuthority` /
+  :func:`validate_citations_against_snapshot` /
+  :func:`enforce_citations_against_snapshot` — the REST of NXT-06:
+  citation AUTHORITY binding. A resolved id is still not authority: each
+  evidence entry is bound to its ``(repository_id, source_oid, path,
+  line)`` and every citation is validated, at read time, against the
+  record's OWN authorized snapshot binding — the dispatch's
+  repository/OID plus the recorded snapshot tree (``path ->
+  {lines, digest}``, hashing back to the dispatch's
+  ``snapshot_set_digest``). A citation whose file:line does not fall
+  inside the snapshot's recorded tree FOR THAT repository/OID is
+  invalid: cross-repo entries, stale-OID entries, paths outside the
+  authorized snapshot, and out-of-range lines all fail closed.
 
 Durability follows the runs/ patterns: the record lives in the
 ``FlowRun.evidence`` blob (reassigned wholesale, like
@@ -61,6 +74,7 @@ here too:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import inspect
 import json
@@ -93,6 +107,7 @@ __all__ = [
     "DIGEST_END",
     "AnswerApplication",
     "AnswerDrain",
+    "CitationAuthority",
     "DiscoveryOutcome",
     "DiscoveryRunContext",
     "DiscoveryStageError",
@@ -101,9 +116,11 @@ __all__ = [
     "InvalidPlanCitation",
     "PLANNER_INPUT_CAP_CHARS",
     "QuestionsOutstanding",
+    "SNAPSHOT_TREE_SCHEMA",
     "attach_answers",
     "attach_digest",
     "discovery_enabled",
+    "enforce_citations_against_snapshot",
     "enforce_plan_citations",
     "extract_citations",
     "extract_keywords",
@@ -121,6 +138,9 @@ __all__ = [
     "render_digest_section",
     "run_discovery_stage",
     "snapshot_set_digest",
+    "snapshot_tree_digest",
+    "snapshot_tree_of",
+    "validate_citations_against_snapshot",
     "validate_plan_citations",
 ]
 
@@ -265,6 +285,9 @@ _RECORD_SCHEMA = "forge.discovery.stage-record/1"
 _BUNDLE_SCHEMA = "forge.discovery.evidence-bundle/1"
 _DIGEST_SCHEMA = "forge.discovery.digest/1"
 _ANSWERS_SCHEMA = "forge.discovery.answers/1"
+#: The schema stamp of the record's ``snapshot_tree`` entry (the authorized
+#: SnapshotSet as recorded at read time — see :func:`snapshot_tree_of`).
+SNAPSHOT_TREE_SCHEMA = "forge.discovery.snapshot-tree/1"
 
 #: Snapshot loading caps: the stage reads a bounded, read-only view —
 #: not the whole history of a huge monorepo — and stops loudly (logged)
@@ -346,6 +369,43 @@ def snapshot_set_digest(files: Mapping[str, str]) -> str:
     identity a completed discovery binds to.
     """
     return _sha256(_canonical({path: _sha256(content) for path, content in files.items()}))
+
+
+def _lines_of(content: str) -> int:
+    """How many citable 1-based lines *content* has (``splitlines`` — the
+    same enumeration :class:`~forge.adaptive.discovery_tools.SnapshotToolbox`
+    probes with, so a toolbox ``line_no`` and a tree bound agree)."""
+    return len(content.splitlines())
+
+
+def snapshot_tree_of(files: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    """The recorded tree of an authorized snapshot (the rest of NXT-06).
+
+    ``{path: {"lines": N, "digest": sha256(content)}}`` — the read-time
+    authority citation validation checks file:line ranges against. The
+    per-path digests use the SAME content addressing as
+    :func:`snapshot_set_digest`, so :func:`snapshot_tree_digest` re-derives
+    the dispatch's authorized ``snapshot_set_digest`` from the recorded
+    tree: a tree that does not hash back to the authorization is not the
+    authorized snapshot, and citations checked against it fail closed.
+    """
+    return {
+        path: {"lines": _lines_of(content), "digest": _sha256(content)}
+        for path, content in files.items()
+    }
+
+
+def snapshot_tree_digest(tree: Mapping[str, Mapping[str, Any]]) -> str:
+    """The set digest a recorded tree re-derives to (the authority check).
+
+    ``snapshot_tree_digest(snapshot_tree_of(files)) ==
+    snapshot_set_digest(files)`` — the identity that lets a validator,
+    holding only the durable record, prove the tree it is checking bounds
+    citations by IS the snapshot the dispatch authorized.
+    """
+    return _sha256(
+        _canonical({path: str(entry.get("digest") or "") for path, entry in tree.items()})
+    )
 
 
 def frozen_input_digest(planner_input: str, snapshot_digest: str) -> str:
@@ -510,10 +570,13 @@ class DiscoveryRunContext:
     ) -> DiscoveryRunContext:
         """A context whose snapshot loads lazily from a repository reader.
 
-        ``reader`` duck-types the shared read surface
-        (``get_tree`` / ``read_text`` — GitHubRepositoryReader,
-        GitLabClient and the Azure reader all satisfy it). The loader is
-        deferred: a disabled stage never touches the provider.
+        ``reader`` duck-types the shared read surface — ``get_tree`` plus
+        EITHER ``read_text`` (``GitHubRepositoryReader`` and
+        ``AzureRepositoryReader``) OR the GitLab ``get_file`` blob shape
+        (:class:`~forge.gitlab.client.GitLabClient`, whose file reads come
+        back as base64 ``RepositoryFile`` records;
+        :func:`load_snapshot_files` decodes that fallback itself). The
+        loader is deferred: a disabled stage never touches the provider.
         """
 
         async def _load() -> Mapping[str, str]:
@@ -536,6 +599,38 @@ class DiscoveryRunContext:
 # ---------------------------------------------------------------------------
 
 
+async def _reader_file_text(reader: Any, project_id: int, path: str, ref: str) -> str:
+    """One file's text through whichever read surface the reader carries.
+
+    The seam's two accepted shapes (NXT-04's construction-surface lesson:
+    the REAL readers, not a fake, define what this seam may call):
+
+    - ``read_text(file_path, ref)`` — the GitHub/Azure readers' decoded
+      read;
+    - ``get_file(project_id, file_path, ref)`` — the GitLab client's
+      base64 ``RepositoryFile`` shape, decoded here so the GitLab client
+      satisfies the same snapshot seam without growing a method.
+
+    A reader carrying NEITHER shape raises :class:`AttributeError` — the
+    caller's per-file handler books it as an unreadable path (a coverage
+    gap), exactly like a failing provider read.
+    """
+    read_text = getattr(reader, "read_text", None)
+    if read_text is not None:
+        return await read_text(path, ref)
+    get_file = getattr(reader, "get_file", None)
+    if get_file is None:
+        raise AttributeError(
+            f"reader {type(reader).__name__!r} carries neither read_text nor get_file — "
+            "it does not satisfy the discovery snapshot surface"
+        )
+    repo_file = await get_file(project_id, path, ref)
+    content = str(getattr(repo_file, "content", "") or "")
+    if str(getattr(repo_file, "encoding", "") or "") == "base64":
+        return base64.b64decode(content).decode("utf-8")
+    return content
+
+
 async def load_snapshot_files(
     reader: Any,
     project_id: int,
@@ -547,13 +642,14 @@ async def load_snapshot_files(
 ) -> dict[str, str]:
     """Load a bounded, read-only ``{path: content}`` snapshot at *ref*.
 
-    Uses ONLY the duck-typed read surface (``get_tree`` / ``read_text``)
-    — no clone, no write, no shell. Non-blob entries are skipped, paths
-    outside ``allowed_globs`` do not exist for this snapshot (filtered
-    BEFORE any content read), and the file/byte caps stop the load with
-    a logged warning instead of an overflow. A file that fails to decode
-    (binary content) is dropped with a warning — a coverage gap, never a
-    crash of the stage.
+    Uses ONLY the duck-typed read surface — ``get_tree`` for the listing
+    and, per file, ``read_text`` when the reader has it or the GitLab
+    ``get_file`` base64 shape otherwise — no clone, no write, no shell.
+    Non-blob entries are skipped, paths outside ``allowed_globs`` do not
+    exist for this snapshot (filtered BEFORE any content read), and the
+    file/byte caps stop the load with a logged warning instead of an
+    overflow. A file that fails to decode (binary content) is dropped
+    with a warning — a coverage gap, never a crash of the stage.
     """
     tree = await reader.get_tree(project_id, "", ref, recursive=True)
     globs = ["**"] if not allowed_globs else list(allowed_globs)
@@ -575,7 +671,7 @@ async def load_snapshot_files(
     total = 0
     for path in selected:
         try:
-            text = await reader.read_text(path, ref)
+            text = await _reader_file_text(reader, project_id, path, ref)
         except Exception as exc:  # noqa: BLE001 — one bad blob must not sink the stage
             logger.warning("discovery snapshot: %s at %r unreadable: %s", path, ref, exc)
             continue
@@ -649,6 +745,13 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
     files = dict(await _resolve_snapshot(run_ctx))
     snap_digest = snapshot_set_digest(files)
     input_digest = frozen_input_digest(planner_input, snap_digest)
+    #: The authorized snapshot AS RECORDED (NXT-06's read-time authority):
+    #: every completed record carries the tree citation validation bounds
+    #: file:line citations by, hashed to the dispatch's snapshot digest.
+    recorded_tree = {
+        "schema": SNAPSHOT_TREE_SCHEMA,
+        "files": snapshot_tree_of(files),
+    }
 
     existing = await _read_record(run_ctx.session_factory, run_ctx.run_id)
     if existing is not None:
@@ -753,6 +856,7 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
             "status": "waiting_question",
             "evidence": [rec.as_document() for rec in records],
             "evidence_artifact_digest": artifact_digest,
+            "snapshot_tree": recorded_tree,
             "repository_researched": True,
             "coverage": coverage,
             "questions": questions,
@@ -790,6 +894,7 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
         "status": "complete",
         "evidence": [rec.as_document() for rec in records],
         "evidence_artifact_digest": artifact_digest,
+        "snapshot_tree": recorded_tree,
         "repository_researched": True,
         "coverage": coverage,
         "questions": questions,
@@ -1159,7 +1264,7 @@ def attach_digest(
 
 
 # ---------------------------------------------------------------------------
-# Citation binding (the NXT-06 slice)
+# Citation binding (NXT-06: resolution, then AUTHORITY)
 # ---------------------------------------------------------------------------
 
 
@@ -1177,23 +1282,18 @@ def evidence_ids_of(record: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def validate_plan_citations(
-    plan: Mapping[str, Any], known_evidence_ids: Collection[str]
-) -> list[str]:
-    """Every invalid citation in *plan*; empty means all citations resolve.
+def _iter_step_citations(plan: Mapping[str, Any]) -> Iterable[tuple[str, str]]:
+    """Every ``(step label, cited evidence id)`` pair in *plan*, in order.
 
     Steps cite evidence as ``evidence:<id>`` in step text; dict-shaped
     steps (the :class:`~forge.adaptive.models.PlanStep` contract) may
-    additionally list bare ids in ``evidence_refs``. A citation that does
-    not resolve to a recorded evidence id is a violation naming the
-    step. UNCITED steps are fine — the contract requires valid
-    citations, not mandatory ones.
+    additionally list bare ids in ``evidence_refs``. Shared by the
+    id-resolution validator and the authority-binding validator, so the
+    two can never disagree about what a citation IS.
     """
-    known = set(known_evidence_ids)
     steps = plan.get("steps") if isinstance(plan, Mapping) else None
     if not isinstance(steps, list):
-        return []
-    violations: list[str] = []
+        return
     for index, step in enumerate(steps, start=1):
         label = f"step {index}"
         text = ""
@@ -1206,14 +1306,30 @@ def validate_plan_citations(
                     ref_id = str(ref)
                     if ref_id.startswith("evidence:"):
                         ref_id = ref_id[len("evidence:") :]
-                    if ref_id not in known:
-                        violations.append(f"{label}: unknown evidence id {ref_id!r}")
+                    yield label, ref_id
         elif isinstance(step, str):
             text = step
         for cited in extract_citations(text):
-            if cited not in known:
-                violations.append(f"{label}: unknown evidence id {cited!r}")
-    return violations
+            yield label, cited
+
+
+def validate_plan_citations(
+    plan: Mapping[str, Any], known_evidence_ids: Collection[str]
+) -> list[str]:
+    """Every invalid citation in *plan*; empty means all citations resolve.
+
+    The RESOLUTION half of NXT-06: a citation that does not resolve to a
+    recorded evidence id is a violation naming the step. UNCITED steps
+    are fine — the contract requires valid citations, not mandatory ones.
+    Use :func:`validate_citations_against_snapshot` for the AUTHORITY
+    half (repository/OID/tree/line binding), which subsumes this check.
+    """
+    known = set(known_evidence_ids)
+    return [
+        f"{label}: unknown evidence id {cited!r}"
+        for label, cited in _iter_step_citations(plan)
+        if cited not in known
+    ]
 
 
 def enforce_plan_citations(plan: Mapping[str, Any], known_evidence_ids: Collection[str]) -> None:
@@ -1226,6 +1342,157 @@ def enforce_plan_citations(plan: Mapping[str, Any], known_evidence_ids: Collecti
     if violations:
         raise InvalidPlanCitation(
             f"plan cites {len(violations)} unknown evidence id(s): {'; '.join(violations)}"
+        )
+
+
+@dataclass(frozen=True)
+class CitationAuthority:
+    """The record's OWN authorized snapshot binding (the rest of NXT-06).
+
+    A resolved evidence id is still not authority. The authority a
+    citation must answer to is the discovery record's OWN binding — the
+    repository/OID the dispatch resolved BEFORE any probe ran, plus the
+    snapshot tree recorded at read time (``path -> {lines, digest}``,
+    hashing back to the dispatch's ``snapshot_set_digest``). Built from
+    the DURABLE record by :meth:`of_record`; every field of a real
+    record's binding is verified, so a missing dispatch, a missing tree,
+    or a tree that does not hash to the authorized digest leaves an
+    authority that REFUSES everything (fail closed, never a guess).
+    """
+
+    repository_id: str
+    source_oid: str
+    tree: Mapping[str, Mapping[str, Any]]
+    authorized_set_digest: str
+
+    @classmethod
+    def of_record(cls, record: Mapping[str, Any]) -> CitationAuthority:
+        """Read the binding out of a persisted discovery record.
+
+        Malformed pieces become EMPTY/refusal values (``""``,
+        ``{}``) — the resulting authority's :meth:`binding_violations`
+        then rejects every citation with the naming reason, instead of
+        the validator crashing or, worse, skipping the check.
+        """
+        dispatch = record.get("dispatch") if isinstance(record, Mapping) else None
+        dispatch = dispatch if isinstance(dispatch, Mapping) else {}
+        tree_entry = record.get("snapshot_tree")
+        tree_entry = tree_entry if isinstance(tree_entry, Mapping) else {}
+        files = tree_entry.get("files")
+        tree = {str(path): entry for path, entry in (files or {}).items() if isinstance(entry, Mapping)}
+        return cls(
+            repository_id=str(dispatch.get("repository_id") or ""),
+            source_oid=str(dispatch.get("source_oid") or ""),
+            tree=tree,
+            authorized_set_digest=str(dispatch.get("snapshot_set_digest") or ""),
+        )
+
+    @property
+    def consistent(self) -> bool:
+        """Whether the recorded tree IS the authorized snapshot.
+
+        The tree's per-path digests re-derive the dispatch's
+        ``snapshot_set_digest`` (:func:`snapshot_tree_digest`); a record
+        whose tree hashes elsewhere is not mis-parsed — it is a binding
+        nobody authorized, and citations checked against it fail closed.
+        """
+        if not self.repository_id or not self.source_oid or not self.tree:
+            return False
+        return bool(self.authorized_set_digest) and (
+            snapshot_tree_digest(self.tree) == self.authorized_set_digest
+        )
+
+    def binding_violations(self, entry: Mapping[str, Any]) -> list[str]:
+        """Why *entry*'s provenance does NOT answer to this authority.
+
+        Empty means the entry is bound to THIS authority's repository and
+        OID, its path is inside the recorded tree, and its line falls
+        within the file's recorded 1-based line range (boundaries exact).
+        """
+        if not self.repository_id:
+            return ["the record carries no dispatch repository_id to bind citations to"]
+        if not self.source_oid:
+            return ["the record carries no dispatch source_oid to bind citations to"]
+        if not self.tree:
+            return ["the record carries no snapshot tree to bound citations by"]
+        if not self.consistent:
+            return [
+                "the record's snapshot tree does not hash to the dispatch's authorized "
+                "snapshot_set_digest — the tree is not the authorized snapshot"
+            ]
+        violations: list[str] = []
+        entry_repo = str(entry.get("repository_id") or "")
+        if entry_repo != self.repository_id:
+            violations.append(
+                f"cross-repository: evidence is bound to {entry_repo!r}, not this "
+                f"discovery's {self.repository_id!r}"
+            )
+        entry_oid = str(entry.get("source_oid") or "")
+        if entry_oid != self.source_oid:
+            violations.append(
+                f"stale OID: evidence is bound to {entry_oid!r}, not this discovery's "
+                f"{self.source_oid!r}"
+            )
+        path = str(entry.get("path") or "")
+        bounds = self.tree.get(path)
+        if bounds is None:
+            violations.append(
+                f"path {path!r} is not inside the snapshot's recorded tree for "
+                f"{self.repository_id!r}@{self.source_oid!r}"
+            )
+            return violations
+        line = int(entry.get("line") or 0)
+        lines = int(bounds.get("lines") or 0)
+        if line < 1 or line > lines:
+            violations.append(
+                f"line {line} is outside {path!r}'s recorded range 1..{lines}"
+            )
+        return violations
+
+
+def validate_citations_against_snapshot(
+    plan: Mapping[str, Any], record: Mapping[str, Any]
+) -> list[str]:
+    """Every citation in *plan* that the record's OWN binding refuses.
+
+    The AUTHORITY half of NXT-06, subsuming resolution: each cited
+    ``evidence:<id>`` must (1) resolve to an entry in THIS record's
+    evidence and (2) be bound to the record's OWN authorized snapshot —
+    the dispatch's repository/OID and the recorded tree. Cross-repo
+    entries, stale-OID entries, paths outside the recorded tree, and
+    lines outside the file's recorded 1..N range are all violations
+    naming the step; an inconsistent or missing binding refuses every
+    citation (fail closed). Uncited steps stay allowed.
+    """
+    entries: dict[str, Mapping[str, Any]] = {
+        str(entry.get("id")): entry
+        for entry in (record.get("evidence") or [])
+        if isinstance(entry, Mapping) and entry.get("id")
+    }
+    authority = CitationAuthority.of_record(record)
+    violations: list[str] = []
+    for label, cited in _iter_step_citations(plan):
+        entry = entries.get(cited)
+        if entry is None:
+            violations.append(f"{label}: unknown evidence id {cited!r}")
+            continue
+        for reason in authority.binding_violations(entry):
+            violations.append(f"{label}: evidence {cited!r} {reason}")
+    return violations
+
+
+def enforce_citations_against_snapshot(plan: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+    """Fail-closed authority binding: an unbound citation REJECTS the plan.
+
+    The plan-parse seam's strict gate: the planner's JSON is accepted
+    only when every citation both resolves AND answers to the record's
+    own authorized snapshot binding.
+    """
+    violations = validate_citations_against_snapshot(plan, record)
+    if violations:
+        raise InvalidPlanCitation(
+            f"plan carries {len(violations)} citation(s) outside the authorized "
+            f"snapshot binding: {'; '.join(violations)}"
         )
 
 

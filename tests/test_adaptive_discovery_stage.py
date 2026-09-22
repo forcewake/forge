@@ -14,7 +14,11 @@ These tests pin the integration slice's behavior:
 - failure is loud: a failed discovery never silently falls back;
 - the NXT-06 citation contract: ``evidence:<id>`` citations validated
   against the durable record's evidence ids — invalid citations reject
-  the plan, uncited claims stay allowed;
+  the plan, uncited claims stay allowed — and, beyond resolution, each
+  citation's AUTHORITY binding: the record's own dispatch
+  repository/OID plus the recorded snapshot tree bound every cited
+  file:line, so cross-repo entries, stale OIDs, out-of-tree paths and
+  out-of-range lines all fail closed;
 - the NXT-07 answer gate: persisted clarification questions refuse
   planning with a typed :class:`QuestionsOutstanding` until every
   question id has a durably recorded answer; answers arrive through the
@@ -47,6 +51,8 @@ from forge.adaptive.discovery_stage import (
     DIGEST_END,
     FORGE_DISCOVERY_ENABLED_ENV,
     PLANNER_INPUT_CAP_CHARS,
+    SNAPSHOT_TREE_SCHEMA,
+    CitationAuthority,
     DiscoveryRunContext,
     DiscoveryStageError,
     InvalidPlanCitation,
@@ -56,6 +62,7 @@ from forge.adaptive.discovery_stage import (
     apply_answer_command,
     apply_answer_commands,
     discovery_enabled,
+    enforce_citations_against_snapshot,
     enforce_plan_citations,
     extract_citations,
     extract_keywords,
@@ -71,6 +78,9 @@ from forge.adaptive.discovery_stage import (
     render_digest_section,
     run_discovery_stage,
     snapshot_set_digest,
+    snapshot_tree_digest,
+    snapshot_tree_of,
+    validate_citations_against_snapshot,
     validate_plan_citations,
 )
 from forge.adaptive.wiring import OperatorControlService
@@ -114,6 +124,29 @@ class FakeReader:
     async def read_text(self, file_path: str, ref: str = "HEAD") -> str:
         self.text_reads.append(file_path)
         return self._files[file_path]
+
+
+class FakeGitLabShapedReader:
+    """The GitLab client's read shape: ``get_tree`` + base64 ``get_file``
+    records and NO ``read_text`` — the fallback leg of the snapshot seam."""
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = files
+        self.file_reads: list[str] = []
+
+    async def get_tree(
+        self, project_id: int, path: str = "", ref: str = "HEAD", recursive: bool = False
+    ) -> list:
+        return [SimpleNamespace(path=p, type="blob") for p in sorted(self._files)]
+
+    async def get_file(self, project_id: int, file_path: str, ref: str = "HEAD"):
+        self.file_reads.append(file_path)
+        import base64
+
+        return SimpleNamespace(
+            content=base64.b64encode(self._files[file_path].encode("utf-8")).decode("ascii"),
+            encoding="base64",
+        )
 
 
 async def _new_process(db_path: Path) -> tuple[async_sessionmaker[AsyncSession], AsyncEngine]:
@@ -608,6 +641,203 @@ class TestCitations:
                 enforce_plan_citations(bad, known)
         finally:
             await engine.dispose()
+
+
+class TestCitationAuthorityBinding:
+    """NXT-06's remaining scope: provenance VERIFIED against the record's
+    OWN authorized snapshot binding, not just id existence."""
+
+    def _bound_record(
+        self,
+        files: dict[str, str],
+        entries: list[dict],
+        *,
+        repository_id: str = "example/repo",
+        source_oid: str = "f" * 40,
+    ) -> dict:
+        """A record whose dispatch and recorded tree are mutually consistent."""
+        return {
+            "discovery_id": "disc-bound",
+            "run_id": RUN_ID,
+            "status": "complete",
+            "dispatch": {
+                "repository_id": repository_id,
+                "source_oid": source_oid,
+                "snapshot_set_digest": snapshot_set_digest(files),
+            },
+            "snapshot_tree": {"schema": SNAPSHOT_TREE_SCHEMA, "files": snapshot_tree_of(files)},
+            "evidence": entries,
+        }
+
+    def _entry(self, evidence_id: str, path: str, line: int, **overrides) -> dict:
+        entry = {
+            "id": evidence_id,
+            "path": path,
+            "line": line,
+            "kind": "symbol",
+            "detail": "d",
+            "repository_id": "example/repo",
+            "source_oid": "f" * 40,
+            "content_digest": "0" * 64,
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_cross_repo_citation_is_invalid(self):
+        files = {"src/a.py": "one\ntwo\n"}
+        record = self._bound_record(files, [self._entry("ev-1", "src/a.py", 1)])
+        record["evidence"][0]["repository_id"] = "other/org:other/repo"
+        plan = {"steps": ["work per evidence:ev-1"]}
+        violations = validate_citations_against_snapshot(plan, record)
+        assert len(violations) == 1
+        assert "cross-repository" in violations[0]
+        assert "other/org:other/repo" in violations[0]
+        with pytest.raises(InvalidPlanCitation, match="cross-repository"):
+            enforce_citations_against_snapshot(plan, record)
+
+    def test_stale_oid_citation_is_invalid(self):
+        files = {"src/a.py": "one\ntwo\n"}
+        record = self._bound_record(files, [self._entry("ev-1", "src/a.py", 1)])
+        record["evidence"][0]["source_oid"] = "0" * 40  # a different commit
+        plan = {"steps": [{"step_id": "s1", "objective": "work per evidence:ev-1"}]}
+        violations = validate_citations_against_snapshot(plan, record)
+        assert len(violations) == 1
+        assert "stale OID" in violations[0]
+        with pytest.raises(InvalidPlanCitation, match="stale OID"):
+            enforce_citations_against_snapshot(plan, record)
+
+    def test_in_range_citations_are_valid(self):
+        files = {"src/a.py": "one\ntwo\nthree\n", "src/b.py": "alpha\nbeta\n"}
+        record = self._bound_record(
+            files,
+            [
+                self._entry("ev-1", "src/a.py", 1),
+                self._entry("ev-2", "src/a.py", 3),  # the file's last line
+                self._entry("ev-3", "src/b.py", 2),
+            ],
+        )
+        plan = {
+            "steps": [
+                "first per evidence:ev-1 and evidence:ev-3",
+                {"step_id": "s2", "objective": "last line per evidence:ev-2", "evidence_refs": ["ev-2"]},
+            ]
+        }
+        assert validate_citations_against_snapshot(plan, record) == []
+        enforce_citations_against_snapshot(plan, record)  # does not raise
+
+    def test_boundary_lines_are_exact(self):
+        # 3 lines WITHOUT a trailing newline: splitlines counts 3.
+        files = {"src/tiny.py": "alpha\nbeta\ngamma"}
+        record = self._bound_record(
+            files,
+            [
+                self._entry("ev-first", "src/tiny.py", 1),
+                self._entry("ev-last", "src/tiny.py", 3),
+                self._entry("ev-over", "src/tiny.py", 4),
+                self._entry("ev-zero", "src/tiny.py", 0),
+            ],
+        )
+        ok = {"steps": ["per evidence:ev-first then evidence:ev-last"]}
+        assert validate_citations_against_snapshot(ok, record) == []
+
+        over = {"steps": ["per evidence:ev-over"]}
+        violations = validate_citations_against_snapshot(over, record)
+        assert len(violations) == 1
+        assert "line 4 is outside 'src/tiny.py''s recorded range 1..3" in violations[0]
+
+        zero = {"steps": ["per evidence:ev-zero"]}
+        violations = validate_citations_against_snapshot(zero, record)
+        assert len(violations) == 1
+        assert "line 0 is outside" in violations[0]
+
+    def test_path_outside_the_recorded_tree_is_invalid(self):
+        files = {"src/a.py": "one\n"}
+        record = self._bound_record(files, [self._entry("ev-1", "elsewhere/x.py", 1)])
+        plan = {"steps": ["work per evidence:ev-1"]}
+        violations = validate_citations_against_snapshot(plan, record)
+        assert len(violations) == 1
+        assert "not inside the snapshot's recorded tree" in violations[0]
+        with pytest.raises(InvalidPlanCitation):
+            enforce_citations_against_snapshot(plan, record)
+
+    def test_a_tree_that_does_not_hash_to_the_authorization_refuses_citations(self):
+        files = {"src/a.py": "one\ntwo\n"}
+        record = self._bound_record(files, [self._entry("ev-1", "src/a.py", 1)])
+        record["snapshot_tree"]["files"]["src/a.py"]["digest"] = "f" * 64  # not sha256("one\n")
+        assert CitationAuthority.of_record(record).consistent is False
+        plan = {"steps": ["work per evidence:ev-1"]}
+        violations = validate_citations_against_snapshot(plan, record)
+        assert len(violations) == 1
+        assert "does not hash to the dispatch's authorized snapshot_set_digest" in violations[0]
+        with pytest.raises(InvalidPlanCitation):
+            enforce_citations_against_snapshot(plan, record)
+
+    def test_a_record_without_a_binding_fails_closed(self):
+        record = {"evidence": [self._entry("ev-1", "src/a.py", 1)]}  # no dispatch, no tree
+        plan = {"steps": ["work per evidence:ev-1"]}
+        violations = validate_citations_against_snapshot(plan, record)
+        assert violations == [
+            "step 1: evidence 'ev-1' the record carries no dispatch repository_id to bind "
+            "citations to"
+        ]
+        with pytest.raises(InvalidPlanCitation):
+            enforce_citations_against_snapshot(plan, record)
+
+    def test_unknown_ids_are_still_invalid_under_the_binding_validator(self):
+        files = {"src/a.py": "one\n"}
+        record = self._bound_record(files, [self._entry("ev-1", "src/a.py", 1)])
+        plan = {"steps": ["work per evidence:ev-404"]}
+        assert validate_citations_against_snapshot(plan, record) == [
+            "step 1: unknown evidence id 'ev-404'"
+        ]
+
+    async def test_the_real_stage_records_a_tree_that_hashes_to_the_authorization(
+        self, tmp_path, monkeypatch
+    ):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            outcome = await run_discovery_stage(_ctx(factory), PLANNER_INPUT)
+            record = await _discovery_record(factory)
+            tree = record["snapshot_tree"]
+            assert tree["schema"] == SNAPSHOT_TREE_SCHEMA
+            assert set(tree["files"]) == set(FILES)
+            for path, content in FILES.items():
+                assert tree["files"][path]["lines"] == len(content.splitlines())
+            assert snapshot_tree_digest(tree["files"]) == record["dispatch"]["snapshot_set_digest"]
+            assert CitationAuthority.of_record(record).consistent is True
+
+            # every recorded citation is valid against the record's OWN binding
+            plan = {"steps": [f"work per evidence:{eid}" for eid in outcome.evidence_ids]}
+            assert validate_citations_against_snapshot(plan, record) == []
+            enforce_citations_against_snapshot(plan, record)  # does not raise
+        finally:
+            await engine.dispose()
+
+    async def test_a_waiting_record_carries_the_binding_too(self, tmp_path, monkeypatch):
+        _enabled(monkeypatch)
+        factory, engine = await _new_process(tmp_path / "runs.db")
+        await _seed_run(factory)
+        try:
+            with pytest.raises(QuestionsOutstanding):
+                await maybe_run_discovery(
+                    _ctx(factory, questions=_question_source(
+                        {"text": "which way?", "criticality": "critical", "citations": []}
+                    )),
+                    PLANNER_INPUT,
+                )
+            record = await _discovery_record(factory)
+            assert record["snapshot_tree"]["schema"] == SNAPSHOT_TREE_SCHEMA
+            assert CitationAuthority.of_record(record).consistent is True
+        finally:
+            await engine.dispose()
+
+    async def test_gitlab_shaped_reader_satisfies_the_snapshot_seam(self):
+        reader = FakeGitLabShapedReader(FILES)
+        files = await load_snapshot_files(reader, 1, "main")
+        assert files == FILES  # decoded through the get_file base64 shape
+        assert sorted(reader.file_reads) == sorted(FILES)
 
 
 class TestHelpers:
