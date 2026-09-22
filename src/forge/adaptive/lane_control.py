@@ -701,7 +701,14 @@ class LaneSteeringSession:
             self._pause = send_interrupt(self._pause)
             self._pause = drain_turn(self._pause, cooperative=True, capture=self._capture)
             detail["pause"] = "interrupt-sent"
+            detail["pause_status"] = self._pause.pause_status
             detail["wip_artifact_id"] = self._pause.wip_artifact_id
+            if self._pause.checkpoint_receipt is not None:
+                detail["checkpoint_receipt"] = {
+                    "checkpoint_id": getattr(self._pause.checkpoint_receipt, "checkpoint_id", None),
+                    "verified": getattr(self._pause.checkpoint_receipt, "verified", None),
+                    "remote_ref": getattr(self._pause.checkpoint_receipt, "remote_ref", ""),
+                }
             # NXT-14: queued guidance is RETAINED explicitly when an
             # urgent control wins — never silently dropped nor lost in
             # ordering; the resume turn carries it.
