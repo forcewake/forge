@@ -60,3 +60,17 @@ episode timings (turn 211s). Live-found en route: SecretStr str() is
 the MASK not the value (get_secret_value); FORGE_RUN_ID needed on the
 DRIVER step too; emit-meta rebuilt the v2 dict and dropped the journal
 (sidecar pass-through now).
+
+## WAVE C — /pause + verified checkpoint LIVE (2026-09-22, run 88385ca7)
+
+/pause from the issue → the same inbound chain → the lane's steering
+drain runs the REAL checkpoint transaction: interrupt acknowledged
+(3ms) → cooperative capture (git tracked baseline + content-addressed
+local store) → upload through /lane/checkpoints (the lane's work-
+scoped token — the shared secret NEVER enters the lane job) →
+pause_status=paused, receipt verified=true, remote_ref mounted.
+Server-side: GET /lane/checkpoints/<work> → 200, 124 digest-verified
+blobs stored. En-route live-found (each fixed): the upload channel
+must be a WipUploadChannel PROTOCOL object (a bare function lacks
+.upload_checkpoint); a work-scoped token must satisfy the channel's
+config check (requiring BOTH it and the secret contradicts EXE-04).
