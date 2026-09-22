@@ -281,7 +281,7 @@ jobs:
           # no steering attach to feed. Both empty → the lane honestly
           # stays on its local mailbox.
           FORGE_LANE_CONTROL_URL: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && vars.FORGE_LANE_CONTROL_URL || '' }}
-          FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && secrets.FORGE_LANE_CONTROL_TOKEN || '' }}
+          FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && inputs.lane_control_token || '' }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):

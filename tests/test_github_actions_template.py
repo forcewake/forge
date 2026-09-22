@@ -298,8 +298,10 @@ class TestDriverCredentialGating:
         assert "XAI_API_KEY" not in MIRROR.read_text()
         assert template_lines == mirror_lines
         assert (
-            len(template_lines) == 10
+            len(template_lines) == 9
         )  # 3 anthropic + zai + grok + copilot + 3 codex + opencode-sdk
+        # (the lane-control TOKEN line no longer matches: it reads the
+        # dispatch INPUT, not a repo secret — per-work HMAC, NXT-10)
         # ... + the sdk lanes' work-scoped lane control token (NXT-10)
 
 
@@ -394,9 +396,14 @@ class TestLaneControlEnv:
                 # steering attach to feed
                 for lane in ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane"):
                     assert f"inputs.driver == '{lane}'" in line, (path, name, lane)
-            # the URL is a repo VARIABLE, the token a repo SECRET
+            # the URL is a repo VARIABLE; the token is the DISPATCH
+            # INPUT (the per-work HMAC — a static repo secret cannot be
+            # per-work, NXT-10).
             assert "vars.FORGE_LANE_CONTROL_URL" in env["FORGE_LANE_CONTROL_URL"]
-            assert "secrets.FORGE_LANE_CONTROL_TOKEN" in env["FORGE_LANE_CONTROL_TOKEN"]
+            assert "inputs.lane_control_token" in env["FORGE_LANE_CONTROL_TOKEN"]
+            # gated to the sdk lanes like the URL
+            for lane in ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane"):
+                assert f"inputs.driver == '{lane}'" in env["FORGE_LANE_CONTROL_TOKEN"]
 
     def test_the_steering_switch_reaches_the_driver_step(self):
         for path in (TEMPLATE, MIRROR):

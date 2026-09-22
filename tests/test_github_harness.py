@@ -241,6 +241,8 @@ class TestGoDispatchesHarness:
             "plan_note_id": str(plan_comment["id"]),
             "envelope_digest": envelope["envelope_digest"],
             "spec_digest": run.spec_digest,
+            # NXT-10: the per-work HMAC — empty with no secret configured.
+            "lane_control_token": "",
         }
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []

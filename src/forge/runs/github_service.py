@@ -2808,6 +2808,12 @@ class GitHubRunService:
                 handle,
                 inputs={
                     "run_id": run_id,
+                    # NXT-10/11: the per-work lane-control token — HMAC of
+                    # this run id under FORGE_LANE_CONTROL_SECRET (the server
+                    # side verifies exactly this). Computed by the DISPATCH,
+                    # never stored; empty when no secret is configured (the
+                    # lane's steering channel stays off, fail-closed).
+                    "lane_control_token": self._lane_control_token(run_id),
                     # R04/A02: the model input is the route frozen in the
                     # spec — the gate approved exactly this execution shape.
                     "model": spec.harness_model,
@@ -4450,6 +4456,15 @@ class GitHubRunService:
             f"- Approve it: `/go {run.id}`\n"
             f"- Cancel it first: `/cancel {run.id}`"
         )
+
+    def _lane_control_token(self, run_id: str) -> str:
+        """The per-work HMAC token for the lane control channel (or "")."""
+        secret = getattr(self._settings, "FORGE_LANE_CONTROL_SECRET", None)
+        if not secret:
+            return ""
+        from forge.api_lane_control import lane_control_token
+
+        return lane_control_token(str(secret), run_id)
 
     def _approvers(self) -> list[str]:
         """The trusted approver list (GitHub logins, connection-scoped).
