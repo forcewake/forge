@@ -169,6 +169,9 @@ jobs:
           # NXT-11: the lane attaches the steering session when enabled —
           # rides the workflow's env (a repo VARIABLE can override).
           FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
+          # The steering attach scopes to the work id (FORGE_RUN_ID —
+          # the same id the control plane books commands under).
+          FORGE_RUN_ID: ${{ inputs.run_id }}
           FORGE_WORK_ID: ${{ inputs.run_id }}
           # Bounded verification-failure context on a repair re-dispatch
           # (empty on cycle 1).
@@ -278,6 +281,9 @@ jobs:
           # step is the process that attaches the steering session; the
           # brief step's copy above does not cross step boundaries).
           FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
+          # The steering attach scopes to the work id (FORGE_RUN_ID —
+          # the same id the control plane books commands under).
+          FORGE_RUN_ID: ${{ inputs.run_id }}
           # NXT-10 outbound leg (EXE-04 — the lane dials OUT, no inbound
           # listener): the control-plane URL is a repo VARIABLE; the TOKEN
           # is the work-scoped lane credential HMAC(run-id) the dispatch
