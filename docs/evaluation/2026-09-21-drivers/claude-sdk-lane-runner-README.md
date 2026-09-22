@@ -30,3 +30,16 @@ Live-found en route (all fixed): #154 eternal-preflight (broad handler +
 honest /go-while-preflight reply); GitHub /go prefix resolution; the
 claude-sdk-lane harness_entry arm + its SDK install (the bootstrap's
 forge install carries no extras).
+
+## Adaptive control LIVE (2026-09-22, run 0f586216 — issue #86)
+
+The operator-command half of the control chain verified live: `/steer
+<run-id> <guidance>` posted as a GitHub issue comment → authenticated
+ingress (app on FORGE_ADAPTIVE_COMMANDS_ENABLED=1) → ControlCommandRouter
+(approver gate, run resolution) → **PostgresMailbox row (steer/received,
+work-scoped)** — the durable control_commands table holds the command.
+The lane-side REMOTE consumer (outbound lane-control API + in-job poller)
+is the last assembly slice (agent dispatched). En-route live findings:
+env-file line gluing strikes twice (HOME=...FORGE_ADAPTIVE — always
+terminate env files with a newline before appending); the ingress flags
+must ride the APP container, not only the worker.
