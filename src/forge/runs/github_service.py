@@ -4464,7 +4464,12 @@ class GitHubRunService:
             return ""
         from forge.api_lane_control import lane_control_token
 
-        return lane_control_token(str(secret), run_id)
+        # SecretStr: str() is "**********" — the masked repr, NEVER the
+        # value (LIVE-found: the dispatched token never matched the API's
+        # HMAC because both sides hashed DIFFERENT literals of the same
+        # secret). get_secret_value() is the value.
+        raw = secret.get_secret_value() if hasattr(secret, "get_secret_value") else str(secret)
+        return lane_control_token(raw, run_id)
 
     def _approvers(self) -> list[str]:
         """The trusted approver list (GitHub logins, connection-scoped).
