@@ -306,7 +306,15 @@ def capture_wip(
 
     files: dict[str, dict[str, object]] = {}
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if not (Path(dirpath) / name).is_symlink())
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if not (Path(dirpath) / name).is_symlink()
+            # LIVE-found (wave D): .git internals are runner infrastructure
+            # (read-only pack files Permission-denied on restore), never WIP.
+            # The agent's work tree excludes them; the checkpoint must too.
+            and name != ".git"
+        )
         for name in sorted(filenames):
             path = Path(dirpath) / name
             if path.is_symlink():
