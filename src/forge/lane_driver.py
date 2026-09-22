@@ -1124,6 +1124,17 @@ def write_artifacts(
     meta_file = Path(meta_path)
     meta_file.parent.mkdir(parents=True, exist_ok=True)
     meta_file.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    # The Actions emit step rebuilds the v2 meta from scratch — the journal
+    # and episode ride this sidecar so harness_entry can pass them through.
+    extras: dict[str, Any] = {}
+    if outcome.steering_journal is not None:
+        extras["steering_journal"] = outcome.steering_journal
+    if outcome.episode is not None:
+        extras["episode"] = outcome.episode
+    if extras:
+        meta_file.parent.joinpath("steering.json").write_text(
+            json.dumps(extras, indent=2, sort_keys=True) + "\n"
+        )
     usage_file = Path(usage_path)
     usage_file.parent.mkdir(parents=True, exist_ok=True)
     usage_file.write_text(json.dumps(outcome.usage, indent=2, sort_keys=True) + "\n")

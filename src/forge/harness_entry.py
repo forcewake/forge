@@ -1269,6 +1269,23 @@ def emit_candidate_meta(
         "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
         "usage": _load_json_object(Path(usage_file)),
         "profile_digest": str(profile_digest or "").strip().lower(),
+        # NXT-11: the lane runner's steering journal + episode timing ride
+        # the meta (additive — ABSENT when the lane ran with steering off).
+        # The lane_driver writes them to .forge/steering.json; the emit step
+        # passes them through UNTOUCHED (LIVE-found: the v2 meta rebuilt the
+        # dict from scratch and dropped both keys on every SDK-lane run).
+        **(
+            {"steering_journal": lane_extras["steering_journal"]}
+            if (lane_extras := _load_json_object(Path(".forge/steering.json")) or {}).get(
+                "steering_journal"
+            )
+            else {}
+        ),
+        **(
+            {"episode": lane_extras["episode"]}
+            if lane_extras.get("episode")
+            else {}
+        ),
         # B12: the OBSERVED execution — what this lane actually did. The
         # declared profile (digest above) is allowance/expectation; a
         # command being allowed is not evidence it ran. Additive v2 field.
