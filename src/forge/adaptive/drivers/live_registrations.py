@@ -42,13 +42,17 @@ from pathlib import Path
 from forge.adaptive.adapters import DriverMatrix, SDKS
 
 __all__ = [
+    "DRIVER_SDK_OF",
     "LIVE_OBSERVED_CAPABILITIES",
     "LIVE_REGISTRATIONS",
     "LiveRegistration",
     "OBSERVED_CAPABILITY_VALUES",
     "ObservedCapabilities",
+    "RegistrationVerdict",
     "install_pin_of",
     "observed_capabilities",
+    "provenance_report",
+    "registration_verdict",
     "sdk_version_of",
     "seed_live_matrix",
 ]
@@ -343,3 +347,194 @@ def install_pin_of(sdk: str) -> str | None:
         if row.sdk == sdk:
             return row.install_pin
     return None
+
+
+# ---------------------------------------------------------------------------
+# R28-26 — exact-binary provenance: what the dispatch DECLARED, what the
+# registration VERIFIED, what the runner ACTUALLY INSTALLED.
+# ---------------------------------------------------------------------------
+
+#: harness driver id → the registration sdk whose ``verified_against[0]``
+#: recorded the binary this lane's CLI was last LIVE-verified as. The
+#: scripted ``claude-code`` lane installs the same
+#: ``@anthropic-ai/claude-code`` binary the ``claude-sdk`` registration
+#: verified; grok-build and copilot have no live registration yet — they
+#: are absent, which reads as ``unregistered`` (the honest non-claim),
+#: never as a silently inherited verdict.
+DRIVER_SDK_OF: Mapping[str, str] = {
+    "claude-code": "claude-sdk",
+    "claude-sdk-lane": "claude-sdk",
+    "codex-sdk-lane": "codex-app",
+    "opencode": "opencode-server",
+    "opencode-sdk-lane": "opencode-server",
+}
+
+
+@dataclass(frozen=True)
+class RegistrationVerdict:
+    """The present-tense comparison of ONE lane binary against its registration.
+
+    The evidence-matrix doctrine, executable: ``recorded`` is the PAST
+    (the exact ``--version`` string the smoke verified), ``installed``
+    is the PRESENT (the exact string the runner reported), and the
+    ``status`` never conflates them — ``match``, ``drift``, or
+    ``unknown_present`` when the runner did not report a version. A
+    drift carries a ``warning`` (the lane keeps running — the
+    registration is evidence, not a gate) naming BOTH versions and the
+    remedy: re-run ``scripts/driver_live_smoke.py`` on the new binary.
+    """
+
+    driver: str
+    sdk: str
+    recorded: str
+    installed: str
+    status: str
+    warning: str
+
+
+def registration_verdict(driver: str, installed_cli_version: str) -> RegistrationVerdict | None:
+    """Compare one lane driver's ACTUAL binary against its live registration.
+
+    ``None`` for a driver no registration covers (``DRIVER_SDK_OF`` has
+    no entry, or the sdk has no registration row): no registration, no
+    verdict — an unregistered driver is reported by
+    :func:`provenance_report` as exactly that, never as a match
+    inherited from a sibling sdk.
+    """
+    sdk = DRIVER_SDK_OF.get(driver)
+    if sdk is None:
+        return None
+    recorded = sdk_version_of(sdk)
+    if recorded is None:
+        return None
+    installed = str(installed_cli_version or "").strip()
+    if not installed:
+        return RegistrationVerdict(
+            driver,
+            sdk,
+            recorded,
+            "",
+            "unknown_present",
+            f"{driver}: the runner did not report the installed CLI version"
+            f" ({sdk} was verified against {recorded!r}) — the present tense"
+            " of this lane's binary is unknown",
+        )
+    if installed == recorded:
+        return RegistrationVerdict(driver, sdk, recorded, installed, "match", "")
+    return RegistrationVerdict(
+        driver,
+        sdk,
+        recorded,
+        installed,
+        "drift",
+        f"{driver}: live registration verified {sdk} against {recorded!r} but the"
+        f" runner installed {installed!r} — the registration is evidence of the"
+        " PAST, not a claim about this binary; re-run"
+        " scripts/driver_live_smoke.py on the installed version before"
+        " promoting a recipe that cites it",
+    )
+
+
+def _pin_satisfied(declared_pin: str, installed_cli_version: str) -> bool | None:
+    """Whether the declared pin plausibly produced the installed version.
+
+    ``None`` is the honest non-answer: an unknown pin, an unreported
+    install, or the literal ``latest`` (an unpinned install makes no
+    exactness claim to check). Otherwise the pin must appear in the
+    installed ``--version`` string (the same containment the
+    observation rows' ``install_pin``/``binary_version`` pair uses).
+    """
+    pin = str(declared_pin or "").strip()
+    installed = str(installed_cli_version or "").strip()
+    if not pin or not installed or pin == "latest":
+        return None
+    return pin in installed
+
+
+def provenance_report(
+    driver: str,
+    *,
+    installed_cli_version: str = "",
+    declared_pin: str | None = None,
+) -> dict[str, object]:
+    """Reconcile the THREE provenance sources for one lane driver (R28-26).
+
+    - what the DISPATCH declared — *declared_pin* (the resolved
+      ``FORGE_DRIVER_VERSIONS`` entry; the shipped
+      ``DEFAULT_DRIVER_VERSIONS`` table when not supplied);
+    - what the REGISTRATION verified — the newest live registration's
+      ``verified_against[0]`` for the driver's sdk;
+    - what the RUNNER actually installed — *installed_cli_version* (the
+      ``FORGE_DRIVER_FINGERPRINT`` the lane preamble reports).
+
+    Returns a JSON-shaped report (``driver``, ``sdk``, ``declared_pin``,
+    ``registration_verified``, ``registration_date``,
+    ``installed_cli_version``, ``pin_matches_install``,
+    ``registration_status`` — ``match``/``drift``/``unknown_present``/
+    ``unregistered`` — and ``warnings``). Warnings never gate: the
+    doctrine is that a registration is evidence of the PAST and the
+    fingerprint is the PRESENT, so a drift is SAID, loudly, while the
+    lane keeps running.
+    """
+    from forge.harnesses.script_render import DEFAULT_DRIVER_VERSIONS
+
+    pin = str(
+        declared_pin if declared_pin is not None else DEFAULT_DRIVER_VERSIONS.get(driver, "")
+    ).strip()
+    installed = str(installed_cli_version or "").strip()
+    warnings: list[str] = []
+
+    if not pin:
+        warnings.append(f"{driver}: no declared version pin — the install rides a default")
+    elif pin == "latest":
+        warnings.append(
+            f"{driver}: the dispatch declared the unpinned 'latest' dist-tag — the"
+            " installed binary is whatever the registry served, by design"
+        )
+    if not installed:
+        warnings.append(
+            f"{driver}: the runner did not report the installed CLI version —"
+            " provenance of the PRESENT is unknown"
+        )
+
+    verdict = registration_verdict(driver, installed)
+    if verdict is None:
+        sdk = DRIVER_SDK_OF.get(driver, "")
+        status = "unregistered"
+        recorded = ""
+        date = ""
+        if sdk:
+            warnings.append(
+                f"{driver}: no live registration covers sdk {sdk!r} — no past"
+                " verification to compare the installed binary against"
+            )
+        else:
+            warnings.append(
+                f"{driver}: no sdk mapping to a live registration — this driver's"
+                " binary has never been smoke-verified"
+            )
+    else:
+        sdk = verdict.sdk
+        status = verdict.status
+        recorded = verdict.recorded
+        date = next((entry.date for entry in LIVE_REGISTRATIONS if entry.sdk == verdict.sdk), "")
+        if verdict.warning:
+            warnings.append(verdict.warning)
+
+    matches = _pin_satisfied(pin, installed)
+    if matches is False:
+        warnings.append(
+            f"{driver}: the declared pin {pin!r} does not appear in the installed"
+            f" version string {installed!r} — the install is not what was dispatched"
+        )
+    return {
+        "driver": driver,
+        "sdk": sdk,
+        "declared_pin": pin,
+        "registration_verified": recorded,
+        "registration_date": date,
+        "installed_cli_version": installed,
+        "pin_matches_install": matches,
+        "registration_status": status,
+        "warnings": warnings,
+    }

@@ -534,3 +534,181 @@ class TestLaneDriverIntegration:
 
         assert rows and rows[-1]["type"] == "lane_control_error"
         assert "fetch failed" in rows[-1]["error"]
+
+
+# -- R28-11/R28-12: bounded control-plane I/O, never on the turn's loop -----------
+
+
+def _pause_cmd(seq: int, *, work_id: str = WORK) -> ControlCommand:
+    return _cmd(seq, work_id=work_id).model_copy(
+        update={"kind": "pause", "command_id": f"cmd-{seq}", "payload": {"run_id": work_id}}
+    )
+
+
+class RecordingPlane(FakeControlPlane):
+    """The plane that remembers WHICH command each ack belonged to."""
+
+    def __init__(self, *commands: ControlCommand) -> None:
+        super().__init__(*commands)
+        self.order: list[tuple[str, str]] = []
+
+    def _ack(self, request: httpx.Request) -> httpx.Response:
+        command_id = request.url.path.rsplit("/", 2)[-2]
+        body = json.loads(request.content.decode("utf-8"))
+        self.order.append((command_id, body["state"]))
+        return super()._ack(request)
+
+
+class TestBoundedControlPlaneIO:
+    def test_every_sync_round_trip_carries_the_ack_timeout_bound(
+        self, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """R28-11: the fetch and every ack POST are bounded by the channel's
+        own timeout — a slow API can hold one round trip at most that long."""
+        FakeControlPlane(_cmd(1)).mount(httpx_mock)
+        seen: dict[str, float] = {}
+        real_post, real_get = httpx.post, httpx.get
+
+        def spy_post(url: str, **kwargs: object) -> object:
+            seen["post"] = kwargs.get("timeout")  # type: ignore[assignment]
+            return real_post(url, **kwargs)  # type: ignore[arg-type]
+
+        def spy_get(url: str, **kwargs: object) -> object:
+            seen["get"] = kwargs.get("timeout")  # type: ignore[assignment]
+            return real_get(url, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(httpx, "post", spy_post)
+        monkeypatch.setattr(httpx, "get", spy_get)
+        ch = channel(ack_timeout=1.5)
+
+        ch.pending(WORK)  # the sync fetch fallback
+        ch.authorize("cmd-1", {})
+
+        assert seen == {"get": 1.5, "post": 1.5}
+
+
+class TestTheDrainNeverBlocksTheTurn:
+    def _session(self, ch: LaneControlChannel, client: FakeClaudeClient, **wait: float):
+        session = LaneSteeringSession(
+            service=ch.service(),
+            driver=ClaudeSDKAdapter(client),
+            driver_kind="claude",
+            run_id=WORK,
+            work_id=WORK,
+            **wait,
+        )
+        session.bind("sess-1")
+        ch.bind_vendor_session("sess-1")
+        return session
+
+    async def test_the_drain_completes_when_the_ack_endpoint_hangs(self, httpx_mock: HTTPXMock):
+        plane = FakeControlPlane(_cmd(1))
+        plane.mount_get(httpx_mock)
+        # every ack round trip dies on its own read timeout — the plane hung
+        httpx_mock.add_exception(
+            httpx.ReadTimeout("ack endpoint hung"), url=ACK_URL, is_reusable=True
+        )
+        client = FakeClaudeClient()
+        ch = channel(ack_timeout=0.2)
+        session = self._session(ch, client)
+
+        actions = await asyncio.wait_for(session.drain_once(), timeout=3.0)
+
+        # bounded: the drain COMPLETED, the command honestly refused (the
+        # gate never runs an effect it cannot prove), the vendor untouched
+        assert actions[0].outcome == "refused"
+        assert "stays in the mailbox" in actions[0].reason
+        assert client.calls == []
+        assert plane.statuses["cmd-1"] == "received"  # left for the reconciler
+        assert any("ack (authorized) failed" in row["error"] for row in ch.channel_journal)
+
+    async def test_a_hung_checkpoint_booking_never_holds_the_drain(self, httpx_mock: HTTPXMock):
+        plane = FakeControlPlane(_cmd(1))
+        plane.mount_get(httpx_mock)
+        import time as _time
+
+        def selective_ack(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8"))
+            if body["state"] == "checkpointed":
+                _time.sleep(0.4)  # the plane took the booking and went silent
+            return plane._ack(request)
+
+        httpx_mock.add_callback(selective_ack, url=ACK_URL, is_reusable=True)
+        client = FakeClaudeClient()
+        session = self._session(channel(ack_timeout=5.0), client, checkpoint_ack_wait=0.15)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        actions = await asyncio.wait_for(session.drain_once(), timeout=3.0)
+
+        # fire-and-forget (R28-11): the gate already decided and the vendor
+        # took the effect, so the drain never waits out the silent booking
+        assert loop.time() - started < 0.35
+        assert actions[0].outcome == "applied"
+        assert actions[0].detail["delivered"] == "mid-turn"
+        assert "not confirmed" in actions[0].detail["mailbox_status"]
+        assert client.calls == [("steer", "sess-1", "tighten retry bounds (1)")]
+
+    async def test_a_slow_control_plane_never_blocks_the_turns_event_loop(
+        self, httpx_mock: HTTPXMock
+    ):
+        """R28-12: the ack POSTs ride worker threads — the loop that drives
+        the vendor turn keeps its cadence while the plane is slow."""
+        import time as _time
+
+        plane = FakeControlPlane(_cmd(1))
+        plane.mount_get(httpx_mock)
+
+        def slow_ack(request: httpx.Request) -> httpx.Response:
+            _time.sleep(0.2)  # off the loop since the ack rides to_thread
+            return plane._ack(request)
+
+        httpx_mock.add_callback(slow_ack, url=ACK_URL, is_reusable=True)
+        client = FakeClaudeClient()
+        session = self._session(channel(ack_timeout=5.0), client)
+        loop = asyncio.get_running_loop()
+        beats: list[float] = []
+        done = asyncio.Event()
+        drain = asyncio.create_task(session.drain_once())
+
+        async def heartbeat() -> None:
+            while not done.is_set():
+                beats.append(loop.time())
+                await asyncio.sleep(0.01)
+
+        pacer = asyncio.create_task(heartbeat())
+        await asyncio.wait_for(drain, timeout=5.0)
+        done.set()
+        await pacer
+
+        # three ack round trips × 0.2s each: the drain was slow, and the
+        # loop beat straight through it — a blocking sync ack would leave
+        # one >= 0.2s hole in the cadence instead
+        assert len(beats) >= 10
+        gaps = [b - a for a, b in zip(beats, beats[1:])]
+        assert max(gaps) < 0.15, gaps
+        assert client.calls == [("steer", "sess-1", "tighten retry bounds (1)")]
+
+    async def test_an_urgent_pause_wins_the_cycle_over_a_slow_plane(self, httpx_mock: HTTPXMock):
+        """R28-11, over the remote leg: pause at the HIGHER sequence — its
+        gate round trips and its interrupt run before the steer's acks."""
+        import time as _time
+
+        plane = RecordingPlane(_cmd(1), _pause_cmd(2))
+        plane.mount_get(httpx_mock)
+
+        def slow_ack(request: httpx.Request) -> httpx.Response:
+            _time.sleep(0.05)
+            return plane._ack(request)
+
+        httpx_mock.add_callback(slow_ack, url=ACK_URL, is_reusable=True)
+        client = FakeClaudeClient()
+        session = self._session(channel(ack_timeout=5.0), client)
+
+        actions = await session.drain_once()
+
+        # the pause's ladder walk was the FIRST control-plane round trip
+        assert plane.order[0] == ("cmd-2", "authorized")
+        assert client.calls[0] == ("interrupt", "sess-1")
+        assert [action.kind for action in actions] == ["pause", "steer"]
+        assert actions[1].detail.get("queued_for_resume") is True

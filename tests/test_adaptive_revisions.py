@@ -992,3 +992,382 @@ class TestFreshSessionBrief:
         brief = fresh_session_brief(_contract(), _revision(_base_steps()), [], None)
         assert brief["checkpoint"] is None
         assert brief["decisions"] == []
+
+
+# ---------------------------------------------------------------------------
+# R28-18: the durable activation transaction + the /approve-revision ingress
+# ---------------------------------------------------------------------------
+
+
+class _DurableWorld:
+    """A sqlite-backed FlowRun evidence store for the activation transaction."""
+
+    def __init__(self, active: ActivePlanState) -> None:
+        self._initial = active
+        self.factory = None
+        self.run_id = "a" * 32
+
+    async def start(self) -> None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        from forge.durable import FlowRun
+        from forge.models.base import Base
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with self.factory() as session:
+            session.add(FlowRun(id=self.run_id, project_id=1, status="planning"))
+            await session.commit()
+        await self.set_active(self._initial)
+
+    async def set_active(self, active: ActivePlanState) -> None:
+        from forge.adaptive.revisions import ACTIVE_PLAN_KEY
+        from forge.durable import FlowRun
+
+        async with self.factory() as session:
+            run = await session.get(FlowRun, self.run_id)
+            merged = dict(run.evidence or {})
+            merged[ACTIVE_PLAN_KEY] = {
+                "work_id": active.work_id,
+                "plan_id": active.plan_id,
+                "active_revision": active.active_revision,
+                "work_contract_digest": active.work_contract_digest,
+                "authorization_epoch": active.authorization_epoch,
+                "publication_epoch": active.publication_epoch,
+            }
+            run.evidence = merged
+            await session.commit()
+
+    async def evidence(self) -> dict:
+        from forge.durable import FlowRun
+
+        async with self.factory() as session:
+            run = await session.get(FlowRun, self.run_id)
+            return dict(run.evidence or {})
+
+    async def outbox_events(self) -> list[tuple[str, dict]]:
+        from sqlalchemy import select
+
+        from forge.durable import Outbox
+
+        async with self.factory() as session:
+            rows = (await session.execute(select(Outbox))).scalars().all()
+        return [(row.event_type, dict(row.payload)) for row in rows]
+
+
+@pytest.fixture()
+async def durable(tmp_path):
+    world = _DurableWorld(_current())
+    await world.start()
+    return world
+
+
+class TestDurableActivation:
+    async def test_activation_is_one_durable_transaction(self, durable):
+        from forge.adaptive.revisions import (
+            ACTIVE_PLAN_KEY,
+            PENDING_PROPOSAL_KEY,
+            REVISION_ACTIVATIONS_KEY,
+            activate_pending_revision,
+            plan_digest,
+            read_active_plan,
+            stage_pending_revision,
+        )
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        staged_events = [
+            e for e in await durable.outbox_events() if e[0] == "revision.proposal_staged"
+        ]
+        assert staged_events, "staging journaled its outbox row"
+
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+        assert outcome.revision is not None and outcome.revision.revision == 2
+        evidence = await durable.evidence()
+        # 1. RECORD: the journal carries the activation keyed by decision id.
+        journal = evidence[REVISION_ACTIVATIONS_KEY]
+        assert decision.decision_id in journal
+        # 2. SWITCH: the durable active-plan pointer moved, with the digest
+        #    a late callback must be fenced against and the bumped epoch.
+        active = evidence[ACTIVE_PLAN_KEY]
+        assert active["active_revision"] == 2
+        assert active["plan_digest"] == plan_digest(proposed)
+        assert active["publication_epoch"] == _current().publication_epoch + 1
+        assert active["activated_by_decision"] == decision.decision_id
+        # 3. The pending slot is CONSUMED, and the dispatch leg reads the
+        #    durable record — not an in-memory function.
+        assert PENDING_PROPOSAL_KEY not in evidence
+        assert (await read_active_plan(durable.factory, durable.run_id)) == active
+        assert any(e[0] == "revision.activated" for e in await durable.outbox_events())
+        # A late OLD-revision callback cannot advance the new revision.
+        assert stale_callback_guard("0" * 64, active["plan_digest"]) is False
+        assert stale_callback_guard(plan_digest(proposed), active["plan_digest"]) is True
+
+    async def test_two_deliveries_activate_one_revision_and_one_continuation(self, durable):
+        from forge.adaptive.revisions import (
+            REVISION_ACTIVATIONS_KEY,
+            activate_pending_revision,
+            stage_pending_revision,
+        )
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        first = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+        )
+        # A SECOND, DIFFERENT delivery of the same decision: idempotent.
+        second = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="bob"
+        )
+        assert second.status == "already_active"
+        assert second.record == first.record
+        evidence = await durable.evidence()
+        assert list(evidence[REVISION_ACTIVATIONS_KEY]) == [decision.decision_id]
+        activations = [e for e in await durable.outbox_events() if e[0] == "revision.activated"]
+        assert len(activations) == 1  # one continuation, one switch
+
+    async def test_the_guard_runs_against_durable_state_not_the_stash(self, durable):
+        """A parent revision that moved BETWEEN staging and approval refuses —
+        the CAS compares the decision's expectations against the durable
+        active-plan pointer, never against the state the proposal came with."""
+        from forge.adaptive.revisions import (
+            PENDING_PROPOSAL_KEY,
+            activate_pending_revision,
+            stage_pending_revision,
+        )
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        # The world moved: revision 3 activated by someone else meanwhile.
+        await durable.set_active(_current(active_revision=3, publication_epoch=9))
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "refused"
+        assert outcome.code == "parent_mismatch"
+        evidence = await durable.evidence()
+        assert PENDING_PROPOSAL_KEY in evidence  # the decision was NOT consumed
+        assert evidence["active_plan"]["active_revision"] == 3  # nothing switched
+
+    async def test_wrong_and_missing_decisions_refuse_without_effects(self, durable):
+        from forge.adaptive.revisions import activate_pending_revision, stage_pending_revision
+
+        # No pending proposal at all.
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, "rd-none", decided_by="alice"
+        )
+        assert (outcome.status, outcome.code) == ("refused", "no_pending_proposal")
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        # A DIFFERENT decision id than the staged one.
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, "rd-other", decided_by="alice"
+        )
+        assert (outcome.status, outcome.code) == ("refused", "stale_decision")
+        assert "revision.activated" not in [e[0] for e in await durable.outbox_events()]
+
+    async def test_stale_authorization_epoch_refuses(self, durable):
+        from forge.adaptive.revisions import activate_pending_revision, stage_pending_revision
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)  # epoch 3
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        await durable.set_active(_current(authorization_epoch=4))  # the epoch bumped
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "refused"
+        assert outcome.code in ("approval_refused", "stale_authorization_epoch")
+
+    async def test_changed_proposal_body_under_a_consumed_decision_refuses(self, durable):
+        """The domain door's replay rule: once a decision is consumed, a
+        DIFFERENT proposal body under the same decision id refuses — the
+        idempotency is content-bound, not id-blind."""
+        from forge.adaptive.revisions import ActivationRefused, stage_pending_revision
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+
+        session = FakeActivationSession(_current())
+        activate_revision(_approved(proposed), proposed, _current(), session)
+
+        tampered = _revision(
+            [_step("S9", "Sneak an unauthorized write.", write_repository_id="billing")],
+            revision=2,
+            parent_revision=1,
+        )
+        with pytest.raises(ActivationRefused, match="decision_already_consumed"):
+            activate_revision(
+                _approved(tampered),
+                tampered,
+                _current(active_revision=1),
+                session,
+            )
+
+
+class TestApproveRevisionIngress:
+    """/approve-revision through the REAL command router → the durable
+    transaction → one journaled operator reply (R28-18)."""
+
+    @staticmethod
+    def _note(text: str, *, note_id: int, verb: str = "approve-revision") -> dict:
+        return {
+            "command": "adaptive_control",
+            "provider": "gitlab",
+            "adaptive_verb": verb,
+            "project_id": 42,
+            "issue_iid": 7,
+            "author_username": "alice",
+            "note_text": text,
+            "note_id": note_id,
+        }
+
+    async def test_router_routes_approval_into_the_durable_transaction(self, tmp_path):
+        from forge.adaptive.command_router import ControlCommandRouter
+        from forge.adaptive.revisions import (
+            PENDING_PROPOSAL_KEY,
+            stage_pending_revision,
+        )
+        from forge.config import Settings
+        from forge.durable import FlowRun
+        from forge.models.base import Base
+        from pydantic import SecretStr
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        run_id = "b" * 32
+        async with factory() as session:
+            session.add(
+                FlowRun(id=run_id, project_id=42, issue_iid=7, provider="gitlab", status="planning")
+            )
+            await session.commit()
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        # The run's durable active-plan state (what the guard checks against).
+        from forge.adaptive.revisions import ACTIVE_PLAN_KEY
+
+        async with factory() as session:
+            run = await session.get(FlowRun, run_id)
+            run.evidence = {
+                ACTIVE_PLAN_KEY: {
+                    "work_id": _current().work_id,
+                    "plan_id": _current().plan_id,
+                    "active_revision": 1,
+                    "work_contract_digest": D_CONTRACT,
+                    "authorization_epoch": 3,
+                    "publication_epoch": 7,
+                }
+            }
+            await session.commit()
+        await stage_pending_revision(factory, run_id, decision, proposed, _current())
+
+        posted: list[str] = []
+
+        async def post(body: str) -> dict:
+            posted.append(body)
+            return {"id": len(posted)}
+
+        settings = Settings(
+            GITLAB_URL="https://gitlab.test",
+            GITLAB_TOKEN=SecretStr("glpat-test"),
+            GITLAB_WEBHOOK_SECRET=SecretStr("test-secret-token"),
+            FORGE_BOT_USERNAME="forge-bot",
+            DATABASE_URL="sqlite+aiosqlite:///:memory:",
+            FORGE_APPROVERS="alice",
+        )
+        router = ControlCommandRouter(session_factory=factory, settings=settings, post_note=post)
+
+        result = await router.handle(
+            self._note(f"/approve-revision {decision.decision_id}", note_id=5001)
+        )
+        assert result["status"] == "applied"
+        assert result["verb"] == "approve-revision"
+        assert result["run_id"] == run_id
+        assert any("is now\nACTIVE" in body or "is now ACTIVE" in body for body in posted)
+        async with factory() as session:
+            run = await session.get(FlowRun, run_id)
+            assert PENDING_PROPOSAL_KEY not in (run.evidence or {})
+            assert (run.evidence or {})["active_plan"]["active_revision"] == 2
+
+        # A second, different note approving the SAME decision: one reply,
+        # no second switch (decision-id idempotency, not note-id dedup).
+        result = await router.handle(
+            self._note(f"/approve-revision {decision.decision_id}", note_id=5002)
+        )
+        assert result["status"] == "refused"  # nothing new applied
+        assert any("already consumed" in body for body in posted)
+        async with factory() as session:
+            run = await session.get(FlowRun, run_id)
+            assert (run.evidence or {})["active_plan"]["active_revision"] == 2
+
+    async def test_non_approver_is_refused_with_a_note(self, tmp_path):
+        from forge.adaptive.command_router import ControlCommandRouter
+        from forge.config import Settings
+        from forge.durable import FlowRun
+        from forge.models.base import Base
+        from pydantic import SecretStr
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            session.add(
+                FlowRun(
+                    id="c" * 32, project_id=42, issue_iid=7, provider="gitlab", status="planning"
+                )
+            )
+            await session.commit()
+
+        posted: list[str] = []
+
+        async def post(body: str) -> dict:
+            posted.append(body)
+            return {"id": len(posted)}
+
+        settings = Settings(
+            GITLAB_URL="https://gitlab.test",
+            GITLAB_TOKEN=SecretStr("glpat-test"),
+            GITLAB_WEBHOOK_SECRET=SecretStr("test-secret-token"),
+            FORGE_BOT_USERNAME="forge-bot",
+            DATABASE_URL="sqlite+aiosqlite:///:memory:",
+            FORGE_APPROVERS="alice",
+        )
+        router = ControlCommandRouter(session_factory=factory, settings=settings, post_note=post)
+        result = await router.handle(
+            self._note("/approve-revision rd-1", note_id=5003, verb="approve-revision")
+            | {"author_username": "stranger"}
+        )
+        assert result["status"] == "refused"
+        assert any("ignored" in body for body in posted)

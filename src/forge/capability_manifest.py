@@ -49,6 +49,7 @@ rule above; ``forge doctor --capabilities`` prints it.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -57,15 +58,21 @@ __all__ = [
     "ADAPTIVE_OPERATOR_COMMANDS",
     "CAPABILITIES",
     "CLASSIC_OPERATOR_COMMANDS",
+    "EVIDENCE_CLASSES",
+    "REQUIRED_EVIDENCE",
     "TIER_LADDER",
     "TIER_LEGEND",
     "Capability",
     "CapabilityManifestError",
+    "PromotionVerdict",
     "Tier",
     "capabilities",
+    "classify_evidence",
     "format_matrix",
     "ingress_routed_commands",
+    "manifest_gate_problems",
     "manifest_problems",
+    "promotion_gate",
     "validate_manifest",
 ]
 
@@ -119,7 +126,13 @@ CLASSIC_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
 #: ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` (default OFF; with the flag off the
 #: verbs are not parsed at all). Verified against the gateway command sets
 #: by :func:`ingress_routed_commands`.
-ADAPTIVE_OPERATOR_COMMANDS: Final[tuple[str, ...]] = ("/pause", "/steer", "/answer", "/resume")
+ADAPTIVE_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
+    "/pause",
+    "/steer",
+    "/answer",
+    "/resume",
+    "/approve-revision",
+)
 
 
 class CapabilityManifestError(Exception):
@@ -198,7 +211,9 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         ),
         commands=ADAPTIVE_OPERATOR_COMMANDS,
         note="NXT-10: all three provider ingresses parse /pause /resume /steer "
-        "/answer and route them through ControlCommandRouter — approver-gated "
+        "/answer (and, since R28-18, /approve-revision into the durable "
+        "activation transaction) and route them through ControlCommandRouter — "
+        "approver-gated "
         "like /go (never authorship), short-prefix run resolution scoped to the "
         "note's issue, ONE journaled reply note per note id — behind "
         "FORGE_ADAPTIVE_COMMANDS_ENABLED, default OFF (with the flag off the "
@@ -577,3 +592,171 @@ def format_matrix(rows: tuple[Capability, ...] | list[Capability] | None = None)
         f"  {not_wired} of {len(checked)} capabilities are NOT wired to any production entry point"
     )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# R28-27 — the EXECUTABLE promotion gate: tier claims need evidence of
+# the matching CLASS, checked by doctor --capabilities --strict.
+# ---------------------------------------------------------------------------
+
+#: The closed evidence-class vocabulary. A class names WHAT KIND of
+#: artifact can support a tier claim — the review's "unexecuted
+#: cross-runner test cannot produce a cross-runner support badge" made
+#: structural: the badge requires the badge's evidence class.
+EVIDENCE_CLASSES: Final[dict[str, str]] = {
+    "entry_point_test": (
+        "a test that exercises the capability's REAL production entry"
+        " point (a helper's unit test is not wiring evidence)"
+    ),
+    "docs_versioned_scenario": (
+        "a docs/ artifact of a real-provider run that names the EXACT"
+        " binary version it executed (a tag name alone proves nothing,"
+        " and a test file alone proves no provider ran)"
+    ),
+    "cross_process_trace": (
+        "a recorded kill/restart/cross-process recovery trace under"
+        " docs/, from a real-provider scenario"
+    ),
+}
+
+#: Which evidence classes a promotion INTO each tier requires. The
+#: ladder's own honesty rules made structural: wiring needs a test that
+#: reaches the entry point; a real-provider scenario adds the versioned
+#: docs artifact; the honest top adds the cross-process trace. Every
+#: requirement is CUMULATIVE by construction (the later tiers' rows
+#: already carry the earlier tiers' evidence classes).
+REQUIRED_EVIDENCE: Final[dict[str, frozenset[str]]] = {
+    "production_wiring": frozenset({"entry_point_test"}),
+    "real_provider_scenario": frozenset({"entry_point_test", "docs_versioned_scenario"}),
+    "cross_process_recovery": frozenset(
+        {"entry_point_test", "docs_versioned_scenario", "cross_process_trace"}
+    ),
+}
+
+
+@dataclass(frozen=True)
+class PromotionVerdict:
+    """The verdict of one :func:`promotion_gate` call (R28-27).
+
+    ``allowed`` is True exactly when every required evidence class for
+    the destination tier is present and every supplied class is known.
+    ``missing`` names the required classes without artifacts;
+    ``unknown_classes`` names supplied classes outside
+    :data:`EVIDENCE_CLASSES` — a wrong evidence class fails the gate,
+    it never silently satisfies a requirement it spells similarly.
+    """
+
+    from_tier: str
+    to_tier: str
+    allowed: bool
+    missing: tuple[str, ...]
+    unknown_classes: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+    def explain(self) -> str:
+        return "; ".join(self.reasons) if self.reasons else "promotion evidence complete"
+
+
+def promotion_gate(
+    from_tier: str,
+    to_tier: str,
+    evidence: Mapping[str, Sequence[str]],
+) -> PromotionVerdict:
+    """Whether a capability holds the REQUIRED evidence to move up ONE tier.
+
+    *evidence* maps evidence class → the artifacts of that class (the
+    caller classifies; :func:`classify_evidence` does it structurally
+    for the seeded manifest). The rules, in order:
+
+    - both tiers must be on :data:`TIER_LADDER` (unknown tiers are a
+      modelling error and raise, mirroring ``manifest_problems``);
+    - a promotion moves EXACTLY one rung — demotions, re-claims of the
+      same tier and skips raise (the ladder is prefix-provable, never
+      skipped);
+    - every supplied evidence class must be in
+      :data:`EVIDENCE_CLASSES` — an unknown class fails the gate;
+    - every class in :data:`REQUIRED_EVIDENCE` for the destination
+      tier must carry at least one artifact — a missing class fails
+      the gate with the class named.
+
+    The gate never looks at artifact CONTENTS (whether a docs artifact
+    really names the binary version is what its CLASS asserts — the
+    classifier's claim, auditable at the classification site).
+    """
+    if from_tier not in TIER_LADDER:
+        raise ValueError(f"unknown from_tier {from_tier!r}; the ladder is {TIER_LADDER}")
+    if to_tier not in TIER_LADDER:
+        raise ValueError(f"unknown to_tier {to_tier!r}; the ladder is {TIER_LADDER}")
+    if TIER_LADDER.index(to_tier) != TIER_LADDER.index(from_tier) + 1:
+        raise ValueError(
+            f"a promotion moves exactly one rung: {from_tier!r} -> {to_tier!r}"
+            " is not the next rung up"
+        )
+
+    unknown = tuple(sorted(set(evidence) - set(EVIDENCE_CLASSES)))
+    required = REQUIRED_EVIDENCE[to_tier]
+    missing = tuple(sorted(name for name in required if not evidence.get(name)))
+    reasons: list[str] = []
+    if unknown:
+        reasons.append(
+            f"evidence classes outside the closed vocabulary {list(unknown)} —"
+            " a wrong evidence class satisfies nothing"
+        )
+    for name in missing:
+        reasons.append(f"promoting to {to_tier!r} requires {name} ({EVIDENCE_CLASSES[name]})")
+    allowed = not unknown and not missing
+    if allowed:
+        reasons.append(
+            f"{from_tier!r} -> {to_tier!r}: required evidence {sorted(required)} present"
+        )
+    return PromotionVerdict(from_tier, to_tier, allowed, missing, unknown, tuple(reasons))
+
+
+def classify_evidence(pointers: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """Structurally classify evidence pointers into :data:`EVIDENCE_CLASSES`.
+
+    ``tests/`` pointers classify as ``entry_point_test`` (the class's
+    meaning — exercises the real entry point — is the row's claim);
+    ``docs/`` pointers classify as ``docs_versioned_scenario``.
+    ``cross_process_trace`` has NO structural producer on purpose: it
+    must be asserted explicitly, which is exactly why no seeded row
+    can drift into claiming ``cross_process_recovery`` by accident.
+    Pointers under neither prefix classify to nothing (extra context,
+    e.g. CI templates — never harmful, never evidence of a class).
+    """
+    classes: dict[str, tuple[str, ...]] = {name: () for name in EVIDENCE_CLASSES}
+    for pointer in pointers:
+        if pointer.startswith("tests/"):
+            classes["entry_point_test"] += (pointer,)
+        elif pointer.startswith("docs/"):
+            classes["docs_versioned_scenario"] += (pointer,)
+    return classes
+
+
+def manifest_gate_problems(
+    rows: tuple[Capability, ...] | list[Capability],
+) -> list[str]:
+    """Every CLAIMED tier checked against the promotion gate (R28-27).
+
+    A ``domain_contract`` row claims nothing and is skipped; anything
+    higher must hold the evidence classes :data:`REQUIRED_EVIDENCE`
+    demands for its tier, classified structurally from its pointers by
+    :func:`classify_evidence`. A row that claims a tier without the
+    matching evidence class is an over-claim — this is what
+    ``doctor --capabilities --strict`` exits 1 on.
+    """
+    problems: list[str] = []
+    for row in rows:
+        if row.tier == "domain_contract":
+            continue
+        classified = classify_evidence(row.evidence)
+        missing = sorted(
+            name for name in REQUIRED_EVIDENCE.get(row.tier, frozenset()) if not classified[name]
+        )
+        if missing:
+            problems.append(
+                f"{row.name!r}: tier {row.tier!r} is claimed without evidence"
+                f" class(es) {missing} — the promotion gate refuses the"
+                " over-claim (demote the row or add the evidence)"
+            )
+    return problems

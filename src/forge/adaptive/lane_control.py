@@ -79,14 +79,35 @@ NXT-14 (first half) — urgent pause never waits behind queued slow
 guidance: within one drain cycle the interrupt-class commands are
 applied first (sequence order still rules inside each class and between
 ordinary commands).
+
+R28-11/R28-12 — the drain never blocks the turn's event loop, and no
+control-plane I/O is unbounded. Every mailbox ladder call the drain
+makes (``pending`` / ``authorize`` / ``apply`` / ``checkpoint`` — over
+the remote :class:`~forge.adaptive.lane_channel.LaneControlChannel` each
+is a synchronous HTTP round trip) and the pause drain's WIP capture
+(filesystem hashing + upload) ride ``asyncio.to_thread`` worker threads,
+so the vendor turn sharing this loop is NEVER starved by control-plane
+I/O. The fetch and each ack POST stay bounded by the channel's own
+``ack_timeout``, and the checkpoint booking — the one ack that runs
+AFTER the gate already decided — is additionally fire-and-forget
+(:data:`CHECKPOINT_ACK_WAIT_S`): a hung plane can hold the drain at most
+that long, and a booking that cannot be confirmed journals the honest
+"not confirmed" note while the applied outcome stands on its observed
+vendor effect.
+
+R28-29 — every journaled action carries its ``at`` timestamp, and
+:meth:`LaneSteeringSession.timeline` projects the journal into the
+operator timeline (request / effect / evidence distinguished — see
+:mod:`forge.adaptive.operator_timeline`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Final, Literal
 
 from forge.adaptive.adapters import (
@@ -103,9 +124,14 @@ from forge.adaptive.control import (
     send_interrupt,
 )
 from forge.adaptive.models import ControlCommand
+from forge.adaptive.operator_timeline import (
+    TimelineEntry,
+    timeline_from_journal,
+)
 from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
+    "CHECKPOINT_ACK_WAIT_S",
     "DEFAULT_POLL_INTERVAL_S",
     "DELIVERY_STATES",
     "DeliveryRecord",
@@ -115,6 +141,7 @@ __all__ = [
     "RESUME_NOTICE",
     "STEER_TEXT_CAP",
     "SteeringAction",
+    "drain_cycle_order",
 ]
 
 DriverKind = Literal["claude", "codex", "opencode"]
@@ -168,6 +195,30 @@ DEFAULT_POLL_INTERVAL_S: Final = 0.25
 #: head-of-line blocking must not delay the interrupt).
 INTERRUPT_KINDS: Final = frozenset({"pause"})
 
+#: The bounded wait for the checkpoint booking — the ONE ladder ack that
+#: runs after the gate already decided (R28-11: "fire-and-forget if the
+#: gate already decided"). The transport already bounds the POST itself
+#: (the channel's ``ack_timeout``); this bound caps how long a hung or
+#: slow plane may hold the DRAIN for bookkeeping the vendor effect does
+#: not depend on. On elapse the action stands applied — its observed
+#: vendor effect is the truth — and the journal carries the honest
+#: "not confirmed" note for the reconciler to re-book from.
+CHECKPOINT_ACK_WAIT_S: Final = 5.0
+
+
+def drain_cycle_order(commands: Iterable[ControlCommand]) -> list[ControlCommand]:
+    """One drain cycle's application order (NXT-14/R28-11, pinned).
+
+    :data:`INTERRUPT_KINDS` commands come FIRST — regardless of sequence
+    — so an urgent pause in the same pending batch never waits behind
+    queued slow guidance; inside each class, and among all ordinary
+    commands, durable sequence order rules (CTL-07).
+    """
+    return sorted(
+        commands, key=lambda command: (command.kind not in INTERRUPT_KINDS, command.sequence)
+    )
+
+
 #: NXT-12's delivery ladder around every vendor call: the intent is
 #: recorded at ``dispatching`` BEFORE the await; a clean vendor return
 #: reaches ``vendor_accepted`` and then — once the mailbox checkpoint
@@ -191,6 +242,10 @@ DeliveryState = Literal[
     "application_observed",
     "delivery_unknown",
 ]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True)
@@ -229,6 +284,8 @@ class SteeringAction:
     effect ended on — ``""`` when no vendor-carrying effect ran
     (refused / ignored). The intent-vs-outcome pair IS NXT-12's journal
     extension: one row says what was INTENDED and what was OBSERVED.
+    ``at`` (R28-29) is when the action was journaled — the timestamp the
+    operator timeline orders by and the lane meta sidecar carries.
     """
 
     command_id: str
@@ -238,6 +295,7 @@ class SteeringAction:
     delivery: str = ""
     reason: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
+    at: str = field(default_factory=_now_iso)
 
 
 class LaneSteeringSession:
@@ -284,6 +342,7 @@ class LaneSteeringSession:
         permissions_valid: bool = True,
         actor_scopes: dict[str, tuple[str, ...]] | None = None,
         capture: "Callable[[], Any] | None" = None,
+        checkpoint_ack_wait: float = CHECKPOINT_ACK_WAIT_S,
     ) -> None:
         """Configure one lane bridge; nothing runs until the context (or a drain).
 
@@ -304,6 +363,9 @@ class LaneSteeringSession:
         # content-addressed WIP); when absent, the pause lands
         # paused_partial honestly (nothing was invented).
         self._capture = capture
+        if checkpoint_ack_wait <= 0:
+            raise ValueError("checkpoint_ack_wait must be positive")
+        self._checkpoint_ack_wait = checkpoint_ack_wait
         if driver_kind not in _KIND_TO_SDK:
             raise ValueError(
                 f"driver_kind must be one of {sorted(_KIND_TO_SDK)}, got {driver_kind!r}"
@@ -409,25 +471,107 @@ class LaneSteeringSession:
         the control plane's reconciler — only APPLIED commands climb to
         ``checkpointed`` and leave the pending view.
 
-        Ordering within one cycle is pause-first (NXT-14's first half):
-        :data:`INTERRUPT_KINDS` commands are applied before queued slow
-        guidance, so an urgent pause never head-of-line blocks behind a
+        Ordering within one cycle is pause-first (NXT-14's first half,
+        pinned by :func:`drain_cycle_order`): :data:`INTERRUPT_KINDS`
+        commands are applied before queued slow guidance REGARDLESS of
+        sequence, so an urgent pause never head-of-line blocks behind a
         steer. Sequence order still rules inside each class and between
         ordinary commands (CTL-07).
+
+        R28-12: the ``pending`` read rides a worker thread — over the
+        remote channel it may run one bounded synchronous fetch, and the
+        turn sharing this loop must never wait on it.
+
+        Cancellation discipline (NXT-12, extended to the thread hops): a
+        command that has LEFT the mailbox view when the drain is torn
+        down always leaves a journaled row before the cancellation
+        propagates — the consumption's fate is unproven from the point
+        of view of the control plane, so it is booked ``delivery_unknown``
+        for a probing reconciler, never silently dropped.
         """
         actions: list[SteeringAction] = []
-        pending = self.service.mailbox.pending(self.work_id)
-        ordered = sorted(
-            pending, key=lambda command: (command.kind not in INTERRUPT_KINDS, command.sequence)
-        )
-        for command in ordered:
-            if command.command_id in self._handled:
-                continue
-            action = await self._apply(command)
-            self._journal.append(action)
-            self._handled[command.command_id] = action.outcome
-            actions.append(action)
+        pending = await self._pending()
+        in_flight: ControlCommand | None = None
+        try:
+            for command in drain_cycle_order(pending):
+                if command.command_id in self._handled:
+                    continue
+                in_flight = command
+                action = await self._apply(command)
+                self._journal.append(action)
+                self._handled[command.command_id] = action.outcome
+                actions.append(action)
+                in_flight = None
+        except asyncio.CancelledError:
+            # The mid-effect and post-effect windows journal inside
+            # :meth:`_run` (their fate is known); reaching here means the
+            # cancellation landed on a BOOKKEEPING await (the gate walk /
+            # the checkpoint POST) — the command left the mailbox view,
+            # so its effect is unproven: record the intent, journal the
+            # honest unknown, and let the cancellation propagate.
+            if in_flight is not None and in_flight.command_id not in self._handled:
+                self._record_intent(in_flight)
+                self._mark_delivery(
+                    in_flight,
+                    "outcome_unknown",
+                    "drain cancelled mid-bookkeeping — probe before any retry",
+                )
+                torn = SteeringAction(
+                    command_id=in_flight.command_id,
+                    kind=in_flight.kind,
+                    outcome="delivery_unknown",
+                    sequence=in_flight.sequence,
+                    delivery="outcome_unknown",
+                    reason=(
+                        "drain torn down between consumption and journaling — "
+                        "the effect's fate is unproven; a probe must decide"
+                    ),
+                )
+                self._journal.append(torn)
+                self._handled[in_flight.command_id] = torn.outcome
+            raise
         return actions
+
+    async def _pending(self) -> list[ControlCommand]:
+        """The mailbox's pending view, read off the loop (R28-12).
+
+        The fetch runs on a worker thread and is SHIELDED: if the drain is
+        torn down mid-read, the thread's result is still taken (the
+        channel may already have consumed its delivery buffer and advanced
+        the cursor) and every command in it that this session never
+        journaled is booked ``delivery_unknown`` — a cancelled read is
+        never a silent loss.
+        """
+        fetch = asyncio.ensure_future(asyncio.to_thread(self.service.mailbox.pending, self.work_id))
+        try:
+            return await asyncio.shield(fetch)
+        except asyncio.CancelledError:
+            fetched: list[ControlCommand] = []
+            with contextlib.suppress(Exception):
+                fetched = list(await fetch)  # the thread runs to completion
+            for command in fetched:
+                if command.command_id in self._handled:
+                    continue
+                self._record_intent(command)
+                self._mark_delivery(
+                    command,
+                    "outcome_unknown",
+                    "drain cancelled while the fetch was consuming the mailbox view",
+                )
+                torn = SteeringAction(
+                    command_id=command.command_id,
+                    kind=command.kind,
+                    outcome="delivery_unknown",
+                    sequence=command.sequence,
+                    delivery="outcome_unknown",
+                    reason=(
+                        "drain torn down mid-fetch — the command left the "
+                        "mailbox view unprocessed; a probe must decide"
+                    ),
+                )
+                self._journal.append(torn)
+                self._handled[command.command_id] = torn.outcome
+            raise
 
     # -- evidence ------------------------------------------------------------
 
@@ -435,6 +579,17 @@ class LaneSteeringSession:
     def journal(self) -> list[SteeringAction]:
         """The append-only action journal (a copy — evidence is not editable)."""
         return list(self._journal)
+
+    @property
+    def timeline(self) -> list[TimelineEntry]:
+        """The operator timeline projected from this lane's journal (R28-29).
+
+        The same projection applies to the ``steering_journal`` rows the
+        lane meta sidecar carries (the actions, with their ``at``
+        timestamps, plus the channel's evidence rows) — see
+        :func:`forge.adaptive.operator_timeline.timeline_from_journal`.
+        """
+        return timeline_from_journal(self._journal)
 
     def delivery_state(self, command_id: str) -> str:
         """The command's :data:`DELIVERY_STATES` rung, or ``""`` if never dispatched."""
@@ -542,16 +697,23 @@ class LaneSteeringSession:
     ) -> SteeringAction:
         """Gate one command through the mailbox ladder, run the effect, journal.
 
-        NXT-12's intent-before-effect order. The ladder walk first: the
-        CAS apply gates the EFFECT (a command written against a stale
-        world expires before any vendor call). Then the dispatch INTENT
-        is recorded at ``dispatching`` — BEFORE the await — so a crash
-        or a lost response in the window leaves an honest record, never
-        an ``applied`` claim the bridge cannot support. Outcomes:
+        NXT-12's intent-before-effect order. The ladder walk first (on a
+        worker thread — R28-12: over the remote channel each rung is a
+        synchronous HTTP POST, and the turn sharing this loop must never
+        wait on it): the CAS apply gates the EFFECT (a command written
+        against a stale world expires before any vendor call). Then the
+        dispatch INTENT is recorded at ``dispatching`` — BEFORE the
+        await — so a crash or a lost response in the window leaves an
+        honest record, never an ``applied`` claim the bridge cannot
+        support. Outcomes:
 
         - clean return → ``vendor_accepted``, then the mailbox
           ``checkpoint`` books the application → ``application_observed``
-          (the journal row carries the intent-vs-outcome pair);
+          (the journal row carries the intent-vs-outcome pair). The
+          booking is fire-and-forget-bounded (R28-11): the gate already
+          decided, so a plane that cannot confirm within
+          :data:`CHECKPOINT_ACK_WAIT_S` journals "not confirmed" and the
+          applied outcome STANDS — never blocked, never un-applied;
         - TimeoutError / ConnectionError → ``outcome_unknown`` and the
           action outcome ``delivery_unknown`` — the request may or may
           not have landed. The command has left ``pending()`` (the
@@ -566,7 +728,7 @@ class LaneSteeringSession:
           uncertainty arrives as Timeout/ConnectionError), so the rung
           stays ``dispatching`` and the journal row is the spent record.
         """
-        ok, gate = self._gate(command)
+        ok, gate = await asyncio.to_thread(self._gate_walk, command)
         if not ok:
             return self._refused(command, gate)
         enriched = dict(detail)
@@ -621,7 +783,34 @@ class LaneSteeringSession:
                 reason=f"vendor effect failed: {exc}",
             )
         self._mark_delivery(command, "vendor_accepted", "the vendor took the effect")
-        status = self._checkpoint(command)
+        booking = asyncio.ensure_future(self._checkpoint(command))
+        try:
+            status = await asyncio.shield(booking)
+        except asyncio.CancelledError:
+            # Teardown landed on the post-effect booking (a bookkeeping
+            # await since R28-12): the effect IS observed, and the booking
+            # is already in flight and BOUNDED by its own wait — let it
+            # land, journal the applied action with whichever status it
+            # produced, then let the cancellation propagate.
+            status = "checkpoint not confirmed (drain cancelled post-effect)"
+            with contextlib.suppress(asyncio.CancelledError):
+                status = await booking
+            self._mark_delivery(
+                command,
+                "application_observed",
+                f"drain cancelled after the observed effect — booking: {status}",
+            )
+            landed = SteeringAction(
+                command_id=command.command_id,
+                kind=command.kind,
+                outcome="applied",
+                sequence=command.sequence,
+                delivery="application_observed",
+                detail={**enriched, "mailbox_status": status},
+            )
+            self._journal.append(landed)
+            self._handled[command.command_id] = landed.outcome
+            raise
         self._mark_delivery(command, "application_observed", f"mailbox status: {status}")
         return SteeringAction(
             command_id=command.command_id,
@@ -699,7 +888,13 @@ class LaneSteeringSession:
                 detail["interrupt_error"] = f"{type(exc).__name__}"
             detail["interrupt_latency_s"] = round(_time.monotonic() - started, 3)
             self._pause = send_interrupt(self._pause)
-            self._pause = drain_turn(self._pause, cooperative=True, capture=self._capture)
+            # R28-12: the cooperative drain may run the REAL capture
+            # capability (hash the working tree, upload blobs) — blocking
+            # filesystem work that rides a worker thread so the turn's
+            # own loop is never held by it.
+            self._pause = await asyncio.to_thread(
+                drain_turn, self._pause, cooperative=True, capture=self._capture
+            )
             detail["pause"] = "interrupt-sent"
             detail["pause_status"] = self._pause.pause_status
             if self._pause.failure_reason:
@@ -809,8 +1004,14 @@ class LaneSteeringSession:
 
     # -- the ladder ----------------------------------------------------------
 
-    def _gate(self, command: ControlCommand) -> tuple[bool, str]:
-        """Walk authorize + CAS-apply; ``(ok, status-or-reason)``."""
+    def _gate_walk(self, command: ControlCommand) -> tuple[bool, str]:
+        """Walk authorize + CAS-apply (sync); ``(ok, status-or-reason)``.
+
+        Runs on a worker thread (:meth:`_run`) — each rung over the
+        remote channel is a bounded synchronous POST whose RESULT the
+        vendor effect is gated on, so it is awaited, but never on the
+        turn's own loop.
+        """
         try:
             current = command
             if current.status == "received":
@@ -832,11 +1033,28 @@ class LaneSteeringSession:
         except (ValueError, PermissionError, KeyError) as exc:
             return False, f"mailbox gate refused: {exc}"
 
-    def _checkpoint(self, command: ControlCommand) -> str:
+    async def _checkpoint(self, command: ControlCommand) -> str:
+        """Book the application — bounded, fire-and-forget (R28-11/R28-12).
+
+        The gate already decided and the vendor effect is observed, so
+        this booking is best-effort I/O the applied outcome never hangs
+        on: the POST rides a worker thread and waits at most
+        ``checkpoint_ack_wait``. A booking that cannot be confirmed (the
+        bound elapsed, or the plane refused) returns the honest note —
+        the reconciler re-books from the journal; the action stays
+        ``applied`` on its OBSERVED effect, and a late server-side
+        completion is harmless (the rung walk is idempotent per command).
+        """
         try:
-            return self.service.mailbox.checkpoint(command.command_id).status
-        except (ValueError, KeyError) as exc:
+            booked = await asyncio.wait_for(
+                asyncio.to_thread(self.service.mailbox.checkpoint, command.command_id),
+                timeout=self._checkpoint_ack_wait,
+            )
+        except TimeoutError:
+            return "checkpoint not confirmed (bounded wait elapsed) — re-book from the journal"
+        except (ValueError, KeyError, PermissionError) as exc:
             return f"checkpoint failed: {exc}"
+        return booked.status
 
     def _scopes_for(self, command: ControlCommand) -> dict[str, tuple[str, ...]]:
         if self._actor_scopes is not None:

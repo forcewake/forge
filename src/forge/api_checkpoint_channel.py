@@ -42,6 +42,21 @@ checkpoints beyond the keep count and can be asked to keep nothing —
 and still NEVER deletes a work's LATEST checkpoint: the one a live
 pause stands on always resolves. Deleted checkpoints release only
 blobs no retained checkpoint of ANY work still references.
+
+R28-14 folds every cap and cleanup rule into ONE
+:class:`StoragePolicy` — the per-blob cap, the per-upload manifest
+entry cap, the per-work TOTAL BYTES quota, the per-work retention cap
+and the disaster-recovery history floor (how many superseded
+checkpoints survive cleanup as rollback targets) — built from the
+environment (:meth:`StoragePolicy.from_env`) and enforced by the
+STORE, before any write, as defense in depth behind the endpoint's
+own checks. An over-quota upload is refused with 413 and leaves the
+work's previous checkpoint byte-identical. The operator surface is
+:meth:`CheckpointStore.storage_health_report` (also
+``GET /lane/checkpoints/health`` and the module-level
+:func:`storage_health_report` for doctor): disk usage, per-work
+checkpoint counts and bytes, works over quota, and ORPHAN CAS entries
+— content present on disk that no work's index references.
 """
 
 from __future__ import annotations
@@ -55,6 +70,7 @@ import re
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -80,13 +96,20 @@ __all__ = [
     "DEFAULT_MAX_BLOB_BYTES",
     "DEFAULT_MAX_BLOB_ENTRIES",
     "DEFAULT_MAX_TOTAL_BLOB_BYTES",
+    "DEFAULT_MAX_WORK_TOTAL_BYTES",
+    "DEFAULT_HISTORY_KEEP",
+    "HISTORY_KEEP_ENV",
     "LANE_CONTROL_SECRET_ENV",
     "MAX_BLOB_BYTES_ENV",
     "MAX_BLOB_ENTRIES_ENV",
     "MAX_TOTAL_BLOB_BYTES_ENV",
+    "MAX_WORK_TOTAL_BYTES_ENV",
     "CheckpointCorruptError",
     "CheckpointStore",
+    "StoragePolicy",
+    "StorageQuotaExceededError",
     "checkpoint_channel_router",
+    "storage_health_report",
 ]
 
 #: Alias naming the shared secret from THIS side of the wire too: the
@@ -121,7 +144,24 @@ DEFAULT_MAX_BLOB_ENTRIES: Final = 4096
 #: The LATEST is exempt whatever this says — see apply_retention.
 CHECKPOINT_RETENTION_ENV: Final = "FORGE_CHECKPOINT_RETENTION"
 
+#: R28-14: the per-work TOTAL bytes quota — the sum of every manifest and
+#: blob the work's index entries reference. Over it (0 = no quota) a new
+#: upload is refused with 413 BEFORE any write; the work's previous
+#: checkpoints are untouched, so quota exhaustion is an explicit
+#: recoverable state, never data loss.
+MAX_WORK_TOTAL_BYTES_ENV: Final = "FORGE_CHECKPOINT_MAX_WORK_TOTAL_BYTES"
+DEFAULT_MAX_WORK_TOTAL_BYTES: Final = 0
+
+#: R28-14: the disaster-recovery history floor — how many SUPERSEDED
+#: checkpoints survive cleanup as rollback targets beyond the active
+#: one. Cleanup itself triggers after every successful upload
+#: (:attr:`StoragePolicy.cleanup_trigger`); the floor bounds what it may
+#: drop, so a bad resume can still be rolled back to recorded history.
+HISTORY_KEEP_ENV: Final = "FORGE_CHECKPOINT_HISTORY_KEEP"
+DEFAULT_HISTORY_KEEP: Final = 0
+
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX2 = re.compile(r"^[0-9a-f]{2}$")
 #: A work id must be a safe single path segment — it names an index
 #: FILE and a URL path component, so escapes (``/``, ``..``, ``@`` for
 #: the remote-ref separator) are refused, not sanitized.
@@ -158,6 +198,105 @@ class CheckpointCorruptError(Exception):
         self.actual = actual
 
 
+class StorageQuotaExceededError(ValueError):
+    """A checkpoint a :class:`StoragePolicy` refuses BEFORE any write.
+
+    Raised by :meth:`CheckpointStore.put_checkpoint` for the per-blob
+    cap, the manifest-entry cap and the per-work TOTAL bytes quota.
+    Subclasses :class:`ValueError` so every existing ``except ValueError``
+    refusal path keeps catching it; the endpoint catches it FIRST and
+    answers 413 — an honest "over quota", never a truncated store, and
+    never a destroyed previous checkpoint (refusal precedes the first
+    write, so the work's durable state is byte-identical).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read an integer env knob, degrading to *default* (never below *minimum*)."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return max(minimum, int(raw)) if raw else default
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class StoragePolicy:
+    """Every cap and cleanup rule of the checkpoint store, in one place (R28-14).
+
+    The endpoint's per-item caps, the ``FORGE_CHECKPOINT_RETENTION`` env
+    and the R28-14 additions (per-work total quota, DR history floor) fold
+    into this frozen value, built from the environment by
+    :meth:`from_env`. The STORE enforces it — not just the HTTP boundary —
+    so the local and network paths obey one policy object instead of two
+    divergent spellings of the same rules:
+
+    - ``max_blob_bytes`` — one blob's (or the manifest's) size cap;
+    - ``max_manifest_entries`` — how many file entries one manifest may
+      carry (the per-upload entry cap the endpoint already enforced);
+    - ``max_total_bytes_per_work`` — per-work quota over the manifest +
+      blob bytes its index entries reference (0 = no quota);
+    - ``max_checkpoints_per_work`` — the retention keep count: at most
+      this many checkpoints per work survive cleanup (0 = keep all);
+    - ``history_keep`` — the disaster-recovery floor: cleanup always
+      leaves the ACTIVE checkpoint plus at least this many superseded
+      ones as rollback history;
+    - ``cleanup_trigger`` — ``"on_upload"`` (retention runs after every
+      successful put; the only trigger today) or ``"manual"`` (the
+      operator runs :meth:`CheckpointStore.apply_retention` herself).
+    """
+
+    max_blob_bytes: int = DEFAULT_MAX_BLOB_BYTES
+    max_manifest_entries: int = DEFAULT_MAX_BLOB_ENTRIES
+    max_total_bytes_per_work: int = DEFAULT_MAX_WORK_TOTAL_BYTES
+    max_checkpoints_per_work: int = 0
+    history_keep: int = DEFAULT_HISTORY_KEEP
+    cleanup_trigger: str = "on_upload"
+
+    @classmethod
+    def from_env(cls) -> StoragePolicy:
+        """The operator's policy: every knob above, from its env variable."""
+        return cls(
+            max_blob_bytes=_env_int(MAX_BLOB_BYTES_ENV, DEFAULT_MAX_BLOB_BYTES, minimum=1),
+            max_manifest_entries=_env_int(
+                MAX_BLOB_ENTRIES_ENV, DEFAULT_MAX_BLOB_ENTRIES, minimum=1
+            ),
+            max_total_bytes_per_work=_env_int(
+                MAX_WORK_TOTAL_BYTES_ENV, DEFAULT_MAX_WORK_TOTAL_BYTES
+            ),
+            max_checkpoints_per_work=_env_int(CHECKPOINT_RETENTION_ENV, 0),
+            history_keep=_env_int(HISTORY_KEEP_ENV, DEFAULT_HISTORY_KEEP),
+        )
+
+    def retention_keep(self) -> int:
+        """The keep count cleanup passes to :meth:`CheckpointStore.apply_retention`.
+
+        ``max(0, max_checkpoints_per_work)`` bounded below by the DR floor
+        (``history_keep + 1`` — the active checkpoint plus the floor's
+        history). Zero means NO cleanup: retention off and no floor is
+        the documented keep-everything default.
+        """
+        keep = max(0, self.max_checkpoints_per_work)
+        if self.history_keep > 0:
+            keep = max(keep, self.history_keep + 1)
+        return keep
+
+    def as_dict(self) -> dict[str, int | str]:
+        """The policy as the health report prints it (operators read env names)."""
+        return {
+            "max_blob_bytes": self.max_blob_bytes,
+            "max_manifest_entries": self.max_manifest_entries,
+            "max_total_bytes_per_work": self.max_total_bytes_per_work,
+            "max_checkpoints_per_work": self.max_checkpoints_per_work,
+            "history_keep": self.history_keep,
+            "cleanup_trigger": self.cleanup_trigger,
+        }
+
+
 class CheckpointStore:
     """The control plane's content-addressed checkpoint directory.
 
@@ -174,10 +313,23 @@ class CheckpointStore:
     touches the active checkpoint.
     """
 
-    def __init__(self, root: Path, *, max_blob_bytes: int = DEFAULT_MAX_BLOB_BYTES) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_blob_bytes: int | None = None,
+        policy: StoragePolicy | None = None,
+    ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        self._max_blob_bytes = max_blob_bytes
+        if policy is not None:
+            self.policy = policy
+        elif max_blob_bytes is not None:
+            # The pre-R28-14 spelling: a direct per-blob override over the
+            # env-derived policy (kept so every existing caller works).
+            self.policy = replace(StoragePolicy.from_env(), max_blob_bytes=max_blob_bytes)
+        else:
+            self.policy = StoragePolicy.from_env()
 
     # -- content-addressed files --------------------------------------------
 
@@ -341,6 +493,100 @@ class CheckpointStore:
             if isinstance(entry, dict) and isinstance(entry.get("digest"), str)
         }
 
+    # -- the storage policy (R28-14) ------------------------------------------
+
+    def _refuse_policy_violations(
+        self, work_id: str, manifest_bytes: bytes, blobs: dict[str, bytes]
+    ) -> None:
+        """The STORE's own cap enforcement — before any write, defense in depth.
+
+        The endpoint checks the same caps while decoding; these lines make
+        the policy a property of the STORAGE, not of one HTTP path, so the
+        local and network surfaces cannot drift apart (R28-14's point).
+        Per-blob and manifest-entry violations raise
+        :class:`StorageQuotaExceededError` naming the exact offender.
+        """
+        policy = self.policy
+        if len(manifest_bytes) > policy.max_blob_bytes:
+            raise StorageQuotaExceededError(
+                f"manifest for {work_id} is {len(manifest_bytes)} bytes; this store"
+                f" accepts at most {policy.max_blob_bytes} bytes per blob — refused"
+                " rather than truncated"
+            )
+        for digest, data in sorted(blobs.items()):
+            if len(data) > policy.max_blob_bytes:
+                raise StorageQuotaExceededError(
+                    f"blob {digest} for {work_id} is {len(data)} bytes; this store"
+                    f" accepts at most {policy.max_blob_bytes} bytes per blob — refused"
+                    " rather than truncated"
+                )
+        entries = len(self._entry_files(manifest_bytes))
+        if entries > policy.max_manifest_entries:
+            raise StorageQuotaExceededError(
+                f"manifest for {work_id} carries {entries} file entries; this store"
+                f" accepts at most {policy.max_manifest_entries} per checkpoint —"
+                " a checkpoint is a bounded WIP delta, not a key-value dump"
+            )
+
+    def _work_usage_bytes(self, entries: list[dict[str, Any]]) -> int:
+        """The bytes the work's index entries currently reference on disk.
+
+        Every retained checkpoint's manifest plus its referenced blobs,
+        counted from the CAS (a digest missing on disk contributes zero —
+        the health report names it; the quota must not guess a size).
+        """
+        digests: set[str] = set()
+        for entry in entries:
+            checkpoint_id = entry.get("checkpoint_id")
+            if not isinstance(checkpoint_id, str):
+                continue
+            digests.add(checkpoint_id)
+            try:
+                digests.update(self._entry_files(self._read_verified(checkpoint_id)))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                continue  # unreadable manifests keep their own address only
+        return sum(self._size_on_disk(digest) for digest in digests)
+
+    def _size_on_disk(self, digest: str) -> int:
+        try:
+            return self._cas_path(digest).stat().st_size
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _refuse_over_work_quota(
+        self,
+        work_id: str,
+        entries: list[dict[str, Any]],
+        manifest_bytes: bytes,
+        blobs: dict[str, bytes],
+    ) -> None:
+        """The per-work TOTAL bytes quota — refused before the first write.
+
+        Current usage is what the work's index references on disk; the
+        upload adds only bytes NOT already stored (content addressing
+        makes an idempotent re-put free, and a blob another checkpoint
+        already landed is not new usage). Over the cap the upload is
+        refused with :class:`StorageQuotaExceededError` — quota
+        exhaustion leaves the previous checkpoints untouched: an
+        explicit, recoverable state, never data loss.
+        """
+        cap = self.policy.max_total_bytes_per_work
+        if cap <= 0:
+            return
+        manifest_id = _sha256(manifest_bytes)
+        fresh = 0
+        for digest in sorted({manifest_id, *blobs}):
+            if self._cas_path(digest).exists():
+                continue  # already stored (and immutable) — not new usage
+            fresh += len(manifest_bytes) if digest == manifest_id else len(blobs[digest])
+        current = self._work_usage_bytes(entries)
+        if current + fresh > cap:
+            raise StorageQuotaExceededError(
+                f"work {work_id} already references {current} bytes; this upload adds"
+                f" {fresh} more, over the per-work quota of {cap} bytes — the upload"
+                " is refused and the work's existing checkpoints are untouched"
+            )
+
     # -- the operations ---------------------------------------------------------
 
     def put_checkpoint(
@@ -373,6 +619,14 @@ class CheckpointStore:
         active checkpoint — it lands as superseded history only (the
         response says ``latest: false``), so a delayed runner arriving
         late cannot roll the work's resume point back.
+
+        R28-14: the store's :class:`StoragePolicy` is enforced here —
+        per-blob cap, manifest-entry cap and the per-work total-bytes
+        quota all refuse BEFORE the first write (the blob writes moved
+        inside the index lock so the quota reads one consistent index),
+        and cleanup runs after a successful landing per the policy's
+        trigger: retention bounded below by the DR history floor, never
+        touching the active checkpoint.
         """
         checkpoint_id = _sha256(manifest_bytes)
         referenced = self._entry_files(manifest_bytes)
@@ -391,17 +645,20 @@ class CheckpointStore:
                 f"blobs — missing {sorted(referenced - supplied)[:3]}, "
                 f"extra {sorted(supplied - referenced)[:3]}; refusing before any write"
             )
-        for digest, data in blobs.items():
-            self._write_cas(digest, data)
-        self._write_cas(checkpoint_id, manifest_bytes)
+        self._refuse_policy_violations(work_id, manifest_bytes, blobs)
 
         with self._index_lock(work_id):
             document = self._load_index(work_id)
             entries: list[dict[str, Any]] = [
                 entry for entry in document["checkpoints"] if isinstance(entry, dict)
             ]
+            self._refuse_over_work_quota(work_id, entries, manifest_bytes, blobs)
+            for digest, data in blobs.items():
+                self._write_cas(digest, data)
+            self._write_cas(checkpoint_id, manifest_bytes)
             own = next(
-                (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id), None
+                (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id),
+                None,
             )
             if own is None:
                 own = {
@@ -414,7 +671,7 @@ class CheckpointStore:
             entries.sort(key=self._entry_order)
             self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
             latest = self._latest_entry(entries)
-            return {
+            result = {
                 "work_id": work_id,
                 "checkpoint_id": checkpoint_id,
                 "sequence": sequence,
@@ -422,6 +679,11 @@ class CheckpointStore:
                 "uploaded_at": str(own.get("uploaded_at") or ""),
                 "latest": latest is not None and latest.get("checkpoint_id") == checkpoint_id,
             }
+        if self.policy.cleanup_trigger == "on_upload":
+            keep = self.policy.retention_keep()
+            if keep > 0:
+                self.apply_retention(work_id, keep)
+        return result
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
         """The work's ACTIVE entry (highest sequence), or the named one.
@@ -568,6 +830,98 @@ class CheckpointStore:
             self._save_index(work_id, {"work_id": work_id, "checkpoints": retained})
             return len(removed)
 
+    # -- the operator health surface (R28-14) ----------------------------------
+
+    def storage_health_report(self, policy: StoragePolicy | None = None) -> dict[str, Any]:
+        """The operator's view of the store: usage, quotas, orphans.
+
+        Walks the per-work indexes (checkpoint count, referenced bytes,
+        works over the policy's quota/retention caps, referenced digests
+        missing from the CAS) and the CAS shards themselves (every
+        content address on disk — an entry NO work's index references is
+        an ORPHAN: harmless, collectable crash residue, but the operator
+        must see it rather than wonder where the disk went). Temporary
+        files (``.tmp-*``, the atomic-write crash window's leftovers)
+        are listed separately. Read-only: this never mutates the store.
+        """
+        policy = policy or self.policy
+        works: dict[str, dict[str, Any]] = {}
+        referenced_anywhere: set[str] = set()
+        works_dir = self._root / "works"
+        if works_dir.is_dir():
+            for index_file in sorted(works_dir.iterdir()):
+                if not index_file.is_file() or index_file.suffix != ".json":
+                    continue
+                try:
+                    document = json.loads(index_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(document, dict):
+                    continue
+                work_id = str(document.get("work_id") or index_file.stem)
+                entries = [
+                    entry
+                    for entry in document.get("checkpoints", [])
+                    if isinstance(entry, dict) and isinstance(entry.get("checkpoint_id"), str)
+                ]
+                digests: set[str] = set()
+                for entry in entries:
+                    checkpoint_id = str(entry["checkpoint_id"])
+                    digests.add(checkpoint_id)
+                    try:
+                        files = self._entry_files(self._read_verified(checkpoint_id))
+                    except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                        files = set()
+                    digests.update(files)
+                missing = {digest for digest in digests if not self._cas_path(digest).exists()}
+                referenced_anywhere.update(digests)
+                usage = sum(self._size_on_disk(digest) for digest in digests)
+                over_bytes = policy.max_total_bytes_per_work > 0 and usage > (
+                    policy.max_total_bytes_per_work
+                )
+                over_count = policy.max_checkpoints_per_work > 0 and len(entries) > (
+                    policy.max_checkpoints_per_work
+                )
+                works[work_id] = {
+                    "checkpoints": len(entries),
+                    "referenced_digests": len(digests),
+                    "missing_digests": sorted(missing),
+                    "bytes": usage,
+                    "over_quota": over_bytes or over_count,
+                    "over_quota_reasons": [
+                        *(["bytes"] if over_bytes else []),
+                        *(["checkpoints"] if over_count else []),
+                    ],
+                }
+
+        cas_entries: dict[str, int] = {}
+        temp_files: list[str] = []
+        disk_usage = 0
+        for shard in sorted(self._root.iterdir()) if self._root.is_dir() else []:
+            if not shard.is_dir() or len(shard.name) != 2 or not _HEX2.fullmatch(shard.name):
+                continue  # the works/ directory and stray dirs are not CAS shards
+            for item in sorted(shard.iterdir()):
+                if not item.is_file():
+                    continue
+                size = item.stat().st_size
+                disk_usage += size
+                if _HEX64.fullmatch(item.name):
+                    cas_entries[item.name] = size
+                else:
+                    temp_files.append(str(item.relative_to(self._root)))
+        orphans = sorted(set(cas_entries) - referenced_anywhere)
+        return {
+            "root": str(self._root),
+            "policy": policy.as_dict(),
+            "disk_usage_bytes": disk_usage,
+            "cas_entry_count": len(cas_entries),
+            "works": works,
+            "over_quota_works": sorted(work for work, info in works.items() if info["over_quota"]),
+            "orphan_cas_entries": orphans,
+            "orphan_bytes": sum(cas_entries[digest] for digest in orphans),
+            "temp_files": sorted(temp_files),
+        }
+
 
 # ---------------------------------------------------------------------------
 # The router
@@ -608,12 +962,18 @@ def _max_blob_entries() -> int:
         return DEFAULT_MAX_BLOB_ENTRIES
 
 
-def _retention_keep() -> int:
-    raw = os.environ.get(CHECKPOINT_RETENTION_ENV, "").strip()
-    try:
-        return max(0, int(raw)) if raw else 0
-    except ValueError:
-        return 0
+def storage_health_report(
+    root: Path | str | None = None, policy: StoragePolicy | None = None
+) -> dict[str, Any]:
+    """The store's health report — the doctor-callable spelling (R28-14).
+
+    Reads the root from ``FORGE_CHECKPOINT_STORE_DIR`` when not given
+    and the policy from the environment, so ``forge doctor`` (or any
+    operator tool) can call this single function without wiring. The
+    report shape is :meth:`CheckpointStore.storage_health_report`'s.
+    """
+    store = CheckpointStore(Path(root) if root is not None else _store_dir(), policy=policy)
+    return store.storage_health_report()
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -813,7 +1173,7 @@ async def put_checkpoint(
 
     manifest_bytes, blobs, sequence = _decode_payload(document, work_id)
 
-    store = CheckpointStore(_store_dir(), max_blob_bytes=_max_blob_bytes())
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
     try:
         result = store.put_checkpoint(
             work_id=work_id,
@@ -821,14 +1181,30 @@ async def put_checkpoint(
             blobs=blobs,
             sequence=sequence,
         )
+    except StorageQuotaExceededError as exc:  # R28-14: an honest 413, store intact
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:  # the store's own defense-in-depth refusal
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except CheckpointCorruptError as exc:  # a rotted address is never adopted
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    keep = _retention_keep()
-    if keep:
-        store.apply_retention(work_id, keep)
     return result
+
+
+@checkpoint_channel_router.get("/lane/checkpoints/health")
+async def checkpoint_storage_health(
+    request: Request,
+    authorization: str | None = Header(None),
+) -> Any:
+    """The operator's storage health report: usage, quotas, orphans (R28-14).
+
+    Registered BEFORE the ``{work_id}`` route so the literal path wins;
+    guarded by the same operator token as the listing. Read-only.
+    """
+    secret = _require_enabled(request)
+    if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
+        raise HTTPException(status_code=401, detail="invalid operator token")
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
+    return store.storage_health_report()
 
 
 @checkpoint_channel_router.get("/lane/checkpoints/{work_id}")
@@ -846,7 +1222,7 @@ async def get_checkpoint(
     if checkpoint_id is not None and not _HEX64.fullmatch(checkpoint_id):
         raise HTTPException(status_code=400, detail="checkpoint_id must be a 64-hex digest")
 
-    store = CheckpointStore(_store_dir(), max_blob_bytes=_max_blob_bytes())
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
     entry = store.entry(work_id, checkpoint_id)
     if entry is None:
         scope = f" with id {checkpoint_id}" if checkpoint_id else ""
@@ -885,5 +1261,5 @@ async def list_checkpoints(
     secret = _require_enabled(request)
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
-    store = CheckpointStore(_store_dir(), max_blob_bytes=_max_blob_bytes())
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
     return {"checkpoints": store.list_entries()}

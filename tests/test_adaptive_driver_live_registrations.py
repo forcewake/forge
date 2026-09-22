@@ -10,16 +10,23 @@ NXT-27 adds the versioned observed-behavior half: capabilities are
 recorded PER BINARY VERSION, an unknown/upgraded version answers
 unknown (never the previous version's observations), and seeding with
 ``installed_versions`` refuses both drift and an unknown present.
+
+R28-26 adds the provenance half: the dispatch's declared pin, the
+registration's ``verified_against`` and the runner's actually-installed
+CLI version are reconciled in ONE report — a drift WARNS (the
+registration is evidence of the PAST), never fails the lane.
 """
 
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from forge.adaptive.adapters import DriverMatrix
 from forge.adaptive.drivers.live_registrations import (
+    DRIVER_SDK_OF,
     LIVE_OBSERVED_CAPABILITIES,
     LIVE_REGISTRATIONS,
     OBSERVED_CAPABILITY_VALUES,
@@ -28,6 +35,8 @@ from forge.adaptive.drivers.live_registrations import (
     _REPO_ROOT,
     install_pin_of,
     observed_capabilities,
+    provenance_report,
+    registration_verdict,
     sdk_version_of,
     seed_live_matrix,
 )
@@ -274,3 +283,183 @@ class TestSeedingVersionGate:
         # binaries installed): unchanged legacy behavior.
         matrix = seed_live_matrix()
         assert matrix.supports("opencode-server", "zai-coding-plan", "server-basic+stored-key")
+
+
+# ---------------------------------------------------------------------------
+# R28-26 — exact-binary provenance: declared pin vs registration vs install
+# ---------------------------------------------------------------------------
+
+
+class TestRegistrationVerdict:
+    def test_every_mapped_driver_maps_to_a_registered_sdk(self) -> None:
+        for driver, sdk in DRIVER_SDK_OF.items():
+            assert sdk in {entry.sdk for entry in LIVE_REGISTRATIONS}, driver
+
+    def test_a_matching_install_verdicts_match(self) -> None:
+        for driver, sdk in DRIVER_SDK_OF.items():
+            verdict = registration_verdict(driver, sdk_version_of(sdk))
+            assert verdict is not None, driver
+            assert verdict.status == "match"
+            assert verdict.warning == ""
+            assert verdict.recorded == verdict.installed
+
+    def test_drift_warns_but_is_never_a_failure(self) -> None:
+        verdict = registration_verdict("codex-sdk-lane", "codex-cli 0.154.0")
+        assert verdict is not None
+        assert verdict.status == "drift"
+        assert "codex-cli 0.153.4" in verdict.warning  # the PAST is named
+        assert "codex-cli 0.154.0" in verdict.warning  # the PRESENT is named
+        assert "driver_live_smoke" in verdict.warning  # the remedy is named
+
+    def test_an_unreported_install_is_unknown_present(self) -> None:
+        verdict = registration_verdict("claude-sdk-lane", "")
+        assert verdict is not None
+        assert verdict.status == "unknown_present"
+        assert "did not report" in verdict.warning
+
+    def test_an_unregistered_driver_has_no_verdict_at_all(self) -> None:
+        assert registration_verdict("grok-build", "grok 1.0.30") is None
+        assert registration_verdict("copilot", "1.0.86") is None
+        assert registration_verdict("not-a-driver", "whatever") is None
+
+
+class TestProvenanceReport:
+    def test_all_three_sources_are_reconciled(self) -> None:
+        report = provenance_report("codex-sdk-lane", installed_cli_version="codex-cli 0.153.4")
+        # what the dispatch declared (the shipped default pin)
+        assert report["declared_pin"] == "0.153.4"
+        # what the registration verified
+        assert report["registration_verified"] == "codex-cli 0.153.4"
+        assert report["registration_date"] == "2026-09-21"
+        # what the runner actually installed
+        assert report["installed_cli_version"] == "codex-cli 0.153.4"
+        assert report["registration_status"] == "match"
+        assert report["pin_matches_install"] is True
+        assert report["warnings"] == []
+
+    def test_the_declared_pin_can_be_supplied(self) -> None:
+        report = provenance_report(
+            "codex-sdk-lane",
+            installed_cli_version="codex-cli 0.153.4",
+            declared_pin="0.153.4",
+        )
+        assert report["declared_pin"] == "0.153.4"
+
+    def test_a_version_mismatch_produces_a_warning(self) -> None:
+        # The negative/recovery case verbatim: "swap same-version/
+        # different-build fixture binaries" — the registration's past
+        # cannot promote the present; the report SAYS so.
+        report = provenance_report("codex-sdk-lane", installed_cli_version="codex-cli 0.154.0")
+        assert report["registration_status"] == "drift"
+        assert report["pin_matches_install"] is False
+        warnings = " ".join(str(w) for w in report["warnings"])
+        assert "verified" in warnings and "0.153.4" in warnings and "0.154.0" in warnings
+        assert "re-run" in warnings  # the remedy, not just the alarm
+
+    def test_an_unknown_install_reports_unknown(self) -> None:
+        report = provenance_report("claude-code")
+        assert report["installed_cli_version"] == ""
+        assert report["registration_status"] == "unknown_present"
+        assert report["pin_matches_install"] is None  # no claim either way
+        assert any("did not report" in str(w) for w in report["warnings"])
+
+    def test_the_latest_pin_is_flagged_as_unpinned(self) -> None:
+        report = provenance_report(
+            "claude-code",
+            installed_cli_version="claude 2.1.290 (Claude Code)",
+            declared_pin="latest",
+        )
+        assert any("'latest'" in str(w) for w in report["warnings"])
+        assert report["pin_matches_install"] is None
+        assert report["registration_status"] == "drift"  # 2.1.273 was verified
+
+    def test_an_unregistered_driver_is_reported_as_such(self) -> None:
+        report = provenance_report("grok-build", installed_cli_version="grok 1.0.30")
+        assert report["registration_status"] == "unregistered"
+        assert report["registration_verified"] == ""
+        assert any("never been smoke-verified" in str(w) for w in report["warnings"])
+
+    def test_the_report_is_json_shaped(self) -> None:
+        report = provenance_report("opencode-sdk-lane", installed_cli_version="opencode v2.0.10")
+        assert json.loads(json.dumps(report)) == report
+
+
+class TestHarnessFingerprint:
+    def test_the_fingerprint_env_lands_in_the_provenance(self) -> None:
+        from forge.harness_entry import FORGE_DRIVER_FINGERPRINT_ENV, driver_provenance
+
+        assert FORGE_DRIVER_FINGERPRINT_ENV == "FORGE_DRIVER_FINGERPRINT"
+        provenance = driver_provenance(
+            "codex-sdk-lane",
+            env={FORGE_DRIVER_FINGERPRINT_ENV: "codex-cli 0.153.4"},
+        )
+        assert provenance["installed_cli_version"] == "codex-cli 0.153.4"
+        assert provenance["declared_pin"] == "0.153.4"  # resolved from the env pins
+        assert provenance["registration_status"] == "match"
+        assert re.fullmatch(r"[0-9a-f]{64}", provenance["forge_wheel_sha256"])
+
+    def test_the_fingerprint_ride_the_candidate_meta_additively(self, tmp_path, monkeypatch):
+        from forge.harness_entry import driver_provenance, emit_candidate_meta
+
+        monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+        monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+        staged = tmp_path / "forge-output"
+        staged.mkdir()
+        diff = staged / "candidate.diff"
+        diff.write_bytes(b"+one line\n")
+        provenance = driver_provenance(
+            "claude-sdk-lane",
+            env={
+                "FORGE_DRIVER_FINGERPRINT": "claude 2.1.273 (Claude Code)",
+                "FORGE_DRIVER_VERSIONS": json.dumps({"claude-sdk-lane": "2.1.273"}),
+            },
+        )
+        kwargs = dict(
+            run_id="d" * 32,
+            attempt_base_oid="1" * 40,
+            driver="claude-sdk-lane",
+            model="m",
+            diff_file=str(diff),
+        )
+        with_meta = emit_candidate_meta(
+            meta_file=str(staged / "with.json"), driver_provenance=provenance, **kwargs
+        )
+        assert with_meta["driver_provenance"] == provenance
+        assert with_meta["driver_provenance"]["registration_status"] == "match"
+
+        # additive: NOT supplied → the key is absent, pre-R28-26 metas unchanged
+        without = emit_candidate_meta(meta_file=str(staged / "without.json"), **kwargs)
+        assert "driver_provenance" not in without
+
+    def test_a_mismatched_fingerprint_warns_at_lane_startup(self):
+        from forge.harness_entry import lane_provenance_warning
+
+        warning = lane_provenance_warning(
+            "codex-sdk-lane", env={"FORGE_DRIVER_FINGERPRINT": "codex-cli 0.154.0"}
+        )
+        assert "0.153.4" in warning and "0.154.0" in warning
+        # the matching lane says nothing — a quiet start is a good start
+        quiet = lane_provenance_warning(
+            "codex-sdk-lane", env={"FORGE_DRIVER_FINGERPRINT": "codex-cli 0.153.4"}
+        )
+        assert quiet == ""
+
+    def test_a_drifted_fingerprint_is_a_warning_never_an_error(self):
+        # The lane-startup posture end to end: drift (and an unverified
+        # present) is SAID loudly — it must never raise or fail closed,
+        # because the registration is evidence of the PAST and the
+        # fingerprint is the PRESENT.
+        from forge.harness_entry import lane_provenance_warning
+
+        warning = lane_provenance_warning(
+            "claude-code", env={"FORGE_DRIVER_FINGERPRINT": "claude 2.1.290 (Claude Code)"}
+        )
+        assert warning  # drift is said
+        assert "PAST" in warning or "re-run" in warning
+
+    def test_forge_install_sha256_is_stable_and_shaped(self) -> None:
+        from forge.harness_entry import forge_install_sha256
+
+        first = forge_install_sha256()
+        assert forge_install_sha256() == first  # deterministic for one install
+        assert first == "" or re.fullmatch(r"[0-9a-f]{64}", first)

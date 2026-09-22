@@ -3358,10 +3358,11 @@ class TestPauseFenceIsDurableAcrossRestart:
 
 
 class TestDiscoverySpliceInsidePlanning:
-    """The splice sits INSIDE the planning try: a discovery failure (or a
-    refusal to plan over unanswered questions) gets the deliberate
-    planning-failed handling — a parked run and an operator note, never a
-    silently stuck preflight run."""
+    """The splice sits INSIDE the planning try: a discovery failure gets the
+    deliberate planning-failed handling — a parked run and an operator note,
+    never a silently stuck preflight run. Unanswered discovery questions are
+    the R28-17 exception: a WAIT (``blocked(waiting_question: …)``), not a
+    failure."""
 
     async def _assert_parked_visibly(self, db, fake, make_exc):
         from forge.adaptive.discovery_stage import DiscoveryStageError
@@ -3393,16 +3394,47 @@ class TestDiscoverySpliceInsidePlanning:
             db, fake, lambda: DiscoveryStageError("discovery disc-1 refuses: probes died")
         )
 
-    async def test_unanswered_questions_refuse_instead_of_defaulting(self, db, fake):
-        from forge.adaptive.discovery_stage import QuestionsOutstanding
+    async def test_unanswered_questions_park_as_a_wait_not_a_failure(self, db, fake):
+        """R28-17: QuestionsOutstanding is a WAIT, not a planning failure.
 
-        await self._assert_parked_visibly(
-            db,
-            fake,
-            lambda: QuestionsOutstanding(
-                "disc-1", "run-x", [{"question_id": "q-1", "text": "which repo?"}]
-            ),
-        )
+        The run parks ``blocked(waiting_question: …)`` with the question
+        stash durable (the recovery pass re-enters planning from it), an
+        operator-visible note names each question with its /answer form,
+        and the exception does NOT propagate — a wait is not an error."""
+        from forge.adaptive.discovery_stage import QuestionsOutstanding
+        from forge.runs import github_service as service_module
+
+        original = service_module.maybe_run_discovery
+
+        async def patched(run_ctx, planner_input):
+            raise QuestionsOutstanding(
+                "disc-1",
+                "run-x",
+                [
+                    {
+                        "question_id": "q-1",
+                        "text": "which repo owns the expiry key?",
+                        "criticality": "critical",
+                    }
+                ],
+            )
+
+        service_module.maybe_run_discovery = patched
+        try:
+            service = make_service(db, fake)
+            run_id = await start(service)  # does NOT raise — a wait, not a failure
+        finally:
+            service_module.maybe_run_discovery = original
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("waiting_question:")
+        stash = (run.evidence or {}).get("question_block") or {}
+        assert stash.get("discovery_id") == "disc-1"
+        assert stash.get("question_ids") == ["q-1"]
+        assert stash.get("issue_description") == ISSUE_DESC  # the replan input is stashed
+        assert any("waiting for clarification" in body for body in comments(fake))
+        assert any("`q-1`" in body and "/answer" in body for body in comments(fake))
 
 
 class TestDiscoveryFreezesOneSourceSet:

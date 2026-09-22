@@ -95,7 +95,21 @@ here too:
 - once every question is answered (durably — the flip to ``complete``
   rides the same transaction as the last answer), planning resumes with
   the answers injected as a bounded, citation-validated
-  :data:`ANSWERS_BEGIN`-delimited section beside the evidence digest.
+  :data:`ANSWERS_BEGIN`-delimited section beside the evidence digest;
+  :func:`discovery_open_questions` is the ingress-side reader the run
+  lifecycle polls to decide when the wait is over.
+
+R28-16 (the third honest mode) gates the stage through
+:func:`forge.adaptive.research_planner.discovery_mode`:
+``FORGE_DISCOVERY_MODE=none|lexical|research-harness`` (empty defers to
+the legacy ``FORGE_DISCOVERY_ENABLED`` flag). In ``research-harness``
+the stage runs the BOUNDED research pass
+(:func:`forge.adaptive.research_planner.run_research_pass`) over the
+same frozen authorized snapshot AFTER the lexical probes — its findings
+join the record as ordinary evidence records (citable and
+authority-bound like any other), and its research summary rides the
+planner input as a third delimited section. The lexical evidence is
+never discarded by the richer mode.
 """
 
 from __future__ import annotations
@@ -120,6 +134,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from forge.adaptive.artifact_store import ContentAddressedStore
 from forge.adaptive.discovery import DiscoveryRun, dispatch_target
 from forge.adaptive.discovery_tools import SnapshotToolbox
+from forge.adaptive.research_planner import (
+    NONE_MODE,
+    RESEARCH_HARNESS_MODE,
+    RESEARCH_SUMMARY_MAX_CHARS,
+    ResearchHarness,
+    ResearchRepo,
+    attach_research,
+    discovery_mode,
+    render_research_section,
+    run_research_pass,
+)
 from forge.durable import FlowRun, Outbox
 
 logger = logging.getLogger(__name__)
@@ -149,6 +174,7 @@ __all__ = [
     "attach_answers",
     "attach_digest",
     "discovery_enabled",
+    "discovery_open_questions",
     "enforce_citations_against_snapshot",
     "enforce_plan_citations",
     "extract_citations",
@@ -641,8 +667,15 @@ class DiscoveryRunContext:
     question_source: QuestionSource | None = None
     max_digest_chars: int = DISCOVERY_DIGEST_MAX_CHARS
     max_answer_chars: int = DISCOVERY_ANSWERS_MAX_CHARS
+    max_research_chars: int = RESEARCH_SUMMARY_MAX_CHARS
     max_keywords: int = _MAX_KEYWORDS
     max_questions: int = _MAX_QUESTIONS
+    #: The research-harness configuration (R28-16): when the mode gate
+    #: resolves ``research-harness`` this MUST carry the gateway-backed
+    #: completion callable the bounded research loop drives — its absence
+    #: in that mode is a loud configuration error, never a silent
+    #: lexical-only downgrade.
+    research: ResearchHarness | None = None
     #: The authorized repo set (NXT-08): empty = the legacy single-repo
     #: fields above; non-empty = the FIRST spec is the run's own repo
     #: (its identity fills the legacy dispatch fields) and the rest are
@@ -871,10 +904,13 @@ async def maybe_run_discovery(run_ctx: DiscoveryRunContext, planner_input: str) 
 
     The production /implement path calls this between run start and
     planning (exact patch in ``docs/adaptive/discovery-splice.md``).
-    When the stage is disabled (the default) the input is returned
-    UNTOUCHED and nothing is persisted — the classic workflow, byte for
-    byte. When enabled, the durable stage runs and the returned input
-    carries the bounded evidence digest section. Failures raise
+    The mode gate (R28-16) is the honest tri-state
+    ``FORGE_DISCOVERY_MODE=none|lexical|research-harness`` (an empty
+    value defers to the legacy ``FORGE_DISCOVERY_ENABLED`` flag): ``none``
+    returns the input UNTOUCHED and persists nothing — the classic
+    workflow, byte for byte; ``lexical`` runs the deterministic probes;
+    ``research-harness`` additionally drives the bounded research loop
+    over the same frozen snapshot. Failures raise
     :class:`DiscoveryStageError` — never a silent fallback.
 
     NXT-07 answer-gating: when the durable record still has an
@@ -883,13 +919,17 @@ async def maybe_run_discovery(run_ctx: DiscoveryRunContext, planner_input: str) 
     until every question is resolved. Once resolved, the returned input
     additionally carries the bounded operator-answers section.
     """
-    if not discovery_enabled():
+    mode = discovery_mode()
+    if mode == NONE_MODE:
         return planner_input
     outcome = await run_discovery_stage(run_ctx, planner_input)
     outstanding = open_questions_of(outcome.record)
     if outstanding:
         raise QuestionsOutstanding(outcome.discovery_id, run_ctx.run_id, outstanding)
     augmented = attach_digest(planner_input, outcome.digest_section)
+    research_section = render_research_section(outcome.record, max_chars=run_ctx.max_research_chars)
+    if research_section:
+        augmented = attach_research(augmented, research_section)
     answers_section = render_answers_section(outcome.record, max_chars=run_ctx.max_answer_chars)
     if not answers_section:
         return augmented
@@ -1041,6 +1081,29 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
         await _fail(run_ctx, record, str(exc))
         raise DiscoveryStageError(f"discovery {discovery_id!r} failed: {exc}") from exc
 
+    # R28-16: the third mode's leg. ``research-harness`` drives the bounded
+    # research loop over the SAME frozen authorized snapshot the lexical
+    # probes just used; its findings join `found` as ordinary evidence
+    # records BEFORE questions are emitted, so a question may cite research
+    # evidence too. A missing harness in this mode is a loud configuration
+    # error (fail-closed — never a silent lexical-only downgrade).
+    research_document: dict[str, Any] | None = None
+    if discovery_mode() == RESEARCH_HARNESS_MODE:
+        if run_ctx.research is None:
+            reason = (
+                "FORGE_DISCOVERY_MODE=research-harness without a configured research "
+                "completion callable — refusing to silently downgrade to lexical-only"
+            )
+            await _fail(run_ctx, record, reason)
+            raise DiscoveryStageError(f"discovery {discovery_id!r} failed: {reason}")
+        try:
+            research_document = await _run_research_leg(run_ctx, repos, planner_input, found)
+        except Exception as exc:
+            await _fail(run_ctx, record, str(exc))
+            raise DiscoveryStageError(
+                f"discovery {discovery_id!r} research pass failed: {exc}"
+            ) from exc
+
     # NXT-07: bounded question emission over the FROZEN evidence — the
     # domain object stacks every question and lands in waiting_question.
     questions = await _emit_questions(run_ctx, planner_input, found)
@@ -1074,6 +1137,7 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
             "repository_researched": True,
             "coverage": coverage,
             "questions": questions,
+            **({"research": research_document} if research_document is not None else {}),
         }
         await _persist(
             run_ctx.session_factory,
@@ -1112,6 +1176,7 @@ async def run_discovery_stage(run_ctx: DiscoveryRunContext, planner_input: str) 
         "repository_researched": True,
         "coverage": coverage,
         "questions": questions,
+        **({"research": research_document} if research_document is not None else {}),
     }
     await _persist(
         run_ctx.session_factory,
@@ -1284,6 +1349,77 @@ def _probe(
         "evidence_count": len(found),
     }
     return found, coverage, domain
+
+
+async def _run_research_leg(
+    run_ctx: DiscoveryRunContext,
+    repos: Mapping[str, _RepoView],
+    planner_input: str,
+    found: list[tuple[EvidenceRecord, str]],
+) -> dict[str, Any]:
+    """Run the bounded research pass and fold its findings into *found*.
+
+    The loop reads through one frozen :class:`SnapshotToolbox` PER
+    authorized repository (the same scope-filtered view the lexical
+    probes used), so nothing outside a repo's ``allowed_globs`` can be
+    consulted. Every finding becomes an ordinary
+    :class:`EvidenceRecord` — the ``ev-N`` id sequence continues from
+    the lexical evidence — bound to the finding's own repository/OID,
+    and the research document's findings carry their minted evidence
+    ids back so the rendered summary's citation map resolves.
+    """
+    assert run_ctx.research is not None  # the mode gate checked before calling
+    research_repos = {
+        # The internal "" namespace of a single-repo context is the run's
+        # OWN repository — the model-facing menu names it "own" (multi-repo
+        # keys pass through unchanged).
+        key or "own": ResearchRepo(
+            repo_key=key or "own",
+            repository_id=view.repository_id,
+            source_oid=view.source_oid,
+            toolbox=SnapshotToolbox(dict(view.files), allowed_globs=view.allowed_globs),
+        )
+        for key, view in repos.items()
+    }
+    lexical_docs = [rec.as_document() for rec, _text in found]
+    outcome = await run_research_pass(
+        run_ctx.research,
+        planner_input=planner_input,
+        lexical=lexical_docs,
+        repos=research_repos,
+    )
+    document = dict(outcome.document)
+    finding_docs: list[dict[str, Any]] = []
+    for research_finding in outcome.findings:
+        evidence_id = f"ev-{len(found) + 1}"
+        found.append(
+            (
+                EvidenceRecord(
+                    evidence_id=evidence_id,
+                    path=research_finding.path,
+                    line=research_finding.line,
+                    kind=research_finding.kind,
+                    detail=research_finding.detail,
+                    repository_id=research_finding.repository_id,
+                    source_oid=research_finding.source_oid,
+                    content_digest=_sha256(research_finding.text),
+                ),
+                research_finding.text,
+            )
+        )
+        finding_docs.append(
+            {
+                "evidence_id": evidence_id,
+                "repo_key": research_finding.repo_key,
+                "repository_id": research_finding.repository_id,
+                "path": research_finding.path,
+                "line": research_finding.line,
+                "kind": research_finding.kind,
+                "detail": research_finding.detail,
+            }
+        )
+    document["findings"] = finding_docs
+    return document
 
 
 async def _emit_questions(
@@ -2183,6 +2319,21 @@ async def record_answer(
         if drain.applications
         else AnswerApplication("rejected", "no command supplied", "", dict())
     )
+
+
+async def discovery_open_questions(session_factory: SessionFactory, run_id: str) -> tuple[str, ...]:
+    """The run's durable discovery question ids still unanswered.
+
+    The ingress-side reader (R28-17): the run lifecycle polls this to
+    decide whether a ``waiting_question`` run may re-enter planning.
+    Reads the DURABLE record — a run with no discovery record (or none
+    with questions) has nothing outstanding. Raises
+    :class:`DiscoveryStageError` when the run itself is missing.
+    """
+    record = await _read_record(session_factory, run_id)
+    if record is None:
+        return ()
+    return open_question_ids_of(record)
 
 
 def _answer_entry(question: Mapping[str, Any]) -> dict[str, Any]:

@@ -1370,3 +1370,306 @@ class TestExactResumeSelection:
 
         assert report["checkpoint_selection"] == "refused"
         assert report["restored"] is False
+
+
+# -- R28-14: the unified storage policy, quotas and health report -------------------
+
+
+def _tiny_checkpoint(work_id: str, files: dict[str, bytes], sequence: int):
+    """A minimal valid manifest + its exact blob set, handcrafted in-test."""
+    manifest = json.dumps(
+        {
+            "schema": "forge.wip.manifest/2",
+            "work_id": work_id,
+            "sequence": sequence,
+            "source_oids": {},
+            "files": {
+                name: {"digest": _digest(data), "mode": 0o644, "role": "new"}
+                for name, data in sorted(files.items())
+            },
+            "deletions": [],
+        }
+    ).encode()
+    document = json.loads(manifest)
+    blobs = {entry["digest"]: files[name] for name, entry in document["files"].items()}
+    return manifest, blobs
+
+
+class TestStoragePolicy:
+    def test_from_env_folds_the_existing_caps_and_retention(self, monkeypatch):
+        monkeypatch.setenv(api_channel.MAX_BLOB_BYTES_ENV, "1000")
+        monkeypatch.setenv(api_channel.MAX_BLOB_ENTRIES_ENV, "7")
+        monkeypatch.setenv(api_channel.CHECKPOINT_RETENTION_ENV, "3")
+        monkeypatch.setenv(api_channel.MAX_WORK_TOTAL_BYTES_ENV, "5000")
+        monkeypatch.setenv(api_channel.HISTORY_KEEP_ENV, "2")
+
+        policy = api_channel.StoragePolicy.from_env()
+
+        assert policy == api_channel.StoragePolicy(
+            max_blob_bytes=1000,
+            max_manifest_entries=7,
+            max_total_bytes_per_work=5000,
+            max_checkpoints_per_work=3,
+            history_keep=2,
+        )
+
+    def test_defaults_keep_the_documented_behaviour(self, monkeypatch):
+        for name in (
+            api_channel.MAX_BLOB_BYTES_ENV,
+            api_channel.MAX_BLOB_ENTRIES_ENV,
+            api_channel.CHECKPOINT_RETENTION_ENV,
+            api_channel.MAX_WORK_TOTAL_BYTES_ENV,
+            api_channel.HISTORY_KEEP_ENV,
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        policy = api_channel.StoragePolicy.from_env()
+
+        assert policy.max_blob_bytes == api_channel.DEFAULT_MAX_BLOB_BYTES
+        assert policy.max_manifest_entries == api_channel.DEFAULT_MAX_BLOB_ENTRIES
+        assert policy.max_total_bytes_per_work == 0  # no quota unless asked
+        assert policy.max_checkpoints_per_work == 0  # keep everything
+        assert policy.history_keep == 0
+        assert policy.retention_keep() == 0  # therefore: no cleanup at all
+
+    def test_retention_keep_bounds_below_the_dr_history_floor(self):
+        no_floor = api_channel.StoragePolicy(max_checkpoints_per_work=2)
+        floor_only = api_channel.StoragePolicy(history_keep=1)
+        floor_wins = api_channel.StoragePolicy(max_checkpoints_per_work=1, history_keep=2)
+
+        assert no_floor.retention_keep() == 2
+        # The floor means: the active checkpoint PLUS history_keep superseded
+        # ones survive even when the retention cap alone would drop them.
+        assert floor_only.retention_keep() == 2
+        assert floor_wins.retention_keep() == 3
+
+    def test_the_dr_floor_bounds_what_upload_cleanup_may_drop(self, tmp_path: Path):
+        """history_keep=1: after three puts, the active plus ONE superseded
+        checkpoint survive — a bad resume can still roll back one step."""
+        policy = api_channel.StoragePolicy(history_keep=1)
+        store = api_channel.CheckpointStore(tmp_path / "cas", policy=policy)
+        for sequence in (1, 2, 3):
+            manifest, blobs = _tiny_checkpoint(
+                WORK_ID, {f"v{sequence}.txt": f"content {sequence}\n".encode()}, sequence
+            )
+            store.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=sequence
+            )
+
+        entries = store.list_entries()
+
+        assert [entry["sequence"] for entry in entries] == [2, 3]  # active + 1 history
+        assert entries[-1]["latest"] is True
+
+
+class TestQuotaEnforcement:
+    def test_an_over_quota_upload_is_refused_before_any_write(self, tmp_path: Path):
+        """The store's own refusal (no HTTP): quota exhaustion is explicit,
+        recoverable, and leaves the previous checkpoint byte-identical."""
+        first_files = {"a.txt": b"first attempt content\n"}
+        manifest, blobs = _tiny_checkpoint(WORK_ID, first_files, 1)
+        usage = len(manifest) + sum(len(data) for data in blobs.values())
+        policy = api_channel.StoragePolicy(max_total_bytes_per_work=usage)
+        store = api_channel.CheckpointStore(tmp_path / "cas", policy=policy)
+        store.put_checkpoint(work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1)
+        before = {
+            item: item.stat().st_mtime for item in (tmp_path / "cas").rglob("*") if item.is_file()
+        }
+
+        second_files = {"a.txt": b"first attempt content\n", "b.txt": b"brand new blob\n"}
+        manifest2, blobs2 = _tiny_checkpoint(WORK_ID, second_files, 2)
+        with pytest.raises(api_channel.StorageQuotaExceededError, match="per-work quota"):
+            store.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest2, blobs=blobs2, sequence=2
+            )
+
+        assert isinstance(
+            api_channel.StorageQuotaExceededError("x"), ValueError
+        )  # every old except-ValueError path still refuses
+        after = {
+            item: item.stat().st_mtime for item in (tmp_path / "cas").rglob("*") if item.is_file()
+        }
+        assert after == before  # byte-identical: nothing was added or removed
+        entry = store.entry(WORK_ID)
+        assert entry is not None and entry["sequence"] == 1  # the previous checkpoint stands
+
+    def test_an_idempotent_re_put_under_quota_is_not_new_usage(self, tmp_path: Path):
+        """Content addressing: the same checkpoint again adds ZERO fresh
+        bytes, so a tight quota never refuses a retry of what landed."""
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"content\n"}, 1)
+        usage = len(manifest) + sum(len(data) for data in blobs.values())
+        store = api_channel.CheckpointStore(
+            tmp_path / "cas", policy=api_channel.StoragePolicy(max_total_bytes_per_work=usage)
+        )
+        first = store.put_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+        )
+
+        again = store.put_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+        )
+
+        assert first["checkpoint_id"] == again["checkpoint_id"]
+        assert again["latest"] is True
+
+    def test_the_http_boundary_answers_413_and_preserves_the_work(
+        self, tmp_path: Path, server, monkeypatch
+    ):
+        tree = tmp_path / "runner-a"
+        store = ContentAddressedStore(tmp_path / "store-a", tenant=TENANT)
+        _wip_tree(tree, app=_APP_V2)
+        first = _capture(store, tree, sequence=1)
+        payload = _wire_payload(store, first.artifact_id)
+        usage = len(base64.b64decode(payload["manifest"])) + sum(
+            len(base64.b64decode(item)) for item in payload["blobs"].values()
+        )
+        monkeypatch.setenv(api_channel.MAX_WORK_TOTAL_BYTES_ENV, str(usage))
+
+        landed = server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            json=payload,
+            headers={"Authorization": _bearer(WORK_ID)},
+        )
+        assert landed.status_code == 200
+
+        _wip_tree(tree, app=_APP_V3)
+        second = _capture(store, tree, sequence=2)
+        refused = server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            json=_wire_payload(store, second.artifact_id),
+            headers={"Authorization": _bearer(WORK_ID)},
+        )
+
+        assert refused.status_code == 413
+        assert "per-work quota" in refused.json()["detail"]
+        # The work still resolves to its FIRST checkpoint — untouched.
+        latest = server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+        assert latest.status_code == 200
+        assert latest.json()["checkpoint_id"] == first.artifact_id
+
+    def test_the_store_enforces_the_manifest_entry_cap_and_blob_cap(self, tmp_path: Path):
+        """The policy is a property of the STORAGE, not of one HTTP path."""
+        store = api_channel.CheckpointStore(
+            tmp_path / "cas", policy=api_channel.StoragePolicy(max_blob_bytes=8)
+        )
+        big = {"a.txt": b"this blob is far over eight bytes\n"}
+        manifest, blobs = _tiny_checkpoint(WORK_ID, big, 1)
+        with pytest.raises(api_channel.StorageQuotaExceededError, match="per blob"):
+            store.put_checkpoint(work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1)
+
+        narrow = api_channel.CheckpointStore(
+            tmp_path / "cas2", policy=api_channel.StoragePolicy(max_manifest_entries=1)
+        )
+        two = {"a.txt": b"x\n", "b.txt": b"y\n"}
+        manifest2, blobs2 = _tiny_checkpoint(WORK_ID, two, 1)
+        with pytest.raises(api_channel.StorageQuotaExceededError, match="file entries"):
+            narrow.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest2, blobs=blobs2, sequence=1
+            )
+
+        assert sorted(item.name for item in (tmp_path / "cas").iterdir()) == []  # nothing landed
+        assert sorted(item.name for item in (tmp_path / "cas2").iterdir()) == []
+
+
+class TestStorageHealthReport:
+    def _seeded_store(self, tmp_path: Path) -> api_channel.CheckpointStore:
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        manifest_a1, blobs_a1 = _tiny_checkpoint("wp-a", {"shared.txt": b"shared\n"}, 1)
+        store.put_checkpoint(work_id="wp-a", manifest_bytes=manifest_a1, blobs=blobs_a1, sequence=1)
+        manifest_a2, blobs_a2 = _tiny_checkpoint(
+            "wp-a", {"shared.txt": b"shared\n", "v2.txt": b"second\n"}, 2
+        )
+        store.put_checkpoint(work_id="wp-a", manifest_bytes=manifest_a2, blobs=blobs_a2, sequence=2)
+        manifest_b, blobs_b = _tiny_checkpoint("wp-b", {"other.txt": b"other work\n"}, 1)
+        store.put_checkpoint(work_id="wp-b", manifest_bytes=manifest_b, blobs=blobs_b, sequence=1)
+        return store
+
+    def test_the_report_accounts_usage_per_work_and_finds_orphans(self, tmp_path: Path):
+        store = self._seeded_store(tmp_path)
+        root = tmp_path / "cas"
+        orphan_data = b"present on disk, referenced by nobody\n"
+        orphan_digest = _digest(orphan_data)
+        (root / orphan_digest[:2]).mkdir(parents=True, exist_ok=True)
+        (root / orphan_digest[:2] / orphan_digest).write_bytes(orphan_data)
+        (root / orphan_digest[:2] / ".tmp-crash-leftover").write_bytes(b"partial")
+
+        report = store.storage_health_report()
+
+        assert report["root"] == str(root)
+        assert set(report["policy"]) == {
+            "max_blob_bytes",
+            "max_manifest_entries",
+            "max_total_bytes_per_work",
+            "max_checkpoints_per_work",
+            "history_keep",
+            "cleanup_trigger",
+        }
+        assert report["works"]["wp-a"]["checkpoints"] == 2
+        assert report["works"]["wp-a"]["missing_digests"] == []
+        assert report["works"]["wp-b"]["checkpoints"] == 1
+        # wp-a references: 2 manifests + shared + v2 blobs = 4 digests.
+        assert report["works"]["wp-a"]["referenced_digests"] == 4
+        # Orphan detection: the planted digest is on disk, referenced by NO work.
+        assert report["orphan_cas_entries"] == [orphan_digest]
+        assert report["orphan_bytes"] == len(orphan_data)
+        # Temp files are listed relative to the report's own root.
+        assert report["temp_files"] == [f"{orphan_digest[:2]}/.tmp-crash-leftover"]
+        # Disk usage counts every file under the CAS shards (orphans and
+        # crash temps included) — the operator's actual footprint.
+        shard_bytes = sum(
+            item.stat().st_size
+            for shard in root.iterdir()
+            if shard.is_dir() and shard.name != "works"
+            for item in shard.iterdir()
+            if item.is_file()
+        )
+        assert report["disk_usage_bytes"] == shard_bytes
+        assert report["cas_entry_count"] == 7  # 6 referenced digests + the orphan
+        assert report["over_quota_works"] == []  # no quota configured
+
+    def test_a_missing_referenced_blob_is_named_not_hidden(self, tmp_path: Path):
+        store = self._seeded_store(tmp_path)
+        manifest_b, _ = _tiny_checkpoint("wp-b", {"other.txt": b"other work\n"}, 1)
+        blob_digest = json.loads(manifest_b)["files"]["other.txt"]["digest"]
+        (tmp_path / "cas" / blob_digest[:2] / blob_digest).unlink()
+
+        report = store.storage_health_report()
+
+        assert report["works"]["wp-b"]["missing_digests"] == [blob_digest]
+        # The missing blob is ALSO an unreferenced-on-paper orphan? No — it
+        # is referenced but absent; orphans are the opposite direction.
+        assert blob_digest not in report["orphan_cas_entries"]
+
+    def test_a_work_over_quota_is_flagged_with_its_reasons(self, tmp_path: Path):
+        store = self._seeded_store(tmp_path)
+        tiny = api_channel.StoragePolicy(max_total_bytes_per_work=1, max_checkpoints_per_work=1)
+
+        report = store.storage_health_report(policy=tiny)
+
+        assert report["over_quota_works"] == ["wp-a", "wp-b"]
+        assert report["works"]["wp-a"]["over_quota_reasons"] == ["bytes", "checkpoints"]
+        assert report["works"]["wp-b"]["over_quota_reasons"] == ["bytes"]
+
+    def test_the_http_health_endpoint_serves_the_report_to_the_operator(
+        self, tmp_path: Path, server
+    ):
+        tree = _wip_tree(tmp_path / "runner-a")
+        store = ContentAddressedStore(tmp_path / "store-a", tenant=TENANT)
+        _capture(store, tree, sequence=1)
+        _channel(server).upload_checkpoint(store, WORK_ID)
+
+        health = server.get(
+            "/lane/checkpoints/health", headers={"Authorization": _bearer(LIST_SCOPE)}
+        )
+        wrong_scope = server.get(
+            "/lane/checkpoints/health", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert wrong_scope.status_code == 401  # a work token is not an operator token
+        assert health.status_code == 200  # the literal route beat {work_id}: health answered
+        body = health.json()
+        assert body["works"][WORK_ID]["checkpoints"] == 1
+        assert body["orphan_cas_entries"] == []
+        assert body["disk_usage_bytes"] > 0

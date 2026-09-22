@@ -27,7 +27,13 @@ The channel is a poller, not a listener:
   CTL-04 CAS world, ``checkpoint`` → the ``checkpointed`` climb) — rare,
   per-command round trips whose RESULTS the gate needs before any vendor
   effect runs (a command written against a stale world must EXPIRE at the
-  gate, never at the vendor);
+  gate, never at the vendor). R28-11/R28-12: every fetch and every ack
+  POST carries the channel's ``ack_timeout`` — a slow or hung control
+  plane can hold one round trip at most that long, never unbounded — and
+  the steering session invokes this sync surface on ``asyncio.to_thread``
+  worker threads (:meth:`LaneSteeringSession.drain_once` and its ladder),
+  so the vendor turn sharing the lane's event loop is NEVER blocked by a
+  control-plane I/O, urgent interrupt included;
 - every ack carries a channel journal row that the control plane APPENDS
   to the command's audit journal — the lane's evidence, posted back.
 

@@ -79,7 +79,12 @@ workflow template passes the same-named repo VARIABLE through) overrides
 :data:`DEFAULT_DRIVER_VERSIONS` per driver, and the literal ``"latest"``
 keeps the unpinned install. Every preamble echoes the installed
 ``<cli> --version`` into the job log either way, so pin drift is visible,
-never silent.
+never silent. R28-26 closes the loop the echo left open: a lane whose
+preamble reports the installed version via ``FORGE_DRIVER_FINGERPRINT``
+gets it reconciled against the live registrations at startup (a drift
+WARNs — the registration is evidence of the PAST, the fingerprint is the
+PRESENT) and both it and the forge wheel SHA ride the candidate meta as
+the additive ``driver_provenance`` field.
 
 Lane credentials are capability/credential PAIRS (BYOK note): a
 provider-native subscription (a Claude seat, a Grok coding plan, a
@@ -100,6 +105,7 @@ credentials — the lane runs forge's CODE, never forge's state.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import asdict
 import hashlib
 import json
@@ -741,6 +747,79 @@ def _load_command_receipts(path: Path) -> list[tuple[str, int, str]]:
     return receipts
 
 
+#: R28-26: the env var carrying the EXACT installed driver CLI version
+#: — the ``<cli> --version`` string the install preamble observes on
+#: THIS runner (the preamble already echoes it to the job log; a lane
+#: that exports it makes the value reach the emit step's meta instead
+#: of dying in the log). Absent means the runner never reported it:
+#: unknown stays unknown, never guessed from the declared pin.
+FORGE_DRIVER_FINGERPRINT_ENV = "FORGE_DRIVER_FINGERPRINT"
+
+
+def forge_install_sha256() -> str:
+    """sha256 over THIS forge installation's dist-info RECORD (R28-26).
+
+    The wheel provenance half of the fingerprint: the RECORD manifest
+    lists every installed file with its own hash, so a digest over it
+    identifies the EXACT installed forge build — two checkouts pinned to
+    the same ref can still drift (a rebuilt wheel, a patched install),
+    and this is the string that tells them apart. ``""`` when the forge
+    distribution metadata is not importable (no metadata, no claim).
+    """
+    import importlib.metadata
+
+    try:
+        distribution = importlib.metadata.distribution("forge")
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+    record = distribution.read_text("RECORD")
+    if not record:
+        return ""
+    return hashlib.sha256(record.encode("utf-8")).hexdigest()
+
+
+def driver_provenance(driver: str, *, env: Mapping[str, str] | None = None) -> dict:
+    """The lane's EXACT execution provenance (R28-26), as a meta value.
+
+    Reads the runner-reported ``FORGE_DRIVER_FINGERPRINT`` (the installed
+    CLI's exact ``--version`` string) and the dispatch's
+    ``FORGE_DRIVER_VERSIONS`` pin from *env* (the process environment by
+    default), reconciles them against the live registrations via
+    :func:`forge.adaptive.drivers.live_registrations.provenance_report`,
+    and adds the forge wheel SHA (:func:`forge_install_sha256`). The
+    result rides the candidate meta as the additive ``driver_provenance``
+    field — what the dispatch declared, what the registration verified,
+    what the runner actually installed, in one auditable record.
+    """
+    from forge.adaptive.drivers.live_registrations import provenance_report
+
+    environ = os.environ if env is None else env
+    installed = str(environ.get(FORGE_DRIVER_FINGERPRINT_ENV) or "").strip()
+    try:
+        declared_pin = str(
+            resolve_driver_versions(environ.get("FORGE_DRIVER_VERSIONS")).get(driver) or ""
+        )
+    except ValueError:
+        declared_pin = ""  # the main path already failed closed on junk
+    report = provenance_report(driver, installed_cli_version=installed, declared_pin=declared_pin)
+    return {**report, "forge_wheel_sha256": forge_install_sha256()}
+
+
+def lane_provenance_warning(driver: str, *, env: Mapping[str, str] | None = None) -> str:
+    """The lane-startup provenance warning (R28-26) — WARN, never fail.
+
+    The lane's actual fingerprint compared against the registered
+    ``verified_against`` at startup: the evidence-matrix doctrine says a
+    registration is evidence of the PAST and the fingerprint is the
+    PRESENT, so a drift is SAID (one stderr line naming both versions)
+    while the lane keeps running. Empty string when every source agrees
+    or is honestly unknown-but-unremarkable.
+    """
+    report = driver_provenance(driver, env=env)
+    warnings = [str(warning) for warning in (report.get("warnings") or [])]
+    return " ".join(warnings)
+
+
 def emit_candidate_meta(
     *,
     run_id: str,
@@ -753,6 +832,7 @@ def emit_candidate_meta(
     usage_file: str = ".forge/usage.json",
     bootstrap_file: str = ".forge/bootstrap",
     profile_digest: str = "",
+    driver_provenance: dict | None = None,
 ) -> dict:
     """Build and write the v2 ``candidate.meta.json`` beside the staged diff.
 
@@ -768,7 +848,12 @@ def emit_candidate_meta(
     bootstrap is infrastructure/config, never code repair) — and
     ``profile_digest`` — the sha256 of the execution profile derived from
     THIS checkout (forge.runs.execution_profile), the executed twin of the
-    digest frozen into the approved spec. Returns the written meta dict.
+    digest frozen into the approved spec. R28-26 adds the additive
+    ``driver_provenance`` audit field — the exact installed CLI version
+    (``FORGE_DRIVER_FINGERPRINT``), the forge wheel SHA, the declared pin
+    and the registration verdict (see :func:`driver_provenance`) — absent
+    when not supplied, so pre-R28-26 metas are byte-identical. Returns
+    the written meta dict.
     """
     # Imported lazily: the profile module is pure stdlib, but importing it
     # initializes the forge.runs package — never worth paying on the
@@ -802,6 +887,11 @@ def emit_candidate_meta(
         "manifest_digest": f"sha256:{hashlib.sha256(diff_bytes).hexdigest()}",
         "usage": _load_json_object(Path(usage_file)),
         "profile_digest": str(profile_digest or "").strip().lower(),
+        # R28-26: the EXACT execution provenance — installed CLI version
+        # (FORGE_DRIVER_FINGERPRINT), forge wheel SHA, the declared pin
+        # and the registration verdict. Additive: ABSENT when the caller
+        # passes nothing (pre-R28-26 lanes byte-identical).
+        **({"driver_provenance": driver_provenance} if driver_provenance else {}),
         # NXT-11: the lane runner's steering journal + episode timing ride
         # the meta (additive — ABSENT when the lane ran with steering off).
         # The lane_driver writes them to .forge/steering.json; the emit step
@@ -1171,6 +1261,10 @@ def main(argv: list[str] | None = None) -> int:
                 usage_file=args.usage_file,
                 bootstrap_file=args.bootstrap_file,
                 profile_digest=profile_digest,
+                # R28-26: the exact-binary/wheel provenance rides the meta
+                # (additive — computed from the runner's own environment,
+                # never from what the dispatch claimed).
+                driver_provenance=driver_provenance(driver) if driver else None,
             )
         except OSError as exc:
             print(f"harness_entry: emit-meta failed ({exc})", file=sys.stderr)
@@ -1204,6 +1298,18 @@ def main(argv: list[str] | None = None) -> int:
         driver_versions = resolve_driver_versions(os.environ.get("FORGE_DRIVER_VERSIONS"))
     except ValueError as exc:
         return _finish("failed", f"harness_entry: {exc}")
+
+    # R28-26: the lane's ACTUAL binary provenance against the live
+    # registration, at startup — a mismatch (or an unreported install)
+    # WARNS to the job log and the lane keeps running: the registration
+    # is evidence of the PAST, the fingerprint is the PRESENT, and the
+    # reconcile that matters rides the candidate meta.
+    provenance_warning = lane_provenance_warning(driver)
+    if provenance_warning:
+        print(
+            f"harness_entry: driver provenance: {provenance_warning}",
+            file=sys.stderr,
+        )
 
     try:
         script = render_driver_script(

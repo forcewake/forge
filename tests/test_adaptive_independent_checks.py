@@ -37,12 +37,17 @@ from sqlalchemy.pool import StaticPool
 
 from forge.adaptive.independent_checks import (
     DB_CHECK_NAMES,
+    MEMBER_COMMIT_CHECK,
+    SET_CHECK_NAMES,
     ContractCheckSuite,
     DbIntegrationChecks,
     IndependentCheckReport,
     run_independent_checks,
+    verify_candidate_set,
 )
 from forge.adaptive.mailbox_db import ControlCommandRow
+from forge.adaptive.models import CandidateSet
+from forge.adaptive.workpackage import freeze_candidate_set
 from forge.durable.models import FlowRun, MRReservation, PublicationIntent
 from forge.models.base import Base
 
@@ -886,3 +891,333 @@ class TestReport:
         assert tuple(result.check for result in report.failures()) == (
             "db.attempt_base.matches_run",
         )
+
+
+# ----------------------------------------------------------------------
+# R28-20: independent verification of one COMPLETE CandidateSet
+# ----------------------------------------------------------------------
+
+WORK_CONTRACT_DIGEST = "9" * 64
+ORDERS_BASE = "1" * 40
+ORDERS_CANDIDATE = "a" * 40
+BILLING_CANDIDATE = "b" * 40
+CATALOG_BASE = "2" * 40
+IMAGE = f"sha256:{'e' * 64}"
+POSTGRES_PIN = f"sha256:{'d' * 64}"
+
+
+def _frozen_set(work_id: str = "run-1") -> CandidateSet:
+    """A two-changed-one-baseline world, frozen with pins and policy refs."""
+    return freeze_candidate_set(
+        work_id,
+        plan_revision=1,
+        contract_digest=WORK_CONTRACT_DIGEST,
+        per_repo={
+            "orders": {
+                "base_oid": ORDERS_BASE,
+                "candidate_oid": ORDERS_CANDIDATE,
+                "role": "changed",
+                "image_digest": IMAGE,
+            },
+            "billing": {
+                "base_oid": ORDERS_BASE,
+                "candidate_oid": BILLING_CANDIDATE,
+                "role": "changed",
+                "image_digest": IMAGE,
+            },
+            "catalog": {
+                "base_oid": CATALOG_BASE,
+                "candidate_oid": CATALOG_BASE,
+                "role": "baseline",
+                "image_digest": IMAGE,
+            },
+        },
+        environment_pins={"postgres": POSTGRES_PIN},
+        policy_refs=["policy:compat-1"],
+    )
+
+
+def _member_meta(repository_id: str, base_oid: str) -> dict:
+    """An honest published meta for ONE member, pinned to its own base."""
+    meta = _meta(attempt_base=base_oid)
+    meta["attempt_id"] = f"{repository_id}:1"
+    return meta
+
+
+def _artifacts(tmp_path: Path) -> dict:
+    """Per-member (meta, diff) artifacts for the contract angle."""
+    artifacts = {}
+    for repository_id, base_oid, diff_text in (
+        ("orders", ORDERS_BASE, _new_file_diff("src/orders.py")),
+        ("billing", ORDERS_BASE, _new_file_diff("src/billing.py")),
+        ("catalog", CATALOG_BASE, ""),
+    ):
+        member_dir = tmp_path / repository_id
+        member_dir.mkdir(parents=True, exist_ok=True)
+        artifacts[repository_id] = (
+            _member_meta(repository_id, base_oid),
+            _write_diff(member_dir, diff_text),
+        )
+    return artifacts
+
+
+async def _seed_workpackage_world(factory, digest: str | None, *, run_id: str = "run-1") -> None:
+    """A parent run coordinating a work package with *digest* active."""
+    async with factory() as session:
+        session.add(FlowRun(id=run_id, project_id=1, status="waiting_harness", evidence={}))
+        await session.commit()
+    state = {
+        "schema": "forge.workpackage.state/1",
+        "package_id": "pkg-1",
+        "parent_run_id": run_id,
+        "objective": "one change, many lanes",
+        "task_brief": "brief",
+        "phases": [["orders", "billing"]],
+        "current_phase": 0,
+        "state": "running",
+        "failed_item": "",
+        "tested_world_digest": digest,
+        "children": {},
+    }
+    async with factory() as session:
+        run = await session.get(FlowRun, run_id)
+        run.evidence = {"workpackage": state}
+        await session.commit()
+
+
+class TestVerifyCandidateSet:
+    async def test_a_well_formed_frozen_set_passes_every_angle(self, tmp_path, session_factory):
+        await _seed_workpackage_world(session_factory, _frozen_set().tested_world_digest)
+        committed = {
+            (repo, oid)
+            for repo, oid in (
+                ("orders", ORDERS_CANDIDATE),
+                ("billing", BILLING_CANDIDATE),
+                ("catalog", CATALOG_BASE),
+            )
+        }
+        artifacts = _artifacts(tmp_path)
+
+        async def lookup(repository_id: str, oid: str) -> bool:
+            return (repository_id, oid) in committed
+
+        report = await verify_candidate_set(
+            _frozen_set(), session_factory, commit_lookup=lookup, candidate_artifacts=artifacts
+        )
+
+        assert report.failures() == ()
+        assert report.skipped() == ()
+        set_verdicts = {result.check: result.verdict for result in report.set_checks}
+        assert set_verdicts == {
+            "candidateset.world_digest.recomputed": "pass",
+            "candidateset.applicability_digest.recomputed": "pass",
+            "candidateset.environment_compose.consistent": "pass",
+            "candidateset.db.recorded_world": "pass",
+        }
+        # Typed per-member outcomes: every member's commit probed, every
+        # published artifact through the contract suite.
+        assert [member.repository_id for member in report.members] == [
+            "billing",
+            "catalog",
+            "orders",
+        ]  # sorted, deterministic
+        for member in report.members:
+            assert member.commit_present.verdict == "pass"
+            assert all(result.verdict == "pass" for result in member.contract)
+        # The evidence fragment carries no verdict surface to misread.
+        evidence = report.as_evidence()
+        assert evidence["role"] == "evidence"
+        assert evidence["failed"] == [] and evidence["failed_members"] == []
+        assert evidence["tested_world_digest"] == _frozen_set().tested_world_digest
+        assert "failures:" not in report.summary_line()
+
+    async def test_a_missing_commit_fails_exactly_that_member(self, tmp_path, session_factory):
+        await _seed_workpackage_world(session_factory, _frozen_set().tested_world_digest)
+
+        async def lookup(repository_id: str, oid: str) -> bool:
+            return repository_id != "orders"  # orders' candidate is nowhere to be found
+
+        report = await verify_candidate_set(_frozen_set(), session_factory, commit_lookup=lookup)
+
+        assert report.failures() == (report.members[2].commit_present,)  # orders
+        assert report.failed_members() == ("orders",)
+        billing, catalog, orders = report.members
+        assert orders.commit_present.verdict == "fail"
+        assert orders.candidate_oid == ORDERS_CANDIDATE
+        assert "does not exist as a commit" in orders.commit_present.evidence
+        assert billing.commit_present.verdict == "pass"  # the others are untouched
+        assert catalog.commit_present.verdict == "pass"
+        assert "failed members: orders" in report.summary_line()
+
+    async def test_a_world_digest_mismatch_fails_the_whole_set(self, session_factory):
+        """A set whose recorded facts do not reproduce its frozen identity
+        is wrong whichever side lied — set-level failure, not one member's."""
+        await _seed_workpackage_world(session_factory, "0" * 64)  # a stale record too
+        honest = _frozen_set()
+        # A member identity silently edited after freeze: recompute differs.
+        tampered_members = tuple(
+            member.model_copy(
+                update={
+                    "candidate_oid": "9" * 40
+                    if member.repository_id == "billing"
+                    else member.candidate_oid
+                }
+            )
+            for member in honest.members
+        )
+        tampered = honest.model_copy(
+            update={
+                "members": tampered_members,
+                # …but the OLD digests still persisted (the lie under test):
+                "tested_world_digest": honest.tested_world_digest,
+                "applicability_digest": honest.applicability_digest,
+            }
+        )
+
+        report = await verify_candidate_set(tampered, session_factory)
+
+        failed = {result.check for result in report.failures()}
+        assert "candidateset.world_digest.recomputed" in failed
+        assert "candidateset.applicability_digest.recomputed" in failed
+        assert "candidateset.db.recorded_world" in failed  # record disagrees too
+        assert "does not reproduce" in report.set_checks[0].evidence
+        assert report.failed_members() == ()  # a WORLD failure, not a member one
+
+    async def test_an_unfrozen_set_skips_the_digest_angles_cleanly(self, session_factory):
+        await _seed_workpackage_world(session_factory, None)
+        unfrozen = freeze_candidate_set(
+            "run-1",
+            plan_revision=1,
+            contract_digest=WORK_CONTRACT_DIGEST,
+            per_repo={
+                "orders": {
+                    "base_oid": ORDERS_BASE,
+                    "candidate_oid": ORDERS_CANDIDATE,
+                    "role": "changed",
+                    "image_digest": IMAGE,
+                }
+            },
+        )
+
+        report = await verify_candidate_set(unfrozen, session_factory)
+
+        verdicts = {result.check: result.verdict for result in report.set_checks}
+        assert verdicts["candidateset.world_digest.recomputed"] == "skipped"
+        assert verdicts["candidateset.applicability_digest.recomputed"] == "skipped"
+        assert verdicts["candidateset.db.recorded_world"] == "skipped"
+        assert verdicts["candidateset.environment_compose.consistent"] == "pass"
+        assert report.failures() == ()
+
+    async def test_without_a_commit_lookup_the_probe_is_a_recorded_skip(self, session_factory):
+        await _seed_workpackage_world(session_factory, _frozen_set().tested_world_digest)
+
+        report = await verify_candidate_set(_frozen_set(), session_factory)
+
+        assert report.failures() == ()
+        skipped_ids = [result.check for result in report.skipped()]
+        # Three members, each with a commit-probe skip and an artifact skip.
+        assert skipped_ids.count(MEMBER_COMMIT_CHECK) == 3
+        assert skipped_ids.count("contract.artifact.present") == 3
+        for member in report.members:
+            assert member.commit_present.verdict == "skipped"
+            assert "no commit lookup" in member.commit_present.evidence
+            assert member.contract[0].check == "contract.artifact.present"
+            assert member.contract[0].verdict == "skipped"
+
+    async def test_the_durable_world_record_disagreement_fails(self, session_factory):
+        """The set froze one world; the package executes another."""
+        await _seed_workpackage_world(session_factory, "f" * 64)
+
+        report = await verify_candidate_set(_frozen_set(), session_factory)
+
+        recorded = next(
+            result
+            for result in report.set_checks
+            if result.check == "candidateset.db.recorded_world"
+        )
+        assert recorded.verdict == "fail"
+        assert "active world" in recorded.evidence
+
+    async def test_a_run_absent_entirely_fails_the_durable_record_check(self, session_factory):
+        report = await verify_candidate_set(_frozen_set(), session_factory)
+
+        recorded = next(
+            result
+            for result in report.set_checks
+            if result.check == "candidateset.db.recorded_world"
+        )
+        assert recorded.verdict == "fail"
+        assert "no durable coordination record" in recorded.evidence
+
+    async def test_a_member_artifact_failing_the_contract_fails_that_member(
+        self, tmp_path, session_factory
+    ):
+        await _seed_workpackage_world(session_factory, _frozen_set().tested_world_digest)
+        artifacts = _artifacts(tmp_path)
+        # billing's published diff escapes the repository — the contract
+        # suite's own negative, now reached through the SET verification.
+        evil_dir = tmp_path / "billing-evil"
+        evil_dir.mkdir(parents=True, exist_ok=True)
+        artifacts["billing"] = (
+            _member_meta("billing", ORDERS_BASE),
+            _write_diff(evil_dir, _new_file_diff("../escape.py")),
+        )
+
+        report = await verify_candidate_set(
+            _frozen_set(), session_factory, candidate_artifacts=artifacts
+        )
+
+        assert report.failed_members() == ("billing",)
+        billing_contract = {result.check: result.verdict for result in report.members[0].contract}
+        assert billing_contract["contract.diff.path_safety"] == "fail"
+
+    async def test_an_unresolvable_member_artifact_fails_the_compose_check(self, session_factory):
+        """A member riding the ``unresolved`` sentinel composes flagged —
+        the verifier names it, never runs whatever a tag points at."""
+        await _seed_workpackage_world(session_factory, None)
+        sentinel_set = freeze_candidate_set(
+            "run-1",
+            plan_revision=1,
+            contract_digest=WORK_CONTRACT_DIGEST,
+            per_repo={
+                "orders": {
+                    "base_oid": ORDERS_BASE,
+                    "candidate_oid": ORDERS_CANDIDATE,
+                    "role": "changed",
+                    "image_digest": "unresolved",
+                }
+            },
+        )
+
+        report = await verify_candidate_set(sentinel_set, session_factory)
+
+        compose = next(
+            result
+            for result in report.set_checks
+            if result.check == "candidateset.environment_compose.consistent"
+        )
+        assert compose.verdict == "fail"
+        assert "exact artifact" in compose.evidence
+        assert "orders" in compose.evidence
+
+    async def test_the_report_shape_is_evidence_never_a_verdict(self, session_factory):
+        await _seed_workpackage_world(session_factory, None)
+
+        report = await verify_candidate_set(_frozen_set(), session_factory)
+
+        assert not hasattr(report, "passed") and not hasattr(report, "ok")
+        evidence = report.as_evidence()
+        assert "verdict" not in evidence and "verified" not in evidence
+        assert set(evidence) == {
+            "role",
+            "note",
+            "work_id",
+            "plan_revision",
+            "tested_world_digest",
+            "set_checks",
+            "members",
+            "failed",
+            "skipped",
+            "failed_members",
+        }
+        assert list(SET_CHECK_NAMES) == [result.check for result in report.set_checks]

@@ -107,7 +107,10 @@ from forge.factory.llm import LLMError, LLMResponseError
 from forge.adaptive.discovery_stage import (
     DiscoveryRunContext,
     DiscoveryStageError,
+    QuestionsOutstanding,
+    discovery_open_questions,
     maybe_run_discovery,
+    record_answers,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
 from forge.factory.planner import PLAN_SUMMARY_CHARS
@@ -157,6 +160,7 @@ from forge.runs.revival import (
     RECONCILE_RE,
     STATUS_RE,
     WHY_BLOCKED_RE,
+    _blocked_runs_query,
     build_retry_context,
     begin_revival_attempt,
     claim_attempt_dispatch,
@@ -301,6 +305,11 @@ _RESUMABLE_PUBLISH_STATUSES = frozenset(
     {"proposing", "validating", "committing", "ensuring_draft_mr"}
 )
 
+#: R28-17: the status_reason prefix marking a run parked waiting for
+#: discovery answers (NOT a failure): the run re-enters planning through
+#: the fenced plan-restart edge once every question is answered.
+QUESTION_BLOCK_PREFIX = "waiting_question"
+
 
 class GitHubRunService:
     """Coordinates the GitHub agents, the controller and one run's lifecycle."""
@@ -313,12 +322,27 @@ class GitHubRunService:
         *,
         stack: GitHubAgents,
         repo_full_name: str,
+        control: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._config = config or ForgeConfig()
         self._stack = stack
         self._repo_full_name = repo_full_name
+        # R28-17: the operator-control seam the question-resumption pass
+        # drains /answer records from. Defaults to the process-shared
+        # control service (the SAME mailbox the command router records
+        # into); injectable so tests and alternate deployments can bind
+        # their own.
+        self._control_override = control
+
+    def _control_service(self) -> Any:
+        """The operator control mailbox the /answer commands landed in."""
+        if self._control_override is not None:
+            return self._control_override
+        from forge.adaptive.command_router import shared_control_service
+
+        return shared_control_service()
 
     @property
     def _owner(self) -> str:
@@ -571,6 +595,24 @@ class GitHubRunService:
                 flow_run_id=run_id,
                 path_scope=path_scope or None,
             )
+        except QuestionsOutstanding as exc:
+            # R28-17: unanswered discovery questions are a WAIT, not a
+            # failure — the run parks blocked(waiting_question) with the
+            # questions durably persisted, the operator answers through
+            # /answer, and the question-recovery pass re-enters planning
+            # here through the fenced plan-restart edge. Must be caught
+            # BEFORE DiscoveryStageError (its parent) so the wait is never
+            # misfiled as a planning failure.
+            await self._park_waiting_question(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                questions=exc,
+                issue_title=issue_title,
+                issue_description=issue_description,
+                author_username=author_username,
+            )
+            return
         except (LLMError, LLMResponseError, DiscoveryStageError) as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"planning_failed: {exc}")
             await self._post_journaled_note(
@@ -1608,6 +1650,222 @@ class GitHubRunService:
 
     async def _resume_config_blocked(self, run_id: str, stash: dict) -> None:
         """Re-enter planning for a recovered config-blocked run."""
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            project_id = run.project_id
+            issue_number = run.issue_iid
+        await self._plan_and_publish(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number or 0,
+            issue_title=str(stash.get("issue_title") or ""),
+            issue_description=str(stash.get("issue_description") or ""),
+            author_username=str(stash.get("author_username") or ""),
+        )
+
+    # ------------------------------------------------------------------
+    # Question-gated planning: park on QuestionsOutstanding, resume on
+    # /answer (R28-17)
+    # ------------------------------------------------------------------
+
+    async def _park_waiting_question(
+        self,
+        run_id: str,
+        *,
+        project_id: int,
+        issue_number: int,
+        questions: QuestionsOutstanding,
+        issue_title: str,
+        issue_description: str,
+        author_username: str,
+    ) -> None:
+        """Park a run whose discovery still has unanswered questions (R28-17).
+
+        A WAIT, not a failure: the discovery record already persisted the
+        questions (durably, with ids and citations); the run parks
+        ``blocked(waiting_question: …)`` with the planning start context
+        stashed beside them so the recovery pass can re-enter planning
+        with the EXACT input the discovery record was frozen against
+        (an edited stash would miss the record's frozen_input_digest and
+        re-pay the probes as new input).
+        """
+        reason = f"{QUESTION_BLOCK_PREFIX}: {questions.discovery_id}"
+        await self._to_terminal(run_id, FlowStatus.BLOCKED, reason)
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            run.evidence = _merge_evidence(
+                run.evidence,
+                {
+                    "question_block": {
+                        "reason": reason[:200],
+                        "discovery_id": questions.discovery_id,
+                        "question_ids": [
+                            str(q.get("question_id") or "") for q in questions.questions
+                        ],
+                        "repo_full_name": self._repo_full_name,
+                        "issue_title": issue_title,
+                        "issue_description": issue_description,
+                        "author_username": author_username,
+                    }
+                },
+            )
+            await session.commit()
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            self._waiting_question_comment(run_id, questions),
+            run_id,
+            "waiting_question",
+        )
+        logger.info(
+            "GitHub run %s parked waiting for %d discovery answer(s) — planning resumes "
+            "when /answer resolves them",
+            run_id[:8],
+            len(questions.questions),
+        )
+
+    @staticmethod
+    def _waiting_question_comment(run_id: str, questions: QuestionsOutstanding) -> str:
+        listed = "\n".join(
+            f"- `{qid}` ({crit}) {text}"
+            for qid, crit, text in (
+                (
+                    str(q.get("question_id") or "?"),
+                    str(q.get("criticality") or "critical"),
+                    str(q.get("text") or ""),
+                )
+                for q in questions.questions
+            )
+        )
+        return (
+            f"Run `{run_id[:8]}` is **waiting for clarification** before planning "
+            f"(discovery `{questions.discovery_id}`):\n\n{listed}\n\n"
+            "Answer each with `/answer <question-id> <text>` — planning resumes "
+            "automatically once every question has an answer.\n\n"
+            "*This is an automated message.*"
+        )
+
+    async def evaluate_question_recovery(self, now: datetime | None = None) -> int:
+        """One recovery pass over this repo's question-parked runs (R28-17).
+
+        For every run parked ``blocked(waiting_question: …)`` of THIS repo:
+
+        - the run's ``answer`` mailbox commands (what ``/answer`` recorded
+          through the command router) are drained into the durable
+          discovery record (:func:`record_answers` — idempotent, one
+          command resolves exactly its own question);
+        - while the record still has open questions the run stays parked
+          (the drain is free);
+        - once every question is answered, the run walks back to
+          ``preflight`` through the SAME fenced plan-restart edge the
+          config recovery uses and re-enters planning — the discovery
+          record is REPLAYED (no probes re-paid) with the operator
+          answers injected beside the evidence digest.
+
+        Returns the number of runs re-entering planning.
+        """
+        # B15: the blocked-run scan is revival.py's shared
+        # ``_blocked_runs_query`` (scoped to THIS repo), never a
+        # service-local re-implementation — the reason filter runs in
+        # Python exactly like ``evaluate_config_blocks`` does.
+        async with self._session_factory() as session:
+            runs = (
+                (await session.execute(_blocked_runs_query("github", self._repo_full_name)))
+                .scalars()
+                .all()
+            )
+            candidates = [
+                (
+                    run.id,
+                    run.project_id,
+                    run.issue_iid or 0,
+                    dict((run.evidence or {}).get("question_block") or {}),
+                )
+                for run in runs
+                if str(run.status_reason or "").startswith(QUESTION_BLOCK_PREFIX)
+            ]
+        resumed = 0
+        for run_id, project_id, issue_number, stash in candidates:
+            try:
+                commands = [
+                    command
+                    for command in await self._control_service().pending(run_id)
+                    if str(getattr(command, "kind", "") or "") == "answer"
+                ]
+                if commands:
+                    await record_answers(self._session_factory, run_id, commands)
+            except Exception:
+                # A drain failure must never kill the recovery pass.
+                logger.exception("Question-answer drain failed for run %s", run_id[:8])
+                continue
+            if await discovery_open_questions(self._session_factory, run_id):
+                continue  # still waiting on at least one answer
+            try:
+                if not await self._begin_question_recovery(run_id):
+                    continue
+            except Exception:
+                logger.exception("Question-recovery walk failed for run %s", run_id[:8])
+                continue
+            try:
+                await self._resume_question_blocked(run_id, stash)
+            except Exception:
+                logger.exception("Question-recovery replan failed for run %s", run_id[:8])
+                continue
+            await self._post_journaled_note(
+                project_id,
+                issue_number,
+                f"Run `{run_id[:8]}` **resumed** — every discovery question is answered; "
+                "planning re-entered with the answers recorded.\n\n"
+                "*This is an automated message.*",
+                run_id,
+                "questions_resolved",
+            )
+            resumed += 1
+        return resumed
+
+    async def _begin_question_recovery(self, run_id: str) -> bool:
+        """Walk one question-parked run back to ``preflight`` (guarded).
+
+        The same fenced plan-restart edge the A13 config recovery uses:
+        the CAS walk consumes the parked state exactly once, a run that
+        froze a spec can never re-plan past its gate, and a live sibling
+        run of the same issue wins over the parked one.
+        """
+        async with self._session_factory() as session:
+            controller = Controller(session)
+            run = await session.get(FlowRun, run_id)
+            if run is None or run.status != FlowStatus.BLOCKED.value:
+                return False
+            if await has_active_run(
+                session,
+                provider="github",
+                project_id=run.project_id,
+                issue_iid=run.issue_iid,
+                repo_full_name=run.github_repo_full_name,
+                exclude_run_id=run.id,
+            ):
+                logger.info(
+                    "Run %s questions answered but a sibling run is active — stays parked",
+                    run_id[:8],
+                )
+                return False
+            await controller.restart_plan_transition(
+                run_id,
+                reason="discovery questions answered — re-entering planning (R28-17)",
+                authorized_by="question_recovery",
+            )
+            await session.commit()
+        return True
+
+    async def _resume_question_blocked(self, run_id: str, stash: dict) -> None:
+        """Re-enter planning for an answered question-parked run.
+
+        The stashed issue description is the ORIGINAL input the discovery
+        record was frozen against, so :func:`maybe_run_discovery` REPLAYS
+        the completed discovery (no probes re-paid) and attaches the
+        answers section beside the evidence digest before the planner
+        sees the task.
+        """
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
@@ -5625,6 +5883,74 @@ async def _repos_with_config_blocked(
     return list(dict.fromkeys(repos))
 
 
+async def evaluate_github_question_recovery(
+    settings: Settings,
+    forge_config: ForgeConfig,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    stack_factory: Callable[[str, str], GitHubAgents] | None = None,
+) -> None:
+    """One R28-17 pass: drain /answer records of question-parked GitHub runs.
+
+    Every repo holding a run parked ``blocked(waiting_question: …)`` gets
+    one :meth:`GitHubRunService.evaluate_question_recovery` tick — the
+    run's answer mailbox commands fold into the durable discovery record
+    and a run with every question answered re-enters planning through
+    the fenced plan-restart edge; a run still waiting stays parked,
+    unpaid.
+    """
+    if stack_factory is None:
+        stack_factory = lambda o, r: build_github_agents(  # noqa: E731 — trivial default
+            settings, session_factory, o, r
+        )
+    for repo_full_name in await _repos_with_question_blocked(session_factory):
+        owner, _, repo = repo_full_name.partition("/")
+        if not repo:
+            logger.warning("Question-parked run with malformed repo %r — skipping", repo_full_name)
+            continue
+        stack = stack_factory(owner, repo)
+        try:
+            service = GitHubRunService(
+                session_factory, settings, forge_config, stack=stack, repo_full_name=repo_full_name
+            )
+            await service.evaluate_question_recovery()
+        except Exception:
+            # One broken repo must not stall the recovery pass.
+            logger.exception("Question recovery failed for %s", repo_full_name)
+        finally:
+            aclose = getattr(stack.client, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
+async def _repos_with_question_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[str]:
+    """Distinct GitHub repos that hold a run parked for discovery answers."""
+    async with session_factory() as session:
+        runs = (
+            (
+                await session.execute(
+                    select(FlowRun).where(
+                        FlowRun.provider == "github",
+                        FlowRun.status == FlowStatus.BLOCKED.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    repos: list[str] = []
+    for run in runs:
+        if not str(run.status_reason or "").startswith(QUESTION_BLOCK_PREFIX):
+            continue
+        stash = (run.evidence or {}).get("question_block") or {}
+        repo = str(stash.get("repo_full_name") or run.github_repo_full_name or "").strip()
+        if repo:
+            repos.append(repo)
+    return list(dict.fromkeys(repos))
+
+
 async def _repos_with_due_publication_intents(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[str]:
@@ -5732,6 +6058,15 @@ async def run_github_publication_intents_reconciler(
         except Exception:
             logger.exception("GitHub config-block recovery pass failed")
         try:
+            # R28-17 question-gate recovery rides the same always-on loop:
+            # drains /answer records into the durable discovery record and
+            # re-enters planning for runs whose questions are all answered.
+            await evaluate_github_question_recovery(
+                settings, forge_config, session_factory, stack_factory=stack_factory
+            )
+        except Exception:
+            logger.exception("GitHub question-wait recovery pass failed")
+        try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=interval_seconds)
             break  # Event set — clean shutdown.
         except asyncio.TimeoutError:
@@ -5742,6 +6077,7 @@ async def run_github_publication_intents_reconciler(
 __all__ = [
     "GitHubRunService",
     "evaluate_github_config_recovery",
+    "evaluate_github_question_recovery",
     "evaluate_github_publication_intents",
     "evaluate_github_revival",
     "evaluate_github_revival_recovery",

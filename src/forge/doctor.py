@@ -10,11 +10,15 @@ Usage::
     uv run python -m forge.doctor --json          # machine-readable
     uv run python -m forge.doctor --project 68    # + target-project checks
     uv run python -m forge.doctor --capabilities  # the capability matrix (NXT-02)
+    uv run python -m forge.doctor --capabilities --strict  # + the promotion gate (R28-27)
 
 Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = usage error.
 Warnings do not affect the exit code. ``--capabilities`` is offline: it prints
 the reachability-based capability manifest (no environment contacts) and exits
-nonzero if the manifest fails its own honesty validation.
+nonzero if the manifest fails its own honesty validation. ``--strict`` adds the
+promotion gate: a row claiming a tier whose required evidence class is missing
+(an unexecuted cross-runner test cannot produce a cross-runner support badge)
+exits 1 as well.
 """
 
 from __future__ import annotations
@@ -389,27 +393,37 @@ def check_capabilities() -> CheckResult:
     return _result("capabilities.manifest", True, detail, "")
 
 
-def _capabilities_mode(as_json: bool) -> int:
-    """``--capabilities``: print the matrix (NXT-02); exit 1 on drift."""
+def _capabilities_mode(as_json: bool, strict: bool = False) -> int:
+    """``--capabilities``: print the matrix (NXT-02); exit 1 on drift.
+
+    R28-27 ``--strict`` adds the PROMOTION GATE: every row claiming a
+    tier above ``domain_contract`` must hold the evidence classes that
+    tier requires (``classify_evidence`` over its pointers), and an
+    over-claim fails the run — a capability cannot claim a tier its
+    evidence class cannot support.
+    """
     import json as _json
 
     from forge.capability_manifest import (
         TIER_LEGEND,
         capabilities,
         format_matrix,
+        manifest_gate_problems,
         manifest_problems,
     )
 
     rows = capabilities()
     problems = manifest_problems(rows)
+    gate_problems = manifest_gate_problems(rows) if strict else []
     if as_json:
         print(
             _json.dumps(
                 {
-                    "status": "failed" if problems else "ok",
+                    "status": "failed" if problems or gate_problems else "ok",
                     "legend": TIER_LEGEND,
                     "capabilities": [row.to_json() for row in rows],
                     "problems": problems,
+                    "gate_problems": gate_problems,
                 },
                 indent=2,
             )
@@ -420,7 +434,9 @@ def _capabilities_mode(as_json: bool) -> int:
             print()
             for problem in problems:
                 print(f"  DRIFT: {problem}")
-    return 1 if problems else 0
+        for problem in gate_problems:
+            print(f"  GATE: {problem}")
+    return 1 if problems or gate_problems else 0
 
 
 async def run_checks(settings: Settings, project_id: int | None = None) -> list[CheckResult]:
@@ -468,11 +484,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the reachability-based capability matrix (NXT-02) and exit; offline",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "with --capabilities: also run the promotion gate (R28-27) — a row"
+            " claiming a tier without the matching evidence class fails the run"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.capabilities:
         # Offline mode: no environment contacts, no Settings needed.
-        return _capabilities_mode(args.json)
+        return _capabilities_mode(args.json, strict=args.strict)
 
     settings = Settings()  # type: ignore[call-arg]
     results = asyncio.run(run_checks(settings, args.project))

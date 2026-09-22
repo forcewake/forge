@@ -45,19 +45,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from forge.adaptive.models import PlanRevision, PlanStep, WorkContract
 
 __all__ = [
+    "ACTIVE_PLAN_KEY",
+    "ACTIVE_PLAN_SCHEMA",
+    "ACTIVATION_SCHEMA",
     "ActivationRecord",
     "ActivationRefused",
     "ActivationSession",
     "ActivePlanState",
+    "DurableActivationOutcome",
+    "PENDING_PROPOSAL_KEY",
+    "PENDING_PROPOSAL_SCHEMA",
     "Question",
+    "REVISION_ACTIVATIONS_KEY",
     "RevisionDecision",
     "TacticalPolicy",
+    "activate_pending_revision",
     "activate_revision",
+    "active_plan_document_of",
     "apply_tactical",
     "change_log",
     "classify_revision",
@@ -67,7 +76,9 @@ __all__ = [
     "parse_tactical_policy",
     "plan_digest",
     "proposed_revision_identity",
+    "read_active_plan",
     "route_question",
+    "stage_pending_revision",
     "stale_callback_guard",
     "transformation_kinds",
 ]
@@ -492,6 +503,87 @@ class ActivationSession(Protocol):
     def commit_activation(self, record: ActivationRecord) -> None: ...
 
 
+def _binding_refusal(
+    decision: RevisionDecision,
+    proposed: PlanRevision,
+    current: ActivePlanState,
+) -> ActivationRefused | None:
+    """The FULL binding-tuple guard, shared by every activation path (NXT-19).
+
+    Returns the typed refusal for the FIRST violated binding, or ``None``
+    when the decision binds to exactly this proposal of exactly this
+    work under exactly the world *current* describes. Both
+    :func:`activate_revision` (the in-memory domain door) and
+    :func:`activate_pending_revision` (the durable transaction) run THIS
+    guard — one rule set, two doors, no drift.
+    """
+    if decision.work_id != proposed.work_id:
+        return ActivationRefused(
+            "work_mismatch",
+            f"decision {decision.decision_id} is for work {decision.work_id!r}, "
+            f"the proposal is for work {proposed.work_id!r}",
+        )
+    if proposed.work_id != current.work_id:
+        return ActivationRefused(
+            "current_work_mismatch",
+            f"the proposal is for work {proposed.work_id!r}, "
+            f"but the current work is {current.work_id!r}",
+        )
+    if proposed.plan_id != current.plan_id:
+        return ActivationRefused(
+            "plan_mismatch",
+            f"the proposal is for plan {proposed.plan_id!r}, "
+            f"but the active plan is {current.plan_id!r}",
+        )
+    if decision.proposed_revision_id != proposed_revision_identity(proposed):
+        return ActivationRefused(
+            "proposal_identity_mismatch",
+            f"decision {decision.decision_id} names {decision.proposed_revision_id!r}, "
+            f"the proposal is {proposed_revision_identity(proposed)!r}",
+        )
+    if decision.proposed_digest != plan_digest(proposed):
+        return ActivationRefused(
+            "proposed_digest_mismatch",
+            f"decision {decision.decision_id} approved content {decision.proposed_digest}, "
+            f"the proposal's canonical digest is {plan_digest(proposed)} — a changed proposal "
+            "body is a different proposal and needs its own decision",
+        )
+    if decision.work_contract_digest != proposed.work_contract_digest:
+        return ActivationRefused(
+            "contract_digest_mismatch",
+            f"decision {decision.decision_id} was judged under contract "
+            f"{decision.work_contract_digest}, the proposal declares "
+            f"{proposed.work_contract_digest}",
+        )
+    if decision.work_contract_digest != current.work_contract_digest:
+        return ActivationRefused(
+            "current_contract_mismatch",
+            f"decision {decision.decision_id} was judged under contract "
+            f"{decision.work_contract_digest}, the current contract is "
+            f"{current.work_contract_digest} — the approval predates the contract change",
+        )
+    if decision.parent_revision != current.active_revision:
+        return ActivationRefused(
+            "parent_mismatch",
+            f"decision {decision.decision_id} expects parent revision "
+            f"{decision.parent_revision}, but revision {current.active_revision} is "
+            "active — the approval predates newer work and must be re-requested",
+        )
+    if proposed.revision <= decision.parent_revision:
+        return ActivationRefused(
+            "revision_not_forward",
+            "the proposed revision must follow the decision's parent revision",
+        )
+    if decision.authorization_epoch != current.authorization_epoch:
+        return ActivationRefused(
+            "stale_authorization_epoch",
+            f"decision epoch {decision.authorization_epoch} != current epoch "
+            f"{current.authorization_epoch}; the decision must be re-requested "
+            "against the current epoch",
+        )
+    return None
+
+
 def activate_revision(
     decision: RevisionDecision,
     proposed: PlanRevision,
@@ -550,71 +642,9 @@ def activate_revision(
             f"{prior.activated_revision} of {prior.plan_id}; it cannot activate different content",
         )
 
-    proposed_digest = plan_digest(proposed)
-    if decision.work_id != proposed.work_id:
-        raise ActivationRefused(
-            "work_mismatch",
-            f"decision {decision.decision_id} is for work {decision.work_id!r}, "
-            f"the proposal is for work {proposed.work_id!r}",
-        )
-    if proposed.work_id != current.work_id:
-        raise ActivationRefused(
-            "current_work_mismatch",
-            f"the proposal is for work {proposed.work_id!r}, "
-            f"but the current work is {current.work_id!r}",
-        )
-    if proposed.plan_id != current.plan_id:
-        raise ActivationRefused(
-            "plan_mismatch",
-            f"the proposal is for plan {proposed.plan_id!r}, "
-            f"but the active plan is {current.plan_id!r}",
-        )
-    if decision.proposed_revision_id != proposed_revision_identity(proposed):
-        raise ActivationRefused(
-            "proposal_identity_mismatch",
-            f"decision {decision.decision_id} names {decision.proposed_revision_id!r}, "
-            f"the proposal is {proposed_revision_identity(proposed)!r}",
-        )
-    if decision.proposed_digest != proposed_digest:
-        raise ActivationRefused(
-            "proposed_digest_mismatch",
-            f"decision {decision.decision_id} approved content {decision.proposed_digest}, "
-            f"the proposal's canonical digest is {proposed_digest} — a changed proposal "
-            "body is a different proposal and needs its own decision",
-        )
-    if decision.work_contract_digest != proposed.work_contract_digest:
-        raise ActivationRefused(
-            "contract_digest_mismatch",
-            f"decision {decision.decision_id} was judged under contract "
-            f"{decision.work_contract_digest}, the proposal declares "
-            f"{proposed.work_contract_digest}",
-        )
-    if decision.work_contract_digest != current.work_contract_digest:
-        raise ActivationRefused(
-            "current_contract_mismatch",
-            f"decision {decision.decision_id} was judged under contract "
-            f"{decision.work_contract_digest}, the current contract is "
-            f"{current.work_contract_digest} — the approval predates the contract change",
-        )
-    if decision.parent_revision != current.active_revision:
-        raise ActivationRefused(
-            "parent_mismatch",
-            f"decision {decision.decision_id} expects parent revision "
-            f"{decision.parent_revision}, but revision {current.active_revision} is "
-            "active — the approval predates newer work and must be re-requested",
-        )
-    if proposed.revision <= decision.parent_revision:
-        raise ActivationRefused(
-            "revision_not_forward",
-            "the proposed revision must follow the decision's parent revision",
-        )
-    if decision.authorization_epoch != current.authorization_epoch:
-        raise ActivationRefused(
-            "stale_authorization_epoch",
-            f"decision epoch {decision.authorization_epoch} != current epoch "
-            f"{current.authorization_epoch}; the decision must be re-requested "
-            "against the current epoch",
-        )
+    refusal = _binding_refusal(decision, proposed, current)
+    if refusal is not None:
+        raise refusal
 
     session.commit_activation(
         ActivationRecord(
@@ -623,7 +653,7 @@ def activate_revision(
             plan_id=proposed.plan_id,
             parent_revision=decision.parent_revision,
             activated_revision=proposed.revision,
-            activated_plan_digest=proposed_digest,
+            activated_plan_digest=plan_digest(proposed),
             work_contract_digest=decision.work_contract_digest,
             authorization_epoch=current.authorization_epoch,
             publication_epoch=current.publication_epoch + 1,
@@ -842,3 +872,369 @@ def fresh_session_brief(
         "decisions": [record["chosen"] for record in decisions],
         "checkpoint": checkpoint_summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# The durable activation transaction (R28-18)
+# ---------------------------------------------------------------------------
+#
+# ``activate_revision`` above is the domain door; this section is its
+# durable twin. The review's finding: the conditional ActivationSession
+# contract was correct but every session was in-memory, so an
+# /approve-revision that arrived through the REAL command ingress had
+# nothing durable to transact against — the next dispatch could not read
+# the ACTIVE revision from the record. Here the transaction's backing
+# store is the ``FlowRun.evidence`` blob (the same runs/ pattern the
+# discovery stage and the work package use): one ``revision_activations``
+# journal keyed by decision id, one ``active_plan`` pointer the dispatch
+# leg reads, and one ``revision_proposal`` slot holding the PENDING
+# decision a human approves through the ingress. Record → verify binding
+# tuple → switch active → commit happen inside ONE database transaction:
+# the session double below STAGES the activation while the guard runs,
+# and the evidence write + the outbox row + the single ``commit()`` land
+# together or not at all — a failure between decision consumption and
+# the revision switch cannot leave partial state.
+
+#: Where each of the durable records lives inside ``FlowRun.evidence``.
+REVISION_ACTIVATIONS_KEY = "revision_activations"
+ACTIVE_PLAN_KEY = "active_plan"
+PENDING_PROPOSAL_KEY = "revision_proposal"
+
+PENDING_PROPOSAL_SCHEMA = "forge.revision.proposal-pending/1"
+ACTIVATION_SCHEMA = "forge.revision.activation/1"
+ACTIVE_PLAN_SCHEMA = "forge.revision.active-plan/1"
+
+#: SessionFactory alias (the same shape every runs/ service codes against:
+#: a zero-arg callable yielding an async context manager over a session).
+_RevisionSessionFactory = Any
+
+
+@dataclass(frozen=True)
+class DurableActivationOutcome:
+    """What one :func:`activate_pending_revision` transaction established.
+
+    ``status`` is ``activated`` (this call switched the active revision),
+    ``already_active`` (the decision was consumed by an earlier delivery —
+    the prior record comes back, nothing new applied) or ``refused``
+    (the typed refusal, carrying the domain ``code``). ``revision`` is
+    the activated :class:`PlanRevision` for the first two statuses.
+    """
+
+    status: str
+    record: ActivationRecord | None = None
+    revision: PlanRevision | None = None
+    code: str = ""
+    reason: str = ""
+
+    @property
+    def activated(self) -> bool:
+        return self.status == "activated"
+
+
+def _activation_record_of(document: Any) -> ActivationRecord | None:
+    if not isinstance(document, dict):
+        return None
+    try:
+        return ActivationRecord(
+            decision_id=str(document.get("decision_id") or ""),
+            work_id=str(document.get("work_id") or ""),
+            plan_id=str(document.get("plan_id") or ""),
+            parent_revision=int(document.get("parent_revision") or 0),
+            activated_revision=int(document.get("activated_revision") or 0),
+            activated_plan_digest=str(document.get("activated_plan_digest") or ""),
+            work_contract_digest=str(document.get("work_contract_digest") or ""),
+            authorization_epoch=int(document.get("authorization_epoch") or 0),
+            publication_epoch=int(document.get("publication_epoch") or 0),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_document(record: ActivationRecord) -> dict[str, Any]:
+    return {
+        "schema": ACTIVATION_SCHEMA,
+        **{
+            key: getattr(record, key)
+            for key in (
+                "decision_id",
+                "work_id",
+                "plan_id",
+                "parent_revision",
+                "activated_revision",
+                "activated_plan_digest",
+                "work_contract_digest",
+                "authorization_epoch",
+                "publication_epoch",
+            )
+        },
+    }
+
+
+def active_plan_document_of(current: ActivePlanState, record: ActivationRecord) -> dict[str, Any]:
+    """The durable ACTIVE-plan pointer the dispatch leg reads.
+
+    The document carries the switched revision, its canonical digest
+    (what :func:`stale_callback_guard` compares late native callbacks
+    against), and the NEW publication epoch — one durable answer to
+    "which revision is active", replacing the in-memory function call.
+    """
+    return {
+        "schema": ACTIVE_PLAN_SCHEMA,
+        "work_id": record.work_id,
+        "plan_id": record.plan_id,
+        "active_revision": record.activated_revision,
+        "plan_digest": record.activated_plan_digest,
+        "work_contract_digest": record.work_contract_digest,
+        "authorization_epoch": record.authorization_epoch,
+        "publication_epoch": record.publication_epoch,
+        "activated_by_decision": record.decision_id,
+    }
+
+
+async def stage_pending_revision(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    decision: RevisionDecision,
+    proposed: PlanRevision,
+    current: ActivePlanState,
+) -> None:
+    """Stage a PENDING material-revision decision for the human gate (R28-18).
+
+    The proposal-emitter leg: the UNDECIDED decision (bound to the exact
+    proposed content and the world it was judged against), the proposed
+    revision and the then-current plan state land in the run's evidence
+    under ONE key with an outbox row — so the /approve-revision ingress
+    approves something DURABLE, and a restart finds the pending proposal
+    exactly as it was staged. Staging OVERWRITES a prior pending
+    proposal of the same run (one live proposal per work at a time); the
+    prior decision, if never consumed, simply expires unused.
+    """
+    from forge.durable import FlowRun, Outbox
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            raise ActivationRefused("run_not_found", f"flow run {run_id!r} not found")
+        merged = dict(run.evidence or {})
+        merged[PENDING_PROPOSAL_KEY] = {
+            "schema": PENDING_PROPOSAL_SCHEMA,
+            "decision": {
+                "decision_id": decision.decision_id,
+                "work_id": decision.work_id,
+                "parent_revision": decision.parent_revision,
+                "proposed_revision_id": decision.proposed_revision_id,
+                "proposed_digest": decision.proposed_digest,
+                "work_contract_digest": decision.work_contract_digest,
+                "authorization_epoch": decision.authorization_epoch,
+            },
+            "proposed": proposed.model_dump(),
+            "current": {
+                "work_id": current.work_id,
+                "plan_id": current.plan_id,
+                "active_revision": current.active_revision,
+                "work_contract_digest": current.work_contract_digest,
+                "authorization_epoch": current.authorization_epoch,
+                "publication_epoch": current.publication_epoch,
+            },
+        }
+        run.evidence = merged
+        session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type="revision.proposal_staged",
+                payload={
+                    "run_id": run_id,
+                    "decision_id": decision.decision_id,
+                    "proposed_revision_id": decision.proposed_revision_id,
+                },
+            )
+        )
+        await session.commit()
+
+
+async def read_active_plan(session_factory: _RevisionSessionFactory, run_id: str) -> dict | None:
+    """The run's durable ACTIVE-plan document, or ``None`` when never activated.
+
+    The dispatch leg's source of truth (R28-18): which revision is
+    active is read from the durable record, not from an in-memory
+    activation function. ``plan_digest`` in the document is the identity
+    :func:`stale_callback_guard` fences late callbacks with.
+    """
+    from forge.durable import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            return None
+        document = (run.evidence or {}).get(ACTIVE_PLAN_KEY)
+        return dict(document) if isinstance(document, dict) else None
+
+
+class _StagingActivationSession:
+    """The in-transaction session double :func:`activate_revision` runs against.
+
+    ``prior_activation`` answers from the journal AS READ IN THIS
+    TRANSACTION (a decision consumed by an earlier delivery is found
+    before the domain guard runs); ``commit_activation`` only STAGES the
+    record — the caller writes the evidence, the active-plan switch and
+    the outbox row and commits ONCE. Nothing durable happens unless that
+    single ``commit()`` runs, which is the "one DB operation" the
+    review demands.
+    """
+
+    def __init__(self, consumed: dict[str, ActivationRecord]) -> None:
+        self._consumed = consumed
+        self.staged: ActivationRecord | None = None
+
+    def prior_activation(self, decision_id: str) -> ActivationRecord | None:
+        return self._consumed.get(decision_id)
+
+    def commit_activation(self, record: ActivationRecord) -> None:
+        self.staged = record
+
+
+def _refused(code: str, reason: str) -> DurableActivationOutcome:
+    return DurableActivationOutcome(status="refused", code=code, reason=reason)
+
+
+async def activate_pending_revision(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    decision_id: str,
+    *,
+    decided_by: str,
+) -> DurableActivationOutcome:
+    """Approve + activate the run's pending revision in ONE DB transaction.
+
+    The /approve-revision persistence leg (R28-17's twin for revisions).
+    Inside a single session/commit:
+
+    1. **record** — the evidence blob is read: the activations journal,
+       the pending proposal slot and the durable ACTIVE-plan pointer;
+    2. **verify binding tuple** — the pending decision is approved
+       against the DURABLE current epoch, then the shared
+       :func:`_binding_refusal` guard checks work/plan/proposal
+       identity/content-digest/contract/parent/epoch against the
+       durable ACTIVE-plan state — never the stash the proposal came
+       with (a parent revision that moved since staging refuses);
+    3. **switch active** — the activation record joins the journal, the
+       ``active_plan`` pointer flips to the activated revision with its
+       digest and the bumped publication epoch, and the pending slot is
+       CONSUMED (removed);
+    4. **commit** — one ``commit()`` carries the evidence write and the
+       ``revision.activated`` outbox row, or nothing at all.
+
+    Idempotent by decision id: a redelivered approval finds the consumed
+    decision in the journal and returns ``already_active`` with the
+    prior record — one revision switch, one continuation, no matter how
+    many deliveries arrive. Every refusal consumes nothing.
+    """
+    from forge.durable import FlowRun, Outbox
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        if run is None:
+            return _refused("run_not_found", f"flow run {run_id!r} not found")
+        evidence = dict(run.evidence or {})
+        journal_raw = evidence.get(REVISION_ACTIVATIONS_KEY)
+        journal_raw = journal_raw if isinstance(journal_raw, dict) else {}
+        journal = {
+            str(key): record
+            for key, doc in journal_raw.items()
+            if (record := _activation_record_of(doc)) is not None
+        }
+
+        prior = journal.get(decision_id)
+        if prior is not None:
+            return DurableActivationOutcome(
+                status="already_active", record=prior, reason="decision already consumed"
+            )
+
+        pending = evidence.get(PENDING_PROPOSAL_KEY)
+        if not isinstance(pending, dict):
+            return _refused(
+                "no_pending_proposal",
+                f"run {run_id!r} has no pending revision decision to approve",
+            )
+        staged_id = str((pending.get("decision") or {}).get("decision_id") or "")
+        if staged_id != decision_id:
+            staged = staged_id or "unknown"
+            return _refused(
+                "stale_decision",
+                f"decision {decision_id!r} is not the pending proposal (staged: {staged!r})",
+            )
+        active_raw = evidence.get(ACTIVE_PLAN_KEY)
+        active_raw = active_raw if isinstance(active_raw, dict) else {}
+        if not active_raw:
+            return _refused(
+                "no_active_plan",
+                f"run {run_id!r} carries no durable active-plan state to guard against",
+            )
+        try:
+            current = ActivePlanState(
+                work_id=str(active_raw.get("work_id") or ""),
+                plan_id=str(active_raw.get("plan_id") or ""),
+                active_revision=int(active_raw.get("active_revision") or 0),
+                work_contract_digest=str(active_raw.get("work_contract_digest") or ""),
+                authorization_epoch=int(active_raw.get("authorization_epoch") or 0),
+                publication_epoch=int(active_raw.get("publication_epoch") or 0),
+            )
+            decision = RevisionDecision(
+                decision_id=staged_id,
+                work_id=str((pending.get("decision") or {}).get("work_id") or ""),
+                parent_revision=int((pending.get("decision") or {}).get("parent_revision") or 0),
+                proposed_revision_id=str(
+                    (pending.get("decision") or {}).get("proposed_revision_id") or ""
+                ),
+                proposed_digest=str((pending.get("decision") or {}).get("proposed_digest") or ""),
+                work_contract_digest=str(
+                    (pending.get("decision") or {}).get("work_contract_digest") or ""
+                ),
+                authorization_epoch=int(
+                    (pending.get("decision") or {}).get("authorization_epoch") or 0
+                ),
+            )
+            proposed = PlanRevision.model_validate(pending.get("proposed") or {})
+        except (TypeError, ValueError) as exc:
+            return _refused("malformed_pending_proposal", str(exc)[:200])
+
+        try:
+            approved = decision.approve(decided_by, current.authorization_epoch)
+        except ValueError as exc:
+            return _refused("approval_refused", str(exc)[:200])
+
+        staging = _StagingActivationSession(journal)
+        try:
+            activated = activate_revision(approved, proposed, current, staging)
+        except ActivationRefused as exc:
+            return _refused(exc.code, exc.detail)
+        record = staging.staged
+        if record is None:  # pragma: no cover — activate_revision always commits on success
+            return _refused("no_transaction", "the domain door staged no activation record")
+
+        merged = dict(evidence)
+        merged[REVISION_ACTIVATIONS_KEY] = {
+            **journal_raw,
+            record.decision_id: _record_document(record),
+        }
+        merged[ACTIVE_PLAN_KEY] = active_plan_document_of(current, record)
+        merged.pop(PENDING_PROPOSAL_KEY, None)  # the decision is consumed
+        run.evidence = merged
+        session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type="revision.activated",
+                payload={
+                    "run_id": run_id,
+                    "decision_id": record.decision_id,
+                    "activated_revision": record.activated_revision,
+                    "plan_id": record.plan_id,
+                    "decided_by": decided_by,
+                    "publication_epoch": record.publication_epoch,
+                },
+            )
+        )
+        await session.commit()
+        return DurableActivationOutcome(
+            status="activated", record=record, revision=activated, reason="recorded"
+        )

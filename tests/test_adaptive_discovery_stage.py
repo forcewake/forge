@@ -41,10 +41,14 @@ These tests pin the integration slice's behavior:
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -75,6 +79,7 @@ from forge.adaptive.discovery_stage import (
     apply_answer_command,
     apply_answer_commands,
     discovery_enabled,
+    discovery_open_questions,
     enforce_citations_against_snapshot,
     enforce_plan_citations,
     extract_citations,
@@ -97,10 +102,17 @@ from forge.adaptive.discovery_stage import (
     validate_citations_against_snapshot,
     validate_plan_citations,
 )
+from forge.adaptive.research_planner import FORGE_DISCOVERY_MODE_ENV
 from forge.adaptive.wiring import OperatorControlService
+from forge.config import ForgeConfig, Settings
 from forge.durable import FlowRun, Outbox
 from forge.factory.planner import PLANNER_MAX_INPUT_CHARS
+from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
+from forge.orchestrator.project_config import clear_cache
+from forge.runs.github_service import GitHubRunService
+from forge.runs.stubs import StubImplementer, StubReviewer
+from tests.fixtures.fake_github import FakeGitHub
 
 PLANNER_INPUT = "Refactor the LLMPlanner so plan() cites evidence and start_run stays stable."
 
@@ -1636,3 +1648,325 @@ class TestMultiRepoDiscovery:
             DiscoveryRunContext.from_readers(
                 {"own": object()}, {"own": "a/b", "ghost": "x/y"}, **kwargs
             )
+
+
+# ---------------------------------------------------------------------------
+# R28-16: the mode gate — three honest modes through the planning seam
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryModeGate:
+    """``FORGE_DISCOVERY_MODE`` resolves none | lexical | research-harness.
+
+    ``none`` is byte-identical to the disabled stage even when the legacy
+    flag is ON (an explicit OFF wins); an empty value defers to the legacy
+    flag so existing deployments are unchanged; unknown values fail CLOSED.
+    """
+
+    async def test_explicit_none_mode_wins_over_the_legacy_flag(self, tmp_path):
+        factory, _engine = await _new_process(tmp_path / "mode-none.db")
+        await _seed_run(factory)
+        with patch.dict(os.environ, {FORGE_DISCOVERY_MODE_ENV: "none"}, clear=False):
+            os.environ[FORGE_DISCOVERY_ENABLED_ENV] = "1"
+            try:
+                augmented = await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+            finally:
+                os.environ.pop(FORGE_DISCOVERY_ENABLED_ENV, None)
+        assert augmented == PLANNER_INPUT  # untouched, byte for byte
+        assert await _discovery_record(factory) == {}  # nothing persisted
+
+    async def test_empty_mode_defers_to_the_legacy_flag(self, tmp_path):
+        factory, _engine = await _new_process(tmp_path / "mode-empty.db")
+        await _seed_run(factory)
+        with patch.dict(os.environ, {FORGE_DISCOVERY_MODE_ENV: ""}, clear=False):
+            os.environ[FORGE_DISCOVERY_ENABLED_ENV] = "1"
+            try:
+                augmented = await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+            finally:
+                os.environ.pop(FORGE_DISCOVERY_ENABLED_ENV, None)
+        assert DIGEST_BEGIN in augmented
+        assert (await _discovery_record(factory)).get("status") == "complete"
+
+    async def test_unknown_mode_fails_closed_to_no_discovery(self, tmp_path):
+        factory, _engine = await _new_process(tmp_path / "mode-unknown.db")
+        await _seed_run(factory)
+        with patch.dict(os.environ, {FORGE_DISCOVERY_MODE_ENV: "agentic"}, clear=False):
+            augmented = await maybe_run_discovery(_ctx(factory), PLANNER_INPUT)
+        assert augmented == PLANNER_INPUT
+        assert await _discovery_record(factory) == {}
+
+
+# ---------------------------------------------------------------------------
+# R28-17: the ingress-side open-question reader
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryOpenQuestions:
+    async def test_reader_reports_the_durable_open_ids(self, tmp_path):
+        factory, _engine = await _new_process(tmp_path / "open-q.db")
+        await _seed_run(factory)
+
+        def questions(planner_input, evidence_docs):
+            return [
+                {"text": "First question?", "criticality": "critical", "citations": []},
+                {"text": "Second question?", "criticality": "advisory", "citations": []},
+            ]
+
+        with patch.dict(os.environ, {FORGE_DISCOVERY_MODE_ENV: "lexical"}):
+            with pytest.raises(QuestionsOutstanding):
+                await maybe_run_discovery(_ctx(factory, questions=questions), PLANNER_INPUT)
+        record = await _discovery_record(factory)
+        q1, q2 = open_question_ids_of(record)
+        assert await discovery_open_questions(factory, RUN_ID) == (q1, q2)
+        # Answering exactly Q1 leaves Q2 open — the reader reports it.
+        await record_answers(
+            factory,
+            RUN_ID,
+            [
+                {
+                    "kind": "answer",
+                    "payload": {"question_id": q1, "text": "yes"},
+                    "idempotency_key": "k1",
+                }
+            ],
+        )
+        assert await discovery_open_questions(factory, RUN_ID) == (q2,)
+        await record_answers(
+            factory,
+            RUN_ID,
+            [
+                {
+                    "kind": "answer",
+                    "payload": {"question_id": q2, "text": "no"},
+                    "idempotency_key": "k2",
+                }
+            ],
+        )
+        assert await discovery_open_questions(factory, RUN_ID) == ()
+
+    async def test_reader_is_empty_without_a_record_and_loud_without_a_run(self, tmp_path):
+        factory, _engine = await _new_process(tmp_path / "open-q-none.db")
+        await _seed_run(factory)
+        assert await discovery_open_questions(factory, RUN_ID) == ()
+        with pytest.raises(DiscoveryStageError):
+            await discovery_open_questions(factory, "run-that-never-was")
+
+
+# ---------------------------------------------------------------------------
+# R28-17: question-to-plan resumption through the ACTUAL GitHub ingress
+# ---------------------------------------------------------------------------
+
+
+GH_REPO = "acme/acme-widget"
+GH_PROJECT_ID = 70010
+GH_ISSUE = 42
+GH_ISSUE_TITLE = "Refactor the planner"
+GH_ISSUE_DESC = "Refactor the LLMPlanner so plan() cites evidence and start_run stays stable."
+GH_BASE_HEAD = "1" * 40
+
+
+class CapturingPlanner:
+    """Records every description the planner received; returns a plan."""
+
+    def __init__(self) -> None:
+        self.descriptions: list[str] = []
+
+    async def plan(self, issue_title, issue_description, *, flow_run_id=None, path_scope=None):
+        self.descriptions.append(issue_description)
+        return "## Implementation plan\n\n- Inspect, then implement."
+
+
+def _two_questions(planner_input, evidence_docs):
+    """A question source proposing TWO questions citing real evidence."""
+    first = evidence_docs[0]["id"] if evidence_docs else ""
+    return [
+        {"text": "Keep the current return shape?", "criticality": "critical", "citations": [first]},
+        {"text": "Is the docs tree authoritative?", "criticality": "advisory", "citations": []},
+    ]
+
+
+class TestQuestionResumptionIngress:
+    """The full question-to-plan loop through ``GitHubRunService``:
+
+    plan → ``QuestionsOutstanding`` → the run parks ``blocked(waiting_question)``
+    (a WAIT, visibly asked) → ``/answer`` records answers in the control
+    mailbox → the recovery pass drains them into the durable discovery
+    record → the run re-enters planning through the fenced plan-restart
+    edge and reaches ``waiting_approval`` with the ANSWERS section
+    injected — without repeating the probes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    @pytest.fixture()
+    async def db(self, tmp_path):
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path}/q-resume.db",
+            connect_args={"check_same_thread": False},
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        await engine.dispose()
+
+    @pytest.fixture()
+    def fake(self) -> FakeGitHub:
+        github = FakeGitHub()
+        github.seed_repo(GH_REPO, dict(FILES))
+        github.heads[GH_REPO]["main"] = GH_BASE_HEAD
+        github.seed_issue(GH_REPO, GH_ISSUE, GH_ISSUE_TITLE, GH_ISSUE_DESC)
+        return github
+
+    @staticmethod
+    def _service(db, fake, *, planner, control) -> GitHubRunService:
+        flow = GitHubPublishFlow(fake, proposer=StubImplementer(), base_branch="main")
+        stack = GitHubAgents(
+            client=fake,
+            reader=fake,
+            planner=planner,
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
+            flow=flow,
+        )
+        settings_values = dict(
+            GITLAB_URL="https://gitlab.test",
+            GITLAB_TOKEN=SecretStr("glpat-test"),
+            GITLAB_WEBHOOK_SECRET=SecretStr("whsec"),
+            FORGE_APPROVERS="alice",
+            DATABASE_URL="sqlite+aiosqlite:///:memory:",
+            FORGE_GITHUB_HARNESS_WORKFLOW="",
+        )
+        return GitHubRunService(
+            db,
+            Settings(**settings_values),
+            ForgeConfig(),
+            stack=stack,
+            repo_full_name=GH_REPO,
+            control=control,
+        )
+
+    async def test_park_answer_resume_through_the_real_ingress(self, db, fake, monkeypatch):
+        from forge.durable.controller import FlowStatus
+
+        monkeypatch.setenv(FORGE_DISCOVERY_ENABLED_ENV, "1")
+        planner = CapturingPlanner()
+        control = OperatorControlService()
+        question_calls = []
+
+        def questions(planner_input, evidence_docs):
+            question_calls.append(planner_input)
+            return _two_questions(planner_input, evidence_docs)
+
+        # Patch the planning path's context construction to carry the
+        # question source (the production splice wires it the same way).
+        from forge.runs import github_service as service_module
+
+        original_from_reader = service_module.DiscoveryRunContext.from_reader
+
+        def from_reader(*args, **kwargs):
+            kwargs["question_source"] = None  # replaced below via ctx wrapper
+            return original_from_reader(*args, **kwargs)
+
+        real_maybe = service_module.maybe_run_discovery
+
+        async def maybe_with_questions(run_ctx, planner_input):
+            # Same seam the production splice uses, plus the question source.
+            ctx = replace(run_ctx, question_source=questions)
+            return await real_maybe(ctx, planner_input)
+
+        service_module.maybe_run_discovery = maybe_with_questions
+        try:
+            service = self._service(db, fake, planner=planner, control=control)
+            run_id = await service.start_run(
+                project_id=GH_PROJECT_ID,
+                issue_number=GH_ISSUE,
+                issue_title=GH_ISSUE_TITLE,
+                issue_description=GH_ISSUE_DESC,
+                author_username="alice",
+            )
+        finally:
+            service_module.maybe_run_discovery = real_maybe
+
+        # 1. The WAIT: parked, visibly asked, planner never called.
+        run = await get_run_row(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("waiting_question:")
+        assert planner.descriptions == []
+        bodies = [call[1][3] for call in fake.calls_of("create_issue_comment")]
+        assert any("waiting for clarification" in body for body in bodies)
+        record = dict((run.evidence or {}).get("discovery") or {})
+        q1, q2 = open_question_ids_of(record)
+
+        # 2. Answering Q1 only does NOT close Q2 — the run stays parked.
+        await control.answer(run_id, "alice", q1, "Yes, keep it.", run_id=run_id)
+        resumed = await service.evaluate_question_recovery()
+        assert resumed == 0
+        run = await get_run_row(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        record = dict((run.evidence or {}).get("discovery") or {})
+        assert dict((record.get("questions") or [])[1]).get("status") == "open"
+
+        # 3. Answering Q2 resumes: replan with the ANSWERS section injected.
+        tree_reads_before = len(fake.calls_of("get_tree"))
+        await control.answer(run_id, "alice", q2, "No, generated docs are noise.", run_id=run_id)
+        resumed = await service.evaluate_question_recovery()
+        assert resumed == 1
+        run = await get_run_row(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+        assert planner.descriptions, "planning re-entered"
+        assert ANSWERS_BEGIN in planner.descriptions[0]
+        assert "Yes, keep it." in planner.descriptions[0]
+        assert DIGEST_BEGIN in planner.descriptions[0]
+        record = dict((run.evidence or {}).get("discovery") or {})
+        assert record["status"] == "complete"
+        assert record["replay_count"] == 1  # adopted, not re-dispatched
+        assert len(question_calls) == 1  # the probes/questions were not re-paid
+        assert len(fake.calls_of("get_tree")) == tree_reads_before + 1  # one snapshot re-load only
+        bodies = [call[1][3] for call in fake.calls_of("create_issue_comment")]
+        assert any("**resumed**" in body for body in bodies)
+
+    async def test_recovery_pass_leaves_unanswered_runs_parked(self, db, fake, monkeypatch):
+        from forge.durable.controller import FlowStatus
+
+        monkeypatch.setenv(FORGE_DISCOVERY_ENABLED_ENV, "1")
+        planner = CapturingPlanner()
+        control = OperatorControlService()
+
+        def questions(planner_input, evidence_docs):
+            return _two_questions(planner_input, evidence_docs)
+
+        from forge.runs import github_service as service_module
+
+        real_maybe = service_module.maybe_run_discovery
+
+        async def maybe_with_questions(run_ctx, planner_input):
+            return await real_maybe(replace(run_ctx, question_source=questions), planner_input)
+
+        service_module.maybe_run_discovery = maybe_with_questions
+        try:
+            service = self._service(db, fake, planner=planner, control=control)
+            run_id = await service.start_run(
+                project_id=GH_PROJECT_ID,
+                issue_number=GH_ISSUE,
+                issue_title=GH_ISSUE_TITLE,
+                issue_description=GH_ISSUE_DESC,
+                author_username="alice",
+            )
+        finally:
+            service_module.maybe_run_discovery = real_maybe
+
+        # No answers at all: the pass drains nothing, resumes nothing.
+        assert await service.evaluate_question_recovery() == 0
+        run = await get_run_row(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("waiting_question:")
+        assert planner.descriptions == []
+
+
+async def get_run_row(db, run_id: str) -> FlowRun:
+    async with db() as session:
+        return await session.get(FlowRun, run_id)

@@ -39,12 +39,30 @@ reviewers decide; this module only measures. (Executing repository code
 against real services — the disposable verifier lane of the full NXT-26
 story — is out of scope here; this is the checking substrate that runs
 before and beside it.)
+
+R28-20 adds the COMPLETE-CandidateSet verification lane entry point:
+:func:`verify_candidate_set` drives an INDEPENDENT pass over one FROZEN
+:class:`~forge.adaptive.models.CandidateSet` — every member's
+``candidate_oid`` probed for existence as a COMMIT on its repository
+(through an injected lookup — the verifier's own clones or the provider
+API, never the producing lane's word), the persisted
+``tested_world_digest``/``applicability_digest`` RECOMPUTED from the
+recorded facts (a set whose recorded world cannot be reproduced is
+wrong whichever side lied), the ``environment_compose`` pins re-composed
+(no unresolved service, no contradictory pin, a compose digest equal to
+the persisted binding), the durable work-package record's active world
+cross-checked, and the per-member PUBLISHED artifacts run through the
+same :class:`ContractCheckSuite` above. The typed
+:class:`VerificationReport` keeps per-member outcomes separate
+(:class:`MemberVerification`) — one member's missing commit fails THAT
+member without hiding the others; a digest mismatch fails the WHOLE set.
+Like every report here it is evidence, never a verdict.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -56,6 +74,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 # Registers control_commands/control_command_deliveries in Base.metadata
 # (the durable mailbox tables this module reads).
 from forge.adaptive.mailbox_db import ControlCommandRow
+from forge.adaptive.models import CandidateSet
+from forge.adaptive.verification_sets import environment_compose
+from forge.adaptive.workpackage import (
+    applicability_digest,
+    read_workpackage_state,
+    tested_world_digest,
+)
 from forge.durable.models import FlowRun, MRReservation, PublicationIntent
 from forge.runs.candidate import CandidateError, attempt_base_for, parse_unified_diff
 
@@ -65,15 +90,19 @@ __all__ = [
     "ContractCheckSuite",
     "DbIntegrationChecks",
     "IndependentCheckReport",
+    "MemberVerification",
+    "VerificationReport",
     "run_independent_checks",
+    "verify_candidate_set",
 ]
 
 #: One check's outcome. ``skipped`` is a RECORDED decision ("this check had
 #: nothing to compare / its precondition failed"), never a silent absence.
 CheckVerdict = Literal["pass", "fail", "skipped"]
 
-#: The suite tag each result carries (contract vs run-side truth).
-CheckSuite = Literal["contract", "db"]
+#: The suite tag each result carries (contract vs run-side truth vs the
+#: whole-set system verification of R28-20).
+CheckSuite = Literal["contract", "db", "system"]
 
 #: The meta keys every lane's ``write_artifacts`` writes (the required
 #: contract). The attempt base may ride under the legacy GitHub-lane alias
@@ -943,3 +972,444 @@ async def run_independent_checks(
         db = DbIntegrationChecks(session_factory, run_id)
         results.extend(await db.run(claimed_attempt_base=claimed))
     return IndependentCheckReport(results=tuple(results))
+
+
+# ----------------------------------------------------------------------
+# R28-20: independent verification of one COMPLETE CandidateSet
+# ----------------------------------------------------------------------
+
+#: The commit-existence seam: does *candidate_oid* exist as a COMMIT on
+#: *repository_id*? The verifier lane injects its own implementation (a
+#: local clone's ``git cat-file -e``, a provider API call) — the producing
+#: lane's claims are the thing being checked, so they cannot also be the
+#: lookup. ``None`` (no seam) records a skip, never a pass.
+CommitLookup = Callable[[str, str], Awaitable[bool]]
+
+#: One member's published artifacts for the contract suite:
+#: ``repository_id -> (candidate meta, candidate.diff path)``.
+CandidateArtifacts = Mapping[str, tuple[Mapping[str, Any], Path | str]]
+
+#: The per-member check ids (in evidence order) — uniform dotted names;
+#: :class:`MemberVerification` carries WHICH member each outcome belongs to.
+MEMBER_COMMIT_CHECK = "candidateset.member.commit_present"
+
+#: The set-level check ids (in evidence order).
+SET_CHECK_NAMES: tuple[str, ...] = (
+    "candidateset.world_digest.recomputed",
+    "candidateset.applicability_digest.recomputed",
+    "candidateset.environment_compose.consistent",
+    "candidateset.db.recorded_world",
+)
+
+
+@dataclass(frozen=True)
+class MemberVerification:
+    """ONE member's independent outcome — typed, never a merged blob.
+
+    ``commit_present`` answers "does the recorded candidate commit exist
+    on the repository" (a fail here fails THIS member, not the set);
+    ``contract`` holds the member's published-artifact check results (or
+    the recorded skip when the verifier was given no artifact for it).
+    """
+
+    repository_id: str
+    role: str
+    candidate_oid: str
+    image_digest: str
+    commit_present: CheckResult
+    contract: tuple[CheckResult, ...]
+
+
+@dataclass(frozen=True)
+class VerificationReport:
+    """The typed evidence record of one COMPLETE CandidateSet verification.
+
+    Same honesty rule as :class:`IndependentCheckReport`: no aggregated
+    verdict exists here — a digest mismatch fails the WHOLE set (a world
+    that cannot be reproduced says nothing about any of its members),
+    while a missing commit or a failed contract check fails exactly its
+    member. Reviewers weigh :meth:`failures` and :meth:`skipped`; nothing
+    in this report decides for them.
+    """
+
+    work_id: str
+    plan_revision: int
+    tested_world_digest: str | None
+    members: tuple[MemberVerification, ...]
+    set_checks: tuple[CheckResult, ...]
+
+    def results(self) -> tuple[CheckResult, ...]:
+        """Every check result, set-level first, then per member (commit,
+        then contract) — the flat evidence order."""
+        flattened = list(self.set_checks)
+        for member in self.members:
+            flattened.append(member.commit_present)
+            flattened.extend(member.contract)
+        return tuple(flattened)
+
+    def failures(self) -> tuple[CheckResult, ...]:
+        """The failed checks — a reviewer's first read."""
+        return tuple(result for result in self.results() if result.verdict == "fail")
+
+    def skipped(self) -> tuple[CheckResult, ...]:
+        """The checks that could not run, each with its recorded reason."""
+        return tuple(result for result in self.results() if result.verdict == "skipped")
+
+    def failed_members(self) -> tuple[str, ...]:
+        """The repositories whose OWN verification failed (commit or contract)."""
+        failed: list[str] = []
+        for member in self.members:
+            results = (member.commit_present, *member.contract)
+            if any(result.verdict == "fail" for result in results):
+                failed.append(member.repository_id)
+        return tuple(failed)
+
+    def as_evidence(self) -> dict[str, Any]:
+        """The evidence fragment for a reviewer verdict record (R02 shape)."""
+        return {
+            "role": "evidence",
+            "note": "candidate-set verification feeds reviewer evidence; it never substitutes a verdict",
+            "work_id": self.work_id,
+            "plan_revision": self.plan_revision,
+            "tested_world_digest": self.tested_world_digest,
+            "set_checks": [
+                {"check": result.check, "verdict": result.verdict, "evidence": result.evidence}
+                for result in self.set_checks
+            ],
+            "members": [
+                {
+                    "repository_id": member.repository_id,
+                    "role": member.role,
+                    "candidate_oid": member.candidate_oid,
+                    "commit_present": {
+                        "check": member.commit_present.check,
+                        "verdict": member.commit_present.verdict,
+                        "evidence": member.commit_present.evidence,
+                    },
+                    "contract": [
+                        {
+                            "check": result.check,
+                            "verdict": result.verdict,
+                            "evidence": result.evidence,
+                        }
+                        for result in member.contract
+                    ],
+                }
+                for member in self.members
+            ],
+            "failed": [result.check for result in self.failures()],
+            "skipped": [result.check for result in self.skipped()],
+            "failed_members": list(self.failed_members()),
+        }
+
+    def summary_line(self) -> str:
+        """One log/evidence line: counts, failed checks, failed members."""
+        results = self.results()
+        failed = [result.check for result in self.failures()]
+        skipped = len(self.skipped())
+        parts = [
+            f"{len(results)} checks: {len(results) - len(failed) - skipped} pass,"
+            f" {len(failed)} fail, {skipped} skipped"
+        ]
+        if failed:
+            parts.append("failures: " + ", ".join(failed))
+        if self.failed_members():
+            parts.append("failed members: " + ", ".join(self.failed_members()))
+        return " — ".join(parts)
+
+
+async def _check_member_commit(member: Any, commit_lookup: CommitLookup | None) -> CheckResult:
+    """Probe ONE member's candidate_oid for existence as a commit.
+
+    No seam → a RECORDED skip (the verifier without repository access
+    measures nothing and must not pretend otherwise). A lookup that
+    raises propagates: an unreachable repository is an operator problem,
+    not a member verdict — and never a silent pass.
+    """
+    if commit_lookup is None:
+        return CheckResult(
+            MEMBER_COMMIT_CHECK,
+            "skipped",
+            "no commit lookup supplied — repository existence not probed",
+            "system",
+        )
+    present = await commit_lookup(member.repository_id, member.candidate_oid)
+    if not present:
+        return CheckResult(
+            MEMBER_COMMIT_CHECK,
+            "fail",
+            f"candidate {_short(member.candidate_oid)}… does not exist as a commit on"
+            f" repository {member.repository_id!r}",
+            "system",
+        )
+    return CheckResult(
+        MEMBER_COMMIT_CHECK,
+        "pass",
+        f"candidate {_short(member.candidate_oid)}… exists as a commit on"
+        f" repository {member.repository_id!r}",
+        "system",
+    )
+
+
+def _member_contract_results(
+    member: Any, artifacts: CandidateArtifacts | None
+) -> tuple[CheckResult, ...]:
+    """The member's published artifacts through the contract suite.
+
+    The suite pins the member's OWN base (``member.base_oid`` — the diff
+    provenance the frozen set records). No artifact supplied → ONE
+    recorded skip, not seven pretend runs and not a pass.
+    """
+    if artifacts is None or member.repository_id not in artifacts:
+        return (
+            CheckResult(
+                "contract.artifact.present",
+                "skipped",
+                f"no published candidate artifact supplied for {member.repository_id!r}",
+                "system",
+            ),
+        )
+    meta, diff_path = artifacts[member.repository_id]
+    return ContractCheckSuite(meta, diff_path, expected_attempt_base=member.base_oid).run()
+
+
+def _check_world_digest(candidate_set: CandidateSet) -> CheckResult:
+    """The persisted tested-world digest must be RECOMPUTABLE from the facts.
+
+    The set claims a frozen identity; this recomputes it from the
+    recorded members, pins and policy refs with the same canonical
+    function the freeze used. A mismatch fails the WHOLE set: whichever
+    side lied, nothing downstream may bind to that digest. An unfrozen
+    set skips — there is no recorded binding to reproduce.
+    """
+    check = "candidateset.world_digest.recomputed"
+    persisted = candidate_set.tested_world_digest
+    if persisted is None:
+        return CheckResult(
+            check,
+            "skipped",
+            "no persisted tested_world_digest — freeze_verified_world first;"
+            " a binding must be recorded, not recomputed",
+            "system",
+        )
+    recomputed = tested_world_digest(
+        candidate_set,
+        environment=dict(candidate_set.environment_pins),
+        policy_refs=candidate_set.policy_refs,
+    )
+    if recomputed != persisted:
+        return CheckResult(
+            check,
+            "fail",
+            f"recorded facts recompute to {_short(recomputed)}…, not the persisted"
+            f" {_short(persisted)}… — the frozen world identity does not reproduce;"
+            " the whole set fails",
+            "system",
+        )
+    return CheckResult(
+        check,
+        "pass",
+        f"recorded facts reproduce the persisted world digest {_short(persisted)}…",
+        "system",
+    )
+
+
+def _check_applicability_digest(candidate_set: CandidateSet) -> CheckResult:
+    """Same reproduction test for the narrower applicability fingerprint."""
+    check = "candidateset.applicability_digest.recomputed"
+    persisted = candidate_set.applicability_digest
+    if persisted is None:
+        return CheckResult(
+            check, "skipped", "no persisted applicability_digest (unfrozen set)", "system"
+        )
+    recomputed = applicability_digest(
+        candidate_set,
+        environment=dict(candidate_set.environment_pins),
+        policy_refs=candidate_set.policy_refs,
+    )
+    if recomputed != persisted:
+        return CheckResult(
+            check,
+            "fail",
+            f"applicability recompute {_short(recomputed)}… != persisted"
+            f" {_short(persisted)}… — the whole set fails",
+            "system",
+        )
+    return CheckResult(
+        check,
+        "pass",
+        f"applicability fingerprint reproduces {_short(persisted)}…",
+        "system",
+    )
+
+
+def _check_environment_compose(candidate_set: CandidateSet) -> CheckResult:
+    """The compose pins must be CONSISTENT with the frozen world.
+
+    Re-composes the integration environment over every member and every
+    pinned external service: a contradictory pin (two claimed artifacts
+    for one launched thing) raises and fails here; a service that
+    resolves to NO exact artifact composes ``unresolved`` and fails here
+    — never "run it as whatever the tag points at today". On a frozen
+    set the compose's own world digest must equal the persisted binding.
+    """
+    check = "candidateset.environment_compose.consistent"
+    services = sorted(
+        {member.repository_id for member in candidate_set.members}
+        | set(dict(candidate_set.environment_pins))
+    )
+    try:
+        composed = environment_compose(candidate_set, services)
+    except ValueError as exc:
+        return CheckResult(check, "fail", f"compose refuses the recorded pins: {exc}", "system")
+    unresolved = sorted(
+        str(entry.get("service"))
+        for entry in composed.get("services", [])
+        if entry.get("unresolved") or entry.get("artifact_digest") is None
+    )
+    if unresolved:
+        return CheckResult(
+            check,
+            "fail",
+            f"services without a recorded exact artifact (refusing to run a mutable"
+            f" tag): {', '.join(unresolved)}",
+            "system",
+        )
+    if candidate_set.tested_world_digest is not None:
+        compose_world = str(composed.get("tested_world_digest") or "")
+        if compose_world != candidate_set.tested_world_digest:
+            return CheckResult(
+                check,
+                "fail",
+                f"compose binds to {_short(compose_world)}… but the set is frozen to"
+                f" {_short(candidate_set.tested_world_digest)}…",
+                "system",
+            )
+        binding = f", compose digest equals the persisted binding {_short(compose_world)}…"
+    else:
+        binding = " (unfrozen set: consistency only)"
+    return CheckResult(
+        check,
+        "pass",
+        f"{len(services)} service(s) pinned to exact artifacts{binding}",
+        "system",
+    )
+
+
+async def _check_recorded_world(
+    session_factory: async_sessionmaker[AsyncSession], candidate_set: CandidateSet
+) -> CheckResult:
+    """The durable work-package record must carry the SAME active world.
+
+    The coordinator persists the package's active ``tested_world_digest``
+    in the parent run's evidence and rejects outcomes from any other
+    world; a set whose digest disagrees with that record verifies one
+    world while the package executes another.
+    """
+    from forge.adaptive.workpackage import WorkPackageStateError
+
+    check = "candidateset.db.recorded_world"
+    try:
+        state = await read_workpackage_state(session_factory, candidate_set.work_id)
+    except WorkPackageStateError as exc:
+        return CheckResult(
+            check,
+            "fail",
+            f"no durable coordination record for the set's work: {exc}",
+            "system",
+        )
+    if state is None:
+        return CheckResult(
+            check,
+            "skipped",
+            f"run {candidate_set.work_id!r} coordinates no work package (no recorded active world)",
+            "system",
+        )
+    recorded = state.get("tested_world_digest")
+    if recorded is None:
+        return CheckResult(
+            check,
+            "skipped",
+            "the work package carries no active tested_world_digest",
+            "system",
+        )
+    if candidate_set.tested_world_digest is None:
+        return CheckResult(
+            check,
+            "skipped",
+            "the candidate set is unfrozen (nothing persisted to compare)",
+            "system",
+        )
+    if str(recorded) != candidate_set.tested_world_digest:
+        return CheckResult(
+            check,
+            "fail",
+            f"package's active world is {_short(str(recorded))}… but the set froze"
+            f" {_short(candidate_set.tested_world_digest)}…",
+            "system",
+        )
+    return CheckResult(
+        check,
+        "pass",
+        f"package's active world equals the set's frozen digest"
+        f" {_short(candidate_set.tested_world_digest)}…",
+        "system",
+    )
+
+
+async def verify_candidate_set(
+    candidate_set: CandidateSet,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    commit_lookup: CommitLookup | None = None,
+    candidate_artifacts: CandidateArtifacts | None = None,
+) -> VerificationReport:
+    """Independently verify ONE complete (frozen) CandidateSet (R28-20).
+
+    This is the separate verification pass the review demands — NOT the
+    producing lane's claim re-stated. Four independent angles, folded
+    into one :class:`VerificationReport` with typed per-member outcomes:
+
+    (a) every member's ``candidate_oid`` probed for existence as a COMMIT
+        on its repository, through the injected *commit_lookup* (skip
+        recorded without one);
+    (b) the persisted ``tested_world_digest`` AND ``applicability_digest``
+        recomputed from the recorded facts — a mismatch fails the WHOLE
+        set;
+    (c) the ``environment_compose`` pins re-composed: contradictory pins
+        refused, unresolved services named, the compose digest bound to
+        the persisted world;
+    (d) the per-member PUBLISHED artifacts (``candidate.meta.json`` +
+        ``candidate.diff``) through :class:`ContractCheckSuite`, pinned to
+        each member's own ``base_oid`` — plus the durable work-package
+        record's active world cross-checked against the set.
+
+    Like every report in this module the result is evidence: it never
+    substitutes a reviewer's verdict.
+    """
+    ordered = sorted(candidate_set.members, key=lambda member: member.repository_id)
+    verified: list[MemberVerification] = []
+    for member in ordered:
+        verified.append(
+            MemberVerification(
+                repository_id=member.repository_id,
+                role=member.role,
+                candidate_oid=member.candidate_oid,
+                image_digest=member.image_digest,
+                commit_present=await _check_member_commit(member, commit_lookup),
+                contract=_member_contract_results(member, candidate_artifacts),
+            )
+        )
+    set_checks = (
+        _check_world_digest(candidate_set),
+        _check_applicability_digest(candidate_set),
+        _check_environment_compose(candidate_set),
+        await _check_recorded_world(session_factory, candidate_set),
+    )
+    return VerificationReport(
+        work_id=candidate_set.work_id,
+        plan_revision=candidate_set.plan_revision,
+        tested_world_digest=candidate_set.tested_world_digest,
+        members=tuple(verified),
+        set_checks=set_checks,
+    )

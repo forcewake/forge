@@ -1024,3 +1024,155 @@ class TestNxt14UrgentControlPath:
         actions = await session.drain_once()
 
         assert actions[0].detail["retained_guidance"] == ["go west"]
+
+
+# -- R28-11: the drain cycle's pinned ordering rule -----------------------------
+
+
+class TestDrainCycleOrderPin:
+    def test_interrupt_class_first_regardless_of_sequence(self):
+        from forge.adaptive.lane_control import drain_cycle_order
+
+        steer1 = _cmd("steer", 1, payload={"text": "one"})
+        steer2 = _cmd("steer", 2, payload={"text": "two"})
+        pause3 = _cmd("pause", 3)  # the HIGHEST sequence still goes FIRST
+
+        ordered = drain_cycle_order([steer1, steer2, pause3])
+
+        assert [command.kind for command in ordered] == ["pause", "steer", "steer"]
+        assert [command.sequence for command in ordered] == [3, 1, 2]
+
+    def test_sequence_still_rules_inside_each_class(self):
+        from forge.adaptive.lane_control import drain_cycle_order
+
+        ordered = drain_cycle_order(
+            [
+                _cmd("pause", 5),
+                _cmd("steer", 2, payload={"text": "b"}),
+                _cmd("pause", 4),
+                _cmd("steer", 1, payload={"text": "a"}),
+            ]
+        )
+
+        assert [(c.kind, c.sequence) for c in ordered] == [
+            ("pause", 4),
+            ("pause", 5),
+            ("steer", 1),
+            ("steer", 2),
+        ]
+
+    async def test_pause_at_a_higher_sequence_fires_its_vendor_call_first(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client)
+        await _submit(svc, _cmd("steer", 1, payload={"text": "slow guidance"}))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "more guidance"}))
+        await _submit(svc, _cmd("pause", 3))  # sequenced LAST, applied FIRST
+
+        actions = await session.drain_once()
+
+        # the pause's vendor call won the cycle even at the higher sequence
+        assert client.calls[0] == ("interrupt", "sess-1")
+        assert [call[0] for call in client.calls[1:]] == []  # no send into a dead turn
+        assert session.queued_guidance == ["slow guidance", "more guidance"]
+        assert [action.kind for action in actions] == ["pause", "steer", "steer"]
+        assert [action.sequence for action in actions] == [3, 1, 2]
+        assert session.pause_state.pause_requested is True
+
+
+# -- R28-12: no control-plane or filesystem work on the turn's event loop --------
+
+
+class _UnverifiedReceipt:
+    """A capture result whose upload could not be read back verified."""
+
+    artifact_id = "artifact:test"
+    digest = "artifact:test"
+    sequence = 1
+    verified = False
+
+
+class TestBlockingWorkRidesWorkerThreads:
+    async def test_a_slow_wip_capture_never_blocks_the_turns_event_loop(self):
+        import time as _time
+
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        loop = asyncio.get_running_loop()
+
+        def slow_capture():
+            _time.sleep(0.3)  # hashing a working tree: blocking filesystem work
+            return _UnverifiedReceipt()
+
+        session = _session(svc, "claude", client, capture=slow_capture)
+        await _submit(svc, _cmd("pause", 1))
+
+        beats: list[float] = []
+        done = asyncio.Event()
+        drain = asyncio.create_task(session.drain_once())
+
+        async def heartbeat() -> None:
+            while not done.is_set():
+                beats.append(loop.time())
+                await asyncio.sleep(0.01)
+
+        pacer = asyncio.create_task(heartbeat())
+        await asyncio.wait_for(drain, timeout=5.0)
+        done.set()
+        await pacer
+
+        # the capture ran (the pause drained, honestly unverified), AND the
+        # loop kept beating through it — a blocked loop would show one
+        # >= 0.3s gap instead of the ~10ms cadence
+        assert len(beats) >= 10
+        gaps = [b - a for a, b in zip(beats, beats[1:])]
+        assert max(gaps) < 0.15, gaps
+        assert client.calls == [("interrupt", "sess-1")]
+        assert actions_capture_landed(session)
+
+    async def test_a_hung_checkpoint_booking_is_bounded_not_blocking(self):
+        import time as _time
+
+        from forge.adaptive.control import Mailbox
+
+        class StalledMailbox(Mailbox):
+            def checkpoint(self, command_id: str):
+                _time.sleep(0.4)  # the plane took the POST and never answered
+                return super().checkpoint(command_id)
+
+        svc = OperatorControlService(mailbox=StalledMailbox())
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client, checkpoint_ack_wait=0.1)
+        await _submit(svc, _cmd("steer", 1, payload={"text": "book me"}))
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        actions = await asyncio.wait_for(session.drain_once(), timeout=5.0)
+        elapsed = loop.time() - started
+
+        # fire-and-forget (R28-11): the gate already decided, so the drain
+        # never waits out the hung booking — the honest note rides the journal
+        assert elapsed < 0.35, elapsed
+        assert actions[0].outcome == "applied"
+        assert actions[0].delivery == "application_observed"
+        assert "not confirmed" in actions[0].detail["mailbox_status"]
+        assert client.calls == [("steer", "sess-1", "book me")]
+
+    async def test_every_journaled_action_carries_its_timestamp(self):
+        svc = OperatorControlService()
+        client = FakeClaudeClient()
+        session = _session(svc, "claude", client)
+        await _submit(svc, _cmd("pause", 1))
+        await _submit(svc, _cmd("steer", 2, payload={"text": "note"}))
+
+        await session.drain_once()
+
+        # R28-29: the sidecar's rows are timeline-projectable as-is
+        assert [action.kind for action in session.journal] == ["pause", "steer"]
+        assert all(action.at.endswith("+00:00") for action in session.journal)
+
+
+def actions_capture_landed(session: LaneSteeringSession) -> bool:
+    """The pause's detail books the (unverified) capture's honest status."""
+    (action,) = session.journal
+    return action.detail["pause_status"] in ("paused_failed", "paused_partial", "paused")

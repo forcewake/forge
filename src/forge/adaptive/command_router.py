@@ -51,7 +51,9 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from forge.adaptive.operator_timeline import timeline_rows
 from forge.adaptive.pause_fence import clear_pause_fence, raise_pause_fence
+from forge.adaptive.revisions import activate_pending_revision
 from forge.adaptive.wiring import OperatorControlService, control_service_from_env
 from forge.durable.controller import TERMINAL_STATUSES
 from forge.durable.models import ActionLog, FlowRun
@@ -70,16 +72,21 @@ __all__ = [
     "ResolvedControlRun",
     "adaptive_commands_enabled",
     "adaptive_command_set",
+    "control_timeline",
     "parse_adaptive_command",
     "reset_shared_control_service",
     "route_adaptive_command_note",
     "shared_control_service",
+    "timeline_note_section",
 ]
 
-#: The four native operator verbs this router owns. The gateways union this
+#: The native operator verbs this router owns. The gateways union this
 #: set into their parsed command sets ONLY while the rollout flag is on.
+#: ``/approve-revision`` (R28-18) rides the SAME authorize → scope →
+#: record → answer pipeline and lands in the durable activation
+#: transaction instead of a mailbox slot.
 ADAPTIVE_NOTE_COMMANDS: Final[frozenset[str]] = frozenset(
-    {"/pause", "/resume", "/steer", "/answer"}
+    {"/pause", "/resume", "/steer", "/answer", "/approve-revision"}
 )
 
 #: The normalized run-command name the gateways stamp on adaptive note
@@ -143,6 +150,10 @@ _STEER_RE = re.compile(r"/steer" + _RUN_REF + r"\s*(.+)", re.IGNORECASE | re.DOT
 #: NXT-07 rule: an answer must name the question it answers). The run is the
 #: issue's latest one (questions belong to that work's discovery).
 _ANSWER_RE = re.compile(r"/answer\s+(\S+)\s*(.*)", re.IGNORECASE | re.DOTALL)
+#: ``/approve-revision [<run-id>] <decision-id>`` — the decision id is
+#: explicit (an approval must name the decision it approves); an optional
+#: ≥8-hex prefix ahead of it scopes the run (R28-18).
+_APPROVE_REVISION_RE = re.compile(r"/approve-revision" + _RUN_REF + r"\s+(\S+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -153,6 +164,7 @@ class ParsedAdaptiveCommand:
     run_ref: str | None = None
     text: str = ""
     question_id: str = ""
+    decision_id: str = ""
 
 
 def parse_adaptive_command(verb: str, note_text: str) -> tuple[ParsedAdaptiveCommand | None, str]:
@@ -187,6 +199,17 @@ def parse_adaptive_command(verb: str, note_text: str) -> tuple[ParsedAdaptiveCom
         if not body:
             return None, "/answer needs the answer text: `/answer <question-id> <text>`"
         return ParsedAdaptiveCommand(verb=verb, question_id=match.group(1), text=body), ""
+    if verb == "approve-revision":
+        match = _APPROVE_REVISION_RE.search(text)
+        if match is None or not match.group(2):
+            return (
+                None,
+                "/approve-revision needs the decision id: `/approve-revision <run-id> "
+                "<decision-id>`",
+            )
+        return ParsedAdaptiveCommand(
+            verb=verb, run_ref=match.group(1), decision_id=match.group(2)
+        ), ""
     return None, f"unknown adaptive verb {verb!r}"
 
 
@@ -223,7 +246,7 @@ def _usage_body(verb: str, problem: str) -> str:
         f"`/{verb}` could not be applied: {problem}. Forms: `/pause <run-id>` "
         "(the run id is optional — bare targets the issue's latest run), "
         "`/steer <run-id> <text>`, `/answer <question-id> <text>`, "
-        f"`/resume <run-id>`.{_automated()}"
+        f"`/resume <run-id>`, `/approve-revision <run-id> <decision-id>`.{_automated()}"
     )
 
 
@@ -304,6 +327,84 @@ def _answer_recorded_body(run_id: str, question_id: str, created: bool) -> str:
         f"Answer {state} for question `{question_id}` on run `{run_id[:8]}` — the "
         f"command is in the run's control mailbox.{_automated()}"
     )
+
+
+def _approve_revision_body(run_id: str, decision_id: str, outcome: Any) -> str:
+    """The /approve-revision reply: activated, already active, or the refusal.
+
+    R28-18's operator-visible distinction: a first approval reports the
+    SWITCHED revision and its publication epoch; a redelivery reports
+    the prior activation (one revision switch, however many deliveries);
+    a typed refusal reports the domain code so the operator can re-ask
+    against the world as it now is.
+    """
+    if outcome.status == "activated":
+        record = outcome.record
+        return (
+            f"Revision **{record.activated_revision}** of plan `{record.plan_id}` is now "
+            f"ACTIVE on run `{run_id[:8]}` (decision `{decision_id}`, publication epoch "
+            f"{record.publication_epoch}) — recorded durably; the next dispatch reads the "
+            f"active revision from the run's record.{_automated()}"
+        )
+    if outcome.status == "already_active":
+        record = outcome.record
+        return (
+            f"Decision `{decision_id}` was already consumed on run `{run_id[:8]}` — revision "
+            f"**{record.activated_revision}** of `{record.plan_id}` is the active one "
+            f"(activated at publication epoch {record.publication_epoch}); nothing "
+            f"changed.{_automated()}"
+        )
+    return (
+        f"`/approve-revision {decision_id}` on run `{run_id[:8]}` was refused "
+        f"[{outcome.code}]: {outcome.reason}. The proposal was not consumed — re-request "
+        f"the decision against the current state if this is still the change you "
+        f"want.{_automated()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R28-29: the operator timeline section (request / effect / evidence)
+# ---------------------------------------------------------------------------
+
+
+def control_timeline(control: OperatorControlService, work_id: str) -> list[dict[str, Any]] | None:
+    """The work's operator timeline rows from control-plane evidence.
+
+    Reads the mailbox's command rows when the backing store exposes a
+    synchronous commands view (the in-memory reference mailbox the router
+    composes by default) and projects each through
+    :func:`forge.adaptive.operator_timeline.timeline_from_journal` — a
+    recorded ``/resume`` shows as ``request_received`` until a lane
+    drained it to ``checkpoint_committed``, a local-only pause is never
+    dressed up as an observed effect. ``None`` when the work has no
+    steering evidence here, or the store keeps its audit journal behind
+    async queries (the durable Postgres mailbox) — the LANE sidecar's
+    timeline (``LaneSteeringSession.timeline``) is the evidence for those
+    runs, and this function says nothing rather than half the truth.
+    """
+    commands = getattr(getattr(control, "mailbox", None), "commands", None)
+    if not isinstance(commands, dict):
+        return None
+    rows = [command for command in commands.values() if command.work_id == work_id]
+    if not rows:
+        return None
+    rows.sort(key=lambda command: command.sequence)
+    return timeline_rows(rows)
+
+
+def timeline_note_section(rows: list[dict[str, Any]]) -> str:
+    """The ``**Control timeline:**`` block a ``/status`` reply appends.
+
+    One line per entry — the time-of-day, the category and the
+    human-readable line — so request, effect and evidence read as three
+    different things, which is the whole point (R28-29).
+    """
+    lines = ["**Control timeline:**"]
+    for row in rows:
+        at = str(row.get("at") or "")
+        stamp = f"{at[11:19]}Z " if len(at) >= 19 else ""
+        lines.append(f"- {stamp}`{row.get('category')}` — {row.get('line')}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +496,11 @@ class ControlCommandRouter:
     settings: Any
     post_note: NotePoster
     control: OperatorControlService = field(default_factory=shared_control_service)
+    #: R28-29: attach the run's operator ``timeline`` to the result when
+    #: the control plane holds steering journal evidence for it. Off by
+    #: default (the ``/status`` surface opts in); reply bodies are
+    #: unchanged either way.
+    include_timeline: bool = False
 
     async def handle(self, note: dict[str, Any]) -> dict[str, Any]:
         """Authorize, scope, record and answer one adaptive command note."""
@@ -473,15 +579,43 @@ class ControlCommandRouter:
                 body = _steer_rejected_body(run_id)
             else:
                 body = _steer_accepted_body(run_id, str(outcome.get("classification") or "steer"))
-        else:  # answer
+        elif verb == "answer":
             created = await self.control.answer(
                 run_id, author, parsed.question_id, parsed.text, run_id=run_id
             )
             body = _answer_recorded_body(run_id, parsed.question_id, created)
+        else:  # approve-revision (R28-18)
+            # The approval lands in the DURABLE activation transaction —
+            # one conditional DB operation consuming the staged decision,
+            # verifying the binding tuple against the durable active-plan
+            # state, switching the active revision and journaling the
+            # outbox row. Idempotent by decision id: a redelivery finds
+            # the consumed decision and changes nothing (the
+            # reply-journal dedup above already collapses the SAME
+            # delivery; this collapses DIFFERENT deliveries of the same
+            # decision).
+            outcome = await activate_pending_revision(
+                self.session_factory, run_id, parsed.decision_id, decided_by=author
+            )
+            applied = outcome.status == "activated"
+            body = _approve_revision_body(run_id, parsed.decision_id, outcome)
         await self._reply(note, body, run_id=run_id)
         if applied:
-            return {"status": "applied", "verb": verb, "run_id": run_id}
-        return {"status": "refused", "verb": verb, "run_id": run_id, "reason": "no mailbox record"}
+            result: dict[str, Any] = {"status": "applied", "verb": verb, "run_id": run_id}
+        else:
+            result = {
+                "status": "refused",
+                "verb": verb,
+                "run_id": run_id,
+                "reason": "no mailbox record",
+            }
+        if self.include_timeline:
+            # R28-29: the run's operator timeline — only when the control
+            # plane actually holds evidence for it, never an empty section.
+            timeline = control_timeline(self.control, run_id)
+            if timeline:
+                result["timeline"] = timeline
+        return result
 
     # -- scoping ----------------------------------------------------------
 
