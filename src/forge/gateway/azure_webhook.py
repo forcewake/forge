@@ -67,6 +67,10 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from forge.adaptive.command_router import (
+    ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
+)
+from forge.adaptive.command_router import adaptive_command_set, route_adaptive_command_note
 from forge.durable import ingest_event
 from forge.gateway.mention import extract_mention
 from forge.worker.steps import STEP_WAKE_KEY, schedule_command_step
@@ -228,17 +232,30 @@ def is_bot_identity(author: str, bot_name: str) -> bool:
     return author == bot or author.split("@", 1)[0] == bot
 
 
-def _parse_command(text: str, mention_pattern: str) -> str | None:
+def _parse_command(
+    text: str, mention_pattern: str, extra_commands: frozenset[str] = frozenset()
+) -> str | None:
     """The SAME command parse as the GitHub ingress: ``@mention /cmd`` or a
     bare first-token command (extract_mention only parses @mentions, so
-    requiring one would silently drop bare ``/implement`` notes)."""
-    mention = extract_mention(text, mention_pattern, extra_commands=_AZDO_RUN_COMMANDS)
-    if mention.is_mention and mention.slash_command in _AZDO_RUN_COMMANDS:
+    requiring one would silently drop bare ``/implement`` notes).
+    *extra_commands* carries the adaptive control verbs while
+    ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` is on (NXT-10)."""
+    commands = _AZDO_RUN_COMMANDS | frozenset(extra_commands)
+    mention = extract_mention(text, mention_pattern, extra_commands=commands)
+    if mention.is_mention and mention.slash_command in commands:
         return mention.slash_command
     first_token = text.split(None, 1)[0] if text else ""
-    if first_token in _AZDO_RUN_COMMANDS:
+    if first_token in commands:
         return first_token
     return None
+
+
+def _command_fields(slash_command: str) -> dict[str, Any]:
+    """The metadata's command fields — the classic map, or the single
+    ``adaptive_control`` command (+ verb) for the adaptive verbs (NXT-10)."""
+    if slash_command in _ADAPTIVE_NOTE_COMMANDS:
+        return {"command": "adaptive_control", "adaptive_verb": slash_command[1:]}
+    return {"command": _COMMAND_MAP[slash_command]}
 
 
 def _strip_ref(ref: Any) -> str:
@@ -249,12 +266,14 @@ def _strip_ref(ref: Any) -> str:
 def normalize_workitem_comment(
     payload: dict[str, Any],
     mention_pattern: str = "@forge",
+    adaptive_commands: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Normalize a ``workitem.commented`` payload into run-command metadata.
 
     The payload has NO comment id (research correction #3): the text is
     ``fields["System.History"]`` and the author ``fields["System.ChangedBy"]``.
-    Returns None when the comment carries no forge command.
+    Returns None when the comment carries no forge command. *adaptive_commands*
+    carries the adaptive control verbs while the NXT-10 flag is on.
     """
     resource = payload.get("resource") or {}
     fields = resource.get("fields") or {}
@@ -264,14 +283,14 @@ def normalize_workitem_comment(
     if not work_item_id:
         return None
 
-    slash_command = _parse_command(text, mention_pattern)
+    slash_command = _parse_command(text, mention_pattern, adaptive_commands)
     if slash_command is None:
         return None
 
     org = org_from_payload(payload)
     delivery_key = f"workitem:{work_item_id}:comment:{resource.get('rev')}"
     return {
-        "command": _COMMAND_MAP[slash_command],
+        **_command_fields(slash_command),
         "provider": "azure_devops",
         "connection_id": azure_connection_id(org, project),
         "project_id": azure_project_key(
@@ -399,6 +418,7 @@ def normalize_workitem_updated(
 def normalize_pr_comment(
     payload: dict[str, Any],
     mention_pattern: str = "@forge",
+    adaptive_commands: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Normalize a PR-comment payload into run-command metadata.
 
@@ -428,7 +448,7 @@ def normalize_pr_comment(
         return None
 
     text = str(comment.get("content") or "").strip()
-    slash_command = _parse_command(text, mention_pattern)
+    slash_command = _parse_command(text, mention_pattern, adaptive_commands)
     if slash_command is None:
         return None
 
@@ -436,7 +456,7 @@ def normalize_pr_comment(
     repo_full_name = f"{project}/{repository.get('name') or ''}".rstrip("/")
     delivery_key = f"pr:{pr_id}:comment:{comment.get('id')}"
     return {
-        "command": _COMMAND_MAP[slash_command],
+        **_command_fields(slash_command),
         "provider": "azure_devops",
         "connection_id": azure_connection_id(org, project),
         "project_id": azure_project_key(str((repository.get("project") or {}).get("id") or "")),
@@ -666,9 +686,17 @@ async def _ingest_azure_event(
                 "Skipping bot-authored Azure DevOps work-item comment", extra={"event": event}
             )
             return {"status": "skipped", "reason": "bot-loop"}
-        run_command = normalize_workitem_comment(payload, mention_pattern=mention_pattern)
+        run_command = normalize_workitem_comment(
+            payload, mention_pattern=mention_pattern, adaptive_commands=adaptive_command_set()
+        )
         if run_command is None:
             return _record_inbox_only(request, background_tasks, event, payload)
+        if run_command.get("command") == "adaptive_control":
+            # NXT-10: adaptive control verbs take the mailbox leg
+            # (ControlCommandRouter), not the classic run-command step path.
+            return _ingest_azure_adaptive_control(
+                request, background_tasks, run_command, event=event
+            )
         source_event_id = azure_source_event_id(
             run_command["connection_id"], event, run_command["note_id"]
         )
@@ -706,9 +734,15 @@ async def _ingest_azure_event(
         if comment_author and is_bot_identity(comment_author, bot_name):
             logger.info("Skipping bot-authored Azure DevOps PR comment", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
-        run_command = normalize_pr_comment(payload, mention_pattern=mention_pattern)
+        run_command = normalize_pr_comment(
+            payload, mention_pattern=mention_pattern, adaptive_commands=adaptive_command_set()
+        )
         if run_command is None:
             return _record_inbox_only(request, background_tasks, event, payload)
+        if run_command.get("command") == "adaptive_control":
+            return _ingest_azure_adaptive_control(
+                request, background_tasks, run_command, event=event
+            )
         source_event_id = azure_source_event_id(
             run_command["connection_id"], event, run_command["note_id"]
         )
@@ -824,6 +858,40 @@ def _payload_project_name(event: str, payload: dict[str, Any]) -> str:
     if repository:
         return str((repository.get("project") or {}).get("name") or "")
     return ""
+
+
+def _ingest_azure_adaptive_control(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_command: dict[str, Any],
+    *,
+    event: str = "workitem.commented",
+) -> Any:
+    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
+
+    Mirrors the GitHub/GitLab adaptive ingest: the ``202`` answers
+    immediately and the ControlCommandRouter leg runs as a background task.
+    The reply channel appends the hidden ``forge:authored`` marker (the
+    self-trigger guard on single-PAT deployments — see the router's Azure
+    note poster).
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        logger.warning("Adaptive command without a database — not routed")
+        return JSONResponse(
+            status_code=202,
+            content={"status": "accepted", "event": event, "adaptive_command": False},
+        )
+    background_tasks.add_task(
+        route_adaptive_command_note,
+        request.app.state.settings,
+        session_factory,
+        run_command,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"status": "accepted", "event": event, "adaptive_command": True},
+    )
 
 
 async def _ingest_azure_run_command(

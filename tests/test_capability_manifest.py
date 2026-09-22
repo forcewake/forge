@@ -2,8 +2,9 @@
 
 The honesty guard and its negatives: no row claims production wiring without
 an entry point, the routed-command claims match the LIVE ingress sets, the
-adaptive commands are recorded as NOT routed, and removing a binding in the
-gateway breaks the claim instead of silently passing.
+adaptive commands are recorded as wired behind their rollout flag, and
+removing a binding in the gateway breaks the claim instead of silently
+passing.
 """
 
 from __future__ import annotations
@@ -111,23 +112,47 @@ def test_cross_process_recovery_is_claimed_nowhere():
 
 def test_classic_commands_match_the_live_ingress_sets():
     routed = ingress_routed_commands()
-    assert set(CLASSIC_OPERATOR_COMMANDS) == set(routed)
     classic = _by_name("operator-commands/classic")
-    assert set(classic.commands) == set(routed)
+    adaptive = _by_name("operator-commands/adaptive")
+    # The live routed set is EXACTLY the classic verbs plus the adaptive
+    # verbs — nothing phantom, nothing missing.
+    assert set(routed) == set(classic.commands) | set(adaptive.commands)
+    assert set(classic.commands) == set(CLASSIC_OPERATOR_COMMANDS)
+    assert set(CLASSIC_OPERATOR_COMMANDS) == set(routed) - set(ADAPTIVE_OPERATOR_COMMANDS)
 
 
-def test_adaptive_commands_are_not_routed_anywhere():
-    """The NXT-02 gap stated as data: /pause /steer /answer /resume exist in
-    the control substrate but no checked ingress routes them."""
+def test_adaptive_commands_are_routed_behind_the_rollout_flag():
+    """NXT-10 raised the adaptive row: all four verbs are parsed and routed
+    by the three ingresses through ControlCommandRouter — wired code with an
+    entry point, honestly gated by FORGE_ADAPTIVE_COMMANDS_ENABLED (default
+    OFF; with the flag off the gateways do not parse the verbs at all)."""
     routed = ingress_routed_commands()
     for command in ADAPTIVE_OPERATOR_COMMANDS:
-        assert command not in routed
+        assert command in routed
     adaptive = _by_name("operator-commands/adaptive")
-    assert adaptive.entry_point is None
-    assert adaptive.tier == "domain_contract"
-    # The row lists the unavailable commands only in its note, never as
-    # supported commands.
-    assert adaptive.commands == ()
+    assert adaptive.tier == "production_wiring"
+    assert adaptive.entry_point and "command_router" in adaptive.entry_point
+    assert adaptive.entry_point and "FORGE_ADAPTIVE_COMMANDS_ENABLED" in adaptive.entry_point
+    assert tuple(adaptive.commands) == ADAPTIVE_OPERATOR_COMMANDS
+    assert "default OFF" in adaptive.note
+
+
+def test_adaptive_router_flag_defaults_off():
+    """The rollout gate fails closed: without the env var the gateways'
+    parsed command sets do NOT include the adaptive verbs (zero routing —
+    not parse-then-refuse)."""
+    from forge.adaptive.command_router import (
+        ADAPTIVE_NOTE_COMMANDS,
+        adaptive_commands_enabled,
+        adaptive_command_set,
+    )
+
+    assert adaptive_commands_enabled({}) is False
+    assert adaptive_command_set({}) == frozenset()
+    assert adaptive_commands_enabled({"FORGE_ADAPTIVE_COMMANDS_ENABLED": "1"}) is True
+    assert adaptive_command_set({"FORGE_ADAPTIVE_COMMANDS_ENABLED": "on"}) == (
+        ADAPTIVE_NOTE_COMMANDS
+    )
 
 
 def test_helper_without_production_caller_is_library_level_only():
@@ -154,13 +179,18 @@ def test_steering_bridge_is_wired_but_default_off():
 
 def _unbind_everywhere(monkeypatch, command: str) -> None:
     """Remove a command from ALL three checked ingresses — an application
-    binding is gone, not one provider's spelling of it."""
+    binding is gone, not one provider's spelling of it. The adaptive verbs
+    live in the per-gateway ``_ADAPTIVE_NOTE_COMMANDS`` attributes, so an
+    unbound adaptive verb must vanish from all three too."""
     for module, attr in (
         (gateway_router, "_RUN_COMMANDS"),
         (github_webhook, "_GITHUB_RUN_COMMANDS"),
         (azure_webhook, "_AZDO_RUN_COMMANDS"),
     ):
         monkeypatch.setattr(module, attr, frozenset(set(getattr(module, attr)) - {command}))
+    for module in (gateway_router, github_webhook, azure_webhook):
+        bound = getattr(module, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
+        monkeypatch.setattr(module, "_ADAPTIVE_NOTE_COMMANDS", frozenset(bound - {command}))
 
 
 def test_removing_an_ingress_binding_breaks_the_claim(monkeypatch):
@@ -170,6 +200,15 @@ def test_removing_an_ingress_binding_breaks_the_claim(monkeypatch):
     problems = manifest_problems(CAPABILITIES)
     flagged = [p for p in problems if "/reconcile" in p and "does not route" in p]
     assert flagged, f"a removed binding must surface as a problem, got: {problems}"
+
+
+def test_removing_an_adaptive_binding_breaks_the_claim(monkeypatch):
+    """The same honesty guard on the NXT-10 surface: unbind /pause in every
+    gateway and the adaptive row's claim must FAIL (never silently pass)."""
+    _unbind_everywhere(monkeypatch, "/pause")
+    problems = manifest_problems(CAPABILITIES)
+    flagged = [p for p in problems if "/pause" in p and "does not route" in p]
+    assert flagged, f"a removed adaptive binding must surface as a problem, got: {problems}"
 
 
 def test_manifest_rejects_unrouted_command_claim():

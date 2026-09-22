@@ -114,8 +114,11 @@ CLASSIC_OPERATOR_COMMANDS: Final[tuple[str, ...]] = (
     "/reconcile",
 )
 
-#: The adaptive operator commands that EXIST in the control substrate but are
-#: NOT routed by any checked ingress (the NXT-02 gap this manifest names).
+#: The adaptive operator commands the three provider ingresses route through
+#: :mod:`forge.adaptive.command_router` (NXT-10) — gated behind
+#: ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` (default OFF; with the flag off the
+#: verbs are not parsed at all). Verified against the gateway command sets
+#: by :func:`ingress_routed_commands`.
 ADAPTIVE_OPERATOR_COMMANDS: Final[tuple[str, ...]] = ("/pause", "/steer", "/answer", "/resume")
 
 
@@ -180,14 +183,30 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
     ),
     Capability(
         name="operator-commands/adaptive",
-        tier="domain_contract",
-        entry_point=None,
-        evidence=("tests/test_adaptive_control.py", "tests/test_adaptive_wiring.py"),
-        commands=(),
-        note="/pause /steer /answer /resume exist as Mailbox ladder + "
-        "OperatorControlService, but NO checked ingress routes them and "
-        "RunService.run_command has no handler — an operator comment is silently "
-        "ignored today. This row is the NXT-02 gap itself.",
+        tier="production_wiring",
+        entry_point=(
+            "forge.gateway.{router,github_webhook,azure_webhook} -> "
+            "forge.adaptive.command_router.ControlCommandRouter -> "
+            "forge.adaptive.wiring.OperatorControlService "
+            "(FORGE_ADAPTIVE_COMMANDS_ENABLED, default OFF)"
+        ),
+        evidence=(
+            "tests/test_adaptive_command_router.py",
+            "tests/test_gateway_issue_lifecycle.py",
+            "tests/test_github_webhook.py",
+            "tests/test_azure_webhook.py",
+        ),
+        commands=ADAPTIVE_OPERATOR_COMMANDS,
+        note="NXT-10: all three provider ingresses parse /pause /resume /steer "
+        "/answer and route them through ControlCommandRouter — approver-gated "
+        "like /go (never authorship), short-prefix run resolution scoped to the "
+        "note's issue, ONE journaled reply note per note id — behind "
+        "FORGE_ADAPTIVE_COMMANDS_ENABLED, default OFF (with the flag off the "
+        "verbs are not parsed at all: zero routing). Honest bounds: the "
+        "mailbox the commands land in is the in-memory reference "
+        "(adaptive/durable-mailbox owns the Postgres swap), the lane-side "
+        "consumer runs only with FORGE_STEERING_ENABLED, and no real-provider "
+        "operator→mailbox→lane cycle is recorded yet.",
     ),
     # ---- batch CI harnesses (the four shipped one-shot drivers) ----
     Capability(
@@ -410,13 +429,25 @@ def ingress_routed_commands() -> frozenset[str]:
     Read live from the three provider gateways — the authoritative set the
     manifest's command claims are cross-checked against. If a binding is
     removed here, a manifest row that still claims the command becomes an
-    integrity error (doctor fails), never a silent over-claim.
+    integrity error (doctor fails), never a silent over-claim. The adaptive
+    verbs count as routed when ANY gateway still binds them (the per-gateway
+    ``_ADAPTIVE_NOTE_COMMANDS`` attributes — a missing binding reads as
+    empty, so unbinding the verb everywhere breaks the row's claim).
     """
-    from forge.gateway.azure_webhook import _AZDO_RUN_COMMANDS
-    from forge.gateway.github_webhook import _GITHUB_RUN_COMMANDS
-    from forge.gateway.router import _RUN_COMMANDS
+    from forge.gateway import azure_webhook, github_webhook
+    from forge.gateway import router as gateway_router
 
-    return frozenset(_RUN_COMMANDS | _GITHUB_RUN_COMMANDS | _AZDO_RUN_COMMANDS)
+    classic = (
+        gateway_router._RUN_COMMANDS
+        | github_webhook._GITHUB_RUN_COMMANDS
+        | azure_webhook._AZDO_RUN_COMMANDS
+    )
+    adaptive = (
+        getattr(gateway_router, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
+        | getattr(github_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
+        | getattr(azure_webhook, "_ADAPTIVE_NOTE_COMMANDS", frozenset())
+    )
+    return frozenset(classic) | frozenset(adaptive)
 
 
 def manifest_problems(

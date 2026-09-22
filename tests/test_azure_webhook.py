@@ -984,3 +984,102 @@ class TestIdentityName:
         from forge.gateway.azure_webhook import identity_name
 
         assert identity_name("Pavel Nasovich") == "Pavel Nasovich"
+
+
+class TestAdaptiveCommandIngress:
+    """NXT-10: the adaptive verbs (/pause /resume /steer /answer) reach the
+    ControlCommandRouter through the real Azure DevOps ingress — work-item
+    comments AND PR comments — and ONLY while FORGE_ADAPTIVE_COMMANDS_ENABLED
+    is on (the disabled default means the comment is not parsed as a command
+    at all: inbox-only)."""
+
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=azure_settings(tmp_path))
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    @staticmethod
+    def _workitem_body(text: str) -> bytes:
+        payload = load_json("workitem_commented_go.json")
+        payload["resource"]["fields"]["System.History"] = text
+        return json.dumps(payload).encode()
+
+    async def test_disabled_default_is_zero_routing(self, app, client, monkeypatch):
+        monkeypatch.delenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", raising=False)
+        body = self._workitem_body("/pause")
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "status": "accepted",
+            "event": "workitem.commented",
+            "recorded": True,
+        }
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
+
+    async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(note)
+            return {"status": "applied"}
+
+        import forge.gateway.azure_webhook as azure_module
+
+        monkeypatch.setattr(azure_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        body = self._workitem_body(f"@forge /pause {RUN_ID}")
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "status": "accepted",
+            "event": "workitem.commented",
+            "adaptive_command": True,
+        }
+        (note,) = routed
+        assert note["command"] == "adaptive_control"
+        assert note["adaptive_verb"] == "pause"
+        assert note["provider"] == "azure_devops"
+        assert note["project"] == PROJECT
+        assert note["issue_number"] == WORK_ITEM
+        assert note["author_username"] == "dev@fabrikam.example"
+        assert note["note_id"] == f"workitem:{WORK_ITEM}:comment:10"
+        # The mailbox leg never schedules a classic run-command step.
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
+
+    async def test_pr_comment_routes_the_same_way(self, app, client, monkeypatch):
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(note)
+            return {"status": "applied"}
+
+        import forge.gateway.azure_webhook as azure_module
+
+        monkeypatch.setattr(azure_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        payload = load_json("pr_commented_on_implement.json")
+        payload["resource"]["comment"]["content"] = "/steer use the existing helper"
+        body = json.dumps(payload).encode()
+        response = await client.post("/webhook/azure_devops", content=body, headers=auth_headers())
+
+        assert response.json()["adaptive_command"] is True
+        (note,) = routed
+        assert note["adaptive_verb"] == "steer"
+        assert note["issue_is_pr"] is True

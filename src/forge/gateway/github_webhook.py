@@ -67,6 +67,10 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from forge.adaptive.command_router import (
+    ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
+)
+from forge.adaptive.command_router import adaptive_command_set, route_adaptive_command_note
 from forge.durable import ingest_event
 from forge.gateway.mention import extract_mention
 from forge.worker.steps import STEP_WAKE_KEY, schedule_command_step
@@ -142,6 +146,7 @@ def github_source_event_id(connection_id: str, event: str, action: str, delivery
 def normalize_issue_comment(
     payload: dict[str, Any],
     mention_pattern: str = "@forge",
+    extra_commands: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Normalize an ``issue_comment`` payload into run-command metadata.
 
@@ -149,29 +154,35 @@ def normalize_issue_comment(
     distinguished by the ``pull_request`` key on the issue object (research
     §2.3) and surfaced as ``issue_is_pr`` — routing treats them the same for
     now; the flow decides what a PR-comment command means post-v0.5.
+
+    *extra_commands* carries the adaptive control verbs while
+    ``FORGE_ADAPTIVE_COMMANDS_ENABLED`` is on (NXT-10): those verbs
+    normalize to the single ``adaptive_control`` command with the verb in
+    ``adaptive_verb`` — the mailbox leg, not the classic run-command step.
     """
     issue = payload.get("issue") or {}
     comment = payload.get("comment") or {}
     repository = payload.get("repository") or {}
     installation = payload.get("installation") or {}
     body = str(comment.get("body") or "").strip()
+    commands = _GITHUB_RUN_COMMANDS | frozenset(extra_commands)
 
     slash_command: str | None = None
-    mention = extract_mention(body, mention_pattern, extra_commands=_GITHUB_RUN_COMMANDS)
-    if mention.is_mention and mention.slash_command in _GITHUB_RUN_COMMANDS:
+    mention = extract_mention(body, mention_pattern, extra_commands=commands)
+    if mention.is_mention and mention.slash_command in commands:
         slash_command = mention.slash_command
     else:
         # Bare commands are equally valid (same rule as the GitLab ingress):
         # extract_mention only parses @mentions, so requiring one here would
         # silently drop "/implement" notes that lack it.
         first_token = body.split(None, 1)[0] if body else ""
-        if first_token in _GITHUB_RUN_COMMANDS:
+        if first_token in commands:
             slash_command = first_token
     if slash_command is None:
         return None
 
-    return {
-        "command": _COMMAND_MAP[slash_command],
+    metadata = {
+        "command": _COMMAND_MAP.get(slash_command, "adaptive_control"),
         "provider": "github",
         "connection_id": github_connection_id(
             installation.get("id"), str(repository.get("full_name") or "")
@@ -188,6 +199,9 @@ def normalize_issue_comment(
         "note_text": body,
         "note_id": comment.get("id"),
     }
+    if slash_command in _ADAPTIVE_NOTE_COMMANDS:
+        metadata["adaptive_verb"] = slash_command[1:]
+    return metadata
 
 
 def normalize_labeled_event(
@@ -559,11 +573,19 @@ async def _ingest_github_event(
             logger.info("Skipping bot-authored GitHub comment", extra={"event": event})
             return {"status": "skipped", "reason": "bot-loop"}
         run_command = normalize_issue_comment(
-            payload, mention_pattern=getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
+            payload,
+            mention_pattern=getattr(settings, "FORGE_MENTION_PATTERN", "@forge"),
+            extra_commands=adaptive_command_set(),
         )
         if run_command is None:
             return _record_inbox_only(
                 request, background_tasks, event, delivery, connection_id, project_id, payload
+            )
+        if run_command.get("command") == "adaptive_control":
+            # NXT-10: adaptive control verbs take the mailbox leg
+            # (ControlCommandRouter), not the classic run-command step path.
+            return _ingest_github_adaptive_control(
+                request, background_tasks, run_command, event=event
             )
         source_event_id = github_source_event_id(
             connection_id, event, action, f"comment:{run_command['note_id']}"
@@ -718,6 +740,40 @@ def _record_inbox_only(
     background_tasks.add_task(_write)
     return JSONResponse(
         status_code=202, content={"status": "accepted", "event": event, "recorded": True}
+    )
+
+
+def _ingest_github_adaptive_control(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_command: dict[str, Any],
+    *,
+    event: str = "issue_comment",
+) -> JSONResponse:
+    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
+
+    Mirrors the GitLab ``_ingest_adaptive_control``: the ``202`` answers
+    immediately and the ControlCommandRouter leg runs as a background task
+    (authorize → resolve the run → mailbox → ONE journaled reply per note
+    id). GitHub retries nothing, but a manual redelivery re-enters the
+    router idempotently (mailbox key + A11 note journal).
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        logger.warning("Adaptive command without a database — not routed")
+        return JSONResponse(
+            status_code=202,
+            content={"status": "accepted", "event": event, "adaptive_command": False},
+        )
+    background_tasks.add_task(
+        route_adaptive_command_note,
+        request.app.state.settings,
+        session_factory,
+        run_command,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"status": "accepted", "event": event, "adaptive_command": True},
     )
 
 

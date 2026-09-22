@@ -332,3 +332,130 @@ class TestIssueLifecycleIngress:
         async with app.state.session_factory() as session:
             steps = (await session.execute(select(StepRun))).scalars().all()
         assert steps == []
+
+
+# ----------------------------------------------------------------------
+# NXT-10: adaptive operator commands (/pause /resume /steer /answer)
+# ----------------------------------------------------------------------
+
+
+class TestAdaptiveCommandIngress:
+    """The adaptive verbs reach the ControlCommandRouter through the real
+    GitLab ingress — and ONLY while FORGE_ADAPTIVE_COMMANDS_ENABLED is on
+    (the disabled default is zero routing: the note is not parsed as a
+    command at all and takes the legacy path)."""
+
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=_settings())
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    @staticmethod
+    def _note(text: str) -> dict:
+        payload = _load("note_issue.json")
+        payload["user"]["username"] = "alice"
+        payload["object_attributes"]["note"] = text
+        return payload
+
+    async def _post(self, client, text: str):
+        return await client.post(
+            "/webhook",
+            json=self._note(text),
+            headers={"X-Gitlab-Token": TEST_WEBHOOK_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+
+    async def test_disabled_default_is_zero_routing(self, app, client, monkeypatch):
+        monkeypatch.delenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", raising=False)
+        response = await self._post(client, "/pause")
+
+        assert response.status_code == 202
+        # Not a run command, not adaptive — the note takes the legacy path.
+        body = response.json()
+        assert body.get("adaptive_command") is None
+        assert body.get("run_command") is None
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
+
+    async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(note)
+            return {"status": "applied"}
+
+        import forge.gateway.router as gateway_router_module
+
+        monkeypatch.setattr(gateway_router_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        response = await self._post(client, "@forge /pause feedface1")
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "status": "accepted",
+            "event": "note",
+            "adaptive_command": True,
+        }
+        (note,) = routed
+        assert note["command"] == "adaptive_control"
+        assert note["adaptive_verb"] == "pause"
+        assert note["provider"] == "gitlab"
+        assert note["project_id"] == PROJECT_ID
+        assert note["issue_iid"] == ISSUE_IID
+        assert note["author_username"] == "alice"
+        assert note["note_text"] == "@forge /pause feedface1"
+        # The mailbox leg never schedules a classic run-command step.
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
+
+    async def test_bot_note_is_never_routed(self, app, client, monkeypatch):
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        payload = self._note("/pause")
+        payload["user"]["username"] = "forge-bot"
+        response = await client.post(
+            "/webhook",
+            json=payload,
+            headers={"X-Gitlab-Token": TEST_WEBHOOK_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+
+        assert response.json() == {"status": "skipped", "reason": "bot-loop"}
+
+    async def test_adaptive_note_on_an_mr_is_not_routed(self, app, client, monkeypatch):
+        """Gate notes are issue-bound: an MR-note /pause is not routed (the
+        same boundary every non-/security run command has)."""
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(note)
+            return {"status": "applied"}
+
+        import forge.gateway.router as gateway_router_module
+
+        monkeypatch.setattr(gateway_router_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        payload = _load("note_mr.json")
+        payload["user"]["username"] = "alice"
+        payload["object_attributes"]["note"] = "/pause"
+        response = await client.post(
+            "/webhook",
+            json=payload,
+            headers={"X-Gitlab-Token": TEST_WEBHOOK_SECRET, "X-Gitlab-Event": "Note Hook"},
+        )
+
+        assert response.json().get("adaptive_command") is None
+        assert routed == []
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []

@@ -16,6 +16,11 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from forge import __version__
+from forge.adaptive.command_router import (
+    ADAPTIVE_NOTE_COMMANDS as _ADAPTIVE_NOTE_COMMANDS,
+    adaptive_command_set,
+    route_adaptive_command_note,
+)
 from forge.durable.models import FlowRun, StepRun
 from forge.gateway.github_webhook import github_router
 from forge.gateway.mention import extract_mention
@@ -67,17 +72,21 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
 
     mention_pattern = getattr(settings, "FORGE_MENTION_PATTERN", "@forge")
     note_text = (event.object_attributes.note or "").strip()
-    mention = extract_mention(note_text, mention_pattern, extra_commands=_RUN_COMMANDS)
+    # NXT-10: the adaptive control verbs (/pause /resume /steer /answer) join
+    # the parsed set ONLY while FORGE_ADAPTIVE_COMMANDS_ENABLED is on — with
+    # the default OFF the verbs are not recognized at all (zero routing).
+    commands = _RUN_COMMANDS | adaptive_command_set()
+    mention = extract_mention(note_text, mention_pattern, extra_commands=commands)
 
     slash_command: str | None = None
-    if mention.is_mention and mention.slash_command in _RUN_COMMANDS:
+    if mention.is_mention and mention.slash_command in commands:
         slash_command = mention.slash_command
     else:
         # Bare commands are equally valid: extract_mention only parses
         # @mentions, so requiring one here silently rerouted "/implement"
         # notes into the legacy path, where nothing handles them.
         first_token = note_text.split(None, 1)[0] if note_text else ""
-        if first_token in _RUN_COMMANDS:
+        if first_token in commands:
             slash_command = first_token
     if slash_command is None:
         return None
@@ -97,6 +106,18 @@ def _match_run_command(event: GitLabEvent, settings) -> dict[str, Any] | None:
         # revival attempt's idempotency (a redelivered webhook is a no-op).
         "note_id": event.object_attributes.id,
     }
+    if slash_command in _ADAPTIVE_NOTE_COMMANDS:
+        # NXT-10: the adaptive verbs normalize to ONE command and route to
+        # the ControlCommandRouter (approver gate, work-scoped run
+        # resolution, OperatorControlService mailbox) — not the classic
+        # run-command step path.
+        return {
+            **common,
+            "command": "adaptive_control",
+            "provider": "gitlab",
+            "adaptive_verb": slash_command[1:],
+            "note_text": note_text,
+        }
     if slash_command == "/security":
         common["mr_iid"] = event.merge_request.iid if not on_issue and event.merge_request else None
         return {**common, "command": "security_triage", "note_text": note_text}
@@ -379,6 +400,37 @@ async def _ingest_run_command(
     return {"status": "accepted", "event": event.object_kind}
 
 
+def _ingest_adaptive_control(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_command: dict[str, Any],
+    object_kind: str,
+) -> dict[str, Any]:
+    """NXT-10 ingress for adaptive operator commands (/pause /resume /steer /answer).
+
+    The classic run commands answer ``202`` only after their inbox row +
+    first step commit; the adaptive surface answers ``202`` immediately and
+    routes in a background task — the durable decision record for these
+    commands is the work-scoped control mailbox
+    (:class:`~forge.adaptive.wiring.OperatorControlService`), reached
+    idempotently: the mailbox dedups by the note-keyed idempotency key and
+    the operator reply is journaled once per note id (the /retry A11
+    pattern). A redelivered webhook is therefore a no-op, and a lost
+    background task is recovered by the provider's webhook redelivery.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        logger.warning("Adaptive command without a database — not routed")
+        return {"status": "accepted", "event": object_kind, "adaptive_command": False}
+    background_tasks.add_task(
+        route_adaptive_command_note,
+        request.app.state.settings,
+        session_factory,
+        run_command,
+    )
+    return {"status": "accepted", "event": object_kind, "adaptive_command": True}
+
+
 @router.get("/health")
 async def health(request: Request) -> dict[str, Any]:
     """Health check endpoint with DB, LiteLLM, and Redis connectivity."""
@@ -653,6 +705,12 @@ async def webhook(
     # orchestrator/flow dispatch entirely (they never need an LLM here).
     run_command = _match_run_command(event, settings)
     if run_command is not None:
+        if run_command.get("command") == "adaptive_control":
+            # NXT-10: adaptive control verbs take the mailbox leg, not the
+            # durable run-command step path.
+            return _ingest_adaptive_control(
+                request, background_tasks, run_command, event.object_kind
+            )
         return await _ingest_run_command(request, background_tasks, event, run_command)
 
     # #29 lifecycle commands: issue updates (edit → replan, trigger-label

@@ -795,3 +795,76 @@ class TestGitHubBotLoginLoopGuard:
                 assert inbox[0].payload["author_username"] == "alice"
         finally:
             reset_engine()
+
+
+class TestAdaptiveCommandIngress:
+    """NXT-10: the adaptive verbs (/pause /resume /steer /answer) reach the
+    ControlCommandRouter through the real GitHub ingress — and ONLY while
+    FORGE_ADAPTIVE_COMMANDS_ENABLED is on (the disabled default means the
+    comment is not parsed as a command at all: inbox-only)."""
+
+    @pytest.fixture()
+    async def app(self, tmp_path):
+        reset_engine()
+        application = create_app(settings=github_settings(tmp_path))
+        async with application.router.lifespan_context(application):
+            application.state.task_queue = AsyncMock()
+            application.state.task_queue.is_duplicate = AsyncMock(return_value=False)
+            yield application
+        reset_engine()
+
+    @pytest.fixture()
+    async def client(self, app) -> AsyncClient:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    @staticmethod
+    def _pause_body() -> bytes:
+        payload = json.loads(load_payload("issue_comment_created.json"))
+        payload["comment"]["body"] = "@forge /pause feedface1"
+        return json.dumps(payload).encode()
+
+    async def test_disabled_default_is_zero_routing(self, app, client, monkeypatch):
+        monkeypatch.delenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", raising=False)
+        body = self._pause_body()
+        response = await client.post("/webhook/github", content=body, headers=signed_headers(body))
+
+        assert response.status_code == 202
+        assert response.json() == {"status": "accepted", "event": "issue_comment", "recorded": True}
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
+
+    async def test_enabled_routes_to_the_command_router(self, app, client, monkeypatch):
+        routed: list[dict] = []
+
+        async def fake_route(settings, session_factory, note):
+            routed.append(note)
+            return {"status": "applied"}
+
+        import forge.gateway.github_webhook as github_module
+
+        monkeypatch.setattr(github_module, "route_adaptive_command_note", fake_route)
+        monkeypatch.setenv("FORGE_ADAPTIVE_COMMANDS_ENABLED", "1")
+        body = self._pause_body()
+        response = await client.post("/webhook/github", content=body, headers=signed_headers(body))
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "status": "accepted",
+            "event": "issue_comment",
+            "adaptive_command": True,
+        }
+        (note,) = routed
+        assert note["command"] == "adaptive_control"
+        assert note["adaptive_verb"] == "pause"
+        assert note["provider"] == "github"
+        assert note["repo_full_name"] == "acme/acme-widget"
+        assert note["issue_number"] == 42
+        assert note["author_username"] == "alice"
+        assert note["note_id"] == 9010
+        # The mailbox leg never schedules a classic run-command step.
+        async with app.state.session_factory() as session:
+            steps = (await session.execute(select(StepRun))).scalars().all()
+        assert steps == []
