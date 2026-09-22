@@ -249,6 +249,15 @@ class Settings(BaseSettings):
     FORGE_AZDO_WEBHOOK_USERNAME: str = ""
     FORGE_AZDO_WEBHOOK_PASSWORD: SecretStr | None = None
 
+    # --- Lane control API (NXT-10, the outbound leg) --------------------------
+    # The server-side secret under which per-run lane tokens are derived
+    # (HMAC-SHA256(secret, run_id) — forge.api_lane_control.lane_control_token).
+    # The dispatch injects the derived token into the lane job env as
+    # FORGE_LANE_CONTROL_TOKEN; the lane dials OUT to GET /lane/controls and
+    # POST acks (EXE-04: no inbound listener on the CI lane). Unset → both
+    # routes answer 503 disabled — never unauthenticated-open.
+    FORGE_LANE_CONTROL_SECRET: SecretStr | None = None
+
     # Connection-scoped approvers (ADR-0018 §3, mirrors FORGE_GITHUB_APPROVERS):
     # comma-separated Azure DevOps identities (uniqueName form) allowed to
     # /implement and /go on the azure_devops path. Empty — fall back to

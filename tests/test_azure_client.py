@@ -1,7 +1,7 @@
 """Azure DevOps client tests: auth bytes, api-version injection, CAS drift.
 
 Everything runs against pytest-httpx — no live Azure DevOps. Endpoint/field
-ground truth: docs/research/azure-devops.md; normalized payload fixtures:
+ground truth: docs/research/2026-09-15-azure-devops.md; normalized payload fixtures:
 tests/fixtures/azure_payloads/ (research §10, SHAs made consistent).
 """
 

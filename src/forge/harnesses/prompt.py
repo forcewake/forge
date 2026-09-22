@@ -8,7 +8,7 @@ over the read-only runner token — and the GitLab templates' brief carries
 the same contract around ``$FORGE_PLAN``. The per-CLI ``-p`` prompt stays
 a SHORT pointer (:data:`TASK_PROMPT`) — the quality lives in the brief
 file, not in the one-liner. Per-CLI flags stay in the driver scripts
-(docs/research/harness-interfaces.md); the PROMPT is shared.
+(docs/research/2026-09-13-harness-interfaces.md); the PROMPT is shared.
 
 Skills = the CLIs' native conventions: Claude Code reads ``CLAUDE.md`` +
 ``.claude/skills/``; Grok Build and opencode read ``AGENTS.md``. Those

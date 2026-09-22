@@ -483,7 +483,7 @@ not to own the parser; it does not remove the differential suite.
 3. **Renames in v0.4.** Decompose `rename` into Delete+Create with a similarity note,
    or add a native `RenameEntry` once the Commits-API/GraphQL write path supports it?
    GitHub `createCommitOnBranch` file changes have no rename action (forge research:
-   `docs/research/github-api.md`), so decomposition is the likely path; review-side
+   `docs/research/2026-09-13-github-api.md`), so decomposition is the likely path; review-side
    rename detection must then be preserved for diff noise reasons.
 4. **Mode changes.** The Commits API write path has no mode action (current docstring
    rationale). Is `mode_change_not_supported` a permanent policy or until the GraphQL

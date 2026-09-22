@@ -8,7 +8,7 @@ process that owns credentials — and steering travels as guidance only:
 nothing on this class changes what a turn is permitted to do.
 
 Vendor surface mapped (verified against the ``claude-agent-sdk==0.2.157``
-wheel; ``docs/research/claude-sdk-python.md`` — where doc-site summaries
+wheel; ``docs/research/2026-09-21-claude-sdk-python.md`` — where doc-site summaries
 and the package disagreed, the package won):
 
 - ``start_session`` → ``ClaudeSDKClient(options=...)`` + ``connect()`` +
@@ -31,7 +31,7 @@ and the package disagreed, the package won):
   dataclasses — field names exactly as the SDK defines them, no
   normalized schema invented).
 
-Hacks ported from ``docs/research/forge-harness-hacks.md`` (each one is
+Hacks ported from ``docs/research/2026-09-21-forge-harness-hacks.md`` (each one is
 LIVE-found doctrine, not preference):
 
 - ephemeral per-session ``CLAUDE_CONFIG_DIR`` (commit e2adf02: agent

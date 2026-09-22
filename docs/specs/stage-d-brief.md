@@ -1,8 +1,8 @@
 # Stage D brief — CandidateBundle pipeline, trusted publisher, usage receipts (v0.3.0)
 
 Handoff brief. Read first: ADR-0016, docs/specs/contracts-v0.2.md,
-docs/research/harness-interfaces.md (driver table + verify-against-binaries
-notes), docs/research/durable-execution.md §6 (idempotency keys).
+docs/research/2026-09-13-harness-interfaces.md (driver table + verify-against-binaries
+notes), docs/research/2026-09-13-durable-execution.md §6 (idempotency keys).
 
 ## 1. HarnessDriver protocol (new: src/forge/harnesses/base.py)
 

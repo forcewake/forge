@@ -269,6 +269,19 @@ jobs:
           # (not secret — it references secrets by ${VAR} name); an empty
           # value means strict isolation with no servers.
           FORGE_HARNESS_MCP: ${{ vars.FORGE_HARNESS_MCP }}
+          # NXT-11: lane_driver reads the steering switch HERE (the driver
+          # step is the process that attaches the steering session; the
+          # brief step's copy above does not cross step boundaries).
+          FORGE_STEERING_ENABLED: ${{ vars.FORGE_STEERING_ENABLED || '' }}
+          # NXT-10 outbound leg (EXE-04 — the lane dials OUT, no inbound
+          # listener): the control-plane URL is a repo VARIABLE; the TOKEN
+          # is the work-scoped lane credential HMAC(run-id) the dispatch
+          # provisions under the server's FORGE_LANE_CONTROL_SECRET, held
+          # as a repo SECRET. SDK lanes only — the scripted drivers have
+          # no steering attach to feed. Both empty → the lane honestly
+          # stays on its local mailbox.
+          FORGE_LANE_CONTROL_URL: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && vars.FORGE_LANE_CONTROL_URL || '' }}
+          FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane') && secrets.FORGE_LANE_CONTROL_TOKEN || '' }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):

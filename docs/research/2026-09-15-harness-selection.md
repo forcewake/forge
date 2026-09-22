@@ -148,7 +148,7 @@ ADR-0021 §3 already ships the acceptance telemetry ladder (candidate → CI-pas
 - **Pros [inference]:** forge's own ladder is a *better objective function* than Chatbot Arena preferences — it measures the actual outcome forge cares about, on data forge already collects; no router training, no proxy metric.
 - **Cons [inference]:** per-project sample sizes are small; automatic (bandit-style) reordering would silently change execution policy and invalidate or bypass gates — so ranking must be a **suggestion surface** (`forge doctor`-style finding), applied by a human as a tighten-only config change that flows into future gates via the policy digest. Cross-project aggregation without project consent is rejected (§5).
 
-Sources: docs/adr/0009, 0011, 0015, 0016, 0018, 0021; src/forge/runs/backends.py (`build_backend`, `_HARNESS_INFRASTRUCTURE_PATTERNS`, `HarnessFailureKind`); src/forge/runs/service.py (`_plan_comment`, `_build_run_spec_document`, `_policy_digest`, repair path); src/forge/runs/github_service.py (`_harness_driver`, `_build_run_spec_document`, Actions inputs); src/forge/durable/budgets.py (F22 reserve/reconcile); docs/research/harness-interfaces.md; docs/research/harness-config-best-practices.md §4, §7, §8 [observed].
+Sources: docs/adr/0009, 0011, 0015, 0016, 0018, 0021; src/forge/runs/backends.py (`build_backend`, `_HARNESS_INFRASTRUCTURE_PATTERNS`, `HarnessFailureKind`); src/forge/runs/service.py (`_plan_comment`, `_build_run_spec_document`, `_policy_digest`, repair path); src/forge/runs/github_service.py (`_harness_driver`, `_build_run_spec_document`, Actions inputs); src/forge/durable/budgets.py (F22 reserve/reconcile); docs/research/2026-09-13-harness-interfaces.md; docs/research/2026-09-15-harness-config-best-practices.md §4, §7, §8 [observed].
 
 ---
 
@@ -175,7 +175,7 @@ Sources: docs/adr/0009, 0011, 0015, 0016, 0018, 0021; src/forge/runs/backends.py
 - Provider-side "Auto" tiers as a default model route.
 - Any harness/model decision taken after the gate that is not an execution of the frozen spec (the fallback list *is* part of the spec; anything beyond it is not).
 
-Sources: same forge internals as §2; docs/research/harness-config-best-practices.md §7 item 8 (RunSpec-sourced model pins, `fallbackModel` adoption) [observed].
+Sources: same forge internals as §2; docs/research/2026-09-15-harness-config-best-practices.md §7 item 8 (RunSpec-sourced model pins, `fallbackModel` adoption) [observed].
 
 ---
 
@@ -197,4 +197,4 @@ Sources: same forge internals as §2; docs/research/harness-config-best-practice
 4. **Provider-side "Auto" (Copilot tier routing, OpenRouter `:auto`) as the default model route.** Silent provider-side choice, non-deterministic per turn, only post-hoc visibility, billing follows the provider's pick. Permitted only as an explicitly configured, gate-disclosed per-project opt-in where the human approves "model is non-deterministic within this tier"; forge's default remains explicit pins (consistent with HCBP §4: pin snapshots per phase for reproducibility).
 5. **Learned routers (RouteLLM-style) trained on forge's own runs, now.** Per-project sample sizes are tiny and the label (merged-without-rework) arrives in days-weeks, not per-request; and an automatically-acting router is rejected under §5.1's logic even when the training data is forge's. Revisit after v1.0 telemetry exists, as a suggestion surface only.
 
-Sources: lmsys.org/blog/2024-07-01-routellm/; openrouter.ai/docs/guides/routing/routers/auto-router; docs.github.com/en/copilot/concepts/models/auto-model-selection; docs/adr/0011, 0015, 0016, 0018; docs/research/harness-config-best-practices.md §2, §4 [observed].
+Sources: lmsys.org/blog/2024-07-01-routellm/; openrouter.ai/docs/guides/routing/routers/auto-router; docs.github.com/en/copilot/concepts/models/auto-model-selection; docs/adr/0011, 0015, 0016, 0018; docs/research/2026-09-15-harness-config-best-practices.md §2, §4 [observed].

@@ -338,7 +338,7 @@ def is_lockfile(path: str) -> bool:
 def in_path_scope(path: str, allowed_paths: list[str]) -> bool:
     """Whether *path* matches at least one of the *allowed_paths* globs.
 
-    Monorepo path scoping (docs/research/complex-projects.md §1): a work
+    Monorepo path scoping (docs/research/2026-09-14-complex-projects.md §1): a work
     package may carry a path allowlist; a change outside it is a failed run,
     not a review comment. Globs are fnmatch-style and matched against the
     repo-relative path — ``*`` also spans ``/``, so ``services/api/*``

@@ -6,7 +6,7 @@ Covers the R23 contract end to end:
   JSON) — deterministic across re-reads of the same artifact, distinct per
   attempt, and recomputed identically by the control plane when the meta
   carries no lane-computed id;
-- normalization honesty (docs/research/actions-artifacts-usage.md § Usage
+- normalization honesty (docs/research/2026-09-17-actions-artifacts-usage.md § Usage
   normalization table): Anthropic-shaped counters are DISJOINT and get the
   total formula ``input + cache_read + cache_write + output``;
   OpenAI-shaped counters are INCLUSIVE and the cache is never added on

@@ -1,7 +1,7 @@
 """GitHub integration: App credentials, REST/GraphQL client, repository reader.
 
 First GitHub slice (ADR-0019, review finding F32). Ground truth for every
-endpoint, field and error shape is ``docs/research/github-api.md`` (tagged
+endpoint, field and error shape is ``docs/research/2026-09-13-github-api.md`` (tagged
 [documented] / [observed] / [inference] there); anything not covered by that
 document is called out in the docstring of the method that relies on it.
 
@@ -743,7 +743,7 @@ class GitHubClient:
 
     # -- REST: PR reviews (the reactive review engine, v0.7) ------------------------
     #
-    # Ground truth: docs/research/github-reactive.md §1 (tagged there).
+    # Ground truth: docs/research/2026-09-14-github-reactive.md §1 (tagged there).
 
     async def create_review(
         self,
@@ -857,7 +857,7 @@ class GitHubClient:
 
     # -- REST: Actions (the E3b execution adapter, ADR-0020) ----------------------
     #
-    # Ground truth: docs/research/github-actions-executor.md (tagged there).
+    # Ground truth: docs/research/2026-09-14-github-actions-executor.md (tagged there).
 
     async def dispatch_workflow(
         self,
@@ -1008,7 +1008,7 @@ class GitHubClient:
 
     # -- REST: security alerts (findings ingestion; research ci-security-surface §3/§4) --
     #
-    # Ground truth: docs/research/ci-security-surface.md §3.2 (field sets,
+    # Ground truth: docs/research/2026-09-14-ci-security-surface.md §3.2 (field sets,
     # 403-when-disabled) and §4.2 (dismissal enums — code scanning uses
     # SPACES ("false positive"), secret scanning UNDERSCORES
     # ("false_positive"); every dismiss reason is REQUIRED).

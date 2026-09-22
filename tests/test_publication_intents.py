@@ -233,7 +233,7 @@ class DelayedApplyGitLab(FakeGitLab):
 
 
 class TestProbeDecisionTable:
-    """docs/research/remote-effect-reconciliation.md, decision table."""
+    """docs/research/2026-09-17-remote-effect-reconciliation.md, decision table."""
 
     COMMITS = [
         {"sha": "a" * 40, "message": "forge: fix (forge-op:ka12bug45678)", "parent_ids": ["p"]},

@@ -3,7 +3,7 @@
 Speaks JSON-RPC 2.0 JSONL over the stdio of a spawned ``codex app-server``
 process — the production transport (the WebSocket listener is experimental)
 — with no vendor package: pure asyncio stdlib. Wire facts and section
-references throughout are ``docs/research/codex-app-server.md``:
+references throughout are ``docs/research/2026-09-21-codex-app-server.md``:
 
 - §1: one JSON-RPC message per line; the ``"jsonrpc": "2.0"`` header is
   OMITTED on the wire in both directions; responses correlate by ``id``.
@@ -26,7 +26,7 @@ references throughout are ``docs/research/codex-app-server.md``:
 - §8: ``-32001`` "Server overloaded" is retried with exponential backoff
   plus jitter.
 
-Doctrine (``docs/research/forge-harness-hacks.md``, EXE-02/EXE-06): this
+Doctrine (``docs/research/2026-09-21-forge-harness-hacks.md``, EXE-02/EXE-06): this
 driver runs in the EXECUTION LANE next to its runner, never inside the
 privileged API process; the headless posture is ``approvalPolicy: "never"``
 plus an explicit ``workspaceWrite`` sandbox, and no code path may block on
@@ -182,7 +182,7 @@ class CodexAppDriverClient:
     """The :class:`~forge.adaptive.adapters.CodexAppClient` duck type, for real.
 
     Maps each Protocol method onto the App Server wire (section refs are
-    ``docs/research/codex-app-server.md``):
+    ``docs/research/2026-09-21-codex-app-server.md``):
 
     - ``start_thread`` — the §3 handshake (``initialize`` request, await
       the response, ``initialized`` notification), then ``thread/start``

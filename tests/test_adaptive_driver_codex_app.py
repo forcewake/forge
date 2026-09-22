@@ -1,7 +1,7 @@
 """The REAL Codex App Server client, over in-memory wire fakes.
 
 Contract fidelity to the VENDOR is the point: every fake speaks the exact
-JSON-RPC frame shapes of ``docs/research/codex-app-server.md`` — requests
+JSON-RPC frame shapes of ``docs/research/2026-09-21-codex-app-server.md`` — requests
 ``{"method", "id", "params"}`` with the ``jsonrpc`` header OMITTED (§1.2),
 ``thread/start`` results carrying ``thread.id`` (§4.1), ``turn/started``
 carrying the turn id (§7.1), ``turn/steer`` requiring ``expectedTurnId``

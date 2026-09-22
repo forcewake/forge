@@ -8,9 +8,9 @@ hosted runners, Azure Pipelines) — and each item cites its anchor:
 `ci/templates/forge-harness.github.yml`, `src/forge/harnesses/prompt.py`,
 `docs/harnesses/claude-code.md`, or the fixing commit.
 
-Companion ground truth: `docs/research/harness-interfaces.md` (§2 Claude
-Code / Agent SDK), `docs/research/harness-config-best-practices.md`,
-`docs/research/mcp-lane-live-evidence.md`.
+Companion ground truth: `docs/research/2026-09-13-harness-interfaces.md` (§2 Claude
+Code / Agent SDK), `docs/research/2026-09-15-harness-config-best-practices.md`,
+`docs/research/2026-09-15-mcp-lane-live-evidence.md`.
 
 ---
 

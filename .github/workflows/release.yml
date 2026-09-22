@@ -107,7 +107,7 @@ jobs:
       # tag. Requires a public repo (public-good Sigstore). If forge goes
       # private, or Rekor transparency is unacceptable, drop the two steps
       # below and keep digest pinning + the provenance attestation
-      # (docs/research/schema-upgrade-gates.md, open question 6).
+      # (docs/research/2026-09-17-schema-upgrade-gates.md, open question 6).
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Sign the digest (keyless)
         run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"

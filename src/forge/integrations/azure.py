@@ -1,7 +1,7 @@
 """Azure DevOps integration: PAT client, CAS writes, PR threads, reader.
 
 First Azure DevOps slice (ADR-0024, milestone AZ-1). Ground truth for every
-endpoint, field and error shape is ``docs/research/azure-devops.md`` (tagged
+endpoint, field and error shape is ``docs/research/2026-09-15-azure-devops.md`` (tagged
 [documented] / [community-documented] / [inference] there); anything not
 covered by that document is called out in the docstring of the method that
 relies on it. The official ``azure-devops`` Python package is stale at

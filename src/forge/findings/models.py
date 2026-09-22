@@ -3,7 +3,7 @@
 On GitLab CE the native vulnerability store, the MR security widget and the
 ``/vulnerabilities`` state APIs are Ultimate — the ``gl-*-report.json``
 artifacts are the only free surface, so forge parses them itself and owns
-all triage state externally (docs/research/ci-security-surface.md §3.1,
+all triage state externally (docs/research/2026-09-14-ci-security-surface.md §3.1,
 §4.1, §7). On GitHub the alert APIs are read for free-tier-eligible repos
 and forge mirrors them into the same table so the triage flow is
 provider-neutral.

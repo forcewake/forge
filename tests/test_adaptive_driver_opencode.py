@@ -2,7 +2,7 @@
 
 Every fake here mirrors the LIVE-VERIFIED surface from the "LIVE
 CORRECTION — opencode v2.0.10" section of
-``docs/research/opencode-server.md`` — the ``/api`` route prefix, the
+``docs/research/2026-09-21-opencode-server.md`` — the ``/api`` route prefix, the
 mandatory ``{providerID, id}`` model call, the user-echo prompt,
 ``session.execution.succeeded|failed`` as the turn-done signal, flat SSE
 frames (``{"id", "created", "type", "data"}``), interrupt's

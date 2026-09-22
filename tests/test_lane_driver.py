@@ -1070,9 +1070,16 @@ class TestLaneRegistration:
 
         assert LANE_DRIVER_ID in SHIPPED_DRIVERS
         assert DRIVER_CREDENTIAL_VARS[LANE_DRIVER_ID] == DRIVER_CREDENTIAL_VARS["claude-code"]
+        # The optional surface extends the batch recipe with the NXT-10
+        # lane control pair (the work-scoped steering token — OPTIONAL:
+        # absent means the lane stays on its local mailbox).
         assert (
-            DRIVER_OPTIONAL_CREDENTIAL_VARS[LANE_DRIVER_ID]
-            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"]
+            DRIVER_OPTIONAL_CREDENTIAL_VARS[LANE_DRIVER_ID][0]
+            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"][0]
+        )
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS[LANE_DRIVER_ID][1:] == (
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
         )
 
     def test_the_lane_driver_constant_matches_the_registered_id(self):

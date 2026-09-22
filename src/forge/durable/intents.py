@@ -1,6 +1,6 @@
 """PublicationIntent helpers: identity, state machine, the probe decision
 table (R11) and the effect-certainty settle machine (A12,
-docs/research/remote-effect-reconciliation.md).
+docs/research/2026-09-17-remote-effect-reconciliation.md).
 
 The intent row is the durable ``Idempotency-Key`` forge cannot get from the
 git providers: minted once, persisted BEFORE the HTTP effect, and resolved
@@ -89,7 +89,7 @@ SETTLE_BACKOFF_FACTOR = 2
 #: and the honest outcome is the conservative park (``PARK_UNKNOWN``).
 MAX_SETTLE_ROUNDS = 3
 
-#: Per-adapter redispatch guarantee (docs/research/remote-effect-reconciliation.md
+#: Per-adapter redispatch guarantee (docs/research/2026-09-17-remote-effect-reconciliation.md
 #: §summary matrix). GitHub's ``createCommitOnBranch`` (``expectedHeadOid``)
 #: and Azure DevOps' pushes (``oldObjectId`` → ``staleOldObjectId``) are
 #: BRANCH-WIDE compare-and-swap writes: a redispatch carrying
@@ -348,7 +348,7 @@ class ProbeObservation:
 
 
 def classify_probe(observation: ProbeObservation) -> ProbeVerdict:
-    """The R11 decision table (docs/research/remote-effect-reconciliation.md).
+    """The R11 decision table (docs/research/2026-09-17-remote-effect-reconciliation.md).
 
     | Observation                                   | Proof                      | Verdict     |
     |-----------------------------------------------|----------------------------|-------------|

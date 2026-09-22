@@ -300,7 +300,7 @@ Env token, precedence `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`. Fine
 No parseable stdout receipt (open issue #52); the SDK (`@github/copilot-sdk`) speaks JSON-RPC but is not a lane fit. forge records `usage: null` (unknown ≠ zero).
 
 ### CI / containers & ToS
-Model spend rides on the Copilot subscription behind the PAT. Scoped grants + deny commit/push are the mechanical contract; see `docs/research/harness-config-best-practices.md` §8.
+Model spend rides on the Copilot subscription behind the PAT. Scoped grants + deny commit/push are the mechanical contract; see `docs/research/2026-09-15-harness-config-best-practices.md` §8.
 
 ## Open questions / to verify against binaries
 1. Codex: current `--ask-for-approval` value set (`untrusted`/`on-failure` gone?); exit-code table; existence of a patch-file output in `codex-action@v1`; whether `item.updated` fires in `exec --json`.

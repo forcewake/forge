@@ -1,7 +1,7 @@
 """Reactive review lane (v0.7) — webhook-triggered PR reviews on GitHub.
 
 This package is the GitHub reactive bot surface ported from the GitLab
-reactive core (docs/research/github-reactive.md, feature F1). It is a
+reactive core (docs/research/2026-09-14-github-reactive.md, feature F1). It is a
 SEPARATE LANE beside the durable run lane (:mod:`forge.runs`):
 
 - The durable lane (E1) is RunService/GitHubRunService: ``/implement`` →

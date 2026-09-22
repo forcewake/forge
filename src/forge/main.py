@@ -145,6 +145,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(azure_router)
 
+    # The lane control API (NXT-10, the outbound leg) — the surface CI lanes
+    # dial OUT to for their steering commands. Same fail-closed posture as
+    # the Azure ingress: mounted unconditionally, but both routes answer 503
+    # unless FORGE_LANE_CONTROL_SECRET is configured (an unauthenticated
+    # control-plane endpoint is never exposed).
+    from forge.api_lane_control import lane_control_router
+
+    application.include_router(lane_control_router)
+
     # Mount MCP server at /mcp — fail closed: only with an auth key, since
     # an unauthenticated endpoint is never exposed. Scoped principals
     # (FORGE_MCP_SCOPED_TOKENS) get per-call scope enforcement on the run

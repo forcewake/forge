@@ -45,6 +45,15 @@ mailbox's ``checkpointed`` rung through :func:`book_checkpoint`): a
 failed capture never fabricates success — the pause lands
 ``paused_failed``/: ``paused_partial`` naming the last REAL
 recoverable checkpoint.
+
+Wave C/D adds the LIVE cross-runner legs WITHOUT moving any of the
+above: ``capture_wip(upload=channel)`` also carries the verified
+checkpoint to the control plane
+(:mod:`forge.adaptive.checkpoint_channel`) and the receipt carries the
+durable ``remote_ref``; ``restore_wip(download=channel)`` accepts that
+remote reference and fetches the checkpoint digest-verified into a
+fresh local store before restoring. Both parameters are optional and
+structural — the transaction above runs unchanged when they are absent.
 """
 
 from __future__ import annotations
@@ -54,9 +63,9 @@ import json
 import os
 import stat
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from forge.adaptive.artifact_store import ContentAddressedStore, CorruptArtifactError
 from forge.adaptive.control import CaptureResult, MailboxSurface, PauseState, new_execution_epoch
@@ -69,6 +78,7 @@ __all__ = [
     "FileRestore",
     "RestoreReport",
     "ResumeOutcome",
+    "UploadFailed",
     "accepts_epoch",
     "book_checkpoint",
     "capture_wip",
@@ -110,6 +120,46 @@ class CaptureFailed(CheckpointError):
     """
 
 
+class UploadFailed(CheckpointError):
+    """The channel leg of a capture could not complete (wave C/D).
+
+    Raised by :func:`capture_wip` when an ``upload=`` channel was given
+    and the transport to the control plane refused — unreachable,
+    unauthenticated, size-capped, or an incomplete local checkpoint.
+    The LOCAL capture may have committed (its blobs stay in the store
+    as the last recoverable state), but the receipt carries no durable
+    remote reference it cannot support, so the pause books
+    ``paused_failed`` with this reason instead of a fabricated durable
+    claim.
+    """
+
+
+class WipUploadChannel(Protocol):
+    """The structural transport :func:`capture_wip` accepts as ``upload=``.
+
+    Satisfied by
+    :class:`forge.adaptive.checkpoint_channel.CheckpointChannel`
+    (``upload_checkpoint(store, work_id)`` returning the durable
+    :class:`~forge.adaptive.checkpoint_channel.CheckpointRef`); kept
+    structural so this module never imports the transport and the
+    channel builds ON the checkpoint transaction, not into it.
+    """
+
+    def upload_checkpoint(self, store: ContentAddressedStore, work_id: str) -> object: ...
+
+
+class RemoteCheckpointSource(Protocol):
+    """The structural transport :func:`restore_wip` accepts as ``download=``.
+
+    Satisfied by :class:`forge.adaptive.checkpoint_channel.CheckpointChannel`
+    (``fetch_checkpoint(remote_ref, store)`` pulling the checkpoint
+    digest-verified into *store* and returning its LOCAL manifest
+    address).
+    """
+
+    def fetch_checkpoint(self, remote_ref: str, store: ContentAddressedStore) -> str: ...
+
+
 @dataclass(frozen=True)
 class CheckpointReceipt:
     """The durable proof a real capture committed (implements
@@ -119,7 +169,10 @@ class CheckpointReceipt:
     the store (identical by construction — the address IS the digest).
     ``sequence`` is the applied-command watermark the checkpoint
     carries; ``verified`` is True only after the read-back re-hashed
-    every blob AND the manifest to its address.
+    every blob AND the manifest to its address. ``remote_ref`` (wave
+    C/D) is the DURABLE reference the control plane handed back when
+    the capture also uploaded — ``<work_id>@<checkpoint_id>`` — empty
+    for a purely local capture.
     """
 
     artifact_id: str
@@ -130,6 +183,7 @@ class CheckpointReceipt:
     verified: bool
     work_id: str = ""
     source_oids: dict[str, str] = field(default_factory=dict)
+    remote_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -215,6 +269,7 @@ def capture_wip(
     tracked_baseline: Mapping[str, str],
     source_oids: Mapping[str, str] | None = None,
     sequence: int = 0,
+    upload: WipUploadChannel | None = None,
 ) -> CheckpointReceipt:
     """Capture the working tree at *root* as a digest-verified checkpoint.
 
@@ -236,6 +291,14 @@ def capture_wip(
     The manifest and every blob are pinned with the
     ``checkpoint:<work_id>`` retention reference so pruning cannot
     delete them while the pause lives.
+
+    ``upload`` (wave C/D, optional): a transport channel — when given,
+    the verified capture is ALSO uploaded to the control plane and the
+    returned receipt carries the durable ``remote_ref``. A refused
+    upload raises :class:`UploadFailed`: the pause then lands
+    ``paused_failed`` (the local blobs remain the last recoverable
+    state), never a receipt claiming durability the transport did not
+    grant.
     """
     root = Path(root)
     if not root.is_dir():
@@ -292,7 +355,35 @@ def capture_wip(
     for entry in files.values():
         digest = str(entry["digest"])
         store.add_reference(digest, label)
+    if upload is not None:
+        receipt = _upload_to_channel(upload, store=store, work_id=work_id, receipt=receipt)
     return receipt
+
+
+def _upload_to_channel(
+    channel: WipUploadChannel,
+    *,
+    store: ContentAddressedStore,
+    work_id: str,
+    receipt: CheckpointReceipt,
+) -> CheckpointReceipt:
+    """The wave C/D upload leg: attach the durable reference or refuse.
+
+    The channel returns the durable reference (an object exposing
+    ``remote_ref``, or its ``checkpoint_id``, or a plain string). Any
+    transport refusal — unreachable control plane, size cap, incomplete
+    local checkpoint — becomes :class:`UploadFailed` carrying the
+    reason: the local capture stays as the last recoverable state, and
+    no receipt leaves here claiming a remote copy that does not exist.
+    """
+    try:
+        outcome = channel.upload_checkpoint(store, work_id)
+    except Exception as exc:  # noqa: BLE001 — every transport refusal is booked, none swallowed
+        raise UploadFailed(f"checkpoint channel upload failed for {work_id}: {exc}") from exc
+    remote_ref = getattr(outcome, "remote_ref", None)
+    if not isinstance(remote_ref, str) or not remote_ref:
+        remote_ref = str(getattr(outcome, "checkpoint_id", outcome))
+    return replace(receipt, remote_ref=remote_ref)
 
 
 def _verify_capture(
@@ -335,6 +426,7 @@ def cooperative_capture(
     tracked_baseline: Mapping[str, str],
     source_oids: Mapping[str, str] | None = None,
     sequence: int = 0,
+    upload: WipUploadChannel | None = None,
 ) -> Callable[[], CaptureResult]:
     """Bind :func:`capture_wip` into the zero-argument capability
     :func:`forge.adaptive.control.drain_turn` consumes as ``capture=``
@@ -343,7 +435,10 @@ def cooperative_capture(
 
     The sequence is the pause state's applied-command watermark at drain
     time — pass ``state.last_applied_command_sequence`` so the committed
-    checkpoint carries what the mailbox actually applied.
+    checkpoint carries what the mailbox actually applied. ``upload``
+    forwards the wave C/D channel: the drain's capture then also lands
+    the durable remote copy, and a refused upload books the same honest
+    ``paused_failed`` as any failed capture.
     """
     return lambda: capture_wip(
         work_id=work_id,
@@ -352,6 +447,7 @@ def cooperative_capture(
         tracked_baseline=tracked_baseline,
         source_oids=source_oids,
         sequence=sequence,
+        upload=upload,
     )
 
 
@@ -381,6 +477,7 @@ def restore_wip(
     store: ContentAddressedStore,
     target: Path,
     principal: str,
+    download: RemoteCheckpointSource | None = None,
 ) -> RestoreReport:
     """Reconstruct the checkpointed WIP into *target* on a second runner.
 
@@ -394,8 +491,32 @@ def restore_wip(
     missing or corrupt required blob fails the restore with the path
     and digest named — resume must be blocked with evidence, never
     handed a half-alive workspace.
+
+    ``download`` (wave C/D, optional): a transport channel — when
+    given, ``artifact_id`` is read as the REMOTE durable reference
+    (``<work_id>@<checkpoint_id>``) and the checkpoint is fetched
+    digest-verified into *store* first (a fresh local store on the
+    second runner); the local restore then continues unchanged. A
+    refused fetch — malformed reference, tampered transfer, unreachable
+    control plane — fails the whole restore with the reason, before a
+    single file is written.
     """
     target = Path(target)
+    if download is not None:
+        try:
+            artifact_id = download.fetch_checkpoint(artifact_id, store)
+        except Exception as exc:  # noqa: BLE001 — the fetch refusal IS the restore verdict
+            return RestoreReport(
+                artifact_id=artifact_id,
+                ok=False,
+                files=(),
+                failures=(
+                    (
+                        f"remote checkpoint {artifact_id!r} could not be fetched: {exc} — "
+                        "restore refuses rather than reconstructing from nothing"
+                    ),
+                ),
+            )
     try:
         manifest_bytes = store.get_verified(artifact_id, principal=principal)
     except CorruptArtifactError as exc:

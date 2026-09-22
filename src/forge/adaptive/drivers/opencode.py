@@ -3,12 +3,12 @@
 Implements the :class:`~forge.adaptive.adapters.OpenCodeClient` Protocol
 against the live ``opencode serve`` HTTP API. The wire layer targets
 **opencode v2.0.10** and is grounded in the "LIVE CORRECTION — opencode
-v2.0.10" section of ``docs/research/opencode-server.md`` (verified
+v2.0.10" section of ``docs/research/2026-09-21-opencode-server.md`` (verified
 against a live server on 2026-09-21); that section SUPERSEDES the older
 research above it in the doc, which described a server whose routes,
 prompt model, event vocabulary, and auth defaults all changed before
 v2.0.10 shipped. The doctrine is
-``docs/research/forge-harness-hacks.md`` — this client runs NEXT TO the
+``docs/research/2026-09-21-forge-harness-hacks.md`` — this client runs NEXT TO the
 runner in the execution lane, never inside the privileged API process,
 it exists for BYOK customer profiles, and which (provider route,
 credential mode) combinations were actually verified stays the

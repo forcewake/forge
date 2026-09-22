@@ -46,7 +46,7 @@ github = ["pyjwt[crypto]>=2.10", "cryptography>=42"]
 # Real interactive-driver clients (forge.adaptive.drivers). Only the Claude
 # lane needs a vendor package — >=0.2.118 is the first release whose aborted
 # turns emit ResultMessage.terminal_reason (interrupt-keyed completion, see
-# docs/research/claude-sdk-python.md §7.2). Codex rides stdlib asyncio;
+# docs/research/2026-09-21-claude-sdk-python.md §7.2). Codex rides stdlib asyncio;
 # OpenCode rides the httpx core dependency.
 interactive = ["claude-agent-sdk>=0.2.118"]
 

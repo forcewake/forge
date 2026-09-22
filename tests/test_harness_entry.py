@@ -2,7 +2,7 @@
 
 The rendered scripts are asserted against the contract the GitLab templates
 establish (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
-``docs/research/harness-interfaces.md``) — same flags, same unattended
+``docs/research/2026-09-13-harness-interfaces.md``) — same flags, same unattended
 posture, same hardened grok preamble. The subprocess is exercised end-to-end
 with a fake driver script, no CLIs and no network.
 """
@@ -197,10 +197,19 @@ class TestRenderSdkLanes:
         from forge.lane_driver import LANE_DRIVER_IDS
 
         assert LANE_DRIVERS == (
-        LANE_DRIVER_IDS["claude"],
-        LANE_DRIVER_IDS["codex"],
-        LANE_DRIVER_IDS["opencode"],
-    )
+            LANE_DRIVER_IDS["claude"],
+            LANE_DRIVER_IDS["codex"],
+            LANE_DRIVER_IDS["opencode"],
+        )
+
+    def test_the_claude_lane_exports_the_lane_control_pair(self):
+        """NXT-10: the claude arm forwards the dispatch's lane control pair
+        into the lane runner's env (empty when unset — the lane then
+        honestly stays on its local mailbox)."""
+        script = render_driver_script("claude-sdk-lane", "m", BRIEF)
+
+        assert 'export FORGE_LANE_CONTROL_URL="${FORGE_LANE_CONTROL_URL:-}"' in script
+        assert 'export FORGE_LANE_CONTROL_TOKEN="${FORGE_LANE_CONTROL_TOKEN:-}"' in script
 
 
 # ----------------------------------------------------------------------

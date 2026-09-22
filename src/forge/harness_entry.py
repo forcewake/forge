@@ -13,7 +13,7 @@ This module is the ENTIRE forge surface inside the ephemeral runner:
   opencode | copilot | codex-sdk-lane | opencode-sdk-lane)
   from the SAME contract the GitLab templates implement
   (``ci/templates/*.gitlab-ci.yml``; interface ground truth:
-  ``docs/research/harness-interfaces.md``) — per-CLI FLAGS live here, the
+  ``docs/research/2026-09-13-harness-interfaces.md``) — per-CLI FLAGS live here, the
   PROMPT is shared; the two SDK-lane ids provision their CLI and hand
   over to ``forge.lane_driver`` (the interactive driver twin of the
   scripted ``-p`` calls — no prompt pointer, no event tee, the lane
@@ -222,14 +222,14 @@ DEFAULT_DRIVER_VERSIONS: dict[str, str] = {
     # npm registry latest at the R15 slice (2026-09-17); the lane needs
     # --permission-prompts none, documented v2.1.259+.
     "claude-code": "2.1.276",
-    # GROUND TRUTH 2026-09-13 (docs/research/harness-interfaces.md §3):
+    # GROUND TRUTH 2026-09-13 (docs/research/2026-09-13-harness-interfaces.md §3):
     # verified against the installed CLI.
     "grok-build": "1.0.30",
     # npm registry latest at the R15 slice (2026-09-17).
     "opencode": "1.18.31",
     # npm registry latest at the R15 slice (2026-09-17).
     "copilot": "1.0.86",
-    # LIVE-verified 2026-09-21 (docs/research/codex-app-server.md LIVE
+    # LIVE-verified 2026-09-21 (docs/research/2026-09-21-codex-app-server.md LIVE
     # CORRECTION + codex-live.json): the app-server wire the codex driver
     # client speaks — the sandbox spellings and turn-completion semantics
     # this lane depends on.
@@ -511,7 +511,7 @@ def fetch_issue_context(
 
 
 #: Work items read at GA 7.1; WIT comments only exist as the
-#: ``7.1-preview.4`` stripe (docs/research/azure-devops.md §1.3/§5.1).
+#: ``7.1-preview.4`` stripe (docs/research/2026-09-15-azure-devops.md §1.3/§5.1).
 _AZDO_WIT_API_VERSION = "7.1"
 _AZDO_COMMENTS_API_VERSION = "7.1-preview.4"
 
@@ -549,7 +549,7 @@ def fetch_workitem(
     The AzDO brief transport, mirroring :func:`fetch_issue_context`:
     stdlib only (the lane runs forge's code without forge's dependencies),
     Basic auth ``":" + token`` — empty username, colon prefix
-    (docs/research/azure-devops.md §1.2). The work item is read at
+    (docs/research/2026-09-15-azure-devops.md §1.2). The work item is read at
     ``api-version=7.1``, its comments at the ``7.1-preview.4`` stripe with
     ``format=markdown`` (the only stripe that family has at 7.1).
 
@@ -973,12 +973,18 @@ def render_driver_script(
             "# GitLab docker executors run as root; claude refuses the bypass\n"
             "# posture for root unless told it is sandboxed (ADR-0002).\n"
             'export IS_SANDBOX="${IS_SANDBOX:-1}"\n'
+            "# NXT-10 outbound leg: the steering attach dials the control\n"
+            "# plane when the dispatch carried the pair — the work-scoped\n"
+            "# lane token rides the job env (never a control-plane secret);\n"
+            "# exported empty when unset so the lane honestly stays local.\n"
+            'export FORGE_LANE_CONTROL_URL="${FORGE_LANE_CONTROL_URL:-}"\n'
+            'export FORGE_LANE_CONTROL_TOKEN="${FORGE_LANE_CONTROL_TOKEN:-}"\n'
         )
         # The SDK lane drives the REAL claude-agent-sdk client (EXE-02):
         # gateway env rides the ambient environment (the driver merges
         # options.env over it); the runner writes the candidate artifacts
         # itself; a nonzero exit classifies through the same .forge/exit.
-        invocation = 'python -m forge.lane_driver --driver claude'
+        invocation = "python -m forge.lane_driver --driver claude"
         return preamble + invocation
 
     if driver == "codex-sdk-lane":

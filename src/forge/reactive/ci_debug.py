@@ -7,7 +7,7 @@ the same agent runs behind the SAME inbox/step mechanics as every other
 command (ADR-0017) — one step in, one root-cause comment out, retries and
 crash recovery included. Two executors share it:
 
-**GitHub — ``debug_ci``** (docs/research/github-reactive.md §4): a
+**GitHub — ``debug_ci``** (docs/research/2026-09-14-github-reactive.md §4): a
 ``workflow_job`` webhook ``completed`` with ``conclusion == "failure"`` —
 the preferred trigger (App-level, per-step granularity). The executor:
 

@@ -36,7 +36,7 @@ durable-runtime phases.
    `issue_comment` commands, builtin → Draft PR via trusted publisher →
    Actions verification → review. Fork/`pull_request_target` privileged
    flows are explicitly out of scope for the first beta.
-   **Trigger ground truth (research 2026-09-13, docs/research/github-api.md):**
+   **Trigger ground truth (research 2026-09-13, docs/research/2026-09-13-github-api.md):**
    App installation tokens DO trigger workflows and BYPASS the first-time-
    contributor approval prompt — the execution adapter must therefore pin
    the trigger model explicitly (dispatch vs push), never rely on GitHub's

@@ -36,7 +36,7 @@ Event routing for this slice:
   label-off = cancel, the mirror of the label-on trigger — runs still
   parked at the gate are cancelled, runs past it are untouched.
 - ``pull_request`` ``opened``/``synchronize`` → the reactive review lane
-  (v0.7, docs/research/github-reactive.md F1): Draft PRs in tracked repos
+  (v0.7, docs/research/2026-09-14-github-reactive.md F1): Draft PRs in tracked repos
   are normalized to a ``review_pr`` command routed through the SAME durable
   step path (inbox row + scheduled step in one transaction). Bot senders,
   bot-authored PRs and forge's own ``forge/*`` branches are skipped — the

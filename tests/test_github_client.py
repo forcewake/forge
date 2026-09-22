@@ -1,7 +1,7 @@
 """GitHub client tests: JWT shape, token lifecycle, REST/GraphQL semantics.
 
 Everything runs against pytest-httpx — no live GitHub. Endpoint/field ground
-truth: docs/research/github-api.md.
+truth: docs/research/2026-09-13-github-api.md.
 """
 
 import base64
@@ -566,7 +566,7 @@ async def test_list_workflow_runs_for_sha_filters_by_name(
 
 
 # ---------------------------------------------------------------------------
-# Actions endpoints (E3b, ADR-0020) — docs/research/github-actions-executor.md
+# Actions endpoints (E3b, ADR-0020) — docs/research/2026-09-14-github-actions-executor.md
 # ---------------------------------------------------------------------------
 
 

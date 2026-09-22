@@ -81,9 +81,7 @@ all ends as ``budget_exceeded``. The process exits nonzero and the
 reason rides the meta, exactly like the claude path.
 
 NXT-11 — the steering bridge is attached to the lane lifecycle. With
-``FORGE_STEERING_ENABLED`` truthy (default OFF — an honest rollout: the
-ingress does not route adaptive commands yet, so ON is a structural
-no-op against the lane-local mailbox), each driven turn runs one
+``FORGE_STEERING_ENABLED`` truthy (default OFF), each driven turn runs one
 :class:`forge.adaptive.lane_control.LaneSteeringSession` over the SAME
 client object the lane drives: the vendor session/thread id is bound
 the moment it exists (claude: right after ``start_session``; codex:
@@ -94,6 +92,17 @@ the turn (the bridge's async-context seam), and the append-only
 ``steering_journal`` rides the meta beside the usage receipt. A lane
 with steering disabled runs byte-for-byte the old path — no session, no
 drain task, no journal key.
+
+NXT-10 — the outbound leg. The steering attach's mailbox is
+:func:`steering_service_from_env`'s single seam: when the dispatch env
+carries ``FORGE_LANE_CONTROL_URL`` + ``FORGE_LANE_CONTROL_TOKEN``, the
+drain's pending/authorize/apply/checkpoint calls run against the
+control plane's durable rows through
+:class:`forge.adaptive.lane_channel.LaneControlChannel` (the lane dials
+OUT — EXE-04; the channel's fetch loop is bounded by the driven turn
+via :func:`_steering_scope`, and its error rows ride the meta after the
+actions). Without the pair the lane-local in-memory mailbox remains —
+the honest default, never a half-configured dial-out.
 
 NXT-28 — every driven outcome carries an ``episode`` timing breakdown
 in the meta (:data:`EPISODE_PHASE_KEYS`): seconds spent in startup
@@ -114,6 +123,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import functools
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -139,6 +149,7 @@ from forge.adaptive.drivers.codex_app import (
 )
 from forge.adaptive.drivers.opencode import opencode_client_from_env
 from forge.adaptive.drivers.opencode_serve import opencode_server_from_env
+from forge.adaptive.lane_channel import LaneControlChannel, lane_channel_from_env
 from forge.adaptive.lane_control import LaneSteeringSession
 from forge.adaptive.wiring import OperatorControlService
 
@@ -248,11 +259,13 @@ def _episode(
 # ---------------------------------------------------------------------------
 
 #: The honest-rollout switch for the lane-side steering consumer. Default
-#: OFF: the ingress does not route adaptive commands yet, so enabling it
-#: buys the drain loop against a lane-local (in-memory) mailbox and an
-#: empty journal — structural wiring, honestly inert until NXT-10's
-#: remote leg lands. Truthy spellings are the same closed set the driver
-#: factories use for their booleans; anything else fails CLOSED (off).
+#: OFF. With the flag on, the consumer's backing store is decided by the
+#: dispatch env: ``FORGE_LANE_CONTROL_URL`` + ``FORGE_LANE_CONTROL_TOKEN``
+#: swap in the remote :class:`~forge.adaptive.lane_channel.LaneControlChannel`
+#: (NXT-10's outbound leg — the control plane's durable rows, dialed out);
+#: without the pair it stays the lane-local (in-memory) mailbox. Truthy
+#: spellings are the same closed set the driver factories use for their
+#: booleans; anything else fails CLOSED (off).
 STEERING_ENV = "FORGE_STEERING_ENABLED"
 _STEERING_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
@@ -274,17 +287,24 @@ def steering_enabled(env: Mapping[str, str] | None = None) -> bool:
 def steering_service_from_env(
     env: Mapping[str, str] | None = None,
 ) -> OperatorControlService | None:
-    """The lane-local control consumer when steering is enabled, else None.
+    """The lane's control consumer when steering is enabled, else None.
 
-    This slice consumes the in-memory mailbox through the existing wiring
-    (:class:`~forge.adaptive.wiring.OperatorControlService` — the same
-    ``MailboxSurface`` protocol the durable PostgresMailbox implements),
-    because the authenticated remote consumer is NXT-10's leg, not this
-    one. The lane process never receives control-plane credentials; when
-    the durable leg lands, this factory is the single seam that swaps.
+    NXT-10's outbound leg: when the dispatch env carries BOTH
+    ``FORGE_LANE_CONTROL_URL`` and ``FORGE_LANE_CONTROL_TOKEN``
+    (:func:`forge.adaptive.lane_channel.lane_channel_from_env`), the
+    service's mailbox is the :class:`~forge.adaptive.lane_channel.
+    LaneControlChannel` — the SAME sync drain surface over the control
+    plane's durable ``control_commands`` rows, polled out through the
+    lane-dials-out API. The lane process still receives NO control-plane
+    credentials beyond its own work-scoped token. Otherwise (the flag
+    off, or the pair unset) this stays the lane-local in-memory mailbox —
+    the honest default, never a half-configured dial-out.
     """
     if not steering_enabled(env):
         return None
+    channel = lane_channel_from_env(env)
+    if channel is not None:
+        return channel.service()
     return OperatorControlService()
 
 
@@ -323,8 +343,51 @@ def _steering_session(
 
 
 def _steering_journal(steering: LaneSteeringSession) -> list[dict[str, Any]]:
-    """The session's append-only journal as the meta's ``steering_journal``."""
-    return [asdict(action) for action in steering.journal]
+    """The session's append-only journal as the meta's ``steering_journal``.
+
+    Over the remote channel, the CHANNEL's own error/evidence rows ride
+    after the actions — an unreachable control plane is visible in the
+    meta (steering degraded, never silently dead), while the turn's own
+    journal stays the actions it actually took.
+    """
+    rows = [asdict(action) for action in steering.journal]
+    mailbox = getattr(steering.service, "mailbox", None)
+    if isinstance(mailbox, LaneControlChannel):
+        rows.extend(mailbox.channel_journal)
+    return rows
+
+
+def _bind_steering(steering: LaneSteeringSession | None, vendor_id: str) -> None:
+    """Bind the vendor id to the session AND the channel it drains over.
+
+    The channel carries the vendor session id on its dispatch acks (the
+    correlation a recovery pass probes); the local path binds only the
+    session, exactly as before.
+    """
+    if steering is None:
+        return
+    steering.bind(vendor_id)
+    mailbox = getattr(steering.service, "mailbox", None)
+    if isinstance(mailbox, LaneControlChannel):
+        mailbox.bind_vendor_session(vendor_id)
+
+
+@contextlib.asynccontextmanager
+async def _steering_scope(steering: LaneSteeringSession | None, poll_s: float):
+    """Enter the steering attach — and the remote channel's fetch loop.
+
+    The channel's poller is bounded by the driven turn's own lifetime:
+    entered beside the attach, torn down with it. The lane-local path
+    (no channel behind the service) enters the attach exactly as before.
+    """
+    if steering is None:
+        yield
+        return
+    mailbox = getattr(steering.service, "mailbox", None)
+    channel_cm = mailbox if isinstance(mailbox, LaneControlChannel) else contextlib.nullcontext()
+    async with channel_cm:
+        async with steering.attach(poll_interval=poll_s):
+            yield
 
 
 @dataclass(frozen=True)
@@ -511,8 +574,7 @@ async def drive_lane(
     session_id = await client.start_session(task)
     startup_s = loop.time() - startup_started
     steering = _steering_session(control, driver_key="claude", client=client)
-    if steering is not None:
-        steering.bind(session_id)
+    _bind_steering(steering, session_id)
 
     async def _turn() -> tuple[LaneOutcome, float, float | None]:
         turn_started = loop.time()
@@ -547,11 +609,8 @@ async def drive_lane(
         )
 
     try:
-        if steering is None:
+        async with _steering_scope(steering, poll_s):
             outcome, turn_s, interrupt_grace_s = await _turn()
-        else:
-            async with steering.attach(poll_interval=poll_s):
-                outcome, turn_s, interrupt_grace_s = await _turn()
     finally:
         teardown_started = loop.time()
         await client.close(session_id)
@@ -594,7 +653,7 @@ def classify_codex_turn(params: dict | None) -> tuple[str, str, str]:
     ``turn/completed``.
 
     The LIVE-verified statuses are ``completed`` / ``interrupted`` /
-    ``failed`` (docs/research/codex-app-server.md §7.1 + the 0.153.4
+    ``failed`` (docs/research/2026-09-21-codex-app-server.md §7.1 + the 0.153.4
     correction): only ``completed`` exits clean; the vendor status itself
     rides the meta as the reason; a frame without a status is classified
     from what it DID carry, never guessed.
@@ -746,8 +805,7 @@ async def drive_codex_lane(
     thread_id = await client.start_thread(task)
     startup_s = loop.time() - startup_started
     steering = _steering_session(control, driver_key="codex", client=client)
-    if steering is not None:
-        steering.bind(thread_id)
+    _bind_steering(steering, thread_id)
 
     async def _turn() -> tuple[LaneOutcome, float, float | None]:
         turn_started = loop.time()
@@ -791,11 +849,8 @@ async def drive_codex_lane(
         )
 
     try:
-        if steering is None:
+        async with _steering_scope(steering, poll_s):
             outcome, turn_s, interrupt_grace_s = await _turn()
-        else:
-            async with steering.attach(poll_interval=poll_s):
-                outcome, turn_s, interrupt_grace_s = await _turn()
     finally:
         teardown_started = loop.time()
         await client.close()
@@ -995,7 +1050,7 @@ async def run_opencode_lane(
                 if steering is not None:
                     # the id-existence point for this vendor: the turn is
                     # already complete — bind, then drain beside the poll.
-                    steering.bind(session_id)
+                    _bind_steering(steering, session_id)
                 deadline = loop.time() + grace_s
 
                 async def _poll_events() -> list[dict[str, Any]]:
@@ -1005,11 +1060,8 @@ async def run_opencode_lane(
                             return events
                         await asyncio.sleep(poll_s)
 
-                if steering is None:
+                async with _steering_scope(steering, poll_s):
                     events = await _poll_events()
-                else:
-                    async with steering.attach(poll_interval=poll_s):
-                        events = await _poll_events()
                 turn_s = loop.time() - turn_started
                 exit_status, reason = classify_opencode_events(events, session_id)
                 outcome = LaneOutcome(

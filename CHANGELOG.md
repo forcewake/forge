@@ -790,7 +790,7 @@ evidence classes and gates.
   journaled, and bounded to the frozen chain. All four GitLab templates
   gained driver-filter rules so multi-driver repos run exactly one lane;
   `forge doctor` reports the compilable chain. Research:
-  docs/research/harness-selection.md.
+  docs/research/2026-09-15-harness-selection.md.
 - **Azure DevOps adapter (beta)** — the third provider, same iron
   contract: `/implement` on a work item or PR comment → plan as a
   work-item comment → `/go` → harness lane in Azure Pipelines
@@ -803,7 +803,7 @@ evidence classes and gates.
   no-merge. `forge doctor` AzDO checks; docs/azure-setup.md runbook with
   the live-verification checklist. Live verification pending a user PAT
   (tests: 190+ new across client/ingress/service/executor/lanes/joins).
-  Research: docs/research/azure-devops.md (12 payload fixtures; three
+  Research: docs/research/2026-09-15-azure-devops.md (12 payload fixtures; three
   documented-API contradictions found and corrected before implementation).
 
 ### Fixed
@@ -816,7 +816,7 @@ evidence classes and gates.
 ### Added — MCP modernization + delivery metrics + fourth harness (v0.8, ADR-0021)
 
 - **GitHub Copilot CLI as the fourth harness driver** (R6 research,
-  `docs/research/harness-config-best-practices.md` §8): proposal-only
+  `docs/research/2026-09-15-harness-config-best-practices.md` §8): proposal-only
   `copilot` lane (`ci/templates/copilot.gitlab-ci.yml`) + Actions-lane
   driver in `forge.harness_entry` — headless `copilot -p`, scoped grants
   (`read,write` + `shell(git:*)`) with deny-wins `--deny-tool` on
@@ -935,7 +935,7 @@ evidence classes and gates.
   journaled, and bounded to the frozen chain. All four GitLab templates
   gained driver-filter rules so multi-driver repos run exactly one lane;
   `forge doctor` reports the compilable chain. Research:
-  docs/research/harness-selection.md.
+  docs/research/2026-09-15-harness-selection.md.
 - **Azure DevOps adapter (beta)** — the third provider, same iron
   contract: `/implement` on a work item or PR comment → plan as a
   work-item comment → `/go` → harness lane in Azure Pipelines
@@ -948,7 +948,7 @@ evidence classes and gates.
   no-merge. `forge doctor` AzDO checks; docs/azure-setup.md runbook with
   the live-verification checklist. Live verification pending a user PAT
   (tests: 190+ new across client/ingress/service/executor/lanes/joins).
-  Research: docs/research/azure-devops.md (12 payload fixtures; three
+  Research: docs/research/2026-09-15-azure-devops.md (12 payload fixtures; three
   documented-API contradictions found and corrected before implementation).
 
 ### Fixed
@@ -961,7 +961,7 @@ evidence classes and gates.
 ### Added — MCP modernization + delivery metrics + fourth harness (v0.8, ADR-0021)
 
 - **GitHub Copilot CLI as the fourth harness driver** (R6 research,
-  `docs/research/harness-config-best-practices.md` §8): proposal-only
+  `docs/research/2026-09-15-harness-config-best-practices.md` §8): proposal-only
   `copilot` lane (`ci/templates/copilot.gitlab-ci.yml`) + Actions-lane
   driver in `forge.harness_entry` — headless `copilot -p`, scoped grants
   (`read,write` + `shell(git:*)`) with deny-wins `--deny-tool` on

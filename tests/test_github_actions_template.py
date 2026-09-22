@@ -298,8 +298,9 @@ class TestDriverCredentialGating:
         assert "XAI_API_KEY" not in MIRROR.read_text()
         assert template_lines == mirror_lines
         assert (
-            len(template_lines) == 9
+            len(template_lines) == 10
         )  # 3 anthropic + zai + grok + copilot + 3 codex + opencode-sdk
+        # ... + the sdk lanes' work-scoped lane control token (NXT-10)
 
 
 # ----------------------------------------------------------------------
@@ -369,3 +370,35 @@ class TestDeterministicInstallAndBootstrap:
         for text in (TEMPLATE.read_text(), MIRROR.read_text()):
             assert "profile_digest" in text
             assert "bootstrap" in text
+
+
+class TestLaneControlEnv:
+    """NXT-10 outbound leg: the driver step (the lane_driver process) is
+    where the lane control pair and the steering switch must land — the
+    brief step's env never crosses step boundaries."""
+
+    def driver_step(self, path: Path) -> dict:
+        workflow = yaml.safe_load(path.read_text())
+        return next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Run harness driver"
+        )
+
+    def test_the_sdk_lanes_carry_the_lane_control_pair(self):
+        for path in (TEMPLATE, MIRROR):
+            env = self.driver_step(path)["env"]
+            for name in ("FORGE_LANE_CONTROL_URL", "FORGE_LANE_CONTROL_TOKEN"):
+                line = env[name]
+                # gated to the sdk lanes — the scripted drivers have no
+                # steering attach to feed
+                for lane in ("claude-sdk-lane", "codex-sdk-lane", "opencode-sdk-lane"):
+                    assert f"inputs.driver == '{lane}'" in line, (path, name, lane)
+            # the URL is a repo VARIABLE, the token a repo SECRET
+            assert "vars.FORGE_LANE_CONTROL_URL" in env["FORGE_LANE_CONTROL_URL"]
+            assert "secrets.FORGE_LANE_CONTROL_TOKEN" in env["FORGE_LANE_CONTROL_TOKEN"]
+
+    def test_the_steering_switch_reaches_the_driver_step(self):
+        for path in (TEMPLATE, MIRROR):
+            env = self.driver_step(path)["env"]
+            assert env["FORGE_STEERING_ENABLED"] == "${{ vars.FORGE_STEERING_ENABLED || '' }}"

@@ -1,6 +1,6 @@
 """Security findings: fingerprints, the dedupe upsert, both ingestions.
 
-Ground truth: docs/research/ci-security-surface.md §3 (report schema,
+Ground truth: docs/research/2026-09-14-ci-security-surface.md §3 (report schema,
 alert field sets, tier matrix) and §4.1 (forge-computed GitLab
 fingerprints; absence from one scan is never a fix). R25/R26 coverage:
 the DB-native concurrent upsert, scan-completeness records, the

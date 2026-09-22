@@ -1,7 +1,7 @@
 # Stage E3 brief — GitHub path to parity: gate, Actions runner, multi-harness
 
 Closes the gaps the user called out on issue #14: no plan, no runner, one
-harness. Read first: ADR-0016/0017/0018/0019, docs/research/github-api.md,
+harness. Read first: ADR-0016/0017/0018/0019, docs/research/2026-09-13-github-api.md,
 docs/specs/contracts-v0.2.md, existing bridge src/forge/integrations/github_flow.py.
 
 ## E3a — plan + human gate on GitHub (parity with GitLab path)

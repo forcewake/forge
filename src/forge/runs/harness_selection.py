@@ -100,13 +100,20 @@ DRIVER_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
 
 #: OPTIONAL per-driver credential surfaces (C03): a recipe may map them
 #: beside the required ones (the Actions recipe maps ANTHROPIC_API_KEY for
-#: key-auth gateways); doctor does NOT require them.
+#: key-auth gateways); doctor does NOT require them. The SDK lanes also
+#: OPTIONALLY carry the NXT-10 lane control pair — the work-scoped steering
+#: token the dispatch provisions when the lane dials the control plane out
+#: (EXE-04); absent means the lane honestly stays on its local mailbox.
 DRIVER_OPTIONAL_CREDENTIAL_VARS: dict[str, tuple[str, ...]] = {
     "claude-code": ("ANTHROPIC_API_KEY",),
     # Same optional surface as the batch claude-code lane.
-    "claude-sdk-lane": ("ANTHROPIC_API_KEY",),
-    "codex-sdk-lane": ("FORGE_CODEX_AUTH",),
-    "opencode-sdk-lane": ("OPENCODE_PROVIDER_API_KEY",),
+    "claude-sdk-lane": ("ANTHROPIC_API_KEY", "FORGE_LANE_CONTROL_URL", "FORGE_LANE_CONTROL_TOKEN"),
+    "codex-sdk-lane": ("FORGE_CODEX_AUTH", "FORGE_LANE_CONTROL_URL", "FORGE_LANE_CONTROL_TOKEN"),
+    "opencode-sdk-lane": (
+        "OPENCODE_PROVIDER_API_KEY",
+        "FORGE_LANE_CONTROL_URL",
+        "FORGE_LANE_CONTROL_TOKEN",
+    ),
 }
 
 #: A version/dist-tag token in a pinned chain entry (``driver@version``):

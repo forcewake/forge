@@ -265,9 +265,17 @@ class TestValidatePreference:
         )
 
         assert DRIVER_CREDENTIAL_VARS["claude-sdk-lane"] == DRIVER_CREDENTIAL_VARS["claude-code"]
+        # The optional surface extends the batch recipe with the NXT-10
+        # lane control pair (the work-scoped steering token — OPTIONAL:
+        # absent means the lane stays on its local mailbox).
         assert (
-            DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"]
-            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"]
+            DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"][0]
+            == DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-code"][0]
+            == "ANTHROPIC_API_KEY"
+        )
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["claude-sdk-lane"][1:] == (
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
         )
 
     def test_codex_and_opencode_sdk_lanes_have_their_own_recipes(self):
@@ -277,14 +285,21 @@ class TestValidatePreference:
         )
 
         # codex: ambient API-key auth; the ChatGPT-login blob is the
-        # optional surface the template lands as ~/.codex/auth.json.
+        # optional surface the template lands as ~/.codex/auth.json
+        # (beside the shared sdk-lane control pair, NXT-10).
         assert DRIVER_CREDENTIAL_VARS["codex-sdk-lane"] == ("OPENAI_API_KEY", "CODEX_API_KEY")
-        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["codex-sdk-lane"] == ("FORGE_CODEX_AUTH",)
+        assert DRIVER_OPTIONAL_CREDENTIAL_VARS["codex-sdk-lane"] == (
+            "FORGE_CODEX_AUTH",
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
+        )
         # opencode: the SAME ambient key the batch opencode lane consumes;
-        # the generic BYOK PUT surface is optional.
+        # the generic BYOK PUT surface is optional (beside the pair).
         assert DRIVER_CREDENTIAL_VARS["opencode-sdk-lane"] == ("ZAI_API_KEY",)
         assert DRIVER_OPTIONAL_CREDENTIAL_VARS["opencode-sdk-lane"] == (
             "OPENCODE_PROVIDER_API_KEY",
+            "FORGE_LANE_CONTROL_URL",
+            "FORGE_LANE_CONTROL_TOKEN",
         )
 
 

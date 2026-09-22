@@ -4,7 +4,7 @@ EXE-02: the driver runs in the execution lane next to its runner — these
 tests pin that its Protocol surface maps onto the VENDOR's actual shapes.
 The ``claude-agent-sdk`` package is not installed here (CI has no vendor
 packages), so the fakes mirror the ``claude-agent-sdk==0.2.157`` surface
-verified in ``docs/research/claude-sdk-python.md``: the interactive
+verified in ``docs/research/2026-09-21-claude-sdk-python.md``: the interactive
 ``ClaudeSDKClient`` method shapes (connect / query / receive_messages /
 interrupt / disconnect), the ``ClaudeAgentOptions`` field names, and the
 message dataclasses (``AssistantMessage.content`` DIRECT, ``ResultMessage``
@@ -12,7 +12,7 @@ carrying ``session_id`` / ``terminal_reason``). Fakes are injected through
 the driver's ``sdk=`` import seam — no monkeypatching of internals the
 tests do not own.
 
-The ported hacks (``docs/research/forge-harness-hacks.md``) are pinned
+The ported hacks (``docs/research/2026-09-21-forge-harness-hacks.md``) are pinned
 here: ephemeral per-session ``CLAUDE_CONFIG_DIR`` (no cross-run memory
 bleed), ``setting_sources`` isolation, the mechanical deny that beats
 every permission mode, one-rule-per-literal allowlists (A09), gateway and

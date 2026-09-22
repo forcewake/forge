@@ -304,7 +304,7 @@ class ChangesetWriter:
     ) -> WriteResult:
         """Reconcile a PREVIOUS attempt's open intent before any new dispatch.
 
-        The decision table (docs/research/remote-effect-reconciliation.md):
+        The decision table (docs/research/2026-09-17-remote-effect-reconciliation.md):
         exactly one marker+parent match ⇒ ADOPT (this process re-enters on
         the landed commit, zero new writes); zero matches + head intact ⇒
         the A12 certainty window (``probing``), and only a re-probe at the

@@ -279,7 +279,7 @@ class ChangeManifestEntry:
 class HarnessUsage:
     """The F22-lite usage receipt parsed from ``candidate.meta.json``.
 
-    Normalization honesty (R23, docs/research/actions-artifacts-usage.md
+    Normalization honesty (R23, docs/research/2026-09-17-actions-artifacts-usage.md
     § Usage normalization table): token fields are ``None`` when unknown —
     unknown stays unknown, never zero — and cache counters are never folded
     into the input count:
