@@ -347,10 +347,10 @@ class LaneControlAPI:
                 f"no control plane URL configured ({FORGE_LANE_CONTROL_URL_ENV}) — "
                 "the checkpoint channel refuses to guess where to send a checkpoint"
             )
-        if not self._secret:
+        if not self._secret and not self._direct_token:
             raise CheckpointChannelError(
-                f"no lane control secret configured ({FORGE_LANE_CONTROL_SECRET_ENV}) — "
-                "the checkpoint channel is disabled"
+                f"no lane control credential ({FORGE_LANE_CONTROL_SECRET_ENV} or a "
+                "work-scoped token) — the checkpoint channel is disabled"
             )
 
     def _request(self, method: str, path: str, *, scope: str, payload: dict | None = None) -> dict:
