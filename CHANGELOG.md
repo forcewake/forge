@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-09-22
+
+### Added — the FULL review chain LIVE: pause → checkpoint → kill → retry → WIP restore on a second runner → resume
+
+The reviewer's demanded acceptance chain is CLOSED end-to-end on a
+real GitHub Actions runner (evidence:
+docs/evaluation/2026-09-21-drivers/claude-sdk-lane-runner-README.md):
+
+- **The resume consumer**: a retried lane (same run-id) downloads the
+  verified checkpoint from the control-plane API, restores 12 WIP
+  files digest-verified into the checkout, and the agent continues
+  from the previous runner's work — `wip_restore: {restored: true,
+  files_restored: 12, failures: []}` in the candidate meta.
+- **/retry accepts a checkpoint**: a paused run with NO candidate but
+  a stored checkpoint is retryable (the checkpoint IS the work to
+  continue from); the gate crosses the process boundary via the
+  checkpoint API.
+- **The capture excludes .git internals** (read-only pack files
+  Permission-denied on restore — runner infrastructure, never WIP).
+- **wip_restore rides the .forge/steering.json sidecar** (emit-meta
+  passes it through; writing the meta directly never reached the
+  uploaded artifact).
+
+Live-found and fixed this wave (four): DownloadedCheckpoint field
+name; .git in the checkpoint; sidecar vs direct write; the /retry
+gate's cross-process checkpoint check. Suite 4692.
+
 ## [0.26.0] - 2026-09-22
 
 ### Added — the adaptive waves LIVE: /steer, /pause with verified checkpoint, /resume
