@@ -373,7 +373,7 @@ def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
         try:
             from forge.adaptive.checkpoint_channel import LaneControlAPI, upload_checkpoint
 
-            api = LaneControlAPI(base_url=url, token=token)
+            api = LaneControlAPI(base_url=url, work_token=token)
             upload = lambda store, wid: upload_checkpoint(store, wid, api)  # noqa: E731
         except Exception:  # noqa: BLE001 — the checkpoint survives locally
             upload = None

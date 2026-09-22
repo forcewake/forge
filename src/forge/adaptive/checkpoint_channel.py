@@ -311,11 +311,20 @@ class LaneControlAPI:
         *,
         base_url: str | None = None,
         token: str | None = None,
+        work_token: str | None = None,
         timeout: float = 30.0,
         client: httpx.Client | None = None,
     ) -> None:
         self._base_url = (base_url or os.environ.get(FORGE_LANE_CONTROL_URL_ENV) or "").rstrip("/")
+        # The lane holds ONLY its work-scoped token (never the shared
+        # secret — EXE-04). When the token IS a pre-computed work token,
+        # it rides as-is; when it's the secret (the control plane side),
+        # per-request work tokens derive from it.
         self._secret = token or os.environ.get(FORGE_LANE_CONTROL_SECRET_ENV) or ""
+        # The lane's PRE-COMPUTED work-scoped token (EXE-04: the shared
+        # secret never enters a lane job; the dispatch provisions exactly
+        # one HMAC). Rides as-is when set.
+        self._direct_token = work_token
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=timeout)
 
@@ -346,7 +355,10 @@ class LaneControlAPI:
 
     def _request(self, method: str, path: str, *, scope: str, payload: dict | None = None) -> dict:
         self._require_config()
-        headers = {"Authorization": f"Bearer {work_scoped_token(self._secret, scope)}"}
+        if self._direct_token:
+            headers = {"Authorization": f"Bearer {self._direct_token}"}
+        else:
+            headers = {"Authorization": f"Bearer {work_scoped_token(self._secret, scope)}"}
         try:
             response = self._client.request(
                 method, f"{self._base_url}{path}", json=payload, headers=headers
