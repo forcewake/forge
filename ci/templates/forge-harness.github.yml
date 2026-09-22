@@ -50,8 +50,6 @@ on:
         type: string
         required: false
         default: ""
-        required: true
-        type: string
       plan_note_id:
         description: "issue comment id of the approved forge plan (empty = legacy scan)"
         required: false
