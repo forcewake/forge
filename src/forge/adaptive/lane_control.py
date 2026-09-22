@@ -283,6 +283,7 @@ class LaneSteeringSession:
         snapshot_available: bool = True,
         permissions_valid: bool = True,
         actor_scopes: dict[str, tuple[str, ...]] | None = None,
+        capture: "Callable[[], Any] | None" = None,
     ) -> None:
         """Configure one lane bridge; nothing runs until the context (or a drain).
 
@@ -298,6 +299,11 @@ class LaneSteeringSession:
         accepted the command into the mailbox — the lane does not
         re-decide authorization, it books it).
         """
+        # NXT-15: the capture capability — when present, the cooperative
+        # pause drain runs the full checkpoint transaction (verified
+        # content-addressed WIP); when absent, the pause lands
+        # paused_partial honestly (nothing was invented).
+        self._capture = capture
         if driver_kind not in _KIND_TO_SDK:
             raise ValueError(
                 f"driver_kind must be one of {sorted(_KIND_TO_SDK)}, got {driver_kind!r}"
@@ -693,7 +699,7 @@ class LaneSteeringSession:
                 detail["interrupt_error"] = f"{type(exc).__name__}"
             detail["interrupt_latency_s"] = round(_time.monotonic() - started, 3)
             self._pause = send_interrupt(self._pause)
-            self._pause = drain_turn(self._pause, cooperative=True)
+            self._pause = drain_turn(self._pause, cooperative=True, capture=self._capture)
             detail["pause"] = "interrupt-sent"
             detail["wip_artifact_id"] = self._pause.wip_artifact_id
             # NXT-14: queued guidance is RETAINED explicitly when an

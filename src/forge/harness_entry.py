@@ -1281,11 +1281,7 @@ def emit_candidate_meta(
             )
             else {}
         ),
-        **(
-            {"episode": lane_extras["episode"]}
-            if lane_extras.get("episode")
-            else {}
-        ),
+        **({"episode": lane_extras["episode"]} if lane_extras.get("episode") else {}),
         # B12: the OBSERVED execution — what this lane actually did. The
         # declared profile (digest above) is allowance/expectation; a
         # command being allowed is not evidence it ran. Additive v2 field.

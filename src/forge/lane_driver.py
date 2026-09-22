@@ -333,13 +333,80 @@ def _steering_session(
     work_id = (source.get("FORGE_WORK_ID") or run_id).strip()
     if not work_id:
         return None
+    # NXT-15 wave C: the pause drain's capture capability — the git
+    # tracked baseline + a local content-addressed store in .forge/ (the
+    # checkpoint channel uploads from there when the control plane is
+    # reachable; otherwise the local copy is still verified+retained).
+    capture = _lane_capture_capability(work_id)
     return LaneSteeringSession(
         service=control,
         driver=_STEERING_ADAPTERS[driver_key](client=client),
         driver_kind=driver_key,  # type: ignore[arg-type]  (keyed by LANE_DRIVER_IDS)
         run_id=run_id,
         work_id=work_id,
+        capture=capture,
     )
+
+
+def _lane_capture_capability(work_id: str) -> "Callable[[], Any] | None":
+    """Build the cooperative capture for the lane checkout, or None.
+
+    None (the honest absent capability → paused_partial) when the git
+    baseline is unreadable; the upload channel rides when the control
+    URL+token are in env (the same env the steering channel uses).
+    """
+    from pathlib import Path as _P
+
+    from forge.adaptive.artifact_store import ContentAddressedStore
+    from forge.adaptive.checkpointing import cooperative_capture
+
+    baseline = _tracked_baseline()
+    if not baseline:
+        return None
+    store_dir = _P(".forge/checkpoints")
+    store_dir.mkdir(parents=True, exist_ok=True)
+    store = ContentAddressedStore(root=store_dir, tenant=work_id)
+    upload = None
+    url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
+    token = (os.environ.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
+    if url and token:
+        try:
+            from forge.adaptive.checkpoint_channel import LaneControlAPI, upload_checkpoint
+
+            api = LaneControlAPI(base_url=url, token=token)
+            upload = lambda store, wid: upload_checkpoint(store, wid, api)  # noqa: E731
+        except Exception:  # noqa: BLE001 — the checkpoint survives locally
+            upload = None
+    return cooperative_capture(
+        work_id=work_id,
+        root=_P.cwd(),
+        store=store,
+        tracked_baseline=baseline,
+        upload=upload,
+    )
+
+
+def _tracked_baseline() -> dict[str, str]:
+    """The lane checkout's tracked baseline: path -> content sha256.
+
+    The caller's durable authority in production is the SnapshotSet; in
+    the lane job the git index IS that authority (the attempt base's
+    tree): every tracked file's blob hash. capture_wip compares the
+    working tree against this to decide modified/new/deleted.
+    """
+    import subprocess
+
+    out = subprocess.run(["git", "ls-files", "-s"], capture_output=True, text=True, timeout=30)
+    baseline: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        # <mode> <sha> <stage>\t<path>
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        meta = parts[0].split()
+        if len(meta) >= 2:
+            baseline[parts[1]] = meta[1]  # the git blob sha
+    return baseline
 
 
 def _steering_journal(steering: LaneSteeringSession) -> list[dict[str, Any]]:
