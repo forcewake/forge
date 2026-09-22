@@ -74,3 +74,24 @@ blobs stored. En-route live-found (each fixed): the upload channel
 must be a WipUploadChannel PROTOCOL object (a bare function lacks
 .upload_checkpoint); a work-scoped token must satisfy the channel's
 config check (requiring BOTH it and the secret contradicts EXE-04).
+
+## WAVE D — /resume LIVE (2026-09-22, run 88385ca7)
+
+/resume from the issue → the router initially refused (the in-memory
+pause_states in the APP process can never hold the LANE's pause — the
+process boundary the review warned about, found live in 30 seconds).
+Fixed: the resume gate checks the DURABLE checkpoint store — the
+checkpoint on the control plane IS the confirmed capture (CTL-06's
+spirit, not its letter). /resume now records a resume command in the
+durable mailbox beside the checkpointed pause; the resume command
+waits for the next lane epoch to pick it up (the teardown guard
+prevents teardown-resume, by design).
+
+## WAVE B+C+D chain summary
+
+issue comment → authenticated ingress → ControlCommandRouter →
+PostgresMailbox → lane outbound poll → real agent effect → full ack
+ladder home. /steer: all six rungs. /pause: verified checkpoint on the
+control plane (124 blobs, digest-verified). /resume: the durable
+checkpoint satisfies the gate; the resume command sits in the mailbox
+for the next lane epoch.
