@@ -18,14 +18,26 @@ to reach the model. This module makes each control invariant executable:
 - CTL-05 — pause is revoke-then-interrupt: ``pause_requested`` is
   persisted BEFORE any interrupt is sent (the ordering IS the
   guarantee), the publication epoch is bumped so grants of the old
-  epoch cannot authorize new effects, a cooperative drain captures WIP,
-  and a timeout exposes the last RECOVERABLE checkpoint — never a false
-  clean pause.
+  epoch cannot authorize new effects, a cooperative drain captures WIP
+  ONLY through a REAL capture capability (NXT-15: the drain runs the
+  capture — serialize the working tree, upload the blobs, VERIFY the
+  digests by reading them back, commit the manifest as the checkpoint
+  reference — :mod:`forge.adaptive.checkpointing` implements it), and
+  a missing capability or failed capture lands the pause as
+  ``paused_partial`` / ``paused_failed`` naming the last REAL
+  recoverable checkpoint — never a fabricated artifact id, never a
+  false clean pause.
 - CTL-06 — resume runs only from a confirmed checkpoint with the
   snapshot available and permissions valid, under a FRESH execution
-  epoch; a native session is restored only for a compatible PINNED
-  profile, everything else reconstructs from durable artifacts (the
-  same behavior on a host with no vendor session files).
+  epoch; the strict gate
+  (:func:`resume_check` ``require_verified_checkpoint=True`` /
+  :func:`forge.adaptive.checkpointing.resume_from_checkpoint`)
+  re-verifies the CURRENT authorization and the checkpoint BYTES now —
+  no constructor-default booleans — and a native session is restored
+  only for a compatible PINNED profile WITH verified restore evidence
+  (a profile name alone claims nothing), everything else reconstructs
+  from durable artifacts (the same behavior on a host with no vendor
+  session files).
 - CTL-07 — steering is bounded: guidance within the current work is
   delivered at the next checkpoint boundary, contract constraints are
   promoted to a :class:`ChangeProposal` for the human gate, attempts to
@@ -52,9 +64,11 @@ from typing import Final, Literal, Protocol, runtime_checkable
 from forge.adaptive.models import ChangeProposal, ControlCommand
 
 __all__ = [
+    "CaptureResult",
     "Mailbox",
     "MailboxSurface",
     "PauseState",
+    "PauseStatus",
     "cancel_generation_applies",
     "classify_instruction",
     "deliver_steer",
@@ -250,6 +264,40 @@ class Mailbox:
         return advanced
 
 
+#: The honest pause outcomes (NXT-15). ``running``/``pausing`` are the
+#: in-flight legs; the drain decides the terminal one:
+#: ``paused`` — a digest-verified checkpoint was COMMITTED (receipt on
+#: record); ``paused_partial`` — the turn ended at a cooperative
+#: boundary but NO durable WIP was captured (the steering bridge's
+#: in-session drain today: the vendor session may hold the conversation,
+#: nothing in the store holds the workspace); ``paused_failed`` — a
+#: capture was attempted and failed, or the runner was terminated by
+#: timeout. Only ``paused`` claims saved work.
+PauseStatus = Literal["running", "pausing", "paused", "paused_partial", "paused_failed"]
+
+_TERMINAL_PAUSE_STATUSES: Final = ("paused", "paused_partial", "paused_failed")
+
+
+@runtime_checkable
+class CaptureResult(Protocol):
+    """What a real WIP capture returns (implemented by
+    :class:`forge.adaptive.checkpointing.CheckpointReceipt`).
+
+    ``artifact_id``/``digest`` are the content address of the committed
+    checkpoint manifest in the artifact store — the same value twice
+    because the store's address IS its digest. ``sequence`` is the
+    applied-command watermark the checkpoint carries.
+    ``verified`` is True only when every uploaded blob and the manifest
+    itself were READ BACK and re-hashed to their addresses before the
+    receipt was minted.
+    """
+
+    artifact_id: str
+    digest: str
+    sequence: int
+    verified: bool
+
+
 @dataclass(frozen=True)
 class PauseState:
     """The durable pause book for one work (CTL-05).
@@ -261,6 +309,16 @@ class PauseState:
     ``publication_epoch`` is the fence CTL-05/CTL-08 share: a grant
     minted under an epoch lower than the current one is dead and can
     never authorize a new effect.
+
+    ``pause_status`` (NXT-15) is the honest terminal claim — see
+    :data:`PauseStatus`. ``checkpoint_captured`` is the bridge-level
+    claim that the drain reached a cooperative boundary with the turn's
+    state retained SOMEWHERE (the vendor session, for the in-session
+    steering bridge); the DURABLE truth is ``pause_status == "paused"``
+    plus a verified ``checkpoint_receipt`` — the strict resume gate
+    checks exactly that pair, never the flag alone. ``wip_artifact_id``
+    is only ever a REAL store address handed in by a completed capture
+    — this module never fabricates one.
     """
 
     work_id: str
@@ -270,15 +328,23 @@ class PauseState:
     checkpoint_captured: bool = False
     last_applied_command_sequence: int = 0
     wip_artifact_id: str | None = None
+    pause_status: PauseStatus = "running"
+    checkpoint_receipt: CaptureResult | None = None
+    last_checkpoint_sequence: int | None = None
+    failure_reason: str = ""
 
     @property
     def last_recoverable(self) -> int:
         """The sequence the last RECOVERABLE checkpoint carries.
 
-        On a cooperative drain this is the fresh capture; on a timeout it
-        is the PREVIOUS durable checkpoint — either way the caller learns
-        what can actually be resumed, not a false clean pause.
+        ``last_checkpoint_sequence`` is set ONLY by a real committed
+        capture, so on a partial or failed pause this names the last
+        REAL checkpoint — the thing resume can actually stand on. When
+        no durable capture ever happened it falls back to the applied
+        watermark (the bridge's book), never to an invented number.
         """
+        if self.last_checkpoint_sequence is not None:
+            return self.last_checkpoint_sequence
         return self.last_applied_command_sequence
 
 
@@ -290,7 +356,8 @@ def request_pause(state: PauseState) -> PauseState:
     leaves a pause on record (an unacknowledged-but-paused work), never
     an interrupted runner with no pause behind it.
     """
-    return replace(state, pause_requested=True)
+    status: PauseStatus = "pausing" if state.pause_status == "running" else state.pause_status
+    return replace(state, pause_requested=True, pause_status=status)
 
 
 def send_interrupt(state: PauseState) -> PauseState:
@@ -309,24 +376,86 @@ def send_interrupt(state: PauseState) -> PauseState:
 
 
 def drain_turn(
-    state: PauseState, *, cooperative: bool, wip_artifact_id: str | None = None
+    state: PauseState,
+    *,
+    cooperative: bool,
+    wip_artifact_id: str | None = None,
+    capture: Callable[[], CaptureResult] | None = None,
 ) -> PauseState:
-    """Drain the active turn after the interrupt.
+    """Drain the active turn after the interrupt (NXT-15's transaction end).
 
-    Cooperative: the runner stopped at a boundary, so the WIP is
-    captured — ``checkpoint_captured`` set and the artifact recorded.
-    Timeout (``cooperative=False``): the runner was terminated and
-    ``checkpoint_captured`` is LEFT AS-IS — we expose the last
-    RECOVERABLE checkpoint (``state.last_recoverable``), not a false
-    clean pause; whether anything from this turn survives is a later
-    reconciliation, never an assumption.
+    Cooperative means the runner's OWN turn-completed signal was
+    observed (quiescence), so the drain may run a REAL capture
+    capability: serialize the working tree, upload the blobs, verify
+    the digests, commit the manifest — and only a VERIFIED receipt
+    lands ``pause_status="paused"`` with the checkpoint reference
+    recorded. A capture that raises (disk full, corrupt upload) or
+    returns an unverified receipt lands ``paused_failed`` with the
+    failure on record and the last REAL checkpoint still named by
+    :attr:`PauseState.last_recoverable` — never a fabricated success.
+
+    A cooperative drain with NO capture capability lands
+    ``paused_partial``: the turn ended at a boundary, but nothing
+    durable was captured, so no artifact id is invented (the old
+    ``artifact:wip:<work_id>`` fabrication is gone) and only the vendor
+    session's own state survives. ``wip_artifact_id`` supplied directly
+    is the caller stating a REAL store address from a transaction it
+    ran itself — recorded verbatim, still never fabricated here.
+
+    Timeout (``cooperative=False``): the runner was terminated, so
+    nothing from this turn is claimed — ``paused_failed`` unless the
+    drain already decided, and :attr:`PauseState.last_recoverable`
+    exposes the previous RECOVERABLE checkpoint, not a false clean
+    pause. Re-draining a decided pause is an idempotent no-op.
     """
-    if cooperative:
-        artifact = (
-            wip_artifact_id if wip_artifact_id is not None else (f"artifact:wip:{state.work_id}")
+    if state.pause_status in _TERMINAL_PAUSE_STATUSES:
+        return state
+    if not cooperative:
+        return replace(state, pause_status="paused_failed")
+    if capture is not None:
+        try:
+            receipt = capture()
+        except Exception as exc:  # noqa: BLE001 — the honest failed-capture booking
+            return replace(
+                state,
+                checkpoint_captured=False,
+                wip_artifact_id=None,
+                checkpoint_receipt=None,
+                pause_status="paused_failed",
+                failure_reason=f"capture failed: {exc}",
+            )
+        if not receipt.verified:
+            return replace(
+                state,
+                checkpoint_captured=False,
+                wip_artifact_id=None,
+                checkpoint_receipt=None,
+                pause_status="paused_failed",
+                failure_reason="capture unverified: uploaded bytes were not read back "
+                "digest-identical; nothing was committed",
+            )
+        return replace(
+            state,
+            checkpoint_captured=True,
+            wip_artifact_id=receipt.artifact_id,
+            checkpoint_receipt=receipt,
+            pause_status="paused",
+            last_checkpoint_sequence=receipt.sequence,
+            failure_reason="",
         )
-        return replace(state, checkpoint_captured=True, wip_artifact_id=artifact)
-    return state
+    if wip_artifact_id is not None:
+        # The caller ran the transaction itself and states the artifact's
+        # REAL store address — recorded verbatim, never invented here.
+        return replace(
+            state,
+            checkpoint_captured=True,
+            wip_artifact_id=wip_artifact_id,
+            pause_status="paused",
+            last_checkpoint_sequence=state.last_applied_command_sequence,
+        )
+    return replace(
+        state, checkpoint_captured=True, wip_artifact_id=None, pause_status="paused_partial"
+    )
 
 
 def new_publication_epoch(state: PauseState) -> PauseState:
@@ -375,6 +504,8 @@ def resume_check(
     snapshot_available: bool,
     active_plan_revision: int,
     permissions_valid: bool,
+    *,
+    require_verified_checkpoint: bool = False,
 ) -> tuple[bool, str]:
     """Gate resume on a confirmed checkpoint, snapshot, and permissions.
 
@@ -383,9 +514,28 @@ def resume_check(
     plan revision is INFORMATIONAL — recorded in the reason, never
     compared: historical spend and pending remote effects stay attached
     to the same work whatever revision is now active.
+
+    ``require_verified_checkpoint`` is the NXT-18 strict gate: it
+    additionally demands ``pause_status == "paused"`` WITH a verified
+    :attr:`PauseState.checkpoint_receipt` — a partial pause (nothing
+    captured durably) or a failed one refuses, because the strict path
+    (:func:`forge.adaptive.checkpointing.resume_from_checkpoint`)
+    re-reads the checkpoint BYTES and re-checks authorization NOW
+    rather than trusting booleans supplied at construction time. The
+    default (False) keeps the in-session steering bridge's legacy gate:
+    its cooperative-boundary claim plus live snapshot/permission flags.
     """
     if not checkpoint_state.checkpoint_captured:
         return False, "no confirmed checkpoint: the pause ended without capturing WIP"
+    if require_verified_checkpoint:
+        receipt = checkpoint_state.checkpoint_receipt
+        if checkpoint_state.pause_status != "paused" or receipt is None or not receipt.verified:
+            return False, (
+                f"no verified durable checkpoint: pause_status="
+                f"{checkpoint_state.pause_status!r} with "
+                f"{'no' if receipt is None else 'an unverified'} receipt — resume must "
+                "stand on a digest-verified capture, not a cooperative-boundary claim"
+            )
     if not snapshot_available:
         return False, "snapshot set unavailable: resume must not run from an unbound source"
     if not permissions_valid:
@@ -399,23 +549,38 @@ _PINNED_PROFILES: Final = frozenset({"claude-sdk", "codex-app", "opencode-server
 
 
 def new_execution_epoch(
-    attempt_id: str, prior_epoch: int, pinned_profile: str | None = None
+    attempt_id: str,
+    prior_epoch: int,
+    pinned_profile: str | None = None,
+    *,
+    native_restore_evidence: str | None = None,
 ) -> dict:
-    """Open a fresh execution epoch for a resume (CTL-06).
+    """Open a fresh execution epoch for a resume (CTL-06, NXT-18).
 
     The new epoch starts at ``prior_epoch + 1`` so late artifacts from
     the interrupted attempt cannot masquerade as current ones. The
     native session is restored ONLY when a compatible PINNED profile is
-    named — an unpinned or unknown profile (or a provider/model change)
-    reconstructs from durable task artifacts, which is exactly how a
-    resume on another host with no vendor session files must behave.
+    named AND *native_restore_evidence* carries the content address of
+    a native-session artifact whose restore was actually verified — a
+    profile NAME alone never yields ``native_session_restored=true``
+    (membership is compatibility, not a completed restore). An unpinned
+    or unknown profile (or a provider/model change, or missing
+    evidence) reconstructs from durable task artifacts, which is
+    exactly how a resume on another host with no vendor session files
+    must behave.
     """
-    native = pinned_profile is not None and pinned_profile in _PINNED_PROFILES
+    native = (
+        pinned_profile is not None
+        and pinned_profile in _PINNED_PROFILES
+        and native_restore_evidence is not None
+        and bool(native_restore_evidence.strip())
+    )
     return {
         "attempt_id": attempt_id,
         "execution_epoch": prior_epoch + 1,
         "native_session_restored": native,
         "reconstruction": "native_session" if native else "durable_artifacts",
+        "native_restore_evidence": native_restore_evidence if native else None,
     }
 
 

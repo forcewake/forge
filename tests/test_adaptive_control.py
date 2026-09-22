@@ -12,6 +12,7 @@ of claiming them undone.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -41,6 +42,16 @@ SCOPES = {
     "operator_token": ("token:ops-1",),
     "automation_reconciler": ("svc:reconciler",),
 }
+
+
+@dataclass(frozen=True)
+class _Receipt:
+    """A minimal real-looking capture receipt (the CaptureResult contract)."""
+
+    artifact_id: str = "a" * 64
+    digest: str = "a" * 64
+    sequence: int = 0
+    verified: bool = True
 
 
 def _command(**overrides) -> ControlCommand:
@@ -375,20 +386,83 @@ class TestPauseOrdering:
 
 
 class TestPauseDrain:
-    def test_cooperative_drain_captures_the_wip(self):
+    """NXT-15: the cooperative drain requires a REAL capture. The old
+    behavior — fabricating ``artifact:wip:<work_id>`` and calling the
+    pause captured — is the regression these tests pin out of existence."""
+
+    def test_cooperative_drain_without_capture_lands_partial_never_fabricated(self):
         state = send_interrupt(request_pause(_paused_work_state()))
 
         drained = drain_turn(state, cooperative=True)
 
+        # The fabricated artifact id is GONE (old behavior failed):
+        assert drained.wip_artifact_id is None
+        assert drained.checkpoint_receipt is None
+        # The honest outcome: a cooperative boundary, nothing durable captured.
+        assert drained.pause_status == "paused_partial"
+        # checkpoint_captured remains the bridge-level cooperative-boundary
+        # claim (the steering bridge's contract); the DURABLE truth is the
+        # pause_status — which says partial.
         assert drained.checkpoint_captured is True
-        assert drained.wip_artifact_id == "artifact:wip:wp-demo-1"
+        # last_recoverable falls back to the applied watermark: the number
+        # the mailbox actually applied, never an invented checkpoint.
+        assert drained.last_recoverable == drained.last_applied_command_sequence
 
-    def test_cooperative_drain_records_the_given_artifact(self):
-        drained = drain_turn(
-            _paused_work_state(), cooperative=True, wip_artifact_id="artifact:wip-42"
+    def test_cooperative_drain_with_a_real_capture_lands_paused_with_a_receipt(self):
+        state = send_interrupt(request_pause(_paused_work_state(last_applied_command_sequence=9)))
+
+        receipt = _Receipt(sequence=9)
+        drained = drain_turn(state, cooperative=True, capture=lambda: receipt)
+
+        assert drained.pause_status == "paused"
+        assert drained.checkpoint_captured is True
+        assert drained.wip_artifact_id == receipt.artifact_id
+        assert drained.checkpoint_receipt is receipt
+        assert drained.last_checkpoint_sequence == 9
+        assert drained.last_recoverable == 9
+        assert drained.failure_reason == ""
+
+    def test_a_failed_capture_lands_paused_failed_with_the_last_real_checkpoint(self):
+        """Disk full during upload: the pause says FAILED, and the last REAL
+        checkpoint (sequence 5, committed by an earlier capture) is what
+        last_recoverable names — never a fabricated success."""
+
+        def disk_full() -> _Receipt:
+            raise RuntimeError("disk full during artifact upload")
+
+        state = send_interrupt(
+            request_pause(
+                _paused_work_state(last_applied_command_sequence=7, last_checkpoint_sequence=5)
+            )
         )
 
-        assert drained.wip_artifact_id == "artifact:wip-42"
+        drained = drain_turn(state, cooperative=True, capture=disk_full)
+
+        assert drained.pause_status == "paused_failed"
+        assert drained.checkpoint_captured is False
+        assert drained.wip_artifact_id is None
+        assert drained.checkpoint_receipt is None
+        assert "disk full" in drained.failure_reason
+        assert drained.last_recoverable == 5  # the last REAL checkpoint
+
+    def test_an_unverified_receipt_is_never_confirmed(self):
+        state = send_interrupt(request_pause(_paused_work_state()))
+
+        drained = drain_turn(state, cooperative=True, capture=lambda: _Receipt(verified=False))
+
+        assert drained.pause_status == "paused_failed"
+        assert drained.checkpoint_captured is False
+        assert drained.wip_artifact_id is None
+        assert "unverified" in drained.failure_reason
+
+    def test_cooperative_drain_records_a_caller_supplied_real_artifact(self):
+        drained = drain_turn(
+            _paused_work_state(), cooperative=True, wip_artifact_id="sha256:abc123"
+        )
+
+        assert drained.pause_status == "paused"
+        assert drained.wip_artifact_id == "sha256:abc123"  # recorded verbatim
+        assert drained.checkpoint_captured is True
 
     def test_timeout_drain_leaves_checkpoint_as_is_and_exposes_last_recoverable(self):
         state = send_interrupt(request_pause(_paused_work_state(last_applied_command_sequence=7)))
@@ -398,14 +472,33 @@ class TestPauseDrain:
         # Never a false clean pause: nothing is captured by a timeout...
         assert drained.checkpoint_captured is False
         assert drained.wip_artifact_id is None
+        assert drained.pause_status == "paused_failed"  # terminated, not saved
         # ...instead the last RECOVERABLE checkpoint sequence is exposed.
         assert drained.last_recoverable == 7
+
+    def test_redraining_a_decided_pause_is_an_idempotent_noop(self):
+        state = drain_turn(
+            send_interrupt(request_pause(_paused_work_state())),
+            cooperative=True,
+            capture=lambda: _Receipt(sequence=3),
+        )
+
+        assert drain_turn(state, cooperative=False) is state
+        assert drain_turn(state, cooperative=True).pause_status == "paused"
 
     def test_last_recoverable_is_the_sequence_the_checkpoint_carries(self):
         state = drain_turn(send_interrupt(request_pause(_paused_work_state())), cooperative=True)
 
         assert state.checkpoint_captured is True
         assert state.last_recoverable == state.last_applied_command_sequence
+
+    def test_request_pause_opens_the_pausing_leg_of_the_status(self):
+        state = _paused_work_state()
+
+        assert request_pause(state).pause_status == "pausing"
+        # A decided pause is never reopened by a redelivered request.
+        decided = replace(request_pause(state), pause_status="paused")
+        assert request_pause(decided).pause_status == "paused"
 
 
 class TestPublicationEpoch:
@@ -462,6 +555,47 @@ class TestResumeCheck:
         assert ok is True
         assert "11" in reason
 
+    def test_strict_mode_refuses_a_pause_without_a_verified_receipt(self):
+        """NXT-18's strict gate: the cooperative-boundary claim (the bridge's
+        legacy flag) is NOT a durable checkpoint — partial and failed
+        pauses refuse, and the reason says which leg was missing."""
+
+        def _receipted(status: str, *, receipt: object) -> PauseState:
+            return _paused_work_state(
+                checkpoint_captured=True, pause_status=status, checkpoint_receipt=receipt
+            )  # type: ignore[arg-type]
+
+        partial = _receipted("paused_partial", receipt=None)
+        failed = _receipted("paused_failed", receipt=_Receipt())
+        unverified = _receipted("paused", receipt=_Receipt(verified=False))
+
+        for state in (partial, failed, unverified):
+            ok, reason = resume_check(
+                state,
+                snapshot_available=True,
+                active_plan_revision=1,
+                permissions_valid=True,
+                require_verified_checkpoint=True,
+            )
+            assert ok is False
+            assert "no verified durable checkpoint" in reason
+
+    def test_strict_mode_accepts_only_a_paused_state_with_a_verified_receipt(self):
+        state = _paused_work_state(
+            checkpoint_captured=True, pause_status="paused", checkpoint_receipt=_Receipt()
+        )
+
+        ok, reason = resume_check(
+            state,
+            snapshot_available=True,
+            active_plan_revision=1,
+            permissions_valid=True,
+            require_verified_checkpoint=True,
+        )
+
+        assert ok is True
+        assert "resumable" in reason
+
 
 class TestNewExecutionEpoch:
     def test_reconstructs_from_durable_artifacts_by_default(self):
@@ -472,20 +606,52 @@ class TestNewExecutionEpoch:
             "execution_epoch": 3,
             "native_session_restored": False,
             "reconstruction": "durable_artifacts",
+            "native_restore_evidence": None,
         }
 
     @pytest.mark.parametrize("profile", ["claude-sdk", "codex-app", "opencode-server"])
-    def test_native_session_restored_only_for_a_pinned_profile(self, profile):
+    def test_a_pinned_profile_name_alone_claims_no_native_restore(self, profile):
+        """NXT-18: profile MEMBERSHIP is compatibility, not a completed
+        restore — the old behavior (native_session_restored=True from the
+        name alone) failed exactly here."""
         epoch = new_execution_epoch("attempt-2", prior_epoch=4, pinned_profile=profile)
-
-        assert epoch["native_session_restored"] is True
-        assert epoch["execution_epoch"] == 5
-
-    def test_an_unknown_profile_reconstructs(self):
-        epoch = new_execution_epoch("attempt-2", prior_epoch=1, pinned_profile="beta-driver")
 
         assert epoch["native_session_restored"] is False
         assert epoch["reconstruction"] == "durable_artifacts"
+
+    @pytest.mark.parametrize("profile", ["claude-sdk", "codex-app", "opencode-server"])
+    def test_a_pinned_profile_with_verified_restore_evidence_restores_natively(self, profile):
+        epoch = new_execution_epoch(
+            "attempt-2",
+            prior_epoch=4,
+            pinned_profile=profile,
+            native_restore_evidence="b" * 64,
+        )
+
+        assert epoch["native_session_restored"] is True
+        assert epoch["reconstruction"] == "native_session"
+        assert epoch["native_restore_evidence"] == "b" * 64
+        assert epoch["execution_epoch"] == 5
+
+    def test_an_unknown_profile_never_restores_natively_even_with_evidence(self):
+        epoch = new_execution_epoch(
+            "attempt-2",
+            prior_epoch=1,
+            pinned_profile="beta-driver",
+            native_restore_evidence="b" * 64,
+        )
+
+        assert epoch["native_session_restored"] is False
+        assert epoch["reconstruction"] == "durable_artifacts"
+
+    def test_evidence_without_a_pinned_profile_reconstructs(self):
+        epoch = new_execution_epoch("attempt-2", prior_epoch=1, native_restore_evidence="b" * 64)
+
+        assert epoch["native_session_restored"] is False
+        assert epoch["reconstruction"] == "durable_artifacts"
+
+    def test_the_epoch_is_always_fresh(self):
+        assert new_execution_epoch("a", prior_epoch=41)["execution_epoch"] == 42
 
 
 class TestClassifyInstruction:
