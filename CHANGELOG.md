@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1] - 2026-09-22
+
+### Refactored — the script-rendering architecture (research doc phases 0-3)
+
+The driver scripts that were 324 LOC of Python string concatenation
+are now real `.sh` files shipped in the wheel, rendered via stdlib
+`string.Template` — the recommendation from
+`docs/research/2026-09-22-script-rendering-architecture.md`:
+
+- **Phase 0**: 14 golden fixtures (7 drivers × MCP on/off), byte-for-byte
+- **Phase 1**: `src/forge/harnesses/scripts/` in the wheel;
+  `harness-log-filter.mjs` rides the same pin (deletes the unpinned
+  network fetch); harness_entry 1708→1234 lines. Zero byte drift
+- **Phase 2**: `bash -n` over all rendered combinations;
+  placeholder-absence test enforced
+- **Phase 3**: `<PINNED_REF>` eliminated — real released-tag defaults
+  with a documented `FORGE_LANE_REF` override
+
+Suite 4717 (+25).
+
 ## [0.27.0] - 2026-09-22
 
 ### Added — the FULL review chain LIVE: pause → checkpoint → kill → retry → WIP restore on a second runner → resume
