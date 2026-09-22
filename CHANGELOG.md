@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-09-22
+
+### Fixed + Added — the edf938c review campaign: assembly over new modules
+
+The review's verdict — components ahead of the finished user process —
+answered with 12 delivered slices (issues #123-#153; 13 closed, tracked
+in GitHub). Suite 4243 (+197 over 0.23.0).
+
+**M0 — the branch is reliable again**
+- NXT-01: the blocking typecheck gate restored — mypy 15→0 via typed
+  `_ResolvedGo/_RefusedGo/_AdvanceGo` resolution (zero `type: ignore`);
+  the AsyncMock warning flood replaced by typed sync-identity doubles.
+- NXT-31: the GitHub harness reconciler is scoped to the bound
+  repository (entry guard BEFORE any blocking transition or provider
+  call; proven by the OUTER production reconciler with two repos — all
+  tests fail against the unfixed source).
+- NXT-02: a reachability-based capability manifest — `forge doctor
+  --capabilities` exits 1 on drift; 17 rows, tiers from
+  domain_contract to real_provider_scenario, unfinished paths stay
+  disabled and say why.
+
+**M1 — the customer's first objection**
+- NXT-05: the durable discovery stage is SPLICED into the production
+  GitHub /implement path (FORGE_DISCOVERY_ENABLED, default OFF):
+  replay/recovery semantics, content-addressed evidence with file:line
+  citations, `evidence:<id>` plan-citation validation (fail-closed),
+  bounded digest inside the planner cap.
+- NXT-09: the control mailbox is durable — migration 020, work-scoped
+  dedup BEFORE epoch mutation, the 7-rung CAS ladder; FI-proven on a
+  real disposable PostgreSQL (full chain 001→020).
+
+**M2 — intervention without losing work**
+- NXT-11+12: steering attached to the real lane lifecycle (every lane,
+  FORGE_STEERING_ENABLED default OFF) with effect-intent rungs —
+  dispatching → vendor_accepted → application_observed;
+  outcome_unknown is honest and never silently retried; pause-class
+  commands preempt queued guidance.
+- NXT-15..18: pause is a real publication fence + checkpoint
+  transaction — the fabricated `artifact:wip:` checkpoint is gone;
+  content-addressed WIP capture with digest-verified read-back,
+  retention-pinned references, honest partial/failed states, restore on
+  a fresh instance, resume under a fresh epoch with re-checked
+  authorization.
+
+**M2/M3 — authority and evidence**
+- NXT-19+20: material activation binds work+proposal-digest+parent+
+  contract+epoch in ONE conditional transaction (the cross-work
+  activation characterization now refuses); tactical policy is
+  fail-closed — unknown materiality routes to a decision, never
+  tactical_internal; the old plan never re-authorizes.
+- NXT-25: the COMPLETE tested world is fingerprinted
+  (tested_world_digest: all members + image digests + bundles + pins +
+  policy refs; provenance ≠ applicability, domain-separated digests);
+  environment_compose pins baselines to exact artifacts.
+
+**Live-found in the lane plumbing (post-review)**
+- A SHARED `forge-agent` job name meant GitLab's last-include-wins
+  silently replaced sibling lanes — jobs are `forge-agent-<driver>` now
+  and the worker matches by prefix.
+- A nonzero driver exit now FAILS the lane job (batch pipefail parity);
+  artifacts still upload via `when:always`.
+- codex no longer inherits `FORGE_HARNESS_MODEL` (gateway-specific
+  model names made turns complete empty in seconds).
+- `/go` accepts the short id prefix the plan actually shows.
+
+**Known-honest**: opencode-sdk-lane is blocked upstream (v2.0.10 yanked
+from every distribution; the installer's latest is a different major
+with a different API); codex-sdk-lane's runner cycle is pending auth
+verification (parked). Both are stated in the capability matrix.
+
 ## [0.23.0] - 2026-09-21
 
 ### Fixed + Added — the real-usage (e2e) pass over the interactive drivers
