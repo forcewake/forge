@@ -310,13 +310,18 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
     # ---- adaptive substrate: domain contracts, NOT wired ----
     Capability(
         name="adaptive/discovery-service",
-        tier="domain_contract",
-        entry_point=None,
-        evidence=("tests/test_adaptive_wiring.py", "tests/test_adaptive_discovery.py"),
-        note="DiscoveryService exists with a harness_start seam, but the normal "
-        "planning path (runs/github_service._plan_and_publish) invokes the "
-        "classic planner directly; no ingress or service constructs a "
-        "DiscoveryRun.",
+        tier="production_wiring",
+        entry_point="runs/github_service._plan_and_publish -> maybe_run_discovery",
+        evidence=(
+            "tests/test_adaptive_discovery_stage.py",
+            "docs/adaptive/discovery-splice.md",
+        ),
+        note="NXT-05 landed: the durable discovery stage (replay/recovery "
+        "semantics, content-addressed evidence, evidence:<id> citation "
+        "validation) is SPLICED into the GitHub /implement planning path — "
+        "DISABLED BY DEFAULT (FORGE_DISCOVERY_ENABLED); the classic flow is "
+        "byte-for-byte identical while off. GitLab/Azure planning paths not "
+        "spliced yet.",
     ),
     Capability(
         name="adaptive/plan-revisions",
@@ -332,30 +337,37 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         tier="domain_contract",
         entry_point=None,
         evidence=("tests/test_adaptive_control.py", "tests/test_adaptive_wiring.py"),
-        note="The Mailbox is in-memory dicts (dict[str, ControlCommand]) — the "
-        "ladder semantics are tested, but there is NO persistence and no "
-        "per-recipient delivery state (review §8); no production caller mounts "
-        "OperatorControlService.",
+        note="NXT-09: PostgresMailbox (migration 020, work-scoped dedup, the "
+        "7-rung CAS ladder, dedup-before-epoch) is FI-tested on real Postgres "
+        "— but the lane still mounts the IN-MEMORY mailbox; no production "
+        "caller selects PostgresMailbox yet (the swap is one constructor "
+        "away, MailboxSurface-compatible).",
     ),
     Capability(
         name="adaptive/pause-resume-checkpoint",
         tier="domain_contract",
         entry_point=None,
         evidence=("tests/test_adaptive_control.py", "tests/test_adaptive_runtime.py"),
-        note="CTL-05/06 ordering rules and portable_checkpoint/SessionRestorer "
-        "exist and are unit-tested, but pause is never reachable from ingress "
-        "and no checkpoint→resume-on-another-runner cycle has run (a driver "
-        "smoke must not mark /pause-to-checkpoint recovery as passed).",
+        note="NXT-15..18: pause is now a REAL fence+checkpoint transaction "
+        "(verified content-addressed WIP capture, honest partial/failed "
+        "states, fresh-epoch resume with re-checked authorization; "
+        "cross-instance restore proven in tests). Still NOT reachable from "
+        "ingress: /pause is not routed, and no cross-RUNNER recovery cycle "
+        "has run live (tests destroy and restore store instances, not "
+        "runners).",
     ),
     Capability(
         name="adaptive/steering-bridge",
-        tier="domain_contract",
-        entry_point=None,
+        tier="production_wiring",
+        entry_point="lane_driver steering attach (FORGE_STEERING_ENABLED, default OFF)",
         evidence=("tests/test_adaptive_lane_control.py",),
-        note="LaneSteeringSession is an attach() seam the lane_driver does not "
-        "call, and /steer is not routed by any ingress. The 2026-09-21 live "
-        "smokes prove the DRIVER's steer/interrupt primitives against vendor "
-        "binaries — they do NOT prove the operator→mailbox→lane bridge.",
+        note="NXT-11: lane_driver ATTACHES the steering session on every lane "
+        "behind FORGE_STEERING_ENABLED (default OFF; effect-intent ladder "
+        "NXT-12: dispatching → vendor_accepted → application_observed, "
+        "outcome_unknown never silently retried). Still off: /steer is not "
+        "routed by any ingress and the lane-local mailbox is in-memory, so "
+        "ON would be a structural no-op. The 2026-09-21 live smokes prove "
+        "the DRIVER primitives, not the operator→mailbox→lane bridge.",
     ),
     Capability(
         name="adaptive/work-package-coordination",

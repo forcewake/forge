@@ -131,13 +131,25 @@ def test_adaptive_commands_are_not_routed_anywhere():
 
 
 def test_helper_without_production_caller_is_library_level_only():
-    """A capability with an entry-point-free helper (steering bridge, mailbox)
-    is reported domain_contract — never dressed as wiring."""
-    for name in ("adaptive/steering-bridge", "adaptive/durable-mailbox"):
-        row = _by_name(name)
-        assert row.tier == "domain_contract"
-        assert row.entry_point is None
-        assert row.note  # the WHY is mandatory
+    """A capability with an entry-point-free helper (the durable mailbox —
+    PostgresMailbox exists and is FI-tested, but no production caller
+    SELECTS it) is reported domain_contract — never dressed as wiring."""
+    row = _by_name("adaptive/durable-mailbox")
+    assert row.tier == "domain_contract"
+    assert row.entry_point is None
+    assert row.note  # the WHY is mandatory
+
+
+def test_steering_bridge_is_wired_but_default_off():
+    """NXT-11 raised the bridge to production_wiring: lane_driver attaches
+    it on every lane — gated by FORGE_STEERING_ENABLED, default OFF (the
+    ingress does not route /steer yet, so ON would be a structural
+    no-op). The tier reflects the REACHABLE entry point; the note keeps
+    the rollout state honest."""
+    row = _by_name("adaptive/steering-bridge")
+    assert row.tier == "production_wiring"
+    assert row.entry_point and "FORGE_STEERING_ENABLED" in row.entry_point
+    assert "default OFF" in row.note
 
 
 def _unbind_everywhere(monkeypatch, command: str) -> None:
