@@ -185,8 +185,9 @@ CAPABILITIES: Final[tuple[Capability, ...]] = (
         name="operator-commands/adaptive",
         tier="real_provider_scenario",
         entry_point=(
-            "adaptive_command_set() behind FORGE_ADAPTIVE_COMMANDS_ENABLED — "
-            "live /steer /pause /resume on forge-lab-gh (2026-09-22)"
+            "forge.adaptive.command_router.ControlCommandRouter behind "
+            "FORGE_ADAPTIVE_COMMANDS_ENABLED — live /steer /pause /resume on "
+            "forge-lab-gh (2026-09-22)"
         ),
         evidence=(
             "docs/evaluation/2026-09-21-drivers/claude-sdk-lane-runner-README.md",
