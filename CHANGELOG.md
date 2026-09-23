@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-09-23
+
+### Added — the ccab247 review P2: execution leases, supervisor, recipe decomposition, support matrix, system context (16 items)
+
+All P1 + 19 of 23 P2 items from the ccab247 review are now closed.
+Suite 5327 (+125 from v0.30.0).
+
+**Reliability:**
+- NEXT-05: Content-Length + bounded stream read BEFORE JSON parse (512 MiB
+  cap) — a hostile payload can't exhaust API memory before validation
+- NEXT-06: flock with holder identity; retention decisions recorded in
+  the index; multi-process concurrent writer safety
+- NEXT-09: bounded research await + sticky-unknown token aggregation
+
+**Execution governance:**
+- NEXT-11/12: execution_leases table (migration 023) — CAS slot
+  reservation at EVERY dispatch entry; queue admission vs execution
+  lease are distinct checks; terminal transitions release the slot
+- NEXT-14: LaneSupervisor — ONE owner of the turn, the drain, and the
+  terminal classification; urgent interrupt fires in the same
+  scheduling slice (not after a queued steer); exactly-once write
+
+**Product:**
+- NEXT-13: copilot-acp observed capability profile (turn, interrupt,
+  next-turn only — the complement is honestly unobserved)
+- NEXT-15: RuntimeRecipe × HarnessProfile decomposition; dotnet-lane is
+  a compatibility alias for (dotnet-9, claude-code); any harness on
+  any recipe validates
+- NEXT-16: TRX LogFilePrefix + multi-project aggregation (bounded
+  breakdown, parse failures recorded, zero-reports is explicit policy)
+- NEXT-21: SystemContextProfile — N authorized read-only neighbors +
+  1 writable target; feeds multi-repo discovery; authorize_write
+  returns typed verdicts
+- NEXT-20: the dispatch reads the ACTIVE plan post-revision; a stale
+  /go with the old digest is refused
+
+**Observability + release:**
+- NEXT-23: per-attempt identity-matched cost receipts; conflicting
+  receipts surface as conflicts, never averaged
+- NEXT-26: support_matrix() — tested/supported/declared_only per
+  (driver, provider, recipe); doctor --support-matrix
+- NEXT-18: runtime network egress probe (verified / declared_only /
+  not_enforced)
+- Bug #185: AzDO /go short-id prefix resolution
+
+Suite 5327; ruff clean; all 3 providers live-verified in v0.30.0.
+
 ## [0.30.0] - 2026-09-23
 
 ### Fixed + Added — the ccab247 review P1: execution identity chain, research harness wiring, tool observations
