@@ -56,9 +56,17 @@ from forge.adaptive.admission import QUEUED_STATUSES
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import check_admission as check_fair_use
 from forge.adaptive.admission import (
+    NativeProbe,
+    NativeStatus,
+    clear_native_start_intent,
+    definite_start_refusal,
     execution_capacity_comment,
     lease_snapshot,
-    release_run_leases,
+    open_lease_for_run,
+    record_native_handle,
+    record_native_start_intent,
+    reconcile_draining,
+    release_lease_with_evidence,
     try_acquire_lease,
 )
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
@@ -2805,14 +2813,48 @@ class RunService:
                 attempt_base=run.base_sha or "",
                 timeout_seconds=spec.harness_timeout,
             )
+            # Q35-04: the native-start intent, persisted BEFORE the
+            # provider call. ``backend.start`` cuts the factory branch and
+            # triggers the pipeline in one seam — a GitLabAPIError from
+            # either step may have reached the provider, so the intent
+            # stays unless the provider PROVED it refused the start; the
+            # reconciler's probe (pipelines on this run-owned branch)
+            # decides the remaining uncertainty. Without this write a
+            # lost start response would free the slot on local status
+            # while the pipeline runs.
+            intent_ref = f"gitlab:pipeline:{project_id}@{factory_branch(run.issue_iid, run.id)}"
+            await record_native_start_intent(self._session_factory, run_id, intent_ref)
             handle = await backend.start(run, issue_title, "", brief, spec=start_spec)
-        except (GitLabAPIError, httpx.HTTPError) as exc:
+        except GitLabAPIError as exc:
+            if definite_start_refusal(exc.status_code):
+                # The provider PROVED it refused the start — nothing
+                # native began; clear the intent so the terminal release
+                # sees proven never-dispatched and capacity returns now.
+                await clear_native_start_intent(self._session_factory, run_id, intent_ref)
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            return
+        except httpx.HTTPError as exc:
+            # Transport failure — the start's outcome is undecidable:
+            # the intent stays and the reconciler probes the branch.
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
             return
 
         handle_data = json.loads(handle)
         pipeline_id = int(handle_data.get("pipeline_id") or 0)
+        # Q35-04: the provider answered — attach the native correlation.
+        # The lease moves dispatched_unknown → native_running; the
+        # reconciler's probe key is provider-shaped (project + pipeline
+        # id) so a fresh process can resolve the occupancy alone.
+        if pipeline_id:
+            lease = await open_lease_for_run(self._session_factory, run_id)
+            if lease is not None:
+                await record_native_handle(
+                    lease.lease_id,
+                    f"gitlab:pipeline:{project_id}:{pipeline_id}",
+                    self._session_factory,
+                )
 
         async with self._session_factory() as session:
             controller = Controller(session)
@@ -4294,6 +4336,15 @@ class RunService:
             except Exception:
                 # One broken run must not stall the reconciler loop.
                 logger.exception("Harness reconcile pass failed for run %s", run_id[:8])
+        # Q35-04: the occupancy pass — leases whose runs landed terminal
+        # above parked draining; probe their native jobs and release the
+        # ones OBSERVED terminal (the same tick that observed them).
+        try:
+            released = await self._reconcile_draining_leases()
+            if released:
+                logger.info("Occupancy pass released %d draining execution lease(s)", released)
+        except Exception:
+            logger.exception("Draining-lease occupancy pass failed")
 
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
         """Poll one waiting_harness run through its journaled backend handle.
@@ -5443,11 +5494,82 @@ class RunService:
             await controller.complete_action(action_id, status, remote_result)  # type: ignore[arg-type]
             await session.commit()
 
+    def _native_occupancy_probe(self) -> NativeProbe:
+        """The GitLab occupancy probe for :func:`reconcile_draining` (Q35-04).
+
+        Two key shapes, both provider-prefixed so a foreign lease reads
+        UNKNOWN (each provider's reconciler owns its own keys):
+
+        - ``gitlab:pipeline:<project>:<pipeline_id>`` — the handle the
+          dispatch recorded: one ``get_pipeline`` read, terminal when the
+          status left the active set;
+        - ``gitlab:pipeline:<project>@<branch>`` — the intent marker of a
+          start whose handle never landed (lost response): pipelines on
+          the run-OWNED factory branch decide it — none means the start
+          never created a job (capacity returns), any pipeline terminal
+          means the job finished, otherwise running. A provider error
+          raises and reads UNKNOWN: uncertain occupancy holds.
+        """
+
+        async def probe(key: str) -> NativeStatus:
+            if not key.startswith("gitlab:"):
+                return NativeStatus.UNKNOWN  # another provider's lease
+            payload = key.split(":", 1)[1]
+            if not payload.startswith("pipeline:"):
+                return NativeStatus.UNKNOWN
+            body = payload.split(":", 1)[1]
+            if "@" in body:  # the intent shape: <project>@<branch>
+                project_raw, _, branch = body.partition("@")
+                pipelines = await self._gitlab.list_pipelines(int(project_raw), ref=branch)
+                if not pipelines:
+                    return NativeStatus.TERMINAL  # nothing ever started
+                statuses = {(p.status or "").lower() for p in pipelines}
+                if statuses - _CI_ACTIVE_STATUSES:
+                    return NativeStatus.TERMINAL
+                return NativeStatus.RUNNING
+            project_raw, _, pipeline_raw = body.partition(":")
+            pipeline = await self._gitlab.get_pipeline(int(project_raw), int(pipeline_raw))
+            return (
+                NativeStatus.RUNNING
+                if (pipeline.status or "").lower() in _CI_ACTIVE_STATUSES
+                else NativeStatus.TERMINAL
+            )
+
+        return probe
+
+    async def _reconcile_draining_leases(self) -> int:
+        """One occupancy pass over DRAINING leases (the reconciler tick).
+
+        The same evidence discipline as the release: a slot frees only
+        when its native job is OBSERVED terminal through the provider
+        probe. Undecidable keys stay draining with their age visible
+        (:func:`forge.adaptive.admission.occupancy_report`).
+        """
+        return await reconcile_draining(self._session_factory, self._native_occupancy_probe())
+
     async def _release_execution_lease(self, run_id: str, reason: str) -> None:
-        """Free the run's execution slot (idempotent; no lease = no-op)."""
-        released = await release_run_leases(self._session_factory, run_id, reason=reason)
-        if released:
-            logger.info("Run %s released %d execution lease(s): %s", run_id[:8], released, reason)
+        """Free the run's execution slot — from EVIDENCE, never local
+        status alone (Q35-04; idempotent; no lease = no-op).
+
+        A lease with NO native-start intent (the builtin lane, a
+        pre-call abort) is proven never-dispatched and releases now; a
+        lease carrying an intent parks DRAINING for the reconciler's
+        native probe — the provider may have accepted a start whose
+        response was lost, and a local terminal verdict is not evidence
+        the runner stopped.
+        """
+        outcome = await release_lease_with_evidence(self._session_factory, run_id, reason=reason)
+        if outcome.released:
+            logger.info(
+                "Run %s released %d execution lease(s): %s", run_id[:8], outcome.released, reason
+            )
+        if outcome.drained:
+            logger.info(
+                "Run %s parked %d execution lease(s) draining (native occupancy unobserved): %s",
+                run_id[:8],
+                outcome.drained,
+                reason,
+            )
 
     async def _reserve_execution_capacity(self, project_id: int, run_id: str) -> bool:
         """NEXT-11/R32-05: take the execution lease at DISPATCH — or park honestly.

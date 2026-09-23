@@ -31,6 +31,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Final
 
+from forge.adaptive.checkpoint_repository import (
+    CheckpointRepository,
+    resolve_repository,
+)
 from forge.adaptive.control import (
     BroadcastCommand,
     Mailbox,
@@ -151,6 +155,18 @@ class OperatorControlService:
 
     mailbox: Mailbox | AsyncMailboxSurface = field(default_factory=Mailbox)
     pause_states: dict[str, PauseState] = field(default_factory=dict)
+    #: Q35-03: the ONE configured checkpoint authority behind resume.
+    #: Injected by the composition root
+    #: (:func:`control_service_from_env` wires
+    #: :func:`forge.adaptive.checkpoint_repository.resolve_repository`);
+    #: ``None`` means the service was constructed directly, and the
+    #: resume producer then resolves the authority through that SAME
+    #: single composition point per call — it never builds a bare
+    #: filesystem store that ignores ``FORGE_CHECKPOINT_DURABILITY``
+    #: (the Q35-03 defect), and a misconfigured or unreachable
+    #: authority FAILS CLOSED with its typed error instead of quietly
+    #: answering "no checkpoint".
+    checkpoint_repository: CheckpointRepository | None = None
     #: The unified async seam every service method awaits (CTL-04). Built
     #: in ``__post_init__`` — the adapter over the in-memory mailbox, or
     #: an already-async mailbox (PostgresMailbox) as itself.
@@ -307,21 +323,43 @@ class OperatorControlService:
         resume stands (the checkpoint IS the confirmed capture).
 
         NEXT-03: the resume command carries the EXACT ResumeSpec — the
-        CURRENT active checkpoint read from the durable checkpoint store
-        (never from the pending-command queue): ``checkpoint_ref`` (the
-        durable ``<work>@<checkpoint_id>`` reference), its ``sequence``
-        and the manifest's ``source_oid``. The resumed runner restores
-        EXACTLY this checkpoint — a newer upload landing after the
+        CURRENT active checkpoint read from the configured checkpoint
+        REPOSITORY (never from the pending-command queue): the durable
+        ``<work>@<checkpoint_id>`` reference, its ``sequence`` and the
+        manifest's ``source_oid``. The resumed runner restores EXACTLY
+        this checkpoint — a newer upload landing after the
         authorization changes nothing — and the spec stays readable from
         the durable command row long after the command leaves the
         pending set (``GET /lane/controls/resume-spec``).
+
+        Q35-03: the durable truth is read through the SAME configured
+        authority the upload route wrote
+        (``FORGE_CHECKPOINT_DURABILITY`` honored — filesystem or
+        postgres), so a checkpoint the API confirmed is visible to a
+        fresh resume producer. An authority that cannot answer
+        (misconfigured, database outage) raises its TYPED error rather
+        than degrading to "no checkpoint" or to a filesystem index the
+        deployment moved away from.
         """
         state = self.pause_states.get(work_id)
         in_memory = state is not None and state.checkpoint_captured
-        spec = self._active_resume_spec(work_id)
+        spec = await self._active_resume_spec(work_id)
         if not in_memory and spec is None:
             return False  # no confirmed checkpoint — resume refuses
         self.pause_states.pop(work_id, None)
+        if spec is not None:
+            # Q35-05: an authorized resume PINS its exact checkpoint —
+            # the approved reference survives a newer upload and every
+            # retention pass until the pin is released EXPLICITLY
+            # (never by time). Guarded: a repository implementation
+            # from before the pin API simply skips the protection.
+            from forge.adaptive.checkpoint_channel import parse_checkpoint_ref
+
+            repository = self._checkpoint_repository()
+            pin = getattr(repository, "pin", None)
+            if pin is not None:
+                _work, pinned_checkpoint_id = parse_checkpoint_ref(str(spec["checkpoint_ref"]))
+                await pin(work_id, pinned_checkpoint_id, f"resume:{idempotency_key}")
         await self.surface.submit(
             ControlCommand(
                 schema="forge.proposal.control-command/1",
@@ -338,46 +376,69 @@ class OperatorControlService:
         )
         return True
 
-    @staticmethod
-    def _active_resume_spec(work_id: str) -> dict[str, Any] | None:
+    def _checkpoint_repository(self) -> CheckpointRepository:
+        """The authority resume reads: the injected repository, else the
+        ONE composition point.
+
+        The injected repository wins when present. Without one (a
+        directly constructed service), the authority is resolved
+        through :func:`forge.adaptive.checkpoint_repository.
+        resolve_repository` — the same single seam the HTTP channel and
+        the app composition use — so the durability contract is honored
+        whichever process the resume producer runs in. A
+        half-configuration (``postgres`` without a session factory, a
+        junk mode) raises :class:`CheckpointRepositoryMisconfigured`
+        HERE, before any lookup: never a silent fallback to the
+        filesystem JSON index (the Q35-03 defect).
+        """
+        if self.checkpoint_repository is not None:
+            return self.checkpoint_repository
+        return resolve_repository()
+
+    async def _active_resume_spec(self, work_id: str) -> dict[str, Any] | None:
         """The exact ResumeSpec for the work's CURRENT active checkpoint.
 
-        Reads the durable control-plane checkpoint STORE (the per-work
-        index's highest-sequence entry, R28-06 — arrival order is not
-        authority) plus the manifest's declared source identity. Returns
-        ``None`` when the store holds nothing for the work (or is not
-        configured) — the caller's confirmed-checkpoint gate then falls
-        back to the in-memory capture state, exactly as before.
-        """
-        try:
-            from forge.api_checkpoint_channel import CheckpointStore, _store_dir
-            from forge.adaptive.checkpoint_channel import format_checkpoint_ref
+        Reads the configured checkpoint REPOSITORY's active entry (the
+        highest-sequence one, R28-06 — arrival order is not authority)
+        plus the manifest's declared source identity, both through the
+        SAME authority the upload route wrote (Q35-03). Returns ``None``
+        when the authority holds nothing for the work — the caller's
+        confirmed-checkpoint gate then falls back to the in-memory
+        capture state, exactly as before.
 
-            store = CheckpointStore(_store_dir())
-            entry = store.entry(work_id)
-            if entry is None:
-                return None
-            checkpoint_id = str(entry.get("checkpoint_id") or "")
-            if not checkpoint_id:
-                return None
-            source_oid = ""
-            try:
-                manifest_bytes, _blobs = store.read_checkpoint(entry)
-                manifest = json.loads(manifest_bytes)
-                sources = manifest.get("source_oids")
-                if isinstance(sources, dict) and sources:
-                    # The declared base identity: the attempt base when the
-                    # lane pinned one, else the first recorded source.
-                    source_oid = str(sources.get("attempt_base") or next(iter(sources.values())))
-            except Exception:  # noqa: BLE001 — the spec degrades to the ref
-                source_oid = ""
-            return {
-                "checkpoint_ref": format_checkpoint_ref(work_id, checkpoint_id),
-                "checkpoint_sequence": int(entry.get("sequence") or 0),
-                "source_oid": source_oid,
-            }
-        except Exception:  # noqa: BLE001 — no store configured, no spec
+        The typed failures are deliberately NOT swallowed: an
+        unreachable authority raises
+        :class:`forge.adaptive.checkpoint_repository.
+        CheckpointRepositoryUnavailable` and a half-configured one
+        raises ``CheckpointRepositoryMisconfigured`` — an outage must
+        never masquerade as "no checkpoint", and resume must never
+        proceed on a guessed authority.
+        """
+        from forge.adaptive.checkpoint_channel import format_checkpoint_ref
+
+        repository = self._checkpoint_repository()
+        entry = await repository.entry(work_id)
+        if entry is None:
             return None
+        checkpoint_id = str(entry.get("checkpoint_id") or "")
+        if not checkpoint_id:
+            return None
+        source_oid = ""
+        try:
+            manifest_bytes, _blobs = await repository.read_entry(entry)
+            manifest = json.loads(manifest_bytes)
+            sources = manifest.get("source_oids")
+            if isinstance(sources, dict) and sources:
+                # The declared base identity: the attempt base when the
+                # lane pinned one, else the first recorded source.
+                source_oid = str(sources.get("attempt_base") or next(iter(sources.values())))
+        except Exception:  # noqa: BLE001 — the spec degrades to the ref
+            source_oid = ""
+        return {
+            "checkpoint_ref": format_checkpoint_ref(work_id, checkpoint_id),
+            "checkpoint_sequence": int(entry.get("sequence") or 0),
+            "source_oid": source_oid,
+        }
 
     async def steer(
         self,
@@ -494,12 +555,19 @@ def control_service_from_env(
     stays on the in-memory reference mailbox, with a WARNING when the
     operator asked for postgres and did not get it — the flag never
     silently degrades in the other direction.
+
+    Q35-03: the CHECKPOINT authority is resolved here too — through the
+    same :func:`resolve_repository` composition point the HTTP channel
+    uses — and injected into the service, so resume reads the SAME
+    configured authority (``FORGE_CHECKPOINT_DURABILITY`` honored)
+    that upload wrote. A misconfigured checkpoint durability (``postgres``
+    without the database wiring, a junk mode value) REFUSES
+    construction with :class:`~forge.adaptive.checkpoint_repository.
+    CheckpointRepositoryMisconfigured` — the composition root fails
+    fast with the specific diagnostic instead of building a service
+    whose resume would silently consult a different store.
     """
     source = os.environ if env is None else env
-    if str(source.get(FORGE_CONTROL_MAILBOX_ENV, "")).strip().lower() != (
-        _CONTROL_MAILBOX_POSTGRES
-    ):
-        return OperatorControlService()
     factory = session_factory
     if factory is None:
         url = str(source.get("DATABASE_URL", "")).strip()
@@ -507,15 +575,23 @@ def control_service_from_env(
             from forge.database import get_session_factory
 
             factory = get_session_factory(url)
+    repository = resolve_repository(source, session_factory=factory)
+    if str(source.get(FORGE_CONTROL_MAILBOX_ENV, "")).strip().lower() != (
+        _CONTROL_MAILBOX_POSTGRES
+    ):
+        return OperatorControlService(checkpoint_repository=repository)
     if factory is None:
         logger.warning(
             "FORGE_CONTROL_MAILBOX=postgres without a session factory or DATABASE_URL — "
             "the control mailbox stays IN MEMORY; the flag did not take effect"
         )
-        return OperatorControlService()
+        return OperatorControlService(checkpoint_repository=repository)
     from forge.adaptive.mailbox_db import PostgresMailbox
 
-    return OperatorControlService(mailbox=PostgresMailbox(factory))
+    return OperatorControlService(
+        mailbox=PostgresMailbox(factory),
+        checkpoint_repository=repository,
+    )
 
 
 # ---------------------------------------------------------------------------

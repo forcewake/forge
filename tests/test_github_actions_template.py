@@ -150,14 +150,31 @@ class TestWorkflowTemplateContract:
         assert ".forge-output" not in text  # the dot-name is gone everywhere
         assert upload["with"]["if-no-files-found"] == "error"
         assert upload["if"] == "always()"  # the audit trail survives failures
-        # The candidate diff is captured against the FROZEN attempt base.
-        assert 'git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}"' in text
+        # The candidate diff is captured against the FROZEN attempt base —
+        # Q35-01: by the packaged collector, never again by inline git in
+        # the original checkout (a resumed lane's work sits in the sibling
+        # generation the checkout's pointer names; the inline commands
+        # diffed the untouched base).
+        emit = next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Emit candidate artifact"
+        )
+        run = emit["run"]
+        assert '--attempt-base-oid "${{ inputs.attempt_base_oid }}"' in run
+        assert "git add -A" not in run
+        assert "git diff --cached" not in run
+        # The failure-suppression that turned a Git error into an empty
+        # "successful" candidate is gone from the emit step entirely.
+        assert "|| true" not in run
 
     def test_emit_step_stages_a_clean_dir_and_builds_meta_v2_via_the_entry_point(self):
         """The emit step stages only the candidate diff into a fresh
-        non-hidden directory and delegates the meta v2 build (identity,
-        manifest digest, usage receipt) to the same pinned forge entry
-        point — one schema, one test suite, never a heredoc copy."""
+        non-hidden directory, collects it from the ACTIVE workspace via
+        the packaged collector (Q35-01 — never inline git in the original
+        checkout), and delegates the meta v2 build (identity, manifest
+        digest, usage receipt) to the same pinned forge entry point —
+        one schema, one test suite, never a heredoc copy."""
         workflow = load_template()
         steps = workflow["jobs"]["harness"]["steps"]
         emit = next(step for step in steps if step.get("name") == "Emit candidate artifact")
@@ -167,12 +184,27 @@ class TestWorkflowTemplateContract:
         # Clean staging in a directory with NO leading dot (A08): nothing
         # else can ride along, and the v4 globber actually traverses it.
         assert "rm -rf forge-output && mkdir -p forge-output" in run
-        assert "forge-output/candidate.diff" in run
         assert ".forge-output" not in run
         assert ".forge/candidate.diff" not in run
+        # Q35-01: the diff is collected by the entry point's collector —
+        # the tree comes from the checkout's .forge/workspace-generation
+        # pointer (the resumed lane chdir'd its OWN process into the
+        # generation; this shell's cwd is NOT that tree). The staged path
+        # contract (forge-output/candidate.diff) is the collector's
+        # --output-root + CANDIDATE_DIFF_NAME, byte-identical to the old
+        # inline redirect's target.
+        assert "python -m forge.harness_entry --collect-candidate" in run
+        assert '--forge-run-id "${{ inputs.run_id }}"' in run
+        assert '--attempt-base-oid "${{ inputs.attempt_base_oid }}"' in run
+        assert "--output-root forge-output" in run
+        assert "git add -A" not in run
+        assert "git diff --cached" not in run
+        assert "|| true" not in run
         # The meta is built by forge's entry point with the dispatched
-        # identity (attempt identity rides from the runner's GITHUB_* env).
+        # identity (attempt identity rides from the runner's GITHUB_* env),
+        # AFTER the collection it binds the bytes of.
         assert "python -m forge.harness_entry --emit-meta" in run
+        assert run.index("--collect-candidate") < run.index("--emit-meta")
         assert '--forge-run-id "${{ inputs.run_id }}"' in run
         assert '--attempt-base-oid "${{ inputs.attempt_base_oid }}"' in run
         assert '--driver "${{ inputs.driver }}"' in run
@@ -189,10 +221,13 @@ class TestWorkflowTemplateContract:
     def test_the_dogfood_mirror_uses_the_same_non_hidden_staging(self):
         """A08 mirror parity: the rename ships in BOTH workflow files — a
         dot-directory staging name uploads nothing (the v4 globber drops
-        dot-directories before traversal)."""
+        dot-directories before traversal). Q35-01 parity: BOTH files
+        collect through the packaged collector into the same non-hidden
+        staging root."""
         for text in (TEMPLATE.read_text(), MIRROR.read_text()):
             assert "rm -rf forge-output && mkdir -p forge-output" in text
-            assert "forge-output/candidate.diff" in text
+            assert "--output-root forge-output" in text
+            assert "--collect-candidate" in text
             assert 'forge-output/" >> .git/info/exclude' in text
             assert "path: forge-output" in text
             assert ".forge-output" not in text

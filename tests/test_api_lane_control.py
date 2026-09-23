@@ -15,9 +15,10 @@ the lane's drain climbs. Pinned here:
   SUPERSEDED generation's token answers 403 with an actionable message,
   and the legacy work-id-only HMAC validates only inside the explicit
   NEXT-01 migration window (FORGE_LANE_LEGACY_TOKEN_DEADLINE, or the
-  recorded FORGE_LANE_LEGACY_TOKEN_START + 30 days — the default window
-  is anchored at the PROCESS's import, a fixed instant, never "now + 30
-  days" recomputed per check) — an unavailable generation authority is a
+  recorded FORGE_LANE_LEGACY_TOKEN_START + 30 days — and since Q35-06
+  the DEFAULT window is anchored at a WRITE-ONCE persisted anchor file,
+  never at a process's import, so a restart cannot re-open a fresh
+  window) — an unavailable generation authority is a
   503 refusal, never a silent legacy acceptance;
 - pending means received/authorized ONLY, in durable sequence order, and
   ``after_sequence`` is an honest cursor;
@@ -43,12 +44,15 @@ from forge.adaptive.models import ControlCommand
 from forge.api_lane_control import (
     LANE_LEGACY_TOKEN_DEADLINE_ENV,
     LANE_LEGACY_TOKEN_START_ENV,
+    LEGACY_CREDENTIAL_ANCHOR_FILE_ENV,
+    LegacyWindowInvalid,
     _PROCESS_MIGRATION_START,
     _legacy_window_open,
     _superseded_generation,
     lane_control_token,
     legacy_token_deadline,
     legacy_token_start,
+    resolve_legacy_window,
     verify_lane_token,
 )
 from forge.config import Settings
@@ -97,6 +101,13 @@ def _cmd(seq: int, *, work_id: str = WORK, kind: str = "steer", **overrides) -> 
 
 def auth(work_id: str = WORK) -> dict[str, str]:
     return {"Authorization": f"Bearer {lane_control_token(SECRET, work_id)}"}
+
+
+@pytest.fixture(autouse=True)
+def _isolated_legacy_anchor(tmp_path, monkeypatch):
+    """Q35-06: every default-window resolution in this module persists its
+    write-once anchor under the test's own tmp dir — never the checkout."""
+    monkeypatch.setenv(LEGACY_CREDENTIAL_ANCHOR_FILE_ENV, str(tmp_path / "legacy-anchor"))
 
 
 @pytest.fixture()
@@ -729,28 +740,38 @@ async def _row(app, command_id: str) -> ControlCommandRow:
 
 
 class TestLegacyTokenDeadline:
-    """R32-03: the deadline is a FIXED instant, never "now + 30 days"
+    """R32-03/Q35-06: the deadline is a FIXED instant, never "now + 30 days"
     recomputed per check (the reviewer's proof: a sliding deadline is
     accepted on day 3650). Anchors, in order: the explicit deadline env,
-    the RECORDED migration start env + 30 days (restart-stable), this
-    process's import time + 30 days."""
+    the RECORDED migration start env + 30 days (restart-stable), and —
+    since Q35-06 — the WRITE-ONCE persisted anchor file + 30 days; with
+    no anchor persistable the window is REFUSED, never re-anchored at a
+    fresh process's import."""
 
-    def test_the_default_deadline_is_anchored_at_the_process_start(self):
-        deadline = legacy_token_deadline({})
+    def test_the_default_deadline_is_anchored_at_a_write_once_file(self, tmp_path):
+        anchor = tmp_path / "anchor"
+        env = {LEGACY_CREDENTIAL_ANCHOR_FILE_ENV: str(anchor)}
 
-        assert deadline == _PROCESS_MIGRATION_START + timedelta(days=30)
+        window = resolve_legacy_window(env)
 
-    def test_the_default_deadline_does_not_slide_between_checks(self):
-        """The reviewer's P01 core: two checks after one another must see
-        the SAME deadline — the old derivation moved it 30 days into the
-        future on every authorization request, so it never arrived."""
-        first = legacy_token_deadline({})
-        second = legacy_token_deadline({})
+        assert anchor.is_file()  # created on the first resolution...
+        assert window.source == "persisted-file"
+        assert window.anchor == _PROCESS_MIGRATION_START  # ...with the seed
+        assert window.deadline == _PROCESS_MIGRATION_START + timedelta(days=30)
+        assert legacy_token_deadline(env) == window.deadline
+
+    def test_the_default_deadline_does_not_slide_between_resolutions(self, tmp_path):
+        """The reviewer's P01 core: two resolutions after one another must
+        see the SAME deadline — the persisted file anchors it, not the
+        clock and not whichever process happens to resolve."""
+        env = {LEGACY_CREDENTIAL_ANCHOR_FILE_ENV: str(tmp_path / "anchor")}
+        first = legacy_token_deadline(env)
+        second = legacy_token_deadline(env)
 
         assert first == second
         # ...and it is reachable: a controlled clock AT the anchored
         # deadline closes the window (equality is past the window).
-        assert _legacy_window_open({}) is (datetime.now(timezone.utc) < first)
+        assert _legacy_window_open(env) is (datetime.now(timezone.utc) < first)
 
     def test_an_explicit_iso_deadline_is_honored(self):
         fixed = "2020-01-01T00:00:00+00:00"
@@ -759,11 +780,12 @@ class TestLegacyTokenDeadline:
         ) == datetime.fromisoformat(fixed)
         naive = legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "2020-01-01"})
         assert naive.tzinfo is not None  # naive reads as UTC
-        # malformed degrades to the PROCESS-ANCHORED default window — a
-        # fixed instant, never a fresh "now + 30 days" and never open-ended
-        assert legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "soon"}) == (
-            _PROCESS_MIGRATION_START + timedelta(days=30)
-        )
+        # Q35-06: malformed (or set-but-empty) explicit configuration is a
+        # TYPED failure — never a silent re-anchor onto a default window.
+        with pytest.raises(LegacyWindowInvalid, match=LANE_LEGACY_TOKEN_DEADLINE_ENV):
+            legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "soon"})
+        with pytest.raises(LegacyWindowInvalid, match="empty"):
+            legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "   "})
 
     def test_a_recorded_migration_start_fixes_the_deadline_thirty_days_out(self):
         """The persisted shape: FORGE_LANE_LEGACY_TOKEN_START records when
@@ -777,10 +799,9 @@ class TestLegacyTokenDeadline:
         # A naive start reads as UTC, same as the deadline spelling.
         naive = legacy_token_start({LANE_LEGACY_TOKEN_START_ENV: "2030-05-01"})
         assert naive == datetime(2030, 5, 1, tzinfo=timezone.utc)
-        # Malformed start: fall back to the process anchor, never slide.
-        assert legacy_token_start({LANE_LEGACY_TOKEN_START_ENV: "soon"}) == (
-            _PROCESS_MIGRATION_START
-        )
+        # Q35-06: a malformed recorded start is a typed failure too.
+        with pytest.raises(LegacyWindowInvalid, match=LANE_LEGACY_TOKEN_START_ENV):
+            legacy_token_start({LANE_LEGACY_TOKEN_START_ENV: "soon"})
         # The explicit deadline still wins over a recorded start.
         both = {
             LANE_LEGACY_TOKEN_START_ENV: "2030-05-01",

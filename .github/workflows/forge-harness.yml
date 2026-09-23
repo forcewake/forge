@@ -443,12 +443,19 @@ jobs:
       - name: Emit candidate artifact
         if: always()
         run: |
-          # Belt and braces for the local exclude: lane infrastructure is
-          # never a deliverable.
-          rm -rf .codegraph .venv
-          rm -rf __pycache__ .pytest_cache
-          find . -name '*.pyc' -delete 2>/dev/null || true
-          git add -A
+          # Q35-01: the candidate bytes are collected by the packaged
+          # collector — NEVER by inline git in the original checkout. A
+          # resumed lane restored its WIP into a stable SIBLING generation
+          # (.forge-workspace-gen-<id>/) and chdir'd the LANE process
+          # there; this step's fresh shell still sits in the checkout, so
+          # the collector resolves the ACTIVE tree through the checkout's
+          # .forge/workspace-generation pointer (ownership-validated: a
+          # forged or foreign pointer yields zero artifacts and a red
+          # step). A fresh run has no pointer and collects the checkout
+          # itself — the classic no-resume flow, byte-compatible. The
+          # infrastructure cleanup (.codegraph/.venv/__pycache__/
+          # .pytest_cache/*.pyc) runs INSIDE the collected tree, inside
+          # the collector.
           # R16/A08: stage the candidate in a directory whose name carries
           # NO leading dot. upload-artifact@v4 (>= 4.4.0) excludes hidden
           # files by default AND its globber drops dot-directories before
@@ -457,8 +464,14 @@ jobs:
           # two contract files are ever staged here; nothing else can ride
           # along, so include-hidden-files stays unnecessary.
           rm -rf forge-output && mkdir -p forge-output
-          git diff --cached --binary --full-index "${{ inputs.attempt_base_oid }}" \
-            > forge-output/candidate.diff || true
+          # A Git failure here FAILS the step — the old failure-swallowing
+          # suffix (a failed diff silently becoming an empty "successful"
+          # candidate) is gone; a zero-change candidate stays a valid
+          # exit-0 result.
+          python -m forge.harness_entry --collect-candidate \
+            --forge-run-id "${{ inputs.run_id }}" \
+            --attempt-base-oid "${{ inputs.attempt_base_oid }}" \
+            --output-root forge-output
           # Meta schema v2 (schema_version, run + GitHub attempt identity,
           # sha256 digest binding the meta to the exact diff bytes, usage
           # receipt; A18 adds the additive `bootstrap` classification and

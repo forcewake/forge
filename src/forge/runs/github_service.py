@@ -102,9 +102,17 @@ from forge.durable import (
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
 from forge.durable.claims import current_claim
-from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
+from forge.execution.github_actions import (
+    _ACTIVE_RUN_STATUSES,
+    ActionsHandle,
+    GitHubActionsExecutor,
+)
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.llm import LLMError, LLMResponseError
+
+# Q35-02: the continuation decision model (pure over an evidence snapshot);
+# module-level so the retry/revival regions stay typed.
+from forge.adaptive import continuation
 from forge.adaptive.discovery_stage import (
     DiscoveryRunContext,
     DiscoveryStageError,
@@ -129,8 +137,20 @@ from forge.adaptive.system_context import (
 )
 from forge.factory.planner import PLAN_SUMMARY_CHARS, PLANNER_TIER
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
-from forge.adaptive.admission import execution_capacity_comment
-from forge.adaptive.admission import lease_snapshot, release_run_leases, try_acquire_lease
+from forge.adaptive.admission import (
+    NativeProbe,
+    NativeStatus,
+    clear_native_start_intent,
+    definite_start_refusal,
+    execution_capacity_comment,
+    lease_snapshot,
+    open_lease_for_run,
+    record_native_handle,
+    record_native_start_intent,
+    reconcile_draining,
+    release_lease_with_evidence,
+    try_acquire_lease,
+)
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError, GitHubRepositoryReader
 from forge.integrations.github_flow import (
@@ -1268,6 +1288,11 @@ class GitHubRunService:
         A11: one durable, idempotent transition — the attempt record commits
         with the CAS walk, keyed by the webhook delivery id (same id twice is
         a no-op; a different id while an attempt is in flight is refused).
+
+        Q35-02: the retry's WIP-continuity contract is SELECTED from the
+        dead attempt's recoverable state (the continuation decision, made
+        once, persisted before this ack, reused on repeated events) — no
+        longer unconditionally ``required``.
         """
         match = _RETRY_RE.search(note_text or "")
         if match is None:
@@ -1283,6 +1308,10 @@ class GitHubRunService:
             return
 
         requested = (match.group(1) or "").lower()
+        # Q35-02: ``/retry <run-id> restart`` — the operator's explicit
+        # discard of the held WIP (the EXPLICIT_RESTART arm of the
+        # continuation decision below).
+        discard_requested = continuation.operator_discard_requested(note_text)
         attempt_key = retry_delivery_key(delivery_id)
         run_id: str | None = None
         # A07: the dispatch leg below aims at the VERIFIED run's subject, read
@@ -1296,6 +1325,9 @@ class GitHubRunService:
         status_reason = ""
         cycle = 1
         evidence: dict = {}
+        candidates: list = []
+        cancel_requested = False
+        other_active = False
         async with self._session_factory() as session:
             run = await resolve_retry_target(
                 session,
@@ -1326,30 +1358,83 @@ class GitHubRunService:
                     if await open_revival_attempt(session, run_id=run.id) is not None:
                         rejection = retry_in_flight_rejection(run.id)
                 if not rejection:
-                    rejection = retry_rejection(
-                        run,
-                        other_active=await has_active_run(
-                            session,
-                            provider=run.provider,
-                            project_id=run.project_id,
-                            issue_iid=run.issue_iid,
-                            repo_full_name=run.github_repo_full_name,
-                            exclude_run_id=run.id,
-                        ),
+                    other_active = await has_active_run(
+                        session,
+                        provider=run.provider,
+                        project_id=run.project_id,
+                        issue_iid=run.issue_iid,
+                        repo_full_name=run.github_repo_full_name,
+                        exclude_run_id=run.id,
                     )
-                if not rejection:
-                    status = run.status
-                    status_reason = run.status_reason or ""
-                    cycle = run.commit_cycle or 1
-                    evidence = dict(run.evidence or {})
+                    rejection = retry_rejection(run, other_active=other_active)
+                # Q35-02: the continuation decision reads these whatever the
+                # rejection said — the proven-no-WIP override below needs
+                # them even when retry_rejection refused.
+                status = run.status
+                status_reason = run.status_reason or ""
+                cycle = run.commit_cycle or 1
+                evidence = dict(run.evidence or {})
+                candidates = list(run.candidate_shas or [])
+                cancel_requested = bool(run.cancel_requested)
         if run_id is None:
             logger.info(
                 "GitHub /retry on %s#%s — no retryable run", self._repo_full_name, issue_number
             )
             return
+        # Q35-02: decide ONCE, from the recorded recoverable state, BEFORE the
+        # ack note — and reuse the persisted decision on a repeated retry
+        # event whose evidence snapshot is unchanged (one decision, one
+        # logical attempt).
+        decision = await self._select_continuation(
+            run_id,
+            death_reason=status_reason,
+            evidence=evidence,
+            candidate_shas=candidates,
+            operator_discard_requested=discard_requested,
+        )
+        if (
+            rejection
+            # Only the "nothing to retry in place" arm of retry_rejection is
+            # superseded here, and only when the decision PROVES it wrong:
+            # with no vendor session ever started there provably is no work
+            # to lose, so the committed baseline IS the retry's continuation
+            # source — the checkpoint that arm demands can never exist.
+            and decision.mode is continuation.ContinuationMode.COMMITTED_BASELINE
+            and not other_active
+            and status in ("failed", "blocked")
+            and not cancel_requested
+            and not candidates
+        ):
+            logger.info(
+                "GitHub /retry of run %s — proven no-WIP death overrides the "
+                "no-candidate/no-checkpoint refusal (Q35-02)",
+                run_id[:8],
+            )
+            rejection = ""
         if rejection:
             await self._post_journaled_note(
                 project_id, issue_number, f"🔁 {rejection}", run_id, "retry_rejected_note"
+            )
+            return
+        if not decision.dispatchable:
+            # Q35-02, UNCERTAIN: the recoverable state is unknown — absence of
+            # a checkpoint never proves there was no WIP, so NOTHING is
+            # dispatched (zero native workflow_dispatch calls, zero vendor
+            # sessions, no attempt, no cycle bump). The operator note names
+            # the blocker and the two honest ways out: an explicit restart
+            # (``/retry <run-id> restart``) or a reconciliation first.
+            await self._post_journaled_note(
+                project_id,
+                issue_number,
+                continuation.uncertain_retry_note(run_id, decision),
+                run_id,
+                "retry_uncertain_note",
+            )
+            logger.info(
+                "GitHub /retry of run %s parked for an operator decision — continuation "
+                "source unknown (%s), nothing dispatched (Q35-02)",
+                run_id[:8],
+                decision.mode_selected,
             )
             return
 
@@ -1405,18 +1490,23 @@ class GitHubRunService:
 
         branch = github_factory_branch(retry_issue_number, run_id)
         logger.info(
-            "GitHub run %s retried by @%s — re-dispatching %s (cycle %d)",
+            "GitHub run %s retried by @%s — re-dispatching %s (cycle %d, continuation %s)",
             run_id[:8],
             author_username,
             branch,
             cycle + 1,
+            decision.mode_selected,
         )
         await self._post_journaled_note(
             project_id,
             issue_number,
             f"## 🔁 Run `{run_id[:8]}` retried by @{author_username}\n\n"
             f"- Branch: `{branch}` — the work continues in place, no re-planning\n"
-            f"- Commit cycle: {cycle + 1}\n\n*This is an automated message.*",
+            f"- Commit cycle: {cycle + 1}\n"
+            # Q35-02: the ack NAMES the selected source of continuation (and
+            # never promises preservation when the decision is a discard).
+            f"- Continuation: {continuation.retry_ack_line(decision)}\n"
+            "\n*This is an automated message.*",
             run_id,
             "retry_ack_note",
         )
@@ -1440,15 +1530,81 @@ class GitHubRunService:
                 issue_number=retry_issue_number,
                 repair_context=repair_context,
                 repair_reason=repair_reason,
-                # R32-04: the retry CONTINUES the work in place ("no
-                # re-planning" — the ack above) — the held checkpoint's
-                # restore is REQUIRED, never a silent start-over.
-                resume_mode=LANE_RESUME_MODE_REQUIRED,
+                # Q35-02: the WIP-continuity contract is the one the decision
+                # SELECTED from the recoverable state — ``required`` only
+                # when an exact committed checkpoint is the authorized
+                # continuation (R32-04's guard then enforces the restore); a
+                # PROVEN no-WIP death retries ``fresh`` on the frozen
+                # committed base; an explicit operator discard is ``restart``.
+                resume_mode=decision.resume_mode(),
             )
         except Exception as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             raise
         await self._complete_action(action_id, "succeeded", {"backend": "ci_harness"})
+
+    async def _select_continuation(
+        self,
+        run_id: str,
+        *,
+        death_reason: str,
+        evidence: dict,
+        candidate_shas: list | None = None,
+        operator_discard_requested: bool = False,
+        checkpoint_lookup: Callable[[str], Any] | None = None,
+    ) -> continuation.ContinuationDecision:
+        """The run's continuation decision — reused when the evidence says so.
+
+        Q35-02: one decision per retry event, computed BEFORE the ack note and
+        persisted on the run's evidence (``continuation``: mode, reason,
+        decided_at, evidence digest). A repeated retry event whose objective
+        evidence snapshot is unchanged re-materializes the SAME decision
+        instead of re-deciding; a materially changed snapshot re-decides.
+
+        Checkpoint presence comes from the authority the /retry path already
+        consults (the local index, then the lane-control checkpoint API) via
+        the injectable *checkpoint_lookup* — a failing lookup is UNKNOWN
+        (None), never a proven absence.
+        """
+        lookup = checkpoint_lookup or continuation.durable_checkpoint_lookup
+        try:
+            checkpoint = lookup(run_id)
+            if isinstance(checkpoint, Awaitable):
+                checkpoint = await checkpoint
+        except Exception:  # noqa: BLE001 — a failed lookup is unknown, not False
+            checkpoint = None
+        prior_doc = evidence.get(continuation.CONTINUATION_EVIDENCE_KEY)
+        snapshot = continuation.evidence_from_record(
+            death_reason=death_reason,
+            evidence=evidence,
+            candidate_shas=candidate_shas,
+            operator_discard_requested=operator_discard_requested,
+            checkpoint_committed=checkpoint if isinstance(checkpoint, bool) else None,
+            prior_mode_selected=(
+                str(prior_doc.get("mode")) if isinstance(prior_doc, dict) else None
+            ),
+        )
+        reused = continuation.matching_decision(prior_doc, snapshot)
+        if reused is not None:
+            logger.info(
+                "Run %s continuation decision reused (%s, decided %s) — evidence "
+                "snapshot unchanged (Q35-02)",
+                run_id[:8],
+                reused.mode_selected,
+                reused.decided_at,
+            )
+            return reused
+        decision = continuation.decide_continuation(snapshot)
+        await self._merge_run_evidence(
+            run_id, {continuation.CONTINUATION_EVIDENCE_KEY: decision.as_document()}
+        )
+        logger.info(
+            "Run %s continuation decision: %s — %s (Q35-02)",
+            run_id[:8],
+            decision.mode_selected,
+            decision.reason,
+        )
+        return decision
 
     async def evaluate_revival_recovery(self, now: datetime | None = None) -> int:
         """One recovery pass over this repo lane's stranded revival attempts (A11)."""
@@ -1667,12 +1823,31 @@ class GitHubRunService:
         resumed epoch) BEFORE the lane launches, so the dispatched token
         is attempt-scoped to the revival and every credential of the
         stalled attempt retires with it.
+
+        Q35-02: the revival carries the SAME continuation decision as /retry
+        — reused from the run's persisted decision when the evidence snapshot
+        is unchanged (a /retry whose dispatch stranded and the recovery scan
+        re-drives), decided fresh otherwise (an auto-revive, whose death
+        reason survives in the revival stamp). An UNCERTAIN decision
+        dispatches NOTHING: zero native workflow_dispatch calls, zero vendor
+        sessions — the ambiguity goes to the operator via /retry's note, not
+        into a guessed re-execution.
         """
         fence = await pause_fence_decision(self._session_factory, run_id)
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
             issue_number = run.issue_iid
+            evidence = dict(run.evidence or {})
+            candidates = list(run.candidate_shas or [])
+            # The death reason the walk to ``proposing`` overwrote: the
+            # auto-revive stamp keeps the ORIGINAL terminal reason.
+            revival_reason = str(
+                (evidence.get("revival") or {}).get("reason")
+                if isinstance(evidence.get("revival"), dict)
+                else ""
+            )
+            death_reason = revival_reason or str(run.status_reason or "")
             run.cancellation_generation = max(
                 int(run.cancellation_generation or 0) + 1, fence.resumed_publication_epoch or 0
             )
@@ -1680,15 +1855,30 @@ class GitHubRunService:
         if issue_number is None:
             logger.warning("GitHub revival of run %s without an issue — skipping", run_id[:8])
             return
+        decision = await self._select_continuation(
+            run_id,
+            death_reason=death_reason,
+            evidence=evidence,
+            candidate_shas=candidates,
+        )
+        if not decision.dispatchable:
+            logger.warning(
+                "GitHub revival of run %s stood down — continuation source unknown "
+                "(%s); an operator must resolve it via /retry (Q35-02)",
+                run_id[:8],
+                decision.mode_selected,
+            )
+            return
         await self._advance_harness(
             run_id,
             project_id=project_id,
             issue_number=issue_number,
-            # R32-04: a revival re-opens a STALLED attempt — the same
-            # WIP-continuity contract as /retry: the held checkpoint's
-            # restore is REQUIRED (a resumed attempt never silently
-            # starts over on its base).
-            resume_mode=LANE_RESUME_MODE_REQUIRED,
+            # Q35-02: the WIP-continuity contract the decision selected from
+            # the recoverable state — ``required`` only when an exact
+            # committed checkpoint is the authorized continuation (R32-04's
+            # strict restore guard then enforces it lane-side); a proven
+            # no-WIP death is the ``fresh`` committed baseline.
+            resume_mode=decision.resume_mode(),
         )
 
     # ------------------------------------------------------------------
@@ -3291,9 +3481,18 @@ class GitHubRunService:
             action_id = await controller.record_action(run_id, "harness_start")
             await session.commit()
 
+        # Q35-04: the native-start intent marker, keyed for a probe that
+        # may run in a FRESH process (owner/repo/workflow + the run-owned
+        # branch — only this run's dispatches live on that branch).
+        intent_ref = f"github:workflow:{self._owner}/{self._repo}/{workflow}@{branch}"
         try:
             await self._ensure_harness_branch(branch, attempt_base)
             plan_note_id = await self._journaled_plan_note_id(run_id)
+            # Q35-04: persisted BEFORE dispatch_workflow — once durable,
+            # a lost start response or a worker death leaves
+            # dispatched_unknown occupancy (the slot cannot free on local
+            # status; the reconciler probes this marker).
+            await record_native_start_intent(self._session_factory, run_id, intent_ref)
             correlated = await executor.launch(
                 handle,
                 inputs={
@@ -3354,10 +3553,35 @@ class GitHubRunService:
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
                 },
             )
-        except Exception as exc:
+        except GitHubAPIError as exc:
+            if definite_start_refusal(exc.status_code):
+                # Q35-04: the provider PROVED it refused the start (a
+                # definitive 4xx — the workflow/ref was rejected, no job
+                # exists). Clear the intent so the terminal release sees
+                # proven never-dispatched and capacity returns now.
+                await clear_native_start_intent(self._session_factory, run_id, intent_ref)
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
             return
+        except Exception as exc:
+            # Transport failure / 5xx / retryable — the start's outcome is
+            # undecidable: the intent STAYS (dispatched_unknown) and the
+            # reconciler's probe decides the occupancy (Q35-04).
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            return
+
+        # Q35-04: the provider answered — attach the native correlation
+        # (dispatched_unknown → native_running). Provider-shaped so a
+        # fresh process can resolve the occupancy alone.
+        if correlated.run_id:
+            lease = await open_lease_for_run(self._session_factory, run_id)
+            if lease is not None:
+                await record_native_handle(
+                    lease.lease_id,
+                    f"github:actions:{self._owner}/{self._repo}:{correlated.run_id}",
+                    self._session_factory,
+                )
 
         await self._complete_action(
             action_id,
@@ -3651,6 +3875,17 @@ class GitHubRunService:
             except Exception:
                 # One broken run must not stall the reconciler loop.
                 logger.exception("Actions harness reconcile failed for run %s", run_id[:8])
+        # Q35-04: the occupancy pass — leases whose runs landed terminal
+        # above parked draining; probe their native jobs and release the
+        # ones OBSERVED terminal (the same tick that observed them).
+        try:
+            released = await self._reconcile_draining_leases()
+            if released:
+                logger.info(
+                    "GitHub occupancy pass released %d draining execution lease(s)", released
+                )
+        except Exception:
+            logger.exception("GitHub draining-lease occupancy pass failed")
 
     async def _evaluate_harness_one(self, run_id: str, now: datetime) -> None:
         """Poll one waiting_harness run through its journaled Actions handle.
@@ -5758,14 +5993,93 @@ class GitHubRunService:
         if status in TERMINAL_STATUSES:
             await self._release_execution_lease(run_id, f"terminal:{status.value}")
 
+    def _native_occupancy_probe(self) -> NativeProbe:
+        """The Actions occupancy probe for :func:`reconcile_draining` (Q35-04).
+
+        Two key shapes, both provider-prefixed so a foreign lease reads
+        UNKNOWN (each provider's reconciler owns its own keys):
+
+        - ``github:actions:<owner>/<repo>:<run_id>`` — the handle the
+          dispatch recorded: one workflow-run read, terminal when the
+          status left the active set;
+        - ``github:workflow:<owner>/<repo>/<workflow>@<branch>`` — the
+          intent marker of a start whose handle never landed (lost
+          response): the workflow's dispatch runs on the run-OWNED
+          branch decide it — none means the start never created a run
+          (capacity returns), any run terminal means the job finished,
+          otherwise running. A provider error raises and reads UNKNOWN:
+          uncertain occupancy holds.
+        """
+
+        async def probe(key: str) -> NativeStatus:
+            if not key.startswith("github:"):
+                return NativeStatus.UNKNOWN  # another provider's lease
+            payload = key.split(":", 1)[1]
+            if payload.startswith("actions:"):
+                # github:actions:<owner>/<repo>:<run_id>
+                body = payload.split(":", 1)[1]
+                target, _, run_raw = body.rpartition(":")
+                owner, _, repo = target.partition("/")
+                run = await self._stack.client.get_workflow_run(owner, repo, int(run_raw))
+                status = str(run.get("status") or "").lower()
+                return (
+                    NativeStatus.RUNNING
+                    if status in _ACTIVE_RUN_STATUSES
+                    else NativeStatus.TERMINAL
+                )
+            if payload.startswith("workflow:"):
+                # github:workflow:<owner>/<repo>/<workflow>@<branch>
+                body = payload.split(":", 1)[1]
+                target, _, branch = body.rpartition("@")
+                owner, _, rest = target.partition("/")
+                repo, _, workflow = rest.partition("/")
+                runs = await self._stack.client.list_workflow_dispatch_runs(
+                    owner, repo, workflow, head_branch=branch
+                )
+                if not runs:
+                    return NativeStatus.TERMINAL  # nothing ever started
+                statuses = {str(run.get("status") or "").lower() for run in runs}
+                if statuses - _ACTIVE_RUN_STATUSES:
+                    return NativeStatus.TERMINAL
+                return NativeStatus.RUNNING
+            return NativeStatus.UNKNOWN
+
+        return probe
+
+    async def _reconcile_draining_leases(self) -> int:
+        """One occupancy pass over DRAINING leases (the reconciler tick).
+
+        A slot frees only when its native job is OBSERVED terminal
+        through the provider probe; undecidable keys stay draining with
+        their age visible (Q35-04).
+        """
+        return await reconcile_draining(self._session_factory, self._native_occupancy_probe())
+
     async def _release_execution_lease(self, run_id: str, reason: str) -> None:
-        """Free the run's execution slot (idempotent; no lease = no-op)."""
-        released = await release_run_leases(self._session_factory, run_id, reason=reason)
-        if released:
+        """Free the run's execution slot — from EVIDENCE, never local
+        status alone (Q35-04; idempotent; no lease = no-op).
+
+        A lease with NO native-start intent (the builtin lane, a pre-call
+        abort) is proven never-dispatched and releases now; a lease
+        carrying an intent parks DRAINING for the reconciler's native
+        probe — the provider may have accepted a start whose response
+        was lost, and a local terminal verdict is not evidence the
+        runner stopped.
+        """
+        outcome = await release_lease_with_evidence(self._session_factory, run_id, reason=reason)
+        if outcome.released:
             logger.info(
                 "GitHub run %s released %d execution lease(s): %s",
                 run_id[:8],
-                released,
+                outcome.released,
+                reason,
+            )
+        if outcome.drained:
+            logger.info(
+                "GitHub run %s parked %d execution lease(s) draining (native occupancy"
+                " unobserved): %s",
+                run_id[:8],
+                outcome.drained,
                 reason,
             )
 

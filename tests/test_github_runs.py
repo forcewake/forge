@@ -3405,8 +3405,16 @@ class TestAttemptScopedDispatchCredential:
         (dispatch,) = fake.dispatch_inputs
         assert dispatch["inputs"]["lane_control_token"] == ""
 
-    async def test_a_retry_opens_a_new_attempt_generation_and_retires_the_old_token(self, db, fake):
+    async def test_a_retry_opens_a_new_attempt_generation_and_retires_the_old_token(
+        self, db, fake, monkeypatch
+    ):
         from forge.api_lane_control import lane_control_token
+        from forge.runs import revival
+
+        # Q35-02: the retry dispatches only with a JUSTIFIED continuation —
+        # a committed checkpoint makes the exact-WIP resume the authorized
+        # one, so this shape still re-dispatches (required mode).
+        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
 
         service = make_service(db, fake, settings=self._harness_settings())
         run_id = await start(service)
@@ -3483,10 +3491,16 @@ class TestDispatchSelectsResumeMode:
         (dispatch,) = fake.dispatch_inputs
         assert dispatch["inputs"]["lane_resume_mode"] == "fresh"
 
-    async def test_a_retry_dispatches_the_required_mode(self, db, fake):
-        """/retry continues the work in place (no re-planning) — the held
+    async def test_a_retry_dispatches_the_required_mode(self, db, fake, monkeypatch):
+        """/retry continues the work in place (no re-planning) — and Q35-02
+        keeps the required contract for exactly the shape that justifies it:
+        a committed checkpoint IS the authorized continuation, so the held
         checkpoint's restore is a PRECONDITION of the retried lane, decided
         by the dispatch, not lane-side env setup."""
+        from forge.runs import revival
+
+        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+
         service = self._service(db, fake)
         run_id = await self._drive_to_failed_with_candidate(db, fake, service)
         fake.dispatch_inputs.clear()
@@ -3502,11 +3516,15 @@ class TestDispatchSelectsResumeMode:
         (dispatch,) = fake.dispatch_inputs
         assert dispatch["inputs"]["lane_resume_mode"] == "required"
 
-    async def test_a_revival_redispatch_dispatches_the_required_mode(self, db, fake):
+    async def test_a_revival_redispatch_dispatches_the_required_mode(self, db, fake, monkeypatch):
         """The revival recovery scan's re-dispatch (a stalled attempt
         re-opened through the revival graph edge) carries the SAME
-        WIP-continuity contract as /retry."""
+        WIP-continuity contract as /retry — required when the committed
+        checkpoint is the authorized continuation (Q35-02)."""
         from forge.durable.controller import Controller
+        from forge.runs import revival
+
+        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
 
         service = self._service(db, fake)
         run_id = await self._drive_to_failed_with_candidate(db, fake, service)
@@ -3627,7 +3645,7 @@ class TestConditionalFenceTransitions:
         assert decision.fenced is False
 
     async def test_the_publisher_refuses_the_old_attempts_candidate_and_publishes_the_new(
-        self, db, fake
+        self, db, fake, monkeypatch
     ):
         """The composed NEXT-02 chain through the REAL publisher: pause →
         resume → retry (new attempt, generation aligned to the fence) → a
@@ -3635,6 +3653,11 @@ class TestConditionalFenceTransitions:
         pre-dispatch guard with the stale-grant reason and ZERO native
         writes; the new attempt's candidate publishes."""
         from forge.durable.claims import ExecutionClaim, bind_claim
+        from forge.runs import revival
+
+        # Q35-02: a committed checkpoint keeps the retry dispatchable
+        # (exact-WIP continuation) so the fence chain below is exercised.
+        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
 
         service = make_service(
             db,
@@ -3922,10 +3945,13 @@ class TestExecutionLeaseAtDispatch:
         ]
         assert any("execution slot" in body for body in parked_comments)
 
-        # A terminal outcome releases the slot: cancel the first run, and
-        # the NEXT dispatch (a fifth, never-approved run — the parked one
-        # consumed its gate when it parked, its recovery spelling is
-        # /retry) acquires what it freed.
+        # A terminal outcome releases the slot THROUGH OBSERVED NATIVE
+        # TERMINATION (Q35-04): cancel the first run — its lease parks
+        # draining because the dispatched Actions run is still live — then
+        # the reconciler's occupancy pass observes the run finished and
+        # frees the slot. The NEXT dispatch (a fifth, never-approved run —
+        # the parked one consumed its gate when it parked, its recovery
+        # spelling is /retry) acquires what it freed.
         await service.handle_cancel(
             project_id=PROJECT_ID,
             issue_number=issues[0],
@@ -3933,6 +3959,10 @@ class TestExecutionLeaseAtDispatch:
             author_username="alice",
         )
         assert (await get_run(db, runs[issues[0]])).status == FlowStatus.CANCELLED.value
+        # The native job ends: the reconciler's probe now observes terminal.
+        for actions_run in fake.actions_runs:
+            actions_run.update(status="completed", conclusion="cancelled")
+        await service.evaluate_waiting_harness()
         await self._go_on(service, issues[4], runs[issues[4]])
         assert (await get_run(db, runs[issues[4]])).status == FlowStatus.WAITING_HARNESS.value
         assert len(fake.calls_of("dispatch_workflow")) == dispatches_before_park + 1

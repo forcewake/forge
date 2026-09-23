@@ -331,11 +331,15 @@ class TestBoundedDiscovery:
         assert run.status == FlowStatus.BLOCKED.value
         assert "dispatch never observed" in (run.status_reason or "")
         assert "harness_infrastructure" in (run.status_reason or "")
-        assert len(fake.calls_of("list_workflow_dispatch_runs")) == discovery_at_dispatch + 3
+        # Q35-04: the tick that parks the run also runs the OCCUPANCY pass
+        # over its drained lease — one more dispatch-runs listing (empty:
+        # nothing ever started, so the capacity is proven free and
+        # released). The cap still bounds the RECONCILER's retries.
+        assert len(fake.calls_of("list_workflow_dispatch_runs")) == discovery_at_dispatch + 4
 
         # The blocked run is out of the reconciler's set — no further calls.
         await service.evaluate_waiting_harness()
-        assert len(fake.calls_of("list_workflow_dispatch_runs")) == discovery_at_dispatch + 3
+        assert len(fake.calls_of("list_workflow_dispatch_runs")) == discovery_at_dispatch + 4
 
     async def test_a_late_surfacing_run_still_completes_within_the_cap(self, db, fake):
         """Discovery is bounded but not eager: while attempts remain, a run

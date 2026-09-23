@@ -41,3 +41,55 @@ jobs read, then restart `forge-litellm`. In-flight harness jobs already
 running keep their env — a key revoked mid-run fails that job honestly
 (classified `harness_infrastructure` when auth patterns appear in the
 trace) and the run blocks or repairs per the standard rules.
+
+## Legacy lane-token drain and rotation (Q35-06)
+
+The lane credential has two spellings: the standing
+**generation-scoped token** (`HMAC(secret, work_id:generation)`, minted
+by each dispatch for the run's current attempt) and the **legacy
+work-scoped token** (`HMAC(secret, work_id)`, no generation), kept
+working only inside a bounded migration window. That window no longer
+depends on process lifetimes — resolve it once, and every restart
+agrees:
+
+| Anchor | Configuration | Restart-stable? |
+|--------|---------------|-----------------|
+| Explicit deadline | `FORGE_LEGACY_CREDENTIAL_DEADLINE` (ISO date; the older `FORGE_LANE_LEGACY_TOKEN_DEADLINE` spelling is honored) | Yes — operator state |
+| Recorded start | `FORGE_LANE_LEGACY_TOKEN_START` + 30 days | Yes — operator state |
+| Persisted anchor file | written **once** on first resolution; default `lane-legacy-credential-anchor` under `FORGE_CHECKPOINT_STORE_DIR` (override with `FORGE_LEGACY_CREDENTIAL_ANCHOR_FILE`) | Yes — deployment state |
+| Nothing persistable | — | Legacy acceptance **refused** (fail-closed); generation tokens unaffected |
+
+Operator rules:
+
+1. **Set an explicit deadline on promotion.** A newly promoted profile
+   should record `FORGE_LEGACY_CREDENTIAL_DEADLINE` from day one; the
+   value is a fixed instant both processes started on either side of it
+   agree on. A date already in the past is valid (the window is closed);
+   a malformed, empty, or out-of-sanity-bounds value is refused —
+   `forge doctor` reports it as `credential.configuration_invalid` and
+   the APIs refuse legacy tokens with the same diagnostic rather than
+   silently opening a fresh window.
+2. **Do not delete or hand-edit the anchor file.** It is write-once
+   deployment state: once it exists, its instant is the migration start
+   forever. Corrupt or missing-and-unwritable state refuses legacy
+   tokens (fail-closed) — restore from backup, or pin the window with
+   an explicit deadline instead.
+3. **Drain before expiry.** `forge doctor`'s `credential.legacy_deadline`
+   check shows the anchor source, the deadline, days remaining, and the
+   count of grandfathered generation-less works still visible
+   (`cancellation_generation = 0`). Warn while that count is non-zero.
+   Drain means: let those attempts finish or retry them — the retry
+   dispatch mints a generation-scoped token; run history is never
+   rewritten.
+4. **Rotate `FORGE_LANE_CONTROL_SECRET` with an overlap.** Both token
+   spellings derive from the same secret, so a rotation pairs with the
+   migration window, not against it: deploy the new secret (restart),
+   then re-dispatch the live attempts so their lanes hold tokens under
+   the new secret, then revoke nothing further — old attempts die with
+   their tokens at the deadline. A secret rotated without re-dispatch
+   strands in-flight lanes exactly as any expiry would; the recovery is
+   the retry/re-dispatch path, never widening the window.
+5. **After the deadline, legacy stays dead.** A restart cannot revive a
+   legacy token: the deadline is derived from recorded state, not from
+   the new process's start. Generation-scoped tokens are unaffected by
+   the window in either direction.

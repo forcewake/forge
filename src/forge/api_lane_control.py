@@ -55,14 +55,18 @@ The server validates against the run's current generation: a token from
 a SUPERSEDED generation is refused with 403 and an actionable message,
 so a retired lane can no longer poll or ack for the resumed attempt.
 The legacy work-id-only HMAC is accepted ONLY inside an explicit
-migration window (``FORGE_LANE_LEGACY_TOKEN_DEADLINE``, or the
-recorded migration START plus 30 days —
-``FORGE_LANE_LEGACY_TOKEN_START``; with neither recorded, the window
-opens at THIS process's import and closes 30 days later, a FIXED
-instant the running process actually reaches): old attempts finish,
-new dispatches must be generation-scoped — and an UNAVAILABLE
-generation authority (a failed lookup) is a 503 refusal, never a
-silent legacy acceptance.
+migration window (``FORGE_LEGACY_CREDENTIAL_DEADLINE`` — spelling
+``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` —, or the recorded migration
+START plus 30 days — ``FORGE_LANE_LEGACY_TOKEN_START``; with neither
+recorded, the FIRST resolution persists a WRITE-ONCE anchor file
+``lane-legacy-credential-anchor`` under the checkpoint store dir —
+``FORGE_LEGACY_CREDENTIAL_ANCHOR_FILE`` overrides the location — and
+the deadline is that persisted anchor + 30 days, so a restart without
+recorded env still derives the SAME window instead of opening a fresh
+one; when no anchor can be read or persisted, legacy acceptance is
+REFUSED, fail-closed): old attempts finish, new dispatches must be
+generation-scoped — and an UNAVAILABLE generation authority (a failed
+lookup) is a 503 refusal, never a silent legacy acceptance.
 
 NEXT-01's generation policy — which transitions open a NEW attempt
 generation (and therefore retire the previous dispatch's token), and
@@ -93,7 +97,9 @@ import hmac
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Final
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -106,13 +112,18 @@ __all__ = [
     "LANE_ACK_STATES",
     "LANE_LEGACY_TOKEN_DEADLINE_ENV",
     "LANE_LEGACY_TOKEN_START_ENV",
+    "LEGACY_CREDENTIAL_ANCHOR_FILE_ENV",
+    "LEGACY_CREDENTIAL_DEADLINE_ENV",
     "LaneAuthorityUnavailable",
+    "LegacyWindow",
+    "LegacyWindowInvalid",
     "authorize_work_credential",
     "durable_run_generation",
     "lane_control_router",
     "lane_control_token",
     "legacy_token_deadline",
     "legacy_token_start",
+    "resolve_legacy_window",
     "verify_lane_token",
 ]
 
@@ -120,13 +131,21 @@ logger = logging.getLogger(__name__)
 
 lane_control_router = APIRouter()
 
-#: NEXT-01: the migration deadline for LEGACY (work-scoped, generation-less)
-#: lane tokens. Until this instant a token that never carried a generation
-#: still authenticates — old attempts finish inside the window — and after
-#: it every credential must be the dispatch-issued, attempt-scoped one.
-#: An explicit ISO date/datetime (naive values read as UTC) closes the
-#: window on the operator's exact schedule.
+#: NEXT-01/Q35-06: the migration deadline for LEGACY (work-scoped,
+#: generation-less) lane tokens. Until this instant a token that never
+#: carried a generation still authenticates — old attempts finish inside
+#: the window — and after it every credential must be the
+#: dispatch-issued, attempt-scoped one. An explicit ISO date/datetime
+#: (naive values read as UTC) closes the window on the operator's exact
+#: schedule; the value is operator STATE, so it survives restarts
+#: unchanged (R32-03).
 LANE_LEGACY_TOKEN_DEADLINE_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_DEADLINE"
+#: Q35-06: the CANONICAL explicit-deadline spelling. Functionally the
+#: same variable as ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` (either
+#: satisfies the explicit branch; the canonical name wins when both are
+#: set) — kept as a separate name so the credential-window family reads
+#: uniformly in new deployments.
+LEGACY_CREDENTIAL_DEADLINE_ENV: Final = "FORGE_LEGACY_CREDENTIAL_DEADLINE"
 #: R32-03: the RECORDED migration START — the instant the legacy-token
 #: compatibility window OPENED (the deployment that began minting
 #: generation-scoped tokens). The deadline is ``start + 30 days``, a
@@ -134,95 +153,324 @@ LANE_LEGACY_TOKEN_DEADLINE_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_DEADLINE"
 #: clock: record it once (deployment env) and process restarts cannot
 #: extend the window. Naive values read as UTC.
 LANE_LEGACY_TOKEN_START_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_START"
+#: Q35-06: where the WRITE-ONCE anchor file lives when neither an
+#: explicit deadline nor a recorded start exists. The default sits under
+#: the checkpoint store dir (``data/checkpoints``) — durable,
+#: already-backed-up deployment state — so the default window survives
+#: restarts exactly like the recorded spellings do.
+LEGACY_CREDENTIAL_ANCHOR_FILE_ENV: Final = "FORGE_LEGACY_CREDENTIAL_ANCHOR_FILE"
+#: The anchor file's name under the checkpoint store dir. Mirrored
+#: locally (not imported) because :mod:`forge.api_checkpoint_channel`
+#: imports THIS module — a cycle either way is refused.
+CHECKPOINT_STORE_DIR_ENV: Final = "FORGE_CHECKPOINT_STORE_DIR"
+DEFAULT_CHECKPOINT_STORE_DIR: Final = "data/checkpoints"
+LEGACY_CREDENTIAL_ANCHOR_FILENAME: Final = "lane-legacy-credential-anchor"
 DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS: Final = 30
+#: Sanity bounds for EXPLICIT operator configuration (Q35-06): a value a
+#: deployment could never have meant is refused as invalid, never
+#: silently re-anchored. Anything inside the bounds — including a
+#: deadline already in the past — is a VALID, honored configuration.
+LEGACY_WINDOW_EARLIEST: Final[datetime] = datetime(2019, 1, 1, tzinfo=timezone.utc)
+LEGACY_WINDOW_LATEST: Final[datetime] = datetime(2101, 1, 1, tzinfo=timezone.utc)
+#: The deadline a REFUSED window reports through the legacy
+#: ``legacy_token_deadline`` spelling: the beginning of time, i.e. the
+#: window is closed forever (fail-closed), never re-anchored.
+LEGACY_WINDOW_REFUSED_DEADLINE: Final[datetime] = datetime.min.replace(tzinfo=timezone.utc)
 
-#: R32-03: the migration start captured ONCE, at module import (process
-#: start). This is the anchor for the DEFAULT window when the operator
-#: recorded neither a deadline nor a start: the deadline is
-#: ``_PROCESS_MIGRATION_START + 30 days`` — computed at import, reused by
-#: EVERY check, so a long-running control plane actually reaches it on
-#: day 30. The reviewer's proof against the previous derivation: a
-#: deadline recomputed as ``now() + 30 days`` on each authorization
-#: request never arrives (day 3650 still accepted). A restart without a
-#: recorded start re-anchors here; deployments that must survive
-#: restarts record ``FORGE_LANE_LEGACY_TOKEN_START`` (or the explicit
-#: deadline) instead.
+#: R32-03/Q35-06: the migration start captured ONCE, at module import
+#: (process start). Since Q35-06 this instant is ONLY the SEED written
+#: into the write-once anchor file on a first resolution — the window
+#: itself is anchored at the FILE's value forever after, so a restart
+#: without operator state cannot open a fresh 30-day window.
 _PROCESS_MIGRATION_START: Final[datetime] = datetime.now(timezone.utc)
 
 
-def _parse_iso_utc(raw: str, *, env: str) -> datetime | None:
-    """Parse an ISO date/datetime from *env*; None when malformed.
+class LegacyWindowInvalid(ValueError):
+    """EXPLICIT legacy-window configuration is malformed (Q35-06).
 
-    Naive values read as UTC; a malformed value logs the operator-facing
-    warning (the caller falls back to a BOUNDED default window, never to
-    "no deadline" and never to a fresh sliding one).
+    Raised by :func:`resolve_legacy_window` when a deadline/start
+    variable is SET but is not a readable ISO instant (including the
+    empty string) or lies outside the sanity bounds: the value is
+    operator state, so a typo must fail loudly — at composition, at
+    ``forge doctor`` (``credential.configuration_invalid``), and as a
+    specific refusal on the wire — never a silent re-anchor onto a
+    fresh process window.
     """
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not an ISO date/datetime — the process-anchored default "
-            "window applies (record %s or %s for a restart-stable deadline)",
-            env,
-            raw,
-            LANE_LEGACY_TOKEN_START_ENV,
-            LANE_LEGACY_TOKEN_DEADLINE_ENV,
+
+
+@dataclass(frozen=True)
+class LegacyWindow:
+    """The resolved legacy-credential migration window (Q35-06).
+
+    ``source`` names the anchor the deadline was derived from —
+    ``"explicit"`` (operator deadline), ``"recorded-start"`` (operator
+    start + window), ``"persisted-file"`` (the write-once anchor file)
+    or ``"refused"`` (nothing restart-stable could be configured or
+    persisted: legacy acceptance is refused, fail-closed, and
+    ``diagnostic`` says why). ``anchor`` is the instant the window
+    opened (for the explicit deadline it is reported as
+    ``deadline - window``), ``anchor_file`` the persisted anchor's path
+    when one is in play. No field ever carries a credential value.
+    """
+
+    source: str
+    deadline: datetime | None
+    anchor: datetime | None = None
+    anchor_file: Path | None = None
+    diagnostic: str = ""
+
+    @property
+    def refused(self) -> bool:
+        """True when legacy acceptance is refused outright (fail-closed)."""
+        return self.deadline is None
+
+    def days_remaining(self, now: datetime) -> int:
+        """Whole days from *now* to the deadline; negative once closed."""
+        if self.deadline is None:
+            return 0
+        return (self.deadline - now).days
+
+    def open_at(self, now: datetime) -> bool:
+        """Whether *now* is still inside the window (the boundary itself
+        refuses — the comparison is strict, as ever)."""
+        return self.deadline is not None and now < self.deadline
+
+
+def _configured_instant(raw: str, *, env: str) -> datetime:
+    """Parse one EXPLICIT operator value or raise :class:`LegacyWindowInvalid`.
+
+    The old silent-degrade (log a warning, fall back to the default
+    window) re-anchored the migration onto process state whenever an
+    operator typo'd the env — Q35-06 removes exactly that: set-but-empty
+    and unparseable values are typed failures carrying the variable
+    name and the offending value, and so is anything outside the sanity
+    bounds. Naive values read as UTC, as ever.
+    """
+    value = raw.strip()
+    if not value:
+        raise LegacyWindowInvalid(
+            f"{env} is set but empty — unset it or record an ISO date/datetime "
+            f"(a restart-stable deadline; do not leave a blank value in place)"
         )
-        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise LegacyWindowInvalid(
+            f"{env}={value!r} is not an ISO date/datetime — fix the value; the "
+            "legacy window is never silently re-anchored on malformed configuration"
+        ) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
+    if not LEGACY_WINDOW_EARLIEST <= parsed <= LEGACY_WINDOW_LATEST:
+        raise LegacyWindowInvalid(
+            f"{env}={value!r} is outside the sanity bounds "
+            f"[{LEGACY_WINDOW_EARLIEST.date().isoformat()}, "
+            f"{LEGACY_WINDOW_LATEST.date().isoformat()}] — a deadline no "
+            "deployment could have meant; fix the value"
+        )
     return parsed
 
 
-def legacy_token_start(env: Mapping[str, str] | None = None) -> datetime:
-    """The instant the legacy migration window OPENED (R32-03).
+def _parse_stored_instant(raw: str) -> datetime | None:
+    """Parse the persisted anchor payload; None when unreadable.
 
-    ``FORGE_LANE_LEGACY_TOKEN_START`` when the deployment recorded one
-    (restart-stable: the value is operator state, never the request
-    clock); otherwise this process's import time — captured ONCE, so the
-    default deadline is a fixed instant rather than a forever-moving
-    "now + 30 days".
+    The anchor file is machine-written state, so a malformed payload is
+    reported (the caller refuses the window) instead of raised — but it
+    is NEVER rewritten: overwriting corrupt state with a fresh anchor
+    is precisely the restart hole Q35-06 closes.
+    """
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _anchor_file_path(source: Mapping[str, str]) -> Path:
+    """Where the write-once anchor lives for THIS environment."""
+    configured = str(source.get(LEGACY_CREDENTIAL_ANCHOR_FILE_ENV, "")).strip()
+    if configured:
+        return Path(configured)
+    root = str(source.get(CHECKPOINT_STORE_DIR_ENV, "")).strip() or DEFAULT_CHECKPOINT_STORE_DIR
+    return Path(root) / LEGACY_CREDENTIAL_ANCHOR_FILENAME
+
+
+def _read_anchor_or_none(path: Path) -> datetime | None:
+    """The persisted anchor, or None when the payload cannot be read."""
+    anchor = _parse_stored_instant(path.read_text(encoding="utf-8"))
+    if anchor is None:
+        logger.error(
+            "the legacy credential anchor %s holds malformed state — legacy "
+            "credentials are refused rather than re-anchored",
+            path,
+        )
+    return anchor
+
+
+def _malformed_anchor_diagnostic(path: Path) -> str:
+    return (
+        f"the persisted legacy credential anchor {path} holds malformed "
+        "state — legacy credentials are refused rather than re-anchored; "
+        f"restore the file from backup or set {LEGACY_CREDENTIAL_DEADLINE_ENV}"
+    )
+
+
+def _write_once_anchor(path: Path) -> tuple[datetime | None, str]:
+    """Create the anchor file exactly once; the winner's value is THE anchor.
+
+    ``O_CREAT | O_EXCL`` makes the write atomic against concurrent first
+    resolutions (both losing races read the winner's instant). The seed
+    is ``_PROCESS_MIGRATION_START`` — the module-import instant of the
+    process that happened to resolve first — written ONCE and never
+    extended afterwards. An unwritable/uncreatable location is a
+    fail-closed REFUSAL with a specific diagnostic, never a fall-back
+    to a fresh in-memory window (that fall-back is the restart hole
+    Q35-06 closes).
+    """
+    seed = _PROCESS_MIGRATION_START
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        # A concurrent first resolution won the race: ITS value is THE anchor.
+        try:
+            anchor = _read_anchor_or_none(path)
+        except OSError as exc:
+            return None, _unusable_anchor_diagnostic(path, exc)
+        return anchor, ("" if anchor is not None else _malformed_anchor_diagnostic(path))
+    except OSError as exc:
+        return None, _unusable_anchor_diagnostic(path, exc)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(seed.isoformat())
+        handle.flush()
+        os.fsync(handle.fileno())
+    return seed, ""
+
+
+def _unusable_anchor_diagnostic(path: Path, exc: OSError) -> str:
+    return (
+        f"no restart-stable legacy credential anchor is available (the anchor "
+        f"file {path} could not be read or created: {exc.__class__.__name__}) — "
+        f"legacy credentials are refused rather than re-anchored at a new "
+        f"process start; set {LEGACY_CREDENTIAL_DEADLINE_ENV} (or "
+        f"{LANE_LEGACY_TOKEN_START_ENV}) to an explicit ISO instant, or make "
+        "the anchor path writable"
+    )
+
+
+def resolve_legacy_window(env: Mapping[str, str] | None = None) -> LegacyWindow:
+    """THE legacy-window resolution (Q35-06) — one ladder, fail-closed.
+
+    Precedence, every surviving branch a FIXED, restart-stable instant:
+
+    1. an EXPLICIT deadline — ``FORGE_LEGACY_CREDENTIAL_DEADLINE`` or
+       its ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` spelling. Operator
+       state; a set-but-malformed or out-of-bounds value raises
+       :class:`LegacyWindowInvalid` (never a silent re-anchor);
+    2. the RECORDED migration start ``FORGE_LANE_LEGACY_TOKEN_START``
+       plus the window — restart-stable exactly as in R32-03;
+    3. the PERSISTED anchor file (``FORGE_LEGACY_CREDENTIAL_ANCHOR_FILE``,
+       by default ``lane-legacy-credential-anchor`` under the checkpoint
+       store dir): WRITE-ONCE — a file that exists is THE anchor
+       forever, an absent one is created with this process's import
+       instant exactly once, so two fresh resolutions (including two
+       processes) agree as long as the file persists;
+    4. neither writable nor configured → a REFUSED window (fail-closed,
+       ``source="refused"`` with a specific diagnostic): legacy
+       acceptance stops, generation-scoped tokens are unaffected.
+
+    The result never carries credential material — anchors and
+    deadlines only.
     """
     source = os.environ if env is None else env
-    recorded = _parse_iso_utc(
-        str(source.get(LANE_LEGACY_TOKEN_START_ENV, "")).strip(), env=LANE_LEGACY_TOKEN_START_ENV
+    for name in (LEGACY_CREDENTIAL_DEADLINE_ENV, LANE_LEGACY_TOKEN_DEADLINE_ENV):
+        if name in source:
+            deadline = _configured_instant(str(source[name]), env=name)
+            return LegacyWindow(
+                source="explicit",
+                deadline=deadline,
+                anchor=deadline - timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS),
+            )
+    if LANE_LEGACY_TOKEN_START_ENV in source:
+        start = _configured_instant(
+            str(source[LANE_LEGACY_TOKEN_START_ENV]), env=LANE_LEGACY_TOKEN_START_ENV
+        )
+        return LegacyWindow(
+            source="recorded-start",
+            anchor=start,
+            deadline=start + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS),
+        )
+    path = _anchor_file_path(source)
+    if path.is_file():
+        try:
+            anchor = _read_anchor_or_none(path)
+        except OSError as exc:
+            return LegacyWindow(
+                source="refused",
+                deadline=None,
+                anchor_file=path,
+                diagnostic=_unusable_anchor_diagnostic(path, exc),
+            )
+        if anchor is not None:
+            return LegacyWindow(
+                source="persisted-file",
+                anchor=anchor,
+                deadline=anchor + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS),
+                anchor_file=path,
+            )
+        return LegacyWindow(
+            source="refused",
+            deadline=None,
+            anchor_file=path,
+            diagnostic=_malformed_anchor_diagnostic(path),
+        )
+    anchor, diagnostic = _write_once_anchor(path)
+    if anchor is None:
+        return LegacyWindow(
+            source="refused", deadline=None, anchor_file=path, diagnostic=diagnostic
+        )
+    return LegacyWindow(
+        source="persisted-file",
+        anchor=anchor,
+        deadline=anchor + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS),
+        anchor_file=path,
     )
-    return recorded if recorded is not None else _PROCESS_MIGRATION_START
+
+
+def legacy_token_start(env: Mapping[str, str] | None = None) -> datetime:
+    """The instant the legacy migration window OPENED (R32-03, Q35-06).
+
+    :func:`resolve_legacy_window`'s anchor; a REFUSED window reports the
+    beginning of time (there is no anchor to name). Malformed explicit
+    configuration raises :class:`LegacyWindowInvalid`.
+    """
+    window = resolve_legacy_window(env)
+    if window.anchor is not None:
+        return window.anchor
+    return LEGACY_WINDOW_REFUSED_DEADLINE
 
 
 def legacy_token_deadline(env: Mapping[str, str] | None = None) -> datetime:
     """The instant legacy work-scoped tokens stop authenticating (NEXT-01).
 
-    Resolution order, every branch a FIXED instant (R32-03 — never
-    ``now() + 30 days`` recomputed per check):
-
-    1. ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` — the operator's explicit
-       ISO deadline (naive reads as UTC);
-    2. ``FORGE_LANE_LEGACY_TOKEN_START + 30 days`` — the RECORDED
-       migration start plus the window (restart-stable);
-    3. ``_PROCESS_MIGRATION_START + 30 days`` — the default: the window
-       opens with THIS process (the honest rollout default) and closes
-       30 days later at a fixed instant the process actually reaches.
-
-    Unset or malformed values degrade DOWN this ladder, never to "no
-    deadline" — the legacy scheme is a bounded migration window, not a
-    permanent second credential.
+    :func:`resolve_legacy_window`'s deadline; a REFUSED window reports
+    the beginning of time — the window is closed forever, fail-closed.
+    Malformed explicit configuration raises :class:`LegacyWindowInvalid`
+    (Q35-06: never a silent re-anchor).
     """
-    source = os.environ if env is None else env
-    explicit = _parse_iso_utc(
-        str(source.get(LANE_LEGACY_TOKEN_DEADLINE_ENV, "")).strip(),
-        env=LANE_LEGACY_TOKEN_DEADLINE_ENV,
-    )
-    if explicit is not None:
-        return explicit
-    return legacy_token_start(env) + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS)
+    window = resolve_legacy_window(env)
+    return window.deadline if window.deadline is not None else LEGACY_WINDOW_REFUSED_DEADLINE
 
 
 def _legacy_window_open(env: Mapping[str, str] | None = None) -> bool:
-    """Whether the FIXED legacy deadline (:func:`legacy_token_deadline`) is
-    still in the future. The deadline itself never moves per check (R32-03)
-    — only the comparison clock does."""
-    return datetime.now(timezone.utc) < legacy_token_deadline(env)
+    """Whether the resolved legacy window (:func:`resolve_legacy_window`)
+    is still open. The deadline never moves per check (R32-03) — only
+    the comparison clock does."""
+    window = resolve_legacy_window(env)
+    return window.open_at(datetime.now(timezone.utc))
 
 
 class LaneAuthorityUnavailable(RuntimeError):
@@ -357,8 +605,12 @@ async def authorize_work_credential(
     - the CURRENT generation's attempt-scoped token authenticates and
       the VERIFIED generation is returned (the ack surface reuses it);
     - the legacy work-scoped token authenticates only inside the
-      migration window — past the deadline it is refused with the
-      deadline named (401/403 by *refusal_status*);
+      migration window (:func:`resolve_legacy_window`, Q35-06:
+      explicit deadline, recorded start, or the persisted write-once
+      anchor) — past the deadline it is refused with the deadline
+      named, and with NO restart-stable anchor at all it is refused
+      fail-closed with the specific diagnostic (401/403 by
+      *refusal_status*);
     - a token minted for a generation BELOW the current one is refused
       naming both generations (the retired-lane oracle);
     - anything else is a work-scoping refusal.
@@ -393,14 +645,26 @@ async def authorize_work_credential(
     if verify_lane_token(secret, token, work_id, generation=current_generation):
         return current_generation
     if verify_lane_token(secret, token, work_id):
-        if _legacy_window_open():
+        # Q35-06: one resolution per attempt — the window is anchored at
+        # operator state or the write-once anchor file, never at this
+        # process's import. Malformed explicit configuration is a typed
+        # refusal carrying the diagnostic (fail-closed, no silent
+        # re-anchor); a refused window names why.
+        try:
+            window = resolve_legacy_window()
+        except LegacyWindowInvalid as exc:
+            raise HTTPException(status_code=refusal_status, detail=str(exc)) from None
+        if window.open_at(datetime.now(timezone.utc)):
             return current_generation
+        if window.refused:
+            raise HTTPException(status_code=refusal_status, detail=window.diagnostic)
         raise HTTPException(
             status_code=refusal_status,
             detail=(
                 "the legacy work-scoped lane token is past its migration deadline "
-                f"({legacy_token_deadline().isoformat()}) — the current attempt must "
-                "dial in with its dispatch-issued generation token"
+                f"({window.deadline.isoformat() if window.deadline else ''}) — "
+                "the current attempt must dial in with its dispatch-issued "
+                "generation token"
             ),
         )
     stale = _superseded_generation(secret, token, work_id, current_generation)

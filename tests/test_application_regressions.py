@@ -1539,6 +1539,13 @@ class TestR32DConcurrentLeaseUnderFourApprovals:
             note_text="/cancel",
             author_username="alice",
         )
+        # Q35-04: the cancel parks the holder's lease DRAINING (its
+        # dispatched Actions run is still live) — the reconciler's
+        # occupancy pass releases it once the native run is observed
+        # finished, and only then does the next dispatch acquire.
+        for actions_run in fake.actions_runs:
+            actions_run.update(status="completed", conclusion="cancelled")
+        await service.evaluate_waiting_harness()
         await self._go(service, issues[4], runs[issues[4]])
         fifth = await _gh_run(db, runs[issues[4]])
         assert fifth.status == "waiting_harness"
@@ -1645,7 +1652,9 @@ class TestR32EDispatchSelectsTheRequiredResumeMode:
             await session.commit()
         return run_id
 
-    async def test_the_retry_dispatch_selects_the_mode_the_lane_executes(self, db, fake):
+    async def test_the_retry_dispatch_selects_the_mode_the_lane_executes(
+        self, db, fake, monkeypatch
+    ):
         from forge.lane_driver import resume_mode, resume_requested
 
         service = self._service(db, fake)
@@ -1672,7 +1681,12 @@ class TestR32EDispatchSelectsTheRequiredResumeMode:
 
         # The RETRY continues the work in place — its dispatch carries the
         # REQUIRED mode, and the shipped mapping turns that into the env
-        # spelling the lane's required-restore gate reads.
+        # spelling the lane's required-restore gate reads. Q35-02: the
+        # required contract is selected only when a committed checkpoint is
+        # the authorized continuation, so this shape holds one.
+        from forge.runs import revival
+
+        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
         failed = await self._drive_to_failed_with_candidate(db, fake, service)
         fake.dispatch_inputs.clear()
         await service.handle_retry(

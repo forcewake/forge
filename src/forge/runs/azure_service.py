@@ -125,6 +125,7 @@ from forge.factory.reviewer import (
 )
 from forge.factory.implementer import IMPLEMENTER_TIER, LLMImplementer
 from forge.execution.azure_pipelines import (
+    _ACTIVE_RUN_STATES,
     AzurePipelinesExecutor,
     AzurePipelinesHandle as ExecutorHandle,
 )
@@ -146,8 +147,16 @@ from forge.adaptive.admission import (
     check_admission as check_fair_use,
 )
 from forge.adaptive.admission import (
+    NativeProbe,
+    NativeStatus,
+    clear_native_start_intent,
+    definite_start_refusal,
     lease_snapshot,
-    release_run_leases,
+    open_lease_for_run,
+    record_native_handle,
+    record_native_start_intent,
+    reconcile_draining,
+    release_lease_with_evidence,
     try_acquire_lease,
 )
 from forge.runs.admission import approvers_for, check_admission
@@ -2879,8 +2888,17 @@ class AzureRunService:
             run_row.evidence = evidence
             await session.commit()
 
+        # Q35-04: the native-start intent marker, keyed for a probe that
+        # may run in a FRESH process (project + pipeline + the run-owned
+        # branch — only this run's dispatches live on that branch).
+        intent_ref = f"azure:pipeline:{self._project}:{pipeline_id}@{branch}"
         try:
             await self._ensure_harness_branch(branch, attempt_base)
+            # Q35-04: persisted BEFORE the Pipelines run request — once
+            # durable, a lost start response or a worker death leaves
+            # dispatched_unknown occupancy (the slot cannot free on
+            # local status; the reconciler probes this marker).
+            await record_native_start_intent(self._session_factory, run_id, intent_ref)
             lane_run: PipelineRun = await self._stack.client.run_pipeline(
                 self._project,
                 handle.pipeline_id,
@@ -2915,10 +2933,35 @@ class AzureRunService:
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
                 },
             )
-        except Exception as exc:
+        except AzureDevOpsError as exc:
+            if definite_start_refusal(exc.status_code):
+                # Q35-04: the provider PROVED it refused the start (a
+                # definitive 4xx — no build exists). Clear the intent so
+                # the terminal release sees proven never-dispatched and
+                # capacity returns now.
+                await clear_native_start_intent(self._session_factory, run_id, intent_ref)
             await self._complete_action(action_id, "failed", {"error": str(exc)})
             await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
             return
+        except Exception as exc:
+            # Transport failure / 5xx / retryable — the start's outcome
+            # is undecidable: the intent STAYS (dispatched_unknown) and
+            # the reconciler's probe decides the occupancy (Q35-04).
+            await self._complete_action(action_id, "failed", {"error": str(exc)})
+            await self._to_terminal(run_id, FlowStatus.FAILED, f"harness_start_failed: {exc}")
+            return
+
+        # Q35-04: the provider answered — attach the native correlation
+        # (dispatched_unknown → native_running). Provider-shaped so a
+        # fresh process can resolve the occupancy alone.
+        if lane_run.run_id:
+            lease = await open_lease_for_run(self._session_factory, run_id)
+            if lease is not None:
+                await record_native_handle(
+                    lease.lease_id,
+                    f"azure:build:{self._project}:{pipeline_id}:{lane_run.run_id}",
+                    self._session_factory,
+                )
 
         correlated = handle.with_run_id(lane_run.run_id)
         await self._complete_action(
@@ -4810,14 +4853,99 @@ class AzureRunService:
         if status in TERMINAL_STATUSES:
             await self._release_execution_lease(run_id, f"terminal:{status.value}")
 
+    def _native_occupancy_probe(self) -> NativeProbe:
+        """The Pipelines occupancy probe for :func:`reconcile_draining`
+        (Q35-04).
+
+        Two key shapes, both provider-prefixed so a foreign lease reads
+        UNKNOWN (each provider's reconciler owns its own keys):
+
+        - ``azure:build:<project>:<pipeline>:<run_id>`` — the handle the
+          dispatch recorded: one Runs-API read, terminal when the state
+          left the active set with a result;
+        - ``azure:pipeline:<project>:<pipeline>@<branch>`` — the intent
+          marker of a start whose handle never landed (lost response):
+          the builds on the run-OWNED branch decide it — none means the
+          start never created a build (capacity returns), a finished
+          build means the job ended, otherwise running. A provider
+          error raises and reads UNKNOWN: uncertain occupancy holds.
+        """
+
+        async def probe(key: str) -> NativeStatus:
+            if not key.startswith("azure:"):
+                return NativeStatus.UNKNOWN  # another provider's lease
+            payload = key.split(":", 1)[1]
+            if payload.startswith("build:"):
+                # azure:build:<project>:<pipeline>:<run_id>
+                body = payload.split(":", 1)[1]
+                project, _, rest = body.partition(":")
+                pipeline_raw, _, run_raw = rest.partition(":")
+                run = await self._stack.client.get_run(project, int(pipeline_raw), int(run_raw))
+                if (run.state or "").strip().lower() in _ACTIVE_RUN_STATES:
+                    return NativeStatus.RUNNING
+                return NativeStatus.TERMINAL
+            if payload.startswith("pipeline:"):
+                # azure:pipeline:<project>:<pipeline>@<branch>
+                body = payload.split(":", 1)[1]
+                target, _, branch = body.rpartition("@")
+                project, _, pipeline_raw = target.partition(":")
+                repository = await self._stack.client.get_repository(project, self._repo)
+                builds = await self._stack.client.list_builds_by_repository(
+                    project,
+                    str(repository.get("id") or ""),
+                    definitions=[int(pipeline_raw)],
+                )
+                mine = [
+                    build
+                    for build in builds
+                    if str(build.get("sourceBranch") or "") == f"refs/heads/{branch}"
+                ]
+                if not mine:
+                    return NativeStatus.TERMINAL  # nothing ever started
+                # Builds-API ``status`` vocabulary (research §6.3):
+                # ``completed`` is the ONLY terminal value — everything
+                # else (notStarted/inProgress/cancelling/…) keeps holding.
+                if all(str(build.get("status") or "").lower() == "completed" for build in mine):
+                    return NativeStatus.TERMINAL
+                return NativeStatus.RUNNING
+            return NativeStatus.UNKNOWN
+
+        return probe
+
+    async def _reconcile_draining_leases(self) -> int:
+        """One occupancy pass over DRAINING leases (the reconciler tick).
+
+        A slot frees only when its native job is OBSERVED terminal
+        through the provider probe; undecidable keys stay draining with
+        their age visible (Q35-04).
+        """
+        return await reconcile_draining(self._session_factory, self._native_occupancy_probe())
+
     async def _release_execution_lease(self, run_id: str, reason: str) -> None:
-        """Free the run's execution slot (idempotent; no lease = no-op)."""
-        released = await release_run_leases(self._session_factory, run_id, reason=reason)
-        if released:
+        """Free the run's execution slot — from EVIDENCE, never local
+        status alone (Q35-04; idempotent; no lease = no-op).
+
+        A lease with NO native-start intent (the builtin lane, a pre-call
+        abort) is proven never-dispatched and releases now; a lease
+        carrying an intent parks DRAINING for the reconciler's native
+        probe — the provider may have accepted a start whose response
+        was lost, and a local terminal verdict is not evidence the
+        runner stopped.
+        """
+        outcome = await release_lease_with_evidence(self._session_factory, run_id, reason=reason)
+        if outcome.released:
             logger.info(
                 "Azure DevOps run %s released %d execution lease(s): %s",
                 run_id[:8],
-                released,
+                outcome.released,
+                reason,
+            )
+        if outcome.drained:
+            logger.info(
+                "Azure DevOps run %s parked %d execution lease(s) draining (native occupancy"
+                " unobserved): %s",
+                run_id[:8],
+                outcome.drained,
                 reason,
             )
 
@@ -5712,6 +5840,20 @@ async def evaluate_azure_waiting_ci(
             logger.exception("AzDO verification reconcile failed for run %s", run_id[:8])
 
 
+def _subject_repo_of(run: FlowRun) -> str:
+    """The run's ``project/repo`` subject — the journaled handle first
+    (the dispatch leg pins project/repo on it), the column fallback."""
+
+    handle_raw = str(((run.evidence or {}).get("harness") or {}).get("handle") or "")
+    try:
+        if handle_raw:
+            parsed = AzurePipelinesHandle.from_json(handle_raw)
+            return f"{parsed.project}/{parsed.repo}"
+    except Exception:
+        pass
+    return str(run.github_repo_full_name or "").strip()
+
+
 async def evaluate_azure_waiting_harness(
     settings: Settings,
     forge_config: ForgeConfig,
@@ -5750,17 +5892,7 @@ async def evaluate_azure_waiting_harness(
         )
     for run in runs:
         run_id = run.id
-        # The journaled handle is the subject identity — the dispatch leg
-        # pins project/repo on it; the column is the legacy fallback.
-        handle_raw = str(((run.evidence or {}).get("harness") or {}).get("handle") or "")
-        repo = ""
-        try:
-            if handle_raw:
-                parsed = AzurePipelinesHandle.from_json(handle_raw)
-                repo = f"{parsed.project}/{parsed.repo}"
-        except Exception:
-            repo = ""
-        repo = repo or str(run.github_repo_full_name or "").strip()
+        repo = _subject_repo_of(run)
         if "/" not in repo:
             logger.warning("AzDO waiting_harness run %s without repo identity", run_id[:8])
             continue
@@ -5776,3 +5908,27 @@ async def evaluate_azure_waiting_harness(
             await service.evaluate_waiting_harness_one(run_id)
         except Exception:
             logger.exception("AzDO harness reconcile failed for run %s", run_id[:8])
+    # Q35-04: the occupancy pass — leases whose runs landed terminal above
+    # parked draining; probe their native builds through each subject's
+    # client and release the ones OBSERVED terminal (the same tick that
+    # observed them). A foreign project's key raises inside the probe and
+    # reads UNKNOWN — held, never freed on a guess.
+    for repo in sorted({_subject_repo_of(run) for run in runs}):
+        if "/" not in repo:
+            continue
+        project, repo_name = repo.split("/", 1)
+        probe_service = AzureRunService(
+            session_factory,
+            settings,
+            forge_config,
+            stack=stack_factory(project, repo_name),
+            repo_full_name=repo,
+        )
+        try:
+            released = await reconcile_draining(
+                session_factory, probe_service._native_occupancy_probe()
+            )
+            if released:
+                logger.info("AzDO occupancy pass released %d draining execution lease(s)", released)
+        except Exception:
+            logger.exception("AzDO draining-lease occupancy pass failed for %s", repo)

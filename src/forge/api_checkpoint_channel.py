@@ -98,6 +98,56 @@ content-addressed filesystem bytes whose writes need no lock (same
 address, same bytes — idempotent by construction). The health report
 names the active mode so an operator never mistakes one contract for
 the other.
+
+Q35-03 (review c7ae8db): every ROUTE now delegates to ONE
+:class:`forge.adaptive.checkpoint_repository.CheckpointRepository`
+resolved by :func:`forge.adaptive.checkpoint_repository.
+resolve_repository` — the SAME configured authority the resume
+producer (:mod:`forge.adaptive.wiring`) reads, so upload and resume
+can never consult different stores. The async ``a*`` index operations
+below remain the single implementation of the postgres contract; the
+repository classes wrap them (no second copy), map a database outage
+to the typed
+``CheckpointRepositoryUnavailable`` (503 here — never 404, never a
+filesystem fallback) and refuse half-configurations at construction.
+
+Q35-05 (review c7ae8db, probe P03): retention is a TWO-PHASE
+mark/recheck/sweep pass under BOTH durability contracts. The old pass
+computed a deletion digest set from the CURRENT references, committed
+the metadata deletion, and only then unlinked the CAS blobs — a work B
+that added a NEW reference to a shared blob between the scan and the
+unlink was left holding an index entry whose bytes were gone. Now:
+
+- **mark** proposes candidate digests (past the horizon, protected by
+  no consumer pin) — a proposal, held in memory as a tombstone
+  (filesystem: the index's ``pending_gc`` record; postgres: the
+  :class:`~forge.adaptive.checkpoint_repository.CheckpointGcJournal`
+  overlay) with NO deletion yet;
+- **recheck** re-derives the live reference set INSIDE the transaction
+  (filesystem: the same lock section) that performs the deletion — a
+  fresh statement that sees references committed since the mark (the
+  P03 schedule), plus a fresh pin read; any digest that gained a new
+  reference or a new pin leaves the deletion set. The new reference's
+  commit wins the race;
+- **sweep** unlinks only the survivors, idempotently — a missing blob
+  is already gone, so an interrupted sweep re-runs to convergence (a
+  failed transaction deletes nothing owned by committed references:
+  rows commit FIRST, blobs second, journal in between).
+
+Consumer protection is explicit (``CheckpointRepository.pin``/``unpin``
+— an authorized resume PINS its exact checkpoint; pins are released
+explicitly, never by time), and a work's FIRST upload serializes on a
+stable per-work anchor (a ``pg_advisory_lock`` keyed on the work id
+plus the row's ``INSERT ... ON CONFLICT DO NOTHING`` and ``SELECT ...
+FOR UPDATE``) because ``FOR UPDATE`` over an empty row set is not a
+mutex. Per-work quotas count REFERENCED bytes: a deduplicated blob
+another work already stored still counts toward THIS work when the
+work newly references it. Orphan recovery: content present on disk
+that no index entry references is named by the health report
+(``orphan_cas_entries``) and is collectable — the GC journal/index
+pending record covers the commit-to-unlink crash window, and crash
+recovery between blob write and index commit leaves exactly such
+orphans, never a reference without bytes.
 """
 
 from __future__ import annotations
@@ -134,6 +184,14 @@ from forge.adaptive.checkpoint_channel import (
     FORGE_LANE_CONTROL_SECRET_ENV,
     work_scoped_token,
 )
+from forge.adaptive.checkpoint_repository import (
+    CheckpointGcJournal,
+    CheckpointPins,
+    CheckpointRepository,
+    CheckpointRepositoryMisconfigured,
+    CheckpointRepositoryUnavailable,
+    resolve_repository,
+)
 from forge.adaptive.checkpointing import MANIFEST_SCHEMA
 from forge.models.base import Base
 
@@ -165,6 +223,7 @@ __all__ = [
     "CheckpointStore",
     "DurabilityContract",
     "IndexLockHeldError",
+    "RetentionMark",
     "StoragePolicy",
     "StorageQuotaExceededError",
     "checkpoint_channel_router",
@@ -529,6 +588,39 @@ def _row_order(row: CheckpointMetadataRow) -> tuple[int, str]:
     return (int(row.sequence), str(row.checkpoint_id))
 
 
+def _pin_list(decision: dict[str, Any] | None) -> list[str]:
+    """The pin set a recorded retention decision was computed under.
+
+    Decisions recorded before Q35-05 carry no ``pinned`` key — an empty
+    list is the honest reading (no pin held anything back), and a
+    decision whose pin set no longer matches the live one simply loses
+    its short-circuit: the pass re-runs.
+    """
+    if decision is None:
+        return []
+    pinned = decision.get("pinned")
+    return sorted(str(item) for item in pinned) if isinstance(pinned, list) else []
+
+
+@dataclass(frozen=True)
+class RetentionMark:
+    """The MARK phase's in-memory tombstone (Q35-05) — a proposal, not a
+    deletion.
+
+    Carries the checkpoint ids a retention pass PROPOSES to drop (past
+    the horizon, unpinned at mark time). The deletion transaction
+    re-validates every part of it — pins re-read, rows re-locked,
+    reachability re-derived from a FRESH scan — before one row goes or
+    one blob is unlinked, so a reference or pin that landed since the
+    mark wins the race and is removed from the deletion set.
+    """
+
+    work_id: str
+    keep_last: int
+    removed_ids: tuple[str, ...]
+    marked_at: str
+
+
 class CheckpointStore:
     """The control plane's content-addressed checkpoint directory.
 
@@ -552,6 +644,8 @@ class CheckpointStore:
         max_blob_bytes: int | None = None,
         policy: StoragePolicy | None = None,
         durability: DurabilityContract | None = None,
+        pins: CheckpointPins | None = None,
+        gc_journal: CheckpointGcJournal | None = None,
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
@@ -567,6 +661,12 @@ class CheckpointStore:
         # best_effort (the filesystem index); the async ``a*`` methods are
         # the postgres surface and refuse to run without its factory.
         self.durability = durability if durability is not None else DurabilityContract()
+        # Q35-05: the GC protection overlays both retention passes consult
+        # — consumer pins and the pending-GC journal. They live on the
+        # blob volume (code-level structures, no schema change) and are
+        # shared by BOTH authorities; injectable for tests.
+        self.pins = pins if pins is not None else CheckpointPins(self._root)
+        self.gc_journal = gc_journal if gc_journal is not None else CheckpointGcJournal(self._root)
 
     # -- content-addressed files --------------------------------------------
 
@@ -833,12 +933,14 @@ class CheckpointStore:
                 " a checkpoint is a bounded WIP delta, not a key-value dump"
             )
 
-    def _work_usage_bytes(self, entries: list[dict[str, Any]]) -> int:
-        """The bytes the work's index entries currently reference on disk.
+    def _work_referenced_digests(self, entries: list[dict[str, Any]]) -> set[str]:
+        """Every digest the work's index entries currently REFERENCE.
 
-        Every retained checkpoint's manifest plus its referenced blobs,
-        counted from the CAS (a digest missing on disk contributes zero —
-        the health report names it; the quota must not guess a size).
+        Each retained checkpoint's manifest address plus the blob
+        digests its manifest declares (an unreadable manifest keeps its
+        own address — conservative). This is the reference set the
+        per-work quota judges against (Q35-05: quotas count REFERENCED
+        bytes, not merely bytes this process happened to write).
         """
         digests: set[str] = set()
         for entry in entries:
@@ -850,7 +952,16 @@ class CheckpointStore:
                 digests.update(self._entry_files(self._read_verified(checkpoint_id)))
             except (FileNotFoundError, CheckpointCorruptError, ValueError):
                 continue  # unreadable manifests keep their own address only
-        return sum(self._size_on_disk(digest) for digest in digests)
+        return digests
+
+    def _work_usage_bytes(self, entries: list[dict[str, Any]]) -> int:
+        """The bytes the work's index entries currently reference on disk.
+
+        Every retained checkpoint's manifest plus its referenced blobs,
+        counted from the CAS (a digest missing on disk contributes zero —
+        the health report names it; the quota must not guess a size).
+        """
+        return sum(self._size_on_disk(digest) for digest in self._work_referenced_digests(entries))
 
     def _size_on_disk(self, digest: str) -> int:
         try:
@@ -867,29 +978,32 @@ class CheckpointStore:
     ) -> None:
         """The per-work TOTAL bytes quota — refused before the first write.
 
-        Current usage is what the work's index references on disk; the
-        upload adds only bytes NOT already stored (content addressing
-        makes an idempotent re-put free, and a blob another checkpoint
-        already landed is not new usage). Over the cap the upload is
-        refused with :class:`StorageQuotaExceededError` — quota
-        exhaustion leaves the previous checkpoints untouched: an
-        explicit, recoverable state, never data loss.
+        Current usage is what the work's index references on disk, and
+        the upload's NEW usage is the part of its closure the work does
+        not already reference (Q35-05): a DEDUPLICATED blob another
+        work already stored still counts toward THIS work when the work
+        newly references it — content-addressed sharing saves disk, not
+        quota. Over the cap the upload is refused with
+        :class:`StorageQuotaExceededError` — quota exhaustion leaves the
+        previous checkpoints untouched: an explicit, recoverable state,
+        never data loss.
         """
         cap = self.policy.max_total_bytes_per_work
         if cap <= 0:
             return
         manifest_id = _sha256(manifest_bytes)
-        fresh = 0
-        for digest in sorted({manifest_id, *blobs}):
-            if self._cas_path(digest).exists():
-                continue  # already stored (and immutable) — not new usage
-            fresh += len(manifest_bytes) if digest == manifest_id else len(blobs[digest])
-        current = self._work_usage_bytes(entries)
-        if current + fresh > cap:
+        current = self._work_referenced_digests(entries)
+        fresh = {manifest_id, *blobs} - current
+        fresh_bytes = sum(
+            len(manifest_bytes) if digest == manifest_id else len(blobs[digest]) for digest in fresh
+        )
+        current_bytes = sum(self._size_on_disk(digest) for digest in current)
+        if current_bytes + fresh_bytes > cap:
             raise StorageQuotaExceededError(
-                f"work {work_id} already references {current} bytes; this upload adds"
-                f" {fresh} more, over the per-work quota of {cap} bytes — the upload"
-                " is refused and the work's existing checkpoints are untouched"
+                f"work {work_id} already references {current_bytes} bytes; this upload "
+                f"newly references {fresh_bytes} more (including shared blobs the work "
+                f"did not reference before), over the per-work quota of {cap} bytes — "
+                "the upload is refused and the work's existing checkpoints are untouched"
             )
 
     # -- the operations ---------------------------------------------------------
@@ -1065,6 +1179,33 @@ class CheckpointStore:
             )
         return factory
 
+    def _metadata_insert(self, session: AsyncSession, **values: Any) -> Any:
+        """The checkpoint row's INSERT with ``ON CONFLICT DO NOTHING`` (Q35-05).
+
+        The composite PK makes a re-put idempotent at the database layer
+        — the same content address IS the same checkpoint — and the
+        ON-CONFLICT spelling keeps that true when two racing puts of
+        the SAME address land back to back: the loser's insert quietly
+        loses to the winner's committed row instead of failing the
+        transaction. The generic fallback (other dialects) keeps the
+        plain INSERT semantics.
+        """
+        from sqlalchemy import insert as generic_insert
+        from sqlalchemy.dialects import postgresql, sqlite as sqlite_dialect
+
+        bind = session.bind
+        name = bind.dialect.name if bind is not None else ""
+        statement: Any
+        if name == "postgresql":
+            statement = postgresql.insert(CheckpointMetadataRow)
+        elif name == "sqlite":
+            statement = sqlite_dialect.insert(CheckpointMetadataRow)
+        else:
+            return generic_insert(CheckpointMetadataRow).values(**values)
+        return statement.values(**values).on_conflict_do_nothing(
+            index_elements=[CheckpointMetadataRow.work_id, CheckpointMetadataRow.checkpoint_id]
+        )
+
     async def aput_checkpoint(
         self,
         *,
@@ -1081,19 +1222,28 @@ class CheckpointStore:
         ``FOR UPDATE`` (the CAS lock — two concurrent puts serialize
         here, so the quota reads a consistent index and neither append
         is lost), the quota is judged, the checkpoint's row is inserted
-        (idempotent: the composite PK refuses a duplicate content
-        address, and the existing row IS the answer), and the policy's
-        on-upload retention drops old rows in the SAME transaction. The
-        blobs land under their addresses before the commit —
-        content-addressed writes are idempotent and need no lock, and a
-        crash between blob write and commit leaves collectable CAS
-        content, never an index row whose bytes are missing. Unlinking
-        retention-doomed blobs happens only AFTER the commit (rows
-        first, blobs second — the same crash discipline the filesystem
-        pass pins).
+        idempotently (``ON CONFLICT DO NOTHING`` under the composite
+        PK — a racing twin's committed row wins and IS the answer), and
+        the policy's on-upload retention — now the two-phase
+        :meth:`_aretention_pass` — drops old rows in the SAME
+        transaction. The blobs land under their addresses before the
+        commit — content-addressed writes are idempotent and need no
+        lock, and a crash between blob write and commit leaves
+        collectable CAS content, never an index row whose bytes are
+        missing. Unlinking retention-doomed blobs happens only AFTER
+        the commit (rows first, blobs second — the same crash
+        discipline the filesystem pass pins), and the pending-GC
+        journal covers that unlink window for the next pass.
+
+        Q35-05: a work's FIRST landing must not rely on the empty-set
+        ``FOR UPDATE`` — callers that can race a first upload serialize
+        through :meth:`forge.adaptive.checkpoint_repository.
+        PostgresCheckpointRepository.first_upload_lock` (the advisory
+        anchor) around this call.
         """
         checkpoint_id = self._verify_upload(work_id, manifest_bytes, blobs)
         factory = self._require_metadata_session()
+        await self._acomplete_pending_gc(work_id)
         doomed_digests: list[str] = []
         async with factory() as session:
             async with session.begin():
@@ -1120,15 +1270,25 @@ class CheckpointStore:
                 own = next((row for row in rows if row.checkpoint_id == checkpoint_id), None)
                 uploaded_at = _now_iso()
                 if own is None:
-                    session.add(
-                        CheckpointMetadataRow(
-                            work_id=work_id,
-                            checkpoint_id=checkpoint_id,
-                            sequence=sequence,
-                            files=len(blobs),
-                            uploaded_at=uploaded_at,
+                    # rowcount is the INSERT's inserted-row count; SQLAlchemy
+                    # 2.0 stubs only type it on CursorResult — access it via
+                    # the runtime attr (the budgets.py precedent).
+                    inserted = (
+                        await session.execute(
+                            self._metadata_insert(
+                                session,
+                                work_id=work_id,
+                                checkpoint_id=checkpoint_id,
+                                sequence=sequence,
+                                files=len(blobs),
+                                uploaded_at=uploaded_at,
+                            )
                         )
-                    )
+                    ).rowcount  # type: ignore[attr-defined]
+                    if inserted != 1:  # a racing twin's committed row won
+                        twin = await session.get(CheckpointMetadataRow, (work_id, checkpoint_id))
+                        if twin is not None:
+                            uploaded_at = str(twin.uploaded_at or uploaded_at)
                 else:
                     uploaded_at = str(own.uploaded_at or uploaded_at)
                 for digest, data in blobs.items():
@@ -1137,9 +1297,13 @@ class CheckpointStore:
                 if self.policy.cleanup_trigger == "on_upload":
                     keep = self.policy.retention_keep()
                     if keep > 0:
-                        doomed_digests = await self._aretention(session, work_id, keep)
+                        _removed, doomed_digests = await self._aretention_pass(
+                            session, work_id, keep
+                        )
         for digest in doomed_digests:  # post-commit: rows first, blobs second
             self._cas_path(digest).unlink(missing_ok=True)
+        if doomed_digests:
+            self.gc_journal.clear(work_id, doomed_digests)
         active = self._adb_active(rows, own is None, checkpoint_id, sequence)
         return {
             "work_id": work_id,
@@ -1169,18 +1333,107 @@ class CheckpointStore:
         )
         return key[1]
 
-    async def _aretention(self, session: AsyncSession, work_id: str, keep_last: int) -> list[str]:
-        """Retention inside the caller's transaction; doomed digests back.
+    async def _amark_retention(self, work_id: str, keep_last: int) -> RetentionMark:
+        """The MARK: the pass's PROPOSAL, derived with no locks held.
+
+        Reads the work's rows in its own short session, splits them at
+        the horizon and subtracts the pin set as it stands NOW — the
+        result is a :class:`RetentionMark`, an in-memory tombstone that
+        names candidates and nothing more. The deletion transaction
+        re-validates every part of it (pins, rows, reachability) before
+        anything goes, so the mark being raced is always safe.
+        """
+        factory = self._require_metadata_session()
+        async with factory() as session:
+            rows = list(
+                (
+                    (
+                        await session.execute(
+                            select(CheckpointMetadataRow.checkpoint_id)
+                            .where(CheckpointMetadataRow.work_id == work_id)
+                            .order_by(
+                                CheckpointMetadataRow.sequence,
+                                CheckpointMetadataRow.checkpoint_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+        keep_count = max(1, min(keep_last, len(rows))) if keep_last > 0 else 1
+        protected = self.pins.protected_ids()
+        removed_ids = tuple(
+            str(row_id) for row_id in rows[:-keep_count] if str(row_id) not in protected
+        )
+        return RetentionMark(
+            work_id=work_id, keep_last=keep_last, removed_ids=removed_ids, marked_at=_now_iso()
+        )
+
+    async def _adb_referenced_digests(
+        self, session: AsyncSession, exclude_ids: set[str]
+    ) -> set[str]:
+        """The live reference set over the CURRENT table — the RECHECK's eye.
+
+        One FRESH statement (every checkpoint id the table holds minus
+        *exclude_ids*), each manifest read for its file digests. Under
+        PostgreSQL's READ COMMITTED this statement sees rows committed
+        since the transaction began — exactly the property the recheck
+        needs: a work B whose put committed between this pass's mark
+        and its deletion transaction is VISIBLE here, and the shared
+        blob B references leaves the deletion set.
+        """
+        ids = (
+            (
+                await session.execute(
+                    select(CheckpointMetadataRow.checkpoint_id).where(
+                        CheckpointMetadataRow.checkpoint_id.not_in(exclude_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        referenced: set[str] = set()
+        for checkpoint_id in ids:
+            referenced.add(str(checkpoint_id))
+            try:
+                referenced.update(self._entry_files(self._read_verified(str(checkpoint_id))))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                continue  # unreadable manifests keep their own address only
+        return referenced
+
+    async def _adelete_rows(self, session: AsyncSession, rows: list[CheckpointMetadataRow]) -> None:
+        """Delete the rechecked rows inside the caller's transaction.
+
+        The seam the failed-transaction proofs crash on purpose: an
+        exception here rolls the WHOLE deletion transaction back — no
+        row goes, no blob is unlinked, nothing owned by a committed
+        reference is lost.
+        """
+        for row in rows:
+            await session.delete(row)
+
+    async def _asweep(self, digests: list[str]) -> None:
+        """The SWEEP: idempotent unlink of the deletion survivors."""
+        for digest in digests:
+            self._cas_path(digest).unlink(missing_ok=True)
+
+    async def _aretention_pass(
+        self, session: AsyncSession, work_id: str, keep_last: int
+    ) -> tuple[int, list[str]]:
+        """Retention inside the caller's transaction; the deletion set back.
 
         The same rule :meth:`apply_retention` pins for the filesystem
-        index: even ``keep_last=0`` keeps the work's ACTIVE checkpoint;
-        older rows beyond the keep count are deleted HERE, and their
-        blobs (manifest plus files) become collectable only when no
-        retained checkpoint of ANY work still references them — the
-        cross-work reachability check runs over the metadata table
-        inside the same transaction. The digests are RETURNED, not
-        unlinked: the caller deletes rows + commits first, then unlinks
-        — a rolled-back transaction must never have deleted blobs its
+        index — even ``keep_last=0`` keeps the ACTIVE checkpoint — as
+        ONE mark/recheck/delete sequence inside the caller's
+        transaction (the on-upload retention of :meth:`aput_checkpoint`):
+        the pin set is read at split time, the doomed closure is
+        derived, and the SURVIVOR SCAN (:meth:`_adb_referenced_digests`)
+        re-derives live reachability from a fresh statement before the
+        rows go. The digests are RETURNED, not unlinked: the caller
+        commits first, records the pending-GC journal, then sweeps —
+        a rolled-back transaction must never have deleted blobs its
         rows still reference.
         """
         rows = list(
@@ -1198,40 +1451,44 @@ class CheckpointStore:
                 .all()
             )
         )
-        if not rows:
-            return []
         keep_count = max(1, min(keep_last, len(rows))) if keep_last > 0 else 1
-        removed = rows[:-keep_count]
+        protected = self.pins.protected_ids()
+        removed = [row for row in rows[:-keep_count] if str(row.checkpoint_id) not in protected]
         if not removed:
-            return []
-        removed_ids = {row.checkpoint_id for row in removed}
-        doomed: set[str] = set(removed_ids)
-        for checkpoint_id in sorted(removed_ids):
-            try:
-                doomed.update(self._entry_files(self._read_verified(checkpoint_id)))
-            except (FileNotFoundError, CheckpointCorruptError, ValueError):
-                continue  # unreadable manifests keep their own address only
-        referenced: set[str] = set()
-        others = (
-            (
-                await session.execute(
-                    select(CheckpointMetadataRow.checkpoint_id).where(
-                        CheckpointMetadataRow.checkpoint_id.not_in(removed_ids)
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for checkpoint_id in others:
-            referenced.add(str(checkpoint_id))
-            try:
-                referenced.update(self._entry_files(self._read_verified(str(checkpoint_id))))
-            except (FileNotFoundError, CheckpointCorruptError, ValueError):
-                continue
-        for row in removed:
-            await session.delete(row)
-        return sorted(doomed - referenced)
+            return 0, []
+        removed_ids = {str(row.checkpoint_id) for row in removed}
+        doomed = self._closure_of(removed_ids)
+        # RECHECK — the fresh survivor scan, plus the pin closure: a
+        # reference or pin that landed since this pass began protects
+        # its digests from this very deletion.
+        referenced = await self._adb_referenced_digests(session, removed_ids)
+        referenced |= self._pin_closure()
+        deletion = sorted(doomed - referenced)
+        await self._adelete_rows(session, removed)
+        self.gc_journal.record(work_id, deletion)
+        return len(removed), deletion
+
+    async def _acomplete_pending_gc(self, work_id: str) -> None:
+        """Complete an interrupted sweep against CURRENT reachability.
+
+        The journal's recovery pass: whatever a previous pass recorded
+        as pending but never unlinked (it crashed, or a late reference
+        spared the digest) is re-derived from the table and the pins AS
+        THEY STAND NOW — only still-unreferenced digests go. A journal
+        left by a ROLLED-BACK transaction names digests whose rows
+        still exist, so this pass spares them and clears the record:
+        recovery never replays blindly, and never double-deletes.
+        """
+        pending = self.gc_journal.pending(work_id)
+        if not pending:
+            return
+        factory = self._require_metadata_session()
+        async with factory() as session:
+            referenced = await self._adb_referenced_digests(session, set())
+        referenced |= self._pin_closure()
+        unlinked = [digest for digest in pending if digest not in referenced]
+        await self._asweep(unlinked)
+        self.gc_journal.clear(work_id, unlinked)
 
     async def aentry(self, work_id: str, checkpoint_id: str | None = None) -> dict | None:
         """The work's ACTIVE entry (highest sequence), or the named one.
@@ -1308,40 +1565,85 @@ class CheckpointStore:
         """The operator's retention pass over the metadata table.
 
         Same contract as :meth:`apply_retention` (never the active
-        checkpoint, shared content survives its sharers), executed as
-        one transaction: rows deleted and committed first, the doomed
-        blobs unlinked after — the recoverable crash window is the gap
-        between them, and an interrupted pass leaves collectable orphans
-        the health report names, never missing bytes.
+        checkpoint, shared content survives its sharers, pinned
+        checkpoints survive until their pin is released), executed as
+        the Q35-05 two-phase pass:
+
+        1. complete any pending GC a previous pass journal'd but never
+           swept (re-validated against CURRENT reachability — never a
+           blind replay);
+        2. **mark** — :meth:`_amark_retention` proposes the past-the-
+           horizon, unpinned rows with NO locks held;
+        3. **recheck + delete** — ONE transaction: the work's rows
+           locked ``FOR UPDATE``, the pin set re-read, rows that were
+           deleted or pinned since the mark dropped from the proposal,
+           and the deletion set re-derived from a FRESH survivor scan
+           (a reference committed since the mark — the P03 schedule —
+           removes its digest from the deletion set; the new reference's
+           commit wins the race). The pending-GC journal records the
+           deletion set BEFORE the commit;
+        4. **sweep** — only the rechecked survivors are unlinked after
+           the commit, idempotently; the journal clears what went.
+
+        An exception anywhere before the commit rolls the whole
+        transaction back — a failed pass deletes NOTHING owned by
+        committed references. The recoverable crash window is the gap
+        between the commit and the unlink, and the journal's
+        completion pass covers it. The per-work PIN flock is held
+        across the transaction: a pin for this work can never land
+        between the recheck's pin read and the commit.
         """
         factory = self._require_metadata_session()
-        removed = 0
-        doomed_digests: list[str] = []
-        async with factory() as session:
-            async with session.begin():
-                existing = list(
-                    (
+        await self._acomplete_pending_gc(work_id)
+        mark = await self._amark_retention(work_id, keep_last)
+        if not mark.removed_ids:
+            return 0
+        async with self.pins.alock(work_id):
+            deletion: list[str] = []
+            async with factory() as session:
+                async with session.begin():
+                    rows = list(
                         (
-                            await session.execute(
-                                select(CheckpointMetadataRow)
-                                .where(CheckpointMetadataRow.work_id == work_id)
-                                .order_by(
-                                    CheckpointMetadataRow.sequence,
-                                    CheckpointMetadataRow.checkpoint_id,
+                            (
+                                await session.execute(
+                                    select(CheckpointMetadataRow)
+                                    .where(CheckpointMetadataRow.work_id == work_id)
+                                    .order_by(
+                                        CheckpointMetadataRow.sequence,
+                                        CheckpointMetadataRow.checkpoint_id,
+                                    )
+                                    .with_for_update()
                                 )
-                                .with_for_update()
                             )
+                            .scalars()
+                            .all()
                         )
-                        .scalars()
-                        .all()
                     )
-                )
-                keep_count = max(1, min(keep_last, len(existing))) if keep_last > 0 else 1
-                removed = max(0, len(existing) - keep_count)
-                if removed:
-                    doomed_digests = await self._aretention(session, work_id, keep_last)
-        for digest in doomed_digests:
-            self._cas_path(digest).unlink(missing_ok=True)
+                    present = {str(row.checkpoint_id): row for row in rows}
+                    # RECHECK, part one — pins as they stand NOW: a pin
+                    # recorded since the mark keeps its row and its bytes.
+                    protected_now = self.pins.protected_ids()
+                    final_ids = [
+                        row_id
+                        for row_id in mark.removed_ids
+                        if row_id in present and row_id not in protected_now
+                    ]
+                    if not final_ids:
+                        return 0  # converged elsewhere, or every candidate was pinned late
+                    removed_ids = set(final_ids)
+                    doomed = self._closure_of(removed_ids)
+                    # RECHECK, part two — the FRESH survivor scan (the
+                    # P03 fix): references committed since the mark are
+                    # visible to this statement and leave the deletion set.
+                    referenced = await self._adb_referenced_digests(session, removed_ids)
+                    referenced |= self._pin_closure()
+                    deletion = sorted(doomed - referenced)
+                    await self._adelete_rows(session, [present[row_id] for row_id in final_ids])
+                    self.gc_journal.record(work_id, deletion)
+                # COMMIT — rows first, blobs second.
+            removed = len(final_ids)
+            await self._asweep(deletion)
+            self.gc_journal.clear(work_id, deletion)
         return removed
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
@@ -1416,6 +1718,44 @@ class CheckpointStore:
             listed.extend(entries)
         return listed
 
+    def _closure_of(self, checkpoint_ids: set[str] | tuple[str, ...] | list[str]) -> set[str]:
+        """Every digest the given checkpoints own — manifest plus files.
+
+        A manifest that can no longer be read contributes only its own
+        address: its blobs are kept, conservatively (the health report
+        names the anomaly; GC never guesses reachability).
+        """
+        digests: set[str] = set(checkpoint_ids)
+        for checkpoint_id in sorted(set(checkpoint_ids)):
+            try:
+                digests.update(self._entry_files(self._read_verified(checkpoint_id)))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                continue
+        return digests
+
+    def _pin_closure(self) -> set[str]:
+        """Every digest an active consumer PIN protects (Q35-05).
+
+        The pinned checkpoint ids plus the blobs their manifests
+        reference — the set both the MARK and the RECHECK phases of
+        every retention pass subtract: a pinned checkpoint's row AND
+        its bytes are unreachable by GC until the pin is released
+        explicitly. Read FRESH each time (never cached): a pin that
+        landed between two reads of one pass protects against that very
+        pass's deletion.
+        """
+        return self._closure_of(self.pins.protected_ids())
+
+    def _sweep(self, digests: list[str]) -> None:
+        """The SWEEP: unlink the deletion survivors — idempotent.
+
+        A missing blob is already gone — success, not an error — so an
+        interrupted sweep re-runs to convergence. This method is the
+        seam the interrupted-GC proofs crash on purpose.
+        """
+        for digest in digests:
+            self._cas_path(digest).unlink(missing_ok=True)
+
     def _referenced_by_retained_works(self, exclude_ids: set[str]) -> set[str]:
         """Every digest ANY retained checkpoint of ANY work still needs.
 
@@ -1461,8 +1801,23 @@ class CheckpointStore:
         retained checkpoint of ANY work still references them — shared
         content survives its sharers. The index read-modify-write runs
         under the per-work OS lock (R28-06), so a concurrent
-        :meth:`put_checkpoint` can never be dropped by this pass.
-        Returns how many checkpoint entries were removed.
+        :meth:`put_checkpoint` for THIS work can never be dropped by
+        this pass. Returns how many checkpoint entries were removed.
+
+        Q35-05 makes the pass TWO-PHASE — mark, recheck, sweep — over
+        the same per-work lock section:
+
+        1. **Mark** — candidates are the entries past the horizon whose
+           ids no PIN protects; their digest closure minus the CURRENT
+           cross-work reachability (and minus the pin closure) is
+           recorded as ``pending_gc`` — the tombstone.
+        2. **Recheck** — the sweep re-derives reachability AGAIN, from
+           the indexes as they stand at unlink time (a FRESH walk, plus
+           a FRESH pin read): a reference some other work landed — or a
+           pin some consumer recorded — between the mark and the sweep
+           is REMOVED from the deletion set. The new reference's commit
+           wins the race; its bytes stay readable (the P03 defect).
+        3. **Sweep** — only the survivors are unlinked, idempotently.
 
         NEXT-06 records the DECISION in the index:
         ``{"keep", "ran_at", "removed", "holder", "kept_tail",
@@ -1470,11 +1825,17 @@ class CheckpointStore:
         same entry set does nothing (no re-walk, no re-delete), and the
         blob unlink phase is recoverable: the index is saved FIRST with
         the doomed digests recorded as ``pending_gc``, the unlink runs
-        second, the record clears third — a crash between the index
-        update and the GC is completed by the next pass (re-validating
-        reachability against the CURRENT indexes, never blindly).
+        second, the record keeps whatever the recheck spared third — a
+        crash between the index update and the GC is completed by the
+        next pass (re-validating reachability against the CURRENT
+        indexes and pins, never blindly).
         """
-        with self._index_lock(work_id):
+        with self._index_lock(work_id), self.pins.lock(work_id):
+            # The pin lock nests INSIDE the index lock (the one nesting
+            # order in the system): a pin for this work can never land
+            # between this pass's pin reads and its index save, so a
+            # pinned checkpoint cannot be tombstoned by the very pass
+            # its pin should have stopped (Q35-05).
             document = self._load_index(work_id)
             entries = sorted(
                 (
@@ -1489,35 +1850,49 @@ class CheckpointStore:
 
             # 1. Crash recovery first: a previous pass saved the index
             # (entries dropped, digests recorded) but died before/during
-            # the unlink. Complete it against CURRENT reachability.
+            # the unlink. Complete it against CURRENT reachability AND
+            # pins — the same recheck discipline the live sweep runs.
             pending = decision.get("pending_gc") if decision is not None else None
             if isinstance(pending, list) and pending and decision is not None:
                 pending_digests = {
                     str(digest) for digest in pending if _HEX64.fullmatch(str(digest))
                 }
-                still_referenced = self._referenced_by_retained_works(set())
-                for digest in sorted(pending_digests - still_referenced):
-                    self._cas_path(digest).unlink(missing_ok=True)
-                document["retention"] = {**decision, "pending_gc": []}
+                still = self._referenced_by_retained_works(set()) | self._pin_closure()
+                self._sweep(sorted(pending_digests - still))
+                spared = sorted(pending_digests & still)
+                document["retention"] = {**decision, "pending_gc": spared}
                 self._save_index(work_id, document)
                 decision = document["retention"]
+                # Spared digests STAY pending: a later pass re-attempts
+                # them once their protection is gone.
 
             if not entries:
                 return 0
 
             # 2. The recorded decision already covers this exact state —
             # a concurrent re-run (or an idempotent retry) re-deletes
-            # nothing.
+            # nothing. The state includes the PIN SET the decision was
+            # computed under: releasing a pin re-exposes past-the-horizon
+            # entries without moving the kept tail, so a decision recorded
+            # while a pin held entries back must not short-circuit the
+            # pass that may now collect them (Q35-05).
             if (
                 decision is not None
                 and decision.get("keep") == keep_last
                 and str(decision.get("kept_tail") or "") == str(entries[-1]["checkpoint_id"])
                 and not decision.get("pending_gc")
+                and _pin_list(decision) == sorted(self.pins.ids_for(work_id))
             ):
                 return 0
 
+            # 3. MARK — pinned entries are never candidates (Q35-05).
+            protected = self.pins.ids_for(work_id)
             keep_count = max(1, min(keep_last, len(entries))) if keep_last > 0 else 1
-            retained, removed = entries[-keep_count:], entries[:-keep_count]
+            removed = [
+                entry
+                for entry in entries[:-keep_count]
+                if str(entry["checkpoint_id"]) not in protected
+            ]
             if not removed:
                 # Nothing to drop — still record the decision so the next
                 # re-run over the same state short-circuits.
@@ -1532,28 +1907,24 @@ class CheckpointStore:
                             "removed": 0,
                             "holder": f"{socket.gethostname()}|{os.getpid()}",
                             "kept_tail": str(entries[-1]["checkpoint_id"]),
+                            "pinned": sorted(protected),
                             "pending_gc": [],
                         },
                     },
                 )
                 return 0
-
-            # Everything the removed checkpoints own — manifest plus blobs. A
-            # manifest that can no longer be read contributes only its own
-            # address: its blobs are kept, conservatively.
             removed_ids = {str(entry["checkpoint_id"]) for entry in removed}
-            doomed_digests = set(removed_ids)
-            for checkpoint_id in removed_ids:
-                try:
-                    doomed_digests.update(self._entry_files(self._read_verified(checkpoint_id)))
-                except (FileNotFoundError, CheckpointCorruptError):
-                    continue
+            retained = [
+                entry for entry in entries if str(entry["checkpoint_id"]) not in removed_ids
+            ]
+            doomed_digests = self._closure_of(removed_ids)
+            referenced_at_mark = (
+                self._referenced_by_retained_works(removed_ids) | self._pin_closure()
+            )
+            pending_gc = sorted(doomed_digests - referenced_at_mark)
 
-            referenced = self._referenced_by_retained_works(removed_ids)
-            unreferenced = sorted(doomed_digests - referenced)
-
-            # 3. Index first (with the GC recorded as pending), unlink
-            # second, clear third — the crash window is recoverable.
+            # 4. TOMBSTONE — index first (entries dropped, GC recorded
+            # as pending), unlink second, spared-third.
             self._save_index(
                 work_id,
                 {
@@ -1565,29 +1936,36 @@ class CheckpointStore:
                         "removed": len(removed),
                         "holder": f"{socket.gethostname()}|{os.getpid()}",
                         "kept_tail": str(retained[-1]["checkpoint_id"]),
-                        "pending_gc": unreferenced,
+                        "pinned": sorted(protected),
+                        "pending_gc": pending_gc,
                     },
                 },
             )
-            for digest in unreferenced:
-                self._cas_path(digest).unlink(missing_ok=True)
-            if unreferenced:
-                document = self._load_index(work_id)
-                document["retention"] = {**document.get("retention", {}), "pending_gc": []}
-                self._save_index(work_id, document)
+            # 5. SWEEP with the RECHECK — reachability re-derived from
+            # the CURRENT indexes and pins: a reference that landed
+            # since the mark wins and keeps its bytes (Q35-05/P03).
+            still = self._referenced_by_retained_works(set()) | self._pin_closure()
+            deletable = [digest for digest in pending_gc if digest not in still]
+            self._sweep(deletable)
+            spared = [digest for digest in pending_gc if digest in still]
+            document = self._load_index(work_id)
+            document["retention"] = {**document.get("retention", {}), "pending_gc": spared}
+            self._save_index(work_id, document)
             return len(removed)
 
     # -- the operator health surface (R28-14) ----------------------------------
 
     def _work_report(
-        self, entries: list[dict[str, Any]], policy: StoragePolicy
+        self, entries: list[dict[str, Any]], policy: StoragePolicy, work_id: str = ""
     ) -> tuple[dict[str, Any], set[str]]:
         """(per-work info, referenced digests) — the half BOTH modes report.
 
         The digests walk (each entry's manifest plus its referenced
         blobs, missing ones named, usage from the CAS) is index-agnostic:
         it consumes the entry-dict shape the filesystem index and the
-        metadata table both produce.
+        metadata table both produce. Q35-05 adds the work's PINNED
+        checkpoint ids — the operator's view of which references GC is
+        currently holding back.
         """
         digests: set[str] = set()
         for entry in entries:
@@ -1616,6 +1994,7 @@ class CheckpointStore:
                 *(["bytes"] if over_bytes else []),
                 *(["checkpoints"] if over_count else []),
             ],
+            "pinned": sorted(self.pins.ids_for(work_id)) if work_id else [],
         }
         return info, digests
 
@@ -1699,7 +2078,7 @@ class CheckpointStore:
                     for entry in document.get("checkpoints", [])
                     if isinstance(entry, dict) and isinstance(entry.get("checkpoint_id"), str)
                 ]
-                works[work_id], digests = self._work_report(entries, policy)
+                works[work_id], digests = self._work_report(entries, policy, work_id)
                 referenced_anywhere.update(digests)
         cas_entries, temp_files, disk_usage = self._cas_inventory()
         return self._finish_report(
@@ -1738,7 +2117,7 @@ class CheckpointStore:
         works: dict[str, dict[str, Any]] = {}
         referenced_anywhere: set[str] = set()
         for work_id in sorted(by_work):
-            works[work_id], digests = self._work_report(by_work[work_id], policy)
+            works[work_id], digests = self._work_report(by_work[work_id], policy, work_id)
             referenced_anywhere.update(digests)
         cas_entries, temp_files, disk_usage = self._cas_inventory()
         return self._finish_report(
@@ -1761,20 +2140,28 @@ def _store_dir() -> Path:
     return Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "") or DEFAULT_CHECKPOINT_ROOT)
 
 
-def _durability(request: Request) -> DurabilityContract:
-    """The request's durability contract (R32-16) — fail closed on junk.
+def _repository(request: Request) -> CheckpointRepository:
+    """The request's ONE checkpoint repository (Q35-03) — fail closed.
 
-    The DB wiring comes from the app (``app.state.session_factory``, the
-    same authority the lane-control generation ladder uses). A
-    misconfiguration — an unknown mode, or ``postgres`` selected without
-    any session factory — is a 503 refusal naming the problem, never a
-    silent downgrade to the filesystem index the operator believes is
-    transactional.
+    :func:`forge.adaptive.checkpoint_repository.resolve_repository` is
+    the single composition point: it reads the durability mode
+    (``FORGE_CHECKPOINT_DURABILITY``), the storage root and the session
+    factory (the app's ``app.state.session_factory`` — the same
+    authority the lane-control generation ladder uses) and returns the
+    SAME repository class the resume producer resolves, so upload and
+    resume can never read different authorities. A misconfiguration —
+    an unknown mode, or ``postgres`` selected without any session
+    factory — is a 503 refusal naming the problem, never a silent
+    downgrade to the filesystem index the operator believes is
+    transactional; a database outage on the index path is the typed
+    ``CheckpointRepositoryUnavailable`` (also a 503) — never
+    ``no-checkpoint``, never a filesystem fallback.
     """
-    session_factory = getattr(request.app.state, "session_factory", None)
     try:
-        return DurabilityContract.from_env(session_factory=session_factory)
-    except ValueError as exc:
+        return resolve_repository(
+            session_factory=getattr(request.app.state, "session_factory", None)
+        )
+    except CheckpointRepositoryMisconfigured as exc:
         raise HTTPException(
             status_code=503, detail=f"checkpoint durability is misconfigured: {exc}"
         ) from exc
@@ -2113,23 +2500,16 @@ async def put_checkpoint(
 
     manifest_bytes, blobs, sequence = _decode_payload(document, work_id)
 
-    durability = _durability(request)
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
+    repository = _repository(request)
     try:
-        if durability.mode == DURABILITY_POSTGRES:
-            result = await store.aput_checkpoint(
-                work_id=work_id,
-                manifest_bytes=manifest_bytes,
-                blobs=blobs,
-                sequence=sequence,
-            )
-        else:
-            result = store.put_checkpoint(
-                work_id=work_id,
-                manifest_bytes=manifest_bytes,
-                blobs=blobs,
-                sequence=sequence,
-            )
+        result = await repository.put_checkpoint(
+            work_id=work_id,
+            manifest_bytes=manifest_bytes,
+            blobs=blobs,
+            sequence=sequence,
+        )
+    except CheckpointRepositoryUnavailable as exc:  # an outage is never 404
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except StorageQuotaExceededError as exc:  # R28-14: an honest 413, store intact
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:  # the store's own defense-in-depth refusal
@@ -2154,13 +2534,13 @@ async def checkpoint_storage_health(
     secret = _require_enabled(request)
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
-    durability = _durability(request)
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
-    if durability.mode == DURABILITY_POSTGRES:
-        report = await store.astorage_health_report()
-    else:
-        report = store.storage_health_report()
+    repository = _repository(request)
+    try:
+        report = await repository.storage_health_report()
+    except CheckpointRepositoryUnavailable as exc:  # an outage is never a report
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     report["request_max_bytes"] = _max_request_bytes()
+    report["authority"] = await repository.authority()
     return report
 
 
@@ -2178,25 +2558,21 @@ async def get_checkpoint(
     if checkpoint_id is not None and not _HEX64.fullmatch(checkpoint_id):
         raise HTTPException(status_code=400, detail="checkpoint_id must be a 64-hex digest")
 
-    durability = _durability(request)
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
-    if durability.mode == DURABILITY_POSTGRES:
-        entry = await store.aentry(work_id, checkpoint_id)
-    else:
-        entry = store.entry(work_id, checkpoint_id)
-    if entry is None:
-        scope = f" with id {checkpoint_id}" if checkpoint_id else ""
-        raise HTTPException(
-            status_code=404,
-            detail=f"no checkpoint held for this work{scope}",
-        )
-    latest_entry = (
-        await store.aentry(work_id)
-        if durability.mode == DURABILITY_POSTGRES
-        else store.entry(work_id)
-    )
+    repository = _repository(request)
     try:
-        manifest_bytes, blobs = store.read_checkpoint(entry)
+        entry = await repository.entry(work_id, checkpoint_id)
+        if entry is None:
+            scope = f" with id {checkpoint_id}" if checkpoint_id else ""
+            raise HTTPException(
+                status_code=404,
+                detail=f"no checkpoint held for this work{scope}",
+            )
+        latest_entry = await repository.entry(work_id)
+    except CheckpointRepositoryUnavailable as exc:
+        # An outage is a RECOVERABLE 503 — never 404, never a fs fallback.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        manifest_bytes, blobs = await repository.read_entry(entry)
     except CheckpointCorruptError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:  # an index/manifest naming non-addresses
@@ -2225,10 +2601,9 @@ async def list_checkpoints(
     secret = _require_enabled(request)
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
-    durability = _durability(request)
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
-    if durability.mode == DURABILITY_POSTGRES:
-        entries = await store.alist_entries()
-    else:
-        entries = store.list_entries()
+    repository = _repository(request)
+    try:
+        entries = await repository.list_entries()
+    except CheckpointRepositoryUnavailable as exc:  # an outage is never a list
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"checkpoints": entries}

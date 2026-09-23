@@ -116,6 +116,38 @@ An expired checkpoint produces a recoverable explicit state (`resolve()`
 returns false), not a fresh empty workspace. The caller re-checkpoints
 from the last confirmed state.
 
+### The checkpoint authority (Q35-03): one store for upload, resume and operations
+
+Upload (`PUT /lane/checkpoints/{work}`), `/resume`, the operator list
+and the retention passes all read ONE configured checkpoint repository,
+resolved by `forge.adaptive.checkpoint_repository.resolve_repository`
+from `FORGE_CHECKPOINT_DURABILITY` (`best_effort` filesystem index, or
+`postgres` — the `checkpoint_metadata` table), `FORGE_CHECKPOINT_STORE_DIR`
+(the blob root, shared by both modes), and the process's session
+factory. Changing the metadata backend therefore never changes whether
+confirmed work can be resumed: an API-confirmed checkpoint is visible
+to a fresh resume producer in the SAME mode.
+
+Operator rules:
+
+- **Switching modes is an explicit migration, never a drift.** The
+  postgres index starts EMPTY (no backfill from the JSON files — see
+  the alembic 026 note). Inventory the old `works/<id>.json` entries,
+  re-upload the checkpoints you must keep (content addressing makes a
+  re-put idempotent), then switch `FORGE_CHECKPOINT_DURABILITY` once.
+- **Half-configurations refuse at startup.** `postgres` without a
+  session factory (or an unknown mode value) makes
+  `control_service_from_env` raise `CheckpointRepositoryMisconfigured`
+  and the HTTP channel answer `503` naming the variable — the process
+  never silently degrades to the filesystem index.
+- **A database outage is `503`/typed-unavailable, never `404`.** Both
+  the channel and the resume producer surface
+  `CheckpointRepositoryUnavailable`; no surface falls back to the
+  filesystem, and an outage is never reported as "no checkpoint".
+  Recovery is bringing the metadata database back — nothing to replay.
+- **Which mode am I on?** `GET /lane/checkpoints/health` names
+  `durability` and `authority` for the configured deployment.
+
 ## 6. Credentials and data flow
 
 ```

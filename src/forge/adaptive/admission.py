@@ -72,6 +72,34 @@ native job through an INJECTED provider callable and releases only
 leases whose native jobs are observed terminal. Absence and unknown
 stay distinct: a probe that raises (provider outage) leaves the lease
 draining — uncertain occupancy holds capacity, never silently frees it.
+
+Q35-04 (review c7ae8db) closes the binding gap the review found: R32-07
+built the draining machinery but NO production dispatch ever recorded a
+native correlation, and every provider release wrapper released with
+``native_completed=True`` — the capacity limit was a RESERVATION
+guarantee, not an OCCUPANCY guarantee. A provider that accepted the
+start request and then lost the response (worker death in between) left
+the slot free on local status while the native job ran. The fix is the
+native-start INTENT: :func:`record_native_start_intent` persists
+``native_intent_at`` / ``native_intent_ref`` BEFORE the provider call
+(every dispatch leg), :func:`record_native_handle` attaches the id the
+provider answers with, and occupancy is a DERIVED state
+(:func:`lease_occupancy`)::
+
+    never_dispatched   native_intent_at IS NULL
+    dispatched_unknown native_intent_at set, native_handle NULL, not terminal
+    native_running     native_handle set, not terminal
+    draining           draining_at set, released_at NULL
+    observed_terminal  released_at set
+
+A slot frees ONLY from evidence (:func:`release_lease_with_evidence`):
+an observed native-terminal verdict, a PROVEN never-dispatched intent
+(no intent was ever persisted — the builtin lane, a pre-call abort), or
+an explicit audited override. A dispatched intent with no handle is
+NOT empty capacity: it parks draining and the reconciler probes it by
+its ``native_intent_ref`` prefix through the probe registry
+(:func:`register_native_probe`); an undecidable probe keeps the slot
+held with its draining age visible.
 """
 
 from __future__ import annotations
@@ -92,6 +120,7 @@ from sqlalchemy import (
     String,
     select,
     text,
+    update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -104,15 +133,27 @@ __all__ = [
     "AdmissionPolicy",
     "ExecutionLease",
     "Lease",
+    "LeaseOccupancy",
+    "LeaseRelease",
+    "NativeProbe",
+    "NativeStatus",
     "RefusalReason",
     "admission_report",
     "check_admission",
+    "clear_native_start_intent",
+    "definite_start_refusal",
     "execution_capacity_comment",
     "lease_conflict_kind",
+    "lease_occupancy",
     "lease_snapshot",
+    "native_probe_for",
+    "occupancy_report",
     "reconcile_draining",
     "record_native_handle",
+    "record_native_start_intent",
+    "register_native_probe",
     "release_lease",
+    "release_lease_with_evidence",
     "release_run_leases",
     "try_acquire_lease",
 ]
@@ -317,6 +358,11 @@ def check_admission(
 #: audit trail (NEXT-12's ``execution_attempts.completed`` counter).
 _LEASE_OPEN = text("released_at IS NULL")
 
+#: Q35-04: the occupancy watchlist — OPEN leases that carry a native
+#: start intent (dispatched, verdict unknown). The reconciler and the
+#: operator's occupancy report scan this, not the audit trail.
+_INTENT_OPEN = text("released_at IS NULL AND native_intent_at IS NOT NULL")
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -376,6 +422,14 @@ class ExecutionLease(Base):
     that observes its run terminal — a worker death leaks capacity only
     until the next dispatch in the same project.
 
+    Since Q35-04 the reservation is bound to OBSERVED native occupancy:
+    ``native_intent_at``/``native_intent_ref`` persist the native-start
+    intent BEFORE the provider call, ``native_handle`` attaches the id
+    the provider answers with, and :func:`lease_occupancy` derives the
+    five occupancy states from those columns — a slot frees from
+    evidence (:func:`release_lease_with_evidence`), never from the
+    run's local status alone.
+
     ``slot`` is the CAS key, not a scheduler decision: acquirers try
     1..max_active_per_project until one INSERT wins; the winner of a
     race is chosen by the database, never by a read-then-write. With
@@ -401,6 +455,21 @@ class ExecutionLease(Base):
     acquired_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    #: Q35-04: the native-start INTENT — set BEFORE the provider call
+    #: (:func:`record_native_start_intent`), NULL when no native job was
+    #: ever dispatched (the builtin lane, a pre-call abort). NULL is the
+    #: PROOF of never-dispatched occupancy: the only evidence that may
+    #: free a slot without observing the provider.
+    native_intent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    #: Q35-04: the correlation marker of the intended start (short,
+    #: provider-shaped: ``github:workflow:<owner>/<repo>/<workflow>@<branch>``,
+    #: ``gitlab:pipeline:<project>@<branch>``,
+    #: ``azure:pipeline:<project>:<pipeline>@<branch>``). The prefix
+    #: before the first ``:`` routes :func:`reconcile_draining` to the
+    #: owning provider's probe when the handle was never recorded.
+    native_intent_ref: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
     #: R32-07: the dispatched native job's correlation (pipeline/run id).
     #: NULL until the provider answers dispatch with an id
     #: (:func:`record_native_handle`); the reconciler's probe key.
@@ -443,7 +512,152 @@ class ExecutionLease(Base):
             sqlite_where=_LEASE_OPEN,
             postgresql_where=_LEASE_OPEN,
         ),
+        # Q35-04: the occupancy watchlist — open leases whose dispatch
+        # intent is live (dispatched, native verdict unknown). Reconciler
+        # scans start here instead of sweeping the audit trail.
+        Index(
+            "ix_execution_leases_native_intent",
+            "native_intent_at",
+            sqlite_where=_INTENT_OPEN,
+            postgresql_where=_INTENT_OPEN,
+        ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Q35-04: occupancy — the slot's DERIVED state, from evidence columns only
+# ---------------------------------------------------------------------------
+
+
+class LeaseOccupancy(str, Enum):
+    """The five occupancy states of a lease (Q35-04), DERIVED — never
+    stored: the columns are facts (intent persisted, handle attached,
+    drain parked, release landed) and occupancy is their reading.
+
+    ``never_dispatched`` — no native-start intent was ever persisted:
+    the builtin lane (forge's own worker is the occupant) or a dispatch
+    that aborted before the provider call. The ONLY occupancy a local
+    terminal verdict may free on its own.
+    ``dispatched_unknown`` — the provider call was intended and may
+    have been accepted, but no handle came back (lost response, worker
+    death in between). NOT empty capacity.
+    ``native_running`` — the provider answered with a handle; the job
+    occupies its slot until observed terminal.
+    ``draining`` — the run is locally terminal but occupancy is
+    unresolved: the slot stays held pending the reconciler's probe.
+    ``observed_terminal`` — released: the terminal evidence landed
+    (native terminal observed, proven never-dispatched, or override).
+    """
+
+    NEVER_DISPATCHED = "never_dispatched"
+    DISPATCHED_UNKNOWN = "dispatched_unknown"
+    NATIVE_RUNNING = "native_running"
+    DRAINING = "draining"
+    OBSERVED_TERMINAL = "observed_terminal"
+
+
+def lease_occupancy(row: ExecutionLease) -> LeaseOccupancy:
+    """Derive one lease's occupancy from its evidence columns (pure)."""
+
+    if row.released_at is not None:
+        return LeaseOccupancy.OBSERVED_TERMINAL
+    if row.draining_at is not None:
+        return LeaseOccupancy.DRAINING
+    if row.native_intent_at is None:
+        return LeaseOccupancy.NEVER_DISPATCHED
+    if row.native_handle:
+        return LeaseOccupancy.NATIVE_RUNNING
+    return LeaseOccupancy.DISPATCHED_UNKNOWN
+
+
+class NativeStatus(str, Enum):
+    """What a native-occupancy probe OBSERVED about one native job.
+
+    ``TERMINAL`` — the provider answered and the job is finished: the
+    slot may free. ``RUNNING`` — the provider answered and the job is
+    active: the slot is genuinely occupied. ``UNKNOWN`` — no decision
+    (undecidable correlation, provider outage, a foreign provider's
+    key): uncertain occupancy HOLDS the slot, never frees it.
+    """
+
+    TERMINAL = "terminal"
+    RUNNING = "running"
+    UNKNOWN = "unknown"
+
+
+#: One provider's occupancy probe: maps a lease's PROBE KEY (the
+#: ``native_handle`` once recorded, else the ``native_intent_ref``) to
+#: its observed :class:`NativeStatus`. Sync or async; may raise — a
+#: raising probe reads as UNKNOWN (keep holding). Bool results are
+#: accepted for back-compat (``True`` → terminal, ``False`` → running).
+NativeProbe = Callable[[str], "bool | NativeStatus | Awaitable[bool | NativeStatus]"]
+
+#: The probe registry, keyed by the probe key's provider prefix (the
+#: text before the first ``:`` — ``github``, ``gitlab``, ``azure``).
+#: Each service registers its probe; :func:`reconcile_draining` without
+#: an explicit callable routes each lease to its owning provider.
+_NATIVE_PROBES: dict[str, NativeProbe] = {}
+
+
+def register_native_probe(prefix: str, probe: NativeProbe) -> None:
+    """Register *probe* for the provider whose probe keys start *prefix*.
+
+    The reconciler's routing table: a lease whose key is
+    ``gitlab:pipeline:123`` is probed by the ``gitlab`` probe, never by
+    the GitHub client that happens to tick first. Re-registering a
+    prefix replaces the previous probe (services are rebuilt per
+    reconciler pass).
+    """
+
+    _NATIVE_PROBES[str(prefix)] = probe
+
+
+def native_probe_for(key: str) -> NativeProbe | None:
+    """The probe owning *key* (by its provider prefix), or None."""
+
+    prefix = key.split(":", 1)[0]
+    return _NATIVE_PROBES.get(prefix)
+
+
+def _coerce_native_status(observed: bool | NativeStatus) -> NativeStatus:
+    if isinstance(observed, NativeStatus):
+        return observed
+    return NativeStatus.TERMINAL if observed else NativeStatus.RUNNING
+
+
+#: Client-error statuses that do NOT mean "the server may have accepted
+#: the request anyway": 408/425/429 are retryable conditions where the
+#: start may have landed (or the request was never sent — undecidable),
+#: so they stay ambiguous like 5xx and transport errors.
+_RETRYABLE_CLIENT_STATUSES = frozenset({408, 425, 429})
+
+
+def definite_start_refusal(status_code: int) -> bool:
+    """Whether a provider start call's HTTP *status_code* PROVES the
+    start was refused before acceptance (Q35-04 evidence classifier).
+
+    A definitive non-retryable client error (4xx except 408/425/429)
+    means the provider rejected the request — no native job exists, so
+    the dispatch leg may :func:`clear_native_start_intent` and return
+    capacity immediately. Everything else — 5xx (the server may have
+    accepted before failing), the retryable client statuses, and
+    transport errors (no status at all) — is ambiguous: the intent
+    STAYS and the reconciler's probe decides the occupancy.
+    """
+
+    return 400 <= status_code < 500 and status_code not in _RETRYABLE_CLIENT_STATUSES
+
+
+async def _probe_status(probe: NativeProbe, key: str) -> NativeStatus:
+    """Run one probe (sync or async); a raise reads as UNKNOWN."""
+
+    try:
+        observed = probe(key)
+        if inspect.isawaitable(observed):
+            observed = await observed
+    except Exception:  # noqa: BLE001 — outage/unknown: keep holding
+        return NativeStatus.UNKNOWN
+    return _coerce_native_status(observed)
 
 
 @dataclass(frozen=True)
@@ -515,13 +729,25 @@ def _lease_of(row: ExecutionLease) -> Lease:
 async def _reclaim_terminal_run_leases(
     session: AsyncSession, project_id: int, *, provider: str, now: datetime
 ) -> int:
-    """Release OPEN leases whose runs are already terminal (NEXT-11).
+    """Reclaim OPEN leases whose runs are already terminal (NEXT-11) —
+    by OCCUPANCY, never by local status alone (Q35-04).
 
     The crash backstop: a worker that died between dispatch and release
     leaves an open lease behind; the run row it names eventually reaches
     a terminal status (or is parked by the reconciler), and the NEXT
     acquirer in this project reclaims the slot instead of leaking it
-    forever. Returns how many leases were reclaimed.
+    forever. What "reclaim" means now depends on the lease's evidence:
+
+    - a DRAINING lease already knows its run is terminal — it waits on
+      the NATIVE job, and only the reconciler's probe may release it;
+    - a lease with a live native-start INTENT (Q35-04) may have a native
+      job still running (the worker died between the provider accepting
+      the start and the handle landing) — it is PARKED draining for the
+      reconciler, never released on the local verdict;
+    - only a lease with NO intent — proven never dispatched — releases
+      here: nothing native ever occupied the slot.
+
+    Returns how many leases were reclaimed (released or parked).
     """
     from forge.durable import FlowRun
     from forge.durable.controller import TERMINAL_STATUSES
@@ -554,8 +780,18 @@ async def _reclaim_terminal_run_leases(
         run = await session.get(FlowRun, row.run_id)
         if run is None or run.status not in terminal:
             continue
-        row.released_at = now
-        row.release_reason = f"reclaimed: run {run.status}"
+        if row.native_intent_at is None:
+            # Q35-04: PROVEN never dispatched — the local terminal
+            # verdict is the whole truth; the slot returns now.
+            row.released_at = now
+            row.release_reason = f"reclaimed: run {run.status}"
+            reclaimed += 1
+            continue
+        # Q35-04: a dispatched intent (handle or not) may still be
+        # occupying a runner — park it draining for the reconciler's
+        # probe. AT-04: the terminal-run reclaim cannot bypass this.
+        row.draining_at = now
+        row.release_reason = f"reclaimed: run {run.status} — native occupancy unobserved"
         reclaimed += 1
     if reclaimed:
         await session.commit()
@@ -595,6 +831,13 @@ async def try_acquire_lease(
     refuses the second reservation and the loser reads the winner back.
     A re-driven dispatch (a revival, a reconciler recovery) therefore
     holds exactly one slot, never one per racing driver.
+
+    Attempt-replacement policy (Q35-04, recorded so it is a decision,
+    not an accident): a later attempt for the SAME run id REUSES the
+    held reservation — the pre-read above — including its occupancy
+    evidence (intent/handle/draining). A re-dispatch never stacks a
+    second lease for the same run and never wipes the occupancy the
+    previous attempt recorded.
     """
     moment = now or _utcnow()
     limit = policy.max_active_per_project
@@ -671,6 +914,137 @@ async def try_acquire_lease(
         return None
 
 
+async def open_lease_for_run(
+    session_factory: async_sessionmaker[AsyncSession], run_id: str
+) -> Lease | None:
+    """The run's OPEN lease, if any (the idempotent pre-read spelling).
+
+    The dispatch legs' helper: after :func:`try_acquire_lease` reserved
+    the slot, this re-reads the same row (the open-run index guarantees
+    at most one) so the leg can attach the native handle without a
+    second reservation.
+    """
+
+    async with session_factory() as session:
+        row = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.run_id == run_id,
+                        ExecutionLease.released_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        return None if row is None else _lease_of(row)
+
+
+async def record_native_start_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: str,
+    intent_ref: str,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Persist the native-start INTENT on the run's OPEN lease(s) —
+    BEFORE the provider call (Q35-04).
+
+    This is the write that turns the capacity limit from a reservation
+    guarantee into an OCCUPANCY guarantee: once the intent is durable, a
+    lost start response or a worker death leaves ``dispatched_unknown``
+    occupancy — the slot cannot free on the run's local status, and the
+    reconciler has a correlation marker (``intent_ref``) to probe even
+    without a handle. Record it immediately before the provider call —
+    after every local pre-flight — so an intent can only exist when the
+    call was actually attempted.
+
+    The *intent_ref* is short and provider-shaped
+    (``github:workflow:...@branch`` / ``gitlab:pipeline:...@branch`` /
+    ``azure:pipeline:...@branch``): its prefix routes the reconciler to
+    the owning provider's probe, its branch names the run-owned ref the
+    job would live on. A re-dispatch (attempt replacement) REUSES the
+    held lease and refreshes the marker. Returns how many leases were
+    stamped (0 when the run holds no open lease — nothing to bind).
+    """
+
+    if not intent_ref:
+        raise ValueError("intent_ref must be non-empty")
+    moment = now or _utcnow()
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.run_id == run_id,
+                        ExecutionLease.released_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.native_intent_at = moment
+            row.native_intent_ref = intent_ref[:200]
+            # Attempt replacement REUSES the held reservation: a fresh
+            # dispatch supersedes a parked drain — the occupancy question
+            # restarts with THIS attempt's native job.
+            row.draining_at = None
+        if rows:
+            await session.commit()
+        return len(rows)
+
+
+async def clear_native_start_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: str,
+    intent_ref: str | None = None,
+) -> int:
+    """Clear the native-start intent — the dispatch aborted PRE-CALL.
+
+    The narrow undo of :func:`record_native_start_intent`: a failure
+    between persisting the intent and reaching the provider call (never
+    the provider call itself) must not leave a phantom intent parking a
+    never-started lease draining forever — with the intent cleared the
+    lease is PROVEN never-dispatched again and the ordinary terminal
+    release frees the slot (AT-06: capacity returns without waiting for
+    a nonexistent remote job). When *intent_ref* is given only leases
+    carrying that marker are cleared (a replaced attempt must not wipe
+    its successor's intent). Never clears a lease that already carries a
+    native HANDLE — a handle proves the provider accepted a start.
+    Returns how many leases were cleared.
+    """
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.run_id == run_id,
+                        ExecutionLease.released_at.is_(None),
+                        ExecutionLease.native_intent_at.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        cleared = 0
+        for row in rows:
+            if row.native_handle:
+                continue  # a handle proves a start — never clear it
+            if intent_ref is not None and (row.native_intent_ref or "") != intent_ref:
+                continue  # a different attempt's marker — not ours to wipe
+            row.native_intent_at = None
+            row.native_intent_ref = None
+            cleared += 1
+        if cleared:
+            await session.commit()
+        return cleared
+
+
 async def record_native_handle(
     lease_id: str,
     native_handle: str,
@@ -695,6 +1069,24 @@ async def record_native_handle(
         return True
 
 
+async def _cas_release(session: AsyncSession, lease_id: str, reason: str, *, now: datetime) -> bool:
+    """Compare-and-set the release — exactly once, under any race.
+
+    ``UPDATE ... WHERE released_at IS NULL``: a concurrent release
+    (another reconciler tick, a terminal callback that raced the
+    reconciler) loses the CAS and changes nothing, so a slot is freed
+    exactly once no matter how many drivers reach for it. Returns
+    whether THIS call landed the release.
+    """
+
+    result = await session.execute(
+        update(ExecutionLease)
+        .where(ExecutionLease.id == lease_id, ExecutionLease.released_at.is_(None))
+        .values(released_at=now, release_reason=reason[:100])
+    )
+    return bool(result.rowcount)
+
+
 async def release_lease(
     lease_id: str,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -702,6 +1094,7 @@ async def release_lease(
     session: AsyncSession | None = None,
     reason: str = "released",
     native_completed: bool = True,
+    force: bool = False,
 ) -> bool:
     """Release one lease — frees its slot for the next dispatch.
 
@@ -717,21 +1110,35 @@ async def release_lease(
     freeing the slot: ``draining_at`` is set, ``released_at`` stays
     NULL (the partial open indexes keep holding the slot), and the
     reconciler's :func:`reconcile_draining` releases it once the native
-    job is observed terminal. The local status never again pretends the
-    fleet's capacity came back before the fleet's job ended.
+    job is observed terminal.
+
+    Q35-04: with ``native_completed=True`` a lease that carries a live
+    native-start INTENT no longer releases on the local verdict alone —
+    it parks DRAINING (the intent proves a start was attempted; only
+    evidence frees the slot). ``force=True`` is the explicit audited
+    override for that guard (operator action, tests): it releases
+    regardless of occupancy and the *reason* records WHO decided.
     """
+
     if session is not None:
         return await _release_in_session(
-            session, lease_id, reason, native_completed=native_completed
+            session, lease_id, reason, native_completed=native_completed, force=force
         )
     if session_factory is None:
         raise ValueError("release_lease needs a session or a session_factory")
     async with session_factory() as own:
-        return await _release_in_session(own, lease_id, reason, native_completed=native_completed)
+        return await _release_in_session(
+            own, lease_id, reason, native_completed=native_completed, force=force
+        )
 
 
 async def _release_in_session(
-    session: AsyncSession, lease_id: str, reason: str, *, native_completed: bool = True
+    session: AsyncSession,
+    lease_id: str,
+    reason: str,
+    *,
+    native_completed: bool = True,
+    force: bool = False,
 ) -> bool:
     row = await session.get(ExecutionLease, lease_id)
     if row is None or row.released_at is not None:
@@ -744,27 +1151,63 @@ async def _release_in_session(
         row.release_reason = reason[:100]
         await session.commit()
         return True
+    if row.native_intent_at is not None and not force:
+        # Q35-04: an intent proves a start was attempted — the local
+        # verdict alone cannot free this slot. Park draining; the
+        # reconciler's probe (or an explicit override) finishes it.
+        row.draining_at = _utcnow()
+        row.release_reason = reason[:100]
+        await session.commit()
+        return True
     row.released_at = _utcnow()
-    row.release_reason = reason[:100]
+    row.release_reason = f"{reason} [override]" if force else reason[:100]
     await session.commit()
     return True
 
 
-async def release_run_leases(
+@dataclass(frozen=True)
+class LeaseRelease:
+    """The outcome of an occupancy-aware release (Q35-04): how many of
+    the run's leases actually FREED versus parked DRAINING — the caller
+    logs both, because "parked draining" is the honest answer whenever
+    native occupancy is unresolved."""
+
+    released: int
+    drained: int
+
+
+async def release_lease_with_evidence(
     session_factory: async_sessionmaker[AsyncSession],
     run_id: str,
     *,
     reason: str = "released",
-    native_completed: bool = True,
-) -> int:
-    """Release every OPEN lease naming *run_id* (the terminal-transition
-    spelling — a run reached a terminal status, its slot(s) free now).
+    native_terminal: bool = False,
+    override: str = "",
+) -> LeaseRelease:
+    """Release the run's OPEN lease(s) from EVIDENCE (Q35-04) — the
+    production terminal-transition spelling.
 
-    ``native_completed=False`` parks every OPEN lease of the run
-    DRAINING instead (R32-07) — the same split :func:`release_lease`
-    gives one lease, at the run's terminal transition.
+    A slot frees per lease ONLY from one of the three evidences the
+    issue names:
+
+    - ``native_terminal=True`` — the caller OBSERVED the native job
+      finished (the harness reconciler's own poll);
+    - a lease with NO native-start intent — PROVEN never dispatched
+      (the builtin lane's work lives in forge's own worker; AT-06: a
+      never-started bootstrap refusal returns capacity immediately);
+    - a non-empty *override* — the explicit audited operator decision
+      (recorded into ``release_reason`` for the audit trail).
+
+    Anything else — an intent without a terminal observation — parks
+    the lease DRAINING: the slot stays held, ``draining_at`` is set,
+    and :func:`reconcile_draining` finishes it once the native job is
+    observed terminal (or holds it, age visible, while undecidable).
+    The run's LOCAL status is never sufficient on its own. Release
+    writes are compare-and-set: however many drivers race the terminal
+    transition, the slot frees exactly once.
     """
-    released = 0
+
+    released = drained = 0
     async with session_factory() as session:
         rows = (
             (
@@ -780,39 +1223,130 @@ async def release_run_leases(
         )
         now = _utcnow()
         for row in rows:
-            if native_completed:
-                row.released_at = now
+            if native_terminal or row.native_intent_at is None:
+                if await _cas_release(session, row.id, reason, now=now):
+                    released += 1
+            elif override:
+                audited = f"{reason} [override: {override}]"[:100]
+                if await _cas_release(session, row.id, audited, now=now):
+                    released += 1
             else:
-                row.draining_at = now
-            row.release_reason = reason[:100]
-            released += 1
-        if released:
+                # Q35-04: dispatched-but-unobserved — park draining for
+                # the reconciler's native probe; never a free pass.
+                result = await session.execute(
+                    update(ExecutionLease)
+                    .where(
+                        ExecutionLease.id == row.id,
+                        ExecutionLease.released_at.is_(None),
+                        ExecutionLease.draining_at.is_(None),
+                    )
+                    .values(draining_at=now, release_reason=reason[:100])
+                )
+                if result.rowcount:
+                    drained += 1
+        if released or drained:
             await session.commit()
-    return released
+    return LeaseRelease(released=released, drained=drained)
+
+
+async def release_run_leases(
+    session_factory: async_sessionmaker[AsyncSession],
+    run_id: str,
+    *,
+    reason: str = "released",
+    native_completed: bool = True,
+    force: bool = False,
+) -> int:
+    """Release every OPEN lease naming *run_id* (the terminal-transition
+    spelling — a run reached a terminal status, its slot(s) free now).
+
+    ``native_completed=False`` parks every OPEN lease of the run
+    DRAINING instead (R32-07) — the same split :func:`release_lease`
+    gives one lease, at the run's terminal transition.
+
+    Q35-04: with ``native_completed=True`` the release is
+    evidence-aware — a lease carrying a live native-start intent parks
+    DRAINING (never frees on the local verdict alone), a lease with no
+    intent releases immediately (proven never-started). ``force=True``
+    is the explicit audited override releasing everything regardless
+    (deliberate test/operator callers only; production terminal paths
+    use :func:`release_lease_with_evidence`). Returns how many leases
+    were touched: RELEASED rows with ``native_completed=True``, DRAINED
+    rows with the drain spelling (the historical count contract).
+    """
+
+    if not native_completed and not force:
+        # The R32-07 spelling: drain every OPEN lease, release nothing.
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ExecutionLease).where(
+                            ExecutionLease.run_id == run_id,
+                            ExecutionLease.released_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            now = _utcnow()
+            drained = 0
+            for row in rows:
+                result = await session.execute(
+                    update(ExecutionLease)
+                    .where(
+                        ExecutionLease.id == row.id,
+                        ExecutionLease.released_at.is_(None),
+                        ExecutionLease.draining_at.is_(None),
+                    )
+                    .values(draining_at=now, release_reason=reason[:100])
+                )
+                drained += bool(result.rowcount)
+            if drained:
+                await session.commit()
+        return drained
+    outcome = await release_lease_with_evidence(
+        session_factory, run_id, reason=reason, override="forced" if force else ""
+    )
+    return outcome.released
 
 
 async def reconcile_draining(
     session_factory: async_sessionmaker[AsyncSession],
-    native_status: Callable[[str], bool | Awaitable[bool]],
+    native_status: NativeProbe | None = None,
 ) -> int:
-    """Release DRAINING leases whose native jobs are observed terminal (R32-07).
+    """Release DRAINING leases whose native jobs are observed terminal
+    (R32-07, Q35-04) — exactly once, under any race.
 
     The reconciler's periodic call. Every lease parked draining
     (``released_at IS NULL AND draining_at IS NOT NULL``) is probed
-    through *native_status* — the INJECTED provider callable (sync or
-    async) that maps the lease's ``native_handle`` to whether the native
-    job reached a terminal state:
+    through its PROBE KEY — the ``native_handle`` once recorded, else
+    the ``native_intent_ref`` (Q35-04: a dispatched intent with no
+    handle is NOT empty capacity; its correlation marker is probed
+    instead of being released as "nothing to observe"):
 
-    - observed terminal → the lease is released (``reconciled: native
-      job terminal``) and its slot returns to the pool;
+    - an explicit *native_status* callable probes every lease (the
+      injected-probe contract since R32-07; each service passes its own
+      provider probe);
+    - otherwise the probe is looked up in the registry
+      (:func:`register_native_probe`) by the key's provider prefix —
+      each service owns its provider's keys, and a lease with no
+      registered probe stays draining (undecidable, age visible);
+    - observed terminal (:class:`NativeStatus.TERMINAL` or a truthy
+      probe) → the lease is RELEASED through a compare-and-set: a
+      concurrent callback racing the reconciler still frees the slot
+      exactly once;
     - still running → the lease keeps holding the slot (honest: the
       capacity is genuinely occupied);
-    - the probe RAISES (provider outage, unknown) → the lease also keeps
-      holding the slot: absence and unknown stay distinct from terminal,
-      and uncertain occupancy never silently frees capacity;
-    - no ``native_handle`` on the row → released immediately: there is
-      nothing observable to wait for, so the local terminal verdict
-      (the back-compat shape) is the only truth there is.
+    - the probe RAISES or answers UNKNOWN (provider outage,
+      undecidable correlation) → the lease also keeps holding the slot:
+      absence and unknown stay distinct from terminal, and uncertain
+      occupancy never silently frees capacity;
+    - NO key at all (a legacy pre-Q35-04 row: no handle, no intent) →
+      released: with no intent persisted the lease is PROVEN
+      never-dispatched — the local terminal verdict is the only truth
+      there is (back-compat with the R32-07 release shape).
 
     Returns how many leases were released.
     """
@@ -832,22 +1366,22 @@ async def reconcile_draining(
             .all()
         )
         for row in rows:
-            handle = str(row.native_handle or "")
-            if not handle:
-                row.released_at = now
-                row.release_reason = "reconciled: no native handle to observe"
-                released += 1
+            key = str(row.native_handle or row.native_intent_ref or "")
+            if not key:
+                # Legacy pre-Q35-04 shape: no intent was ever persisted,
+                # so never-dispatched is PROVEN — the local verdict is
+                # the whole truth.
+                if await _cas_release(
+                    session, row.id, "reconciled: no native correlation to observe", now=now
+                ):
+                    released += 1
                 continue
-            try:
-                observed = native_status(handle)
-                if inspect.isawaitable(observed):
-                    observed = await observed
-            except Exception:  # noqa: BLE001 — outage/unknown: keep holding
-                continue
-            if observed:
-                row.released_at = now
-                row.release_reason = "reconciled: native job terminal"
-                released += 1
+            probe = native_status if native_status is not None else native_probe_for(key)
+            if probe is None:
+                continue  # undecidable: stays draining, age visible
+            if await _probe_status(probe, key) is NativeStatus.TERMINAL:
+                if await _cas_release(session, row.id, "reconciled: native job terminal", now=now):
+                    released += 1
         if released:
             await session.commit()
     return released
@@ -888,6 +1422,76 @@ async def lease_snapshot(
         "completed": len(rows) - held,
         "limit": limit if limit > 0 else None,
         "available": max(0, limit - held) if limit > 0 else None,
+    }
+
+
+async def occupancy_report(
+    policy: AdmissionPolicy,
+    project_id: int,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    provider: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """The Q35-04 operator view: occupancy BY STATE, not just counts.
+
+    ``lease_snapshot`` answers "how many slots"; this answers "what is
+    each held slot DOING" — the review's observability asks
+    (``execution.occupancy_unknown``, ``execution.draining_age``,
+    ``execution.native_vs_reserved``):
+
+    - ``occupancy`` — open leases per :class:`LeaseOccupancy` state;
+    - ``occupancy_unknown`` — ``dispatched_unknown`` + ``draining``:
+      every slot whose native occupancy is not proven (the count an
+      operator watches after an incident);
+    - ``draining_age_seconds`` — the OLDEST draining lease's age (None
+      when nothing drains): an undecidable lease stays draining with
+      its age visible, never silently freed;
+    - ``native_vs_reserved`` — handles recorded vs slots held: reserved
+      minus native-attributed is exactly the unknown occupancy the
+      reconciler is chasing.
+    """
+
+    moment = now or _utcnow()
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(ExecutionLease.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if provider:
+        rows = [row for row in rows if not row.provider or row.provider == provider]
+    open_rows = [row for row in rows if row.released_at is None]
+    occupancy = {state.value: 0 for state in LeaseOccupancy}
+    for row in open_rows:
+        occupancy[lease_occupancy(row).value] += 1
+    held = len(open_rows)
+
+    def _aware(value: datetime) -> datetime:
+        # SQLite returns naive datetimes; the lease clocks are UTC.
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+    ages = [
+        int((moment - _aware(row.draining_at)).total_seconds())
+        for row in open_rows
+        if row.draining_at is not None
+    ]
+    native_running = occupancy[LeaseOccupancy.NATIVE_RUNNING.value]
+    return {
+        "project_id": project_id,
+        "provider": provider or None,
+        "held": held,
+        "occupancy": occupancy,
+        "occupancy_unknown": (
+            occupancy[LeaseOccupancy.DISPATCHED_UNKNOWN.value]
+            + occupancy[LeaseOccupancy.DRAINING.value]
+        ),
+        "draining_age_seconds": max(ages) if ages else None,
+        "native_vs_reserved": {"native_attributed": native_running, "reserved": held},
     }
 
 

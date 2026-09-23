@@ -380,6 +380,94 @@ def _short(exc: Exception) -> str:
     return text[:200]
 
 
+async def check_legacy_credential_window(settings: Settings) -> list[CheckResult]:
+    """Q35-06: the legacy (generation-less) lane-credential window, resolved.
+
+    Reports the anchor SOURCE (explicit | recorded-start | persisted-file
+    | refused), the deadline and the days remaining — plus the count of
+    grandfathered generation-less works where the durable authority is
+    visible (``flow_runs`` still at ``cancellation_generation = 0``, the
+    pre-migration posture). No credential value is ever read or printed:
+    the check observes configuration and run counters only.
+
+    Verdicts: invalid explicit configuration FAILS as
+    ``credential.configuration_invalid`` (the startup-profile refusal —
+    fix the value); a REFUSED window (nothing restart-stable could be
+    configured or persisted) FAILS with the specific diagnostic; a
+    valid window PASSES, with a WARN while grandfathered works still
+    depend on it (the migration has not drained yet).
+    """
+    from datetime import datetime, timezone
+
+    from forge.api_lane_control import LegacyWindowInvalid, resolve_legacy_window
+
+    try:
+        window = resolve_legacy_window()
+    except LegacyWindowInvalid as exc:
+        return [_result("credential.configuration_invalid", False, "", str(exc))]
+    if window.refused:
+        return [
+            _result(
+                "credential.legacy_deadline",
+                False,
+                "",
+                window.diagnostic or "no restart-stable legacy credential anchor is available",
+            )
+        ]
+    assert window.deadline is not None  # a refused window returned above
+    now = datetime.now(timezone.utc)
+    days = window.days_remaining(now)
+    remaining = f"{days} day(s) remaining" if days >= 0 else f"closed {-days} day(s) ago"
+    grandfathered = await _grandfathered_works(settings)
+    detail = (
+        f"anchor source={window.source}, deadline={window.deadline.isoformat()} "
+        f"({remaining}); {grandfathered}"
+    )
+    # The window itself is healthy whether open or closed (closed is the
+    # migration's END state); what deserves a warning is a population the
+    # window still strands: works at generation 0 while it is closed, or
+    # still depending on it while it drains.
+    healthy = grandfathered.startswith("grandfathered generation-less works: 0")
+    return [
+        _result(
+            "credential.legacy_deadline",
+            True if healthy else None,
+            detail,
+            detail if not healthy else "",
+        )
+    ]
+
+
+async def _grandfathered_works(settings: Settings) -> str:
+    """The count of generation-less works the durable authority can see.
+
+    Best-effort by contract ("where visible"): without a DATABASE_URL or
+    with the authority unreachable, the count reports not-visible rather
+    than failing the window check — the window's own verdict never
+    depends on it.
+    """
+    from sqlalchemy import func, select
+
+    from forge.database import get_engine
+    from forge.durable.models import FlowRun
+
+    database_url = str(getattr(settings, "DATABASE_URL", "") or "")
+    if not database_url:
+        return "grandfathered generation-less works: not visible (no DATABASE_URL)"
+    try:
+        engine = get_engine(database_url)
+        async with engine.connect() as conn:
+            count = await conn.scalar(
+                select(func.count())
+                .select_from(FlowRun)
+                .where(FlowRun.cancellation_generation == 0)
+            )
+        await engine.dispose()
+    except Exception as exc:  # noqa: BLE001 — the count is advisory, never the verdict
+        return f"grandfathered generation-less works: not visible ({_short(exc)})"
+    return f"grandfathered generation-less works: {int(count or 0)}"
+
+
 def check_capabilities() -> CheckResult:
     """NXT-02: the reachability-based capability manifest holds honestly.
 
@@ -486,6 +574,9 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     results.append(await check_database(settings))
     results.append(await check_litellm(settings))
     results.extend(await check_azure_devops(settings))
+    # Q35-06: the legacy-credential window — configuration observability,
+    # read-only, no credential values (anchor source, deadline, drain count).
+    results.extend(await check_legacy_credential_window(settings))
     if project_id is not None:
         results.extend(await check_project(settings, project_id))
     # NXT-02: offline honesty check, appended last so existing ordering

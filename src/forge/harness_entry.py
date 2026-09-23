@@ -145,6 +145,10 @@ from forge.harnesses.brief_envelope import (
     extract_approved_sections,
     verify_brief_envelope,
 )
+from forge.candidate_collector import (
+    CollectionError,
+    collect_candidate,
+)
 from forge.harnesses.mcp import McpConfigError, parse_servers
 from forge.runs.execution_profile import (
     FORGE_EGRESS_ALLOWLIST_ENV,
@@ -967,6 +971,29 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="write the v2 candidate meta beside the staged diff (emit step)",
     )
+    parser.add_argument(
+        "--collect-candidate",
+        action="store_true",
+        help=(
+            "collect the candidate diff from the ACTIVE workspace generation "
+            "(Q35-01: the checkout's .forge/workspace-generation pointer decides "
+            "the tree; a missing pointer falls back to the checkout itself, the "
+            "fresh-run path)"
+        ),
+    )
+    parser.add_argument(
+        "--output-root",
+        default="forge-output",
+        help="staging directory for --collect-candidate's candidate.diff",
+    )
+    parser.add_argument(
+        "--require-generation",
+        action="store_true",
+        help=(
+            "with --collect-candidate: refuse a MISSING generation pointer "
+            "instead of collecting the checkout (the resumed-delivery profile)"
+        ),
+    )
     parser.add_argument("--forge-run-id", default=None, help="forge run id for --emit-meta")
     parser.add_argument(
         "--attempt-base-oid", default=None, help="frozen attempt base for --emit-meta"
@@ -1285,6 +1312,32 @@ def main(argv: list[str] | None = None) -> int:
         brief_path.parent.mkdir(parents=True, exist_ok=True)
         brief_path.write_text(render_brief(body, plan))
         print(f"harness_entry: brief rendered at {brief_path}")
+        return 0
+
+    if args.collect_candidate:
+        # Q35-01: the candidate bytes come from the ACTIVE workspace — the
+        # tree the checkout's .forge/workspace-generation pointer names
+        # (the resumed lane restored its WIP into a SIBLING generation and
+        # chdir'd the LANE process there; this step's shell still sits in
+        # the checkout, so the pointer — never the inherited cwd — decides
+        # what is collected). Ownership is validated fail-closed and Git
+        # failures exit non-zero (the old ``|| true`` empty-diff is gone);
+        # a zero-change candidate stays a valid exit-0 result. The lane's
+        # own exit classification (.forge/exit) is NEVER rewritten here:
+        # this step runs ``if: always()`` and a collection failure must
+        # redden the job as infrastructure, not re-classify the turn.
+        try:
+            result = collect_candidate(
+                Path.cwd(),
+                args.forge_run_id or "",
+                args.attempt_base_oid or "",
+                args.output_root,
+                allow_missing_pointer=not args.require_generation,
+            )
+        except CollectionError as exc:
+            print(f"harness_entry: candidate collection failed ({exc})", file=sys.stderr)
+            return 1
+        print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
         return 0
 
     if args.emit_meta:

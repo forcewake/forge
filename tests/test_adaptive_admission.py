@@ -31,12 +31,20 @@ from forge.adaptive.admission import (
     AdmissionDecision,
     AdmissionPolicy,
     ExecutionLease,
+    LeaseOccupancy,
+    NativeStatus,
     RefusalReason,
     admission_report,
     check_admission,
+    clear_native_start_intent,
+    definite_start_refusal,
+    lease_occupancy,
     lease_snapshot,
+    native_probe_for,
     reconcile_draining,
     record_native_handle,
+    record_native_start_intent,
+    register_native_probe,
     release_lease,
     release_run_leases,
     try_acquire_lease,
@@ -1220,6 +1228,285 @@ class TestMigration025:
                     module.downgrade()
                 columns = {col["name"] for col in inspect(conn).get_columns("execution_leases")}
                 assert "native_handle" not in columns and "draining_at" not in columns
+                assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 1
+        finally:
+            engine.dispose()
+
+
+# ----------------------------------------------------------------------
+# Q35-04: occupancy — the derived state machine over the intent columns
+# ----------------------------------------------------------------------
+
+
+class TestLeaseOccupancyStates:
+    """Occupancy is DERIVED, never stored: the five states are pure
+    functions of (intent, handle, draining, released)."""
+
+    @staticmethod
+    async def _lease(db, **columns) -> ExecutionLease:
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(AdmissionPolicy(), PROJECT_ID, db, run_id=run_id)
+        assert lease is not None
+        async with db() as session:
+            row = await session.get(ExecutionLease, lease.lease_id)
+            for name, value in columns.items():
+                setattr(row, name, value)
+            await session.commit()
+            await session.refresh(row)
+        return row
+
+    async def test_never_dispatched_without_an_intent(self, db):
+        row = await self._lease(db)
+        assert lease_occupancy(row) is LeaseOccupancy.NEVER_DISPATCHED
+
+    async def test_dispatched_unknown_with_intent_and_no_handle(self, db):
+        row = await self._lease(db, native_intent_at=datetime.now(timezone.utc))
+        assert lease_occupancy(row) is LeaseOccupancy.DISPATCHED_UNKNOWN
+
+    async def test_native_running_with_a_handle(self, db):
+        row = await self._lease(
+            db,
+            native_intent_at=datetime.now(timezone.utc),
+            native_handle="gitlab:pipeline:42:7",
+        )
+        assert lease_occupancy(row) is LeaseOccupancy.NATIVE_RUNNING
+
+    async def test_draining_parks_before_terminal(self, db):
+        row = await self._lease(
+            db,
+            native_intent_at=datetime.now(timezone.utc),
+            draining_at=datetime.now(timezone.utc),
+        )
+        assert lease_occupancy(row) is LeaseOccupancy.DRAINING
+
+    async def test_observed_terminal_once_released(self, db):
+        row = await self._lease(
+            db,
+            native_intent_at=datetime.now(timezone.utc),
+            native_handle="github:actions:o/r:9",
+            released_at=datetime.now(timezone.utc),
+        )
+        assert lease_occupancy(row) is LeaseOccupancy.OBSERVED_TERMINAL
+
+
+class TestNativeStartIntentApi:
+    """The Q35-04 writes: intent before the provider call, cleared on a
+    proven pre-call abort, handle attached when the provider answers."""
+
+    async def test_intent_and_handle_compose_the_running_state(self, db):
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(AdmissionPolicy(), PROJECT_ID, db, run_id=run_id)
+        assert await record_native_start_intent(db, run_id, "github:workflow:o/r/w@b") == 1
+        assert await record_native_handle(lease.lease_id, "github:actions:o/r:501", db)
+        row = await TestNativeStartIntentApi._row(db, lease.lease_id)
+        assert lease_occupancy(row) is LeaseOccupancy.NATIVE_RUNNING
+
+    async def test_intent_is_idempotent_and_refreshes_the_marker(self, db):
+        run_id = uuid4().hex
+        await try_acquire_lease(AdmissionPolicy(), PROJECT_ID, db, run_id=run_id)
+        assert await record_native_start_intent(db, run_id, "gitlab:pipeline:42@a") == 1
+        assert await record_native_start_intent(db, run_id, "gitlab:pipeline:42@b") == 1
+        row = await open_run_lease(db, run_id)
+        assert row.native_intent_ref == "gitlab:pipeline:42@b"
+
+    async def test_clear_restores_the_never_dispatched_proof(self, db):
+        run_id = uuid4().hex
+        await try_acquire_lease(AdmissionPolicy(), PROJECT_ID, db, run_id=run_id)
+        await record_native_start_intent(db, run_id, "azure:pipeline:P:9@b")
+        assert await clear_native_start_intent(db, run_id) == 1
+        row = await open_run_lease(db, run_id)
+        assert row.native_intent_at is None and row.native_intent_ref is None
+
+    async def test_a_released_lease_accepts_no_new_intent(self, db):
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(AdmissionPolicy(), PROJECT_ID, db, run_id=run_id)
+        await release_lease(lease.lease_id, db)
+        assert await record_native_start_intent(db, run_id, "gitlab:pipeline:42@b") == 0
+
+    @staticmethod
+    async def _row(db, lease_id: str) -> ExecutionLease:
+        async with db() as session:
+            return await session.get(ExecutionLease, lease_id)
+
+
+async def open_run_lease(db, run_id: str) -> ExecutionLease:
+    async with db() as session:
+        return (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.run_id == run_id,
+                        ExecutionLease.released_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+
+class TestNativeProbeRegistry:
+    """The reconciler's routing table: probe keys carry their provider
+    prefix; an unregistered provider is UNDECIDABLE, never a guess."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        from forge.adaptive import admission
+
+        saved = dict(admission._NATIVE_PROBES)
+        admission._NATIVE_PROBES.clear()
+        yield
+        admission._NATIVE_PROBES.clear()
+        admission._NATIVE_PROBES.update(saved)
+
+    def test_register_and_lookup_by_prefix(self):
+        probe = lambda key: True  # noqa: E731 — trivial test probe
+        register_native_probe("github", probe)
+        assert native_probe_for("github:actions:o/r:501") is probe
+        assert native_probe_for("gitlab:pipeline:42:7") is None
+
+    def test_a_bare_legacy_key_has_no_provider(self):
+        assert native_probe_for("pipe-7") is None
+
+    def test_reregistration_replaces_the_previous_probe(self):
+        first = lambda key: True  # noqa: E731
+        second = lambda key: False  # noqa: E731
+        register_native_probe("gitlab", first)
+        register_native_probe("gitlab", second)
+        assert native_probe_for("gitlab:pipeline:1") is second
+
+    async def test_reconcile_uses_the_registry_when_no_probe_is_given(self, db):
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(
+            AdmissionPolicy(), PROJECT_ID, db, run_id=run_id, native_handle="github:actions:o/r:9"
+        )
+        await release_lease(lease.lease_id, db, native_completed=False)
+        register_native_probe("github", lambda key: NativeStatus.TERMINAL)
+
+        assert await reconcile_draining(db) == 1  # routed by the prefix
+
+
+class TestDefiniteStartRefusal:
+    """The evidence classifier for pre-call aborts: only a definitive
+    non-retryable client error PROVES the provider never accepted."""
+
+    def test_definitive_client_errors_prove_refusal(self):
+        for status in (400, 401, 403, 404, 409, 422):
+            assert definite_start_refusal(status) is True
+
+    def test_retryable_and_server_errors_stay_ambiguous(self):
+        for status in (408, 425, 429, 500, 502, 503):
+            assert definite_start_refusal(status) is False
+
+    def test_success_and_redirect_statuses_are_not_refusals(self):
+        for status in (200, 201, 202, 301):
+            assert definite_start_refusal(status) is False
+
+
+class TestMigration027:
+    """The Q35-04 migration: the native-start intent columns plus the
+    occupancy watchlist index; downgrade refuses while an OPEN lease
+    still carries an intent (dropping the columns would recast
+    dispatched-unknown capacity as never-dispatched — premature release)."""
+
+    @staticmethod
+    def _load_migration():
+        import importlib.util
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "alembic"
+            / "versions"
+            / "027_lease_native_start_intent.py"
+        )
+        spec = importlib.util.spec_from_file_location("migration_027", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _create_026_surface(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE execution_leases (
+                    id VARCHAR(32) PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    provider VARCHAR(32) NOT NULL DEFAULT '',
+                    run_id VARCHAR(32),
+                    slot INTEGER NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    native_handle VARCHAR(256),
+                    draining_at DATETIME,
+                    released_at DATETIME,
+                    release_reason VARCHAR(100),
+                    CONSTRAINT ck_execution_leases_slot CHECK (slot >= 1)
+                )
+                """
+            )
+        )
+
+    def test_upgrade_adds_the_intent_columns_and_the_watchlist_index(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine, inspect
+
+        module = self._load_migration()
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.connect() as conn:
+                self._create_026_surface(conn)
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at)"
+                        " VALUES (:a, 7, :r, 1, :t)"
+                    ),
+                    {"a": uuid4().hex, "r": uuid4().hex, "t": "2026-01-01T00:00:00+00:00"},
+                )
+                conn.commit()
+
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    module.upgrade()
+
+                columns = {col["name"] for col in inspect(conn).get_columns("execution_leases")}
+                assert {"native_intent_at", "native_intent_ref"} <= columns
+                indexes = {ix["name"] for ix in inspect(conn).get_indexes("execution_leases")}
+                assert "ix_execution_leases_native_intent" in indexes
+                # Pre-existing leases dispatched no intent we can invent:
+                # NULL columns ARE the never-dispatched behavior (025 posture).
+                row = conn.execute(
+                    text("SELECT native_intent_at, native_intent_ref FROM execution_leases")
+                ).one()
+                assert row == (None, None)
+
+                # An OPEN lease with a live intent blocks the downgrade.
+                conn.execute(
+                    text(
+                        "UPDATE execution_leases SET native_intent_at ="
+                        " '2026-09-23T00:00:00+00:00',"
+                        " native_intent_ref = 'gitlab:pipeline:42@factory/7/ab'"
+                    )
+                )
+                conn.commit()
+                with Operations.context(ctx):
+                    try:
+                        module.downgrade()
+                    except RuntimeError as exc:
+                        assert "native-start intent" in str(exc)
+                    else:
+                        raise AssertionError("downgrade must refuse while intents are live")
+                # Released history downgrades cleanly.
+                conn.execute(
+                    text("UPDATE execution_leases SET released_at = '2026-09-23T01:00:00+00:00'")
+                )
+                conn.commit()
+                with Operations.context(ctx):
+                    module.downgrade()
+                columns = {col["name"] for col in inspect(conn).get_columns("execution_leases")}
+                assert "native_intent_at" not in columns
+                assert "native_intent_ref" not in columns
                 assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 1
         finally:
             engine.dispose()
