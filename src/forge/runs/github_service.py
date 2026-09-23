@@ -113,6 +113,11 @@ from forge.factory.llm import LLMError, LLMResponseError
 # Q35-02: the continuation decision model (pure over an evidence snapshot);
 # module-level so the retry/revival regions stay typed.
 from forge.adaptive import continuation
+
+# Q35-07: the composition-boundary adoption (ADR-0029) — the narrow seam
+# the dispatch entry composes the frozen AttemptStartSpec envelope through.
+from forge.adaptive import composition_adoption
+from forge.adaptive.composition_adoption import compose_attempt_start
 from forge.adaptive.discovery_stage import (
     DiscoveryRunContext,
     DiscoveryStageError,
@@ -172,6 +177,7 @@ from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, HarnessOutcome, is_harness_backend
 from forge.runs.candidate import attempt_base_for
 from forge.runs.checkpoints import load_step_output, record_step_output, step_input_digest
+from forge.runs.composition import CompositionBoundaryError
 from forge.runs.consistency import (
     assert_ready_invariants,
     ready_evidence,
@@ -3371,6 +3377,18 @@ class GitHubRunService:
         revival recovery scan) makes the held checkpoint's restore a
         precondition of the turn; ``restart`` is the operator's explicit
         discard of the held WIP.
+
+        Q35-07 (the ADR-0029 adoption): this entry is the composition
+        boundary — before any effectful call it composes and asserts the
+        frozen ``AttemptStartSpec`` envelope
+        (:mod:`forge.adaptive.composition_adoption`) from the durable
+        dispatch facts and persists its digest on the run's evidence
+        (``attempt_start``). A construction or boundary refusal parks the
+        run ``blocked(composition_boundary: …)`` naming the exact field,
+        with zero provider calls. Coordinate axes stay separate: the
+        attempt base is the attempt identity, the cancellation epoch is
+        the authority axis, and a checkpoint sequence is never accepted
+        on either.
         """
         if resume_mode not in LANE_RESUME_MODES:
             raise ValueError(
@@ -3423,6 +3441,12 @@ class GitHubRunService:
             envelope_digest = str(envelope.get("envelope_digest") or "")
             spec_digest = str(run.spec_digest or "")
             claimed_plan_digest = str(run.plan_digest or "")
+            # Q35-07: the persisted composition envelope of the PRIOR
+            # dispatch (None on a run persisted before the adoption — the
+            # explicit legacy shape below).
+            prior_attempt_start = (run.evidence or {}).get(
+                composition_adoption.ATTEMPT_START_EVIDENCE_KEY
+            )
         # R32-11 (NEXT-20): the dispatch consumes the durable ACTIVE plan
         # revision — the plan this lane runs under is read from the
         # run's ``active_plan`` pointer, never assumed from the comment
@@ -3456,6 +3480,72 @@ class GitHubRunService:
             return
         plan_binding_document = (
             plan_binding.as_document() if plan_binding.revised_from_digest else None
+        )
+
+        # Q35-07 (the ADR-0029 adoption): the composition boundary — the
+        # frozen AttemptStartSpec envelope EVERY GitHub dispatch constructs
+        # and asserts BEFORE any effectful call (branch creation, the
+        # native-start intent, dispatch_workflow). The envelope's approved
+        # inputs resolve ONCE, from the durable record: the frozen spec's
+        # execution-profile digest, the caller's continuation-selected
+        # resume mode (the persisted continuation decision for /retry and
+        # the revival), the run row's attempt base and cancellation epoch,
+        # the reserved execution lease. No live setting enters the
+        # envelope, so settings mutated after approval cannot reshape a
+        # recovered attempt.
+        lease = await open_lease_for_run(self._session_factory, run_id)
+        try:
+            composed = compose_attempt_start(
+                run_id=run_id,
+                repo_full_name=self._repo_full_name,
+                project_id=project_id,
+                attempt_oid=attempt_base,
+                authority_epoch=generation,
+                profile_digest=spec.profile_digest,
+                fallback_profile_digest=spec_digest,
+                resume_mode=resume_mode,
+                lease_id=lease.lease_id if lease is not None else "",
+                prior_document=prior_attempt_start,
+            )
+        except CompositionBoundaryError as exc:
+            # Pre-effect by construction: nothing above has touched the
+            # provider, no native-start intent was recorded, and the
+            # terminal park below frees the reserved slot through the
+            # ordinary terminal-lease reclaim (proven never-dispatched).
+            logger.warning(
+                "composition.refusal_by_field: GitHub run %s dispatch refused at the "
+                "composition boundary — %s",
+                run_id[:8],
+                exc,
+            )
+            await self._to_terminal(run_id, FlowStatus.BLOCKED, f"composition_boundary: {exc}")
+            return
+        if composed.legacy:
+            # The compat shape, observable and never silent: a run whose
+            # evidence carries no persisted envelope (persisted before
+            # Q35-07, or this run's first composed dispatch).
+            logger.info(
+                "composition.legacy_attempts: GitHub run %s carries no persisted "
+                "attempt_start envelope — constructed on the fly from the frozen "
+                "spec and the durable dispatch facts",
+                run_id[:8],
+            )
+        # The audit trail: the envelope digest + context digest persist
+        # BEFORE the launch, so a redispatch (the reconciler's re-drive, a
+        # stranding recovery) verifies digest equality — the same
+        # authorization — or a legitimately new attempt.
+        await self._merge_run_evidence(
+            run_id, {composition_adoption.ATTEMPT_START_EVIDENCE_KEY: composed.document}
+        )
+        logger.info(
+            "composition.version_used: GitHub run %s attempt_start v%d (%s resume, "
+            "envelope %s, context %s%s)",
+            run_id[:8],
+            composition_adoption.ATTEMPT_START_VERSION,
+            composed.spec.resume_mode,
+            composed.document["envelope_digest"][:12],
+            composed.document["context_digest"][:12],
+            " — same envelope as the prior dispatch" if composed.unchanged else "",
         )
         if driver is None:
             driver = spec.harness_driver

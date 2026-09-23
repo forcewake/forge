@@ -1474,6 +1474,12 @@ class TestR32DConcurrentLeaseUnderFourApprovals:
             db,
             fake,
             settings=make_settings(FORGE_GITHUB_HARNESS_WORKFLOW=GH_WORKFLOW),
+            # Q35-07: the composition boundary refuses a dispatch whose
+            # attempt base never resolved — bind the service to the repo
+            # this fixture actually seeds (the make_service default names
+            # a repository the fake has no head for, so base_sha stayed
+            # empty and the old dispatch silently ran without a base).
+            repo=GH_REPO,
         )
 
     async def _start(self, service, fake, issue: int) -> str:
@@ -1607,6 +1613,11 @@ class TestR32EDispatchSelectsTheRequiredResumeMode:
                 FORGE_GITHUB_HARNESS_WORKFLOW=GH_WORKFLOW,
                 FORGE_HARNESS_MODEL="glm-5.3-flash[1m]",
             ),
+            # Q35-07: same fixture repair as R32-D above — the service
+            # must be bound to the repository this fake actually seeds,
+            # or the attempt base never resolves and the composition
+            # boundary (correctly) refuses the dispatch.
+            repo=GH_REPO,
         )
 
     def _template_resume_env(self, mode: str) -> str:

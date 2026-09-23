@@ -445,6 +445,27 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         "the not_run entries below.",
     ),
     ManifestEntry(
+        capability="lane-install-contract",
+        provider="github",
+        backend="harness",
+        level="contract_tested",
+        evidence_class="contract_suite",
+        evidence=(
+            "tests/test_lane_install_contract.py",
+            "scripts/generate_template_pins.py",
+            ".github/workflows/release.yml",
+        ),
+        ci_jobs=("test",),
+        gating="pr_gate",
+        note="Q35-08: the shipped GitHub lane template installs ONLY the promoted "
+        "release identity — a lane pin generated from the archived promotion record "
+        "(promoted version + wheel sha256), no hardcoded historical fallback, "
+        "refuse-unset with an upgrade instruction, source installs gated behind the "
+        "less-qualified dev override, and the installed identity verified before any "
+        "model call. A true empty-runner cold install is #246's production-entry "
+        "suite, not claimed here.",
+    ),
+    ManifestEntry(
         capability="release-promotion-gate",
         provider="*",
         backend="*",

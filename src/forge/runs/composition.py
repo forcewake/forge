@@ -27,8 +27,12 @@ compose with which:
 Import boundary (ADR-0027 §3, applied at creation): this module is core
 — it imports no ``forge.integrations.*`` and no ``forge.gateway.*``.
 
-No production caller yet (ADR-0029 §5): the services adopt these types
-one dispatch entry at a time; until then the types ARE the contract.
+Production adoption (Q35-07): the GitHub dispatch entry
+(:meth:`forge.runs.github_service.GitHubRunService._advance_harness`)
+now constructs and asserts these types before any effectful call, via
+the narrow provider seam :mod:`forge.adaptive.composition_adoption`
+(ADR-0027's ladder — one provider path first; the other services adopt
+only after this path passes the composed suite).
 """
 
 from __future__ import annotations

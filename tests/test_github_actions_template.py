@@ -6,6 +6,7 @@ the factory-branch ref, the entry-point invocation, and the candidate
 artifact contract (name + files) the trusted publisher consumes.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -251,18 +252,17 @@ class TestWorkflowTemplateContract:
 
         run = driver_step["run"]
         assert "python -m forge.harness_entry" in run
-        # The install ships a REAL released tag as the default — never a
-        # <PLACEHOLDER> a raw copy would carry to the runner (the LIVE
-        # class: pip attempted the literal ref and the lane died in
-        # bootstrap). The FORGE_LANE_REF repo variable overrides; the tag
-        # default is refreshed deliberately per release (phase 3 of
-        # docs/research/2026-09-22-script-rendering-architecture.md §7).
+        # Q35-08: the lane's default version is the GENERATED pin (rendered
+        # from the archived promotion record by scripts/
+        # generate_template_pins.py) — never a <PLACEHOLDER> a raw copy
+        # would carry to the runner (the LIVE class: pip attempted the
+        # literal ref and the lane died in bootstrap) and never a hardcoded
+        # historical fallback (the retired v0.27.0 shape). The FORGE_LANE_REF
+        # repo variable overrides with a released tag.
         text = TEMPLATE.read_text()
         assert "<PINNED_REF>" not in text
-        assert (
-            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}"'
-            in text
-        )
+        assert re.search(r"\$\{[A-Z_]*REF:-v[0-9]+\.", text) is None
+        assert "FORGE_LANE_PROMOTED_VERSION=" in text
         assert "FORGE_LANE_REF: ${{ vars.FORGE_LANE_REF }}" in text
 
     def test_concurrency_groups_one_run_per_forge_run(self):
@@ -601,18 +601,27 @@ class TestImmutableResourcePinning:
             assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in run
             assert '"pin":"git-ref","ref":"%s"' in run
 
-    def test_the_git_route_stays_the_documented_fallback(self):
-        """The released-tag default survives (the LIVE-found placeholder
-        doctrine); the wheel route wraps it, never replaces it."""
-        text = TEMPLATE.read_text()
-        assert (
-            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}"'
-            in text
-        )
-        # The wheel route is TAKEN FIRST (the git install lives in the
-        # else branch of the wheel guard).
+    def test_the_git_route_requires_a_resolved_ref_never_a_fallback(self):
+        """Q35-08: the released-tag default is GONE — the git route installs
+        the RESOLVED ref (the explicit FORGE_LANE_REF variable, else the
+        GENERATED promoted pin) and refuses when neither resolves, with the
+        upgrade instruction naming the repair. The wheel route is still
+        taken first; the dev source override sits between them, explicitly
+        less-qualified."""
         run = self.brief_step(TEMPLATE)["run"]
-        assert run.index('if [ -n "$FORGE_WHEEL_URL" ]') < run.index("git+https://")
+        assert (
+            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF_RESOLVED}"'
+            in run
+        )
+        assert "${FORGE_LANE_REF:-$FORGE_LANE_PROMOTED_VERSION}" in run
+        # The refuse-unset gate precedes the install it guards.
+        assert run.index("no lane version pinned") < run.index("forge@${FORGE_LANE_REF_RESOLVED}")
+        assert "generate_template_pins.py" in run  # the upgrade instruction
+        # Route precedence: wheel first, dev override, qualified tag last.
+        assert run.index('if [ -n "$FORGE_WHEEL_URL" ]') < run.index(
+            "FORGE_LANE_DEV_SOURCE_INSTALL"
+        )
+        assert run.index("FORGE_LANE_DEV_SOURCE_INSTALL") < run.index("FORGE_LANE_REF_RESOLVED=")
 
     def test_the_codegraph_binary_installs_through_a_lock_not_a_bare_spec(self):
         """`npm ci` installs EXACTLY the materialized lock — npm verifies
@@ -699,15 +708,17 @@ def _wheel_branch(path: Path) -> str:
     """The shipped wheel-pin branch, verbatim, dedented to column 0 — from
     the ``mkdir -p .forge`` preamble through the lane_install.json record.
     The closing ``fi`` is appended by the harness: the template opens the
-    wheel route's ``if`` and closes it after the git-ref ``else`` branch,
-    so selecting ONLY the wheel route means closing it here — everything
-    between is byte-verbatim shipped script."""
+    wheel route's ``if`` and closes it after the git-ref branches, so
+    selecting ONLY the wheel route means closing it here — everything
+    between is byte-verbatim shipped script (Q35-08: that now includes the
+    generated lane-pin assignments and the route-selection preamble; with
+    FORGE_LANE_WHEEL set they are inert)."""
     lines = path.read_text().splitlines()
     start = next(i for i, line in enumerate(lines) if line.strip() == "mkdir -p .forge")
     end = next(
         i
         for i, line in enumerate(lines)
-        if line.strip() == 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-}"'
+        if line.strip() == 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-$FORGE_LANE_PROMOTED_WHEEL_URL}"'
     )
     stop = next(i for i, line in enumerate(lines[end:], end) if ".forge/lane_install.json" in line)
     block = lines[start : stop + 1]
@@ -795,12 +806,16 @@ class TestWheelBootstrapRunsOnRealPip:
         )
         assert result.returncode == 0, result.stdout + result.stderr
 
-        # The provenance record carries BOTH halves (expected = observed).
+        # The provenance record carries BOTH halves (expected = observed)
+        # plus the Q35-08 qualification facts (the wheel route is the
+        # qualified one; a non-forge probe wheel records no version).
         recorded = json.loads((workdir / ".forge" / "lane_install.json").read_text())
         assert recorded == {
             "pin": "wheel",
             "expected_sha256": digest,
             "actual_sha256": digest,
+            "qualified": True,
+            "version": "",
         }
         # The installed lane code imports from the throwaway target.
         import os

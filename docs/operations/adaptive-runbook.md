@@ -132,9 +132,11 @@ Operator rules:
 
 - **Switching modes is an explicit migration, never a drift.** The
   postgres index starts EMPTY (no backfill from the JSON files — see
-  the alembic 026 note). Inventory the old `works/<id>.json` entries,
-  re-upload the checkpoints you must keep (content addressing makes a
-  re-put idempotent), then switch `FORGE_CHECKPOINT_DURABILITY` once.
+  the alembic 026 note). Use the Q35-21 command set above
+  (`inventory` → `import` → `verify` → `cutover`) instead of manual
+  re-uploads: it is idempotent, restartable and gated, and
+  `enforce_authority_marker` keeps exactly one backend accepting
+  mutations after the cutover.
 - **Half-configurations refuse at startup.** `postgres` without a
   session factory (or an unknown mode value) makes
   `control_service_from_env` raise `CheckpointRepositoryMisconfigured`
@@ -147,6 +149,81 @@ Operator rules:
   Recovery is bringing the metadata database back — nothing to replay.
 - **Which mode am I on?** `GET /lane/checkpoints/health` names
   `durability` and `authority` for the configured deployment.
+
+### Migrating checkpoint metadata to the postgres authority (Q35-21)
+
+Adopting `FORGE_CHECKPOINT_DURABILITY=postgres` for an installation
+that already holds checkpoints is an EXPLICIT migration — a bare schema
+migration (alembic 026) migrates no index contents, and a silent flip
+would strand every paused work behind an index the new authority has
+never seen. The command set (module CLI, exit 0 clean / 3 partial
+import / 1 refused):
+
+```bash
+uv run python -m forge.adaptive.checkpoint_migration inventory
+uv run python -m forge.adaptive.checkpoint_migration import   --database-url "$DATABASE_URL"
+uv run python -m forge.adaptive.checkpoint_migration verify   --database-url "$DATABASE_URL"
+uv run python -m forge.adaptive.checkpoint_migration cutover
+uv run python -m forge.adaptive.checkpoint_migration rollback --verify-report <path>
+```
+
+- **`inventory`** scans `works/<id>.json`, every manifest and referenced
+  blob (digests verified), the pins overlay, and writes
+  `<store-root>/migration/inventory.json`. Missing and corrupt entries
+  are LISTED with their digests — never invented, never silently
+  skipped.
+- **`import`** lands every importable entry in `checkpoint_metadata`
+  through the repository protocol (the same verified landing the upload
+  route uses), with on-upload retention DISABLED so the migration never
+  drops history. A missing blob makes that ENTRY unimportable —
+  reported, the run continues with the rest, exit 3. Re-running is a
+  no-op: the natural keys `(work_id, checkpoint_id)` prevent duplicates
+  and selection is derived from the rows, so a re-import can never
+  alter which checkpoint is active. Interrupted anywhere, a re-run
+  converges (verify names any gap).
+- **`verify`** compares the old index against the database per work
+  (entry sets, active identity), resolves every PINNED exact reference
+  through the new backend, and re-checks blob reachability through the
+  configured root. A disagreement (JSON says A, DB says B) is reported
+  with BOTH actives — the operator resolves it; no timestamp ever picks
+  a winner. Exit 1 while anything disagrees.
+- **`cutover`** flips the deployment authority MARKER — the state file
+  `<store-root>/migration/authority.json`, written atomically under an
+  exclusive fence (`<store-root>/migration/cutover.lock`) — ONLY when
+  the verify report is clean AND the index has not moved since it was
+  taken. Then set `FORGE_CHECKPOINT_DURABILITY=postgres` and restart.
+- **Exactly one mutator afterwards**: wrap the composed repository —
+  `enforce_authority_marker(resolve_repository(...))` from
+  `forge.adaptive.checkpoint_migration` — and the authority the marker
+  does NOT name refuses every mutation with the typed
+  `MutationsFencedError` while its immutable READS through the old root
+  stay available. While a cutover holds the fence, mutations are
+  refused on BOTH sides.
+- **Rollback is forward-only by default.** `rollback` refuses unless a
+  CLEAN verify report for the CURRENT data state is supplied
+  (`--verify-report`, taken after the cutover; a report that predates
+  the flip or the store's current shape is refused). Checkpoints
+  uploaded after the cutover exist only in the database — the
+  documented recovery is `import --reverse` (database entries back into
+  the filesystem index; the blobs are shared CAS bytes), then `verify`,
+  then `rollback`. The old inventory is NEVER deleted by any step.
+- **`forge doctor` preflight** (read-only): `checkpoint.migration_coverage`
+  (works still only on the filesystem while postgres is active — with
+  the `import` command named), `checkpoint.pointer_conflicts`
+  (disagreeing actives → operator resolution), and
+  `checkpoint.blob_topology`.
+
+**Blob volumes and replicas (the unsupported topology).** The CAS blobs
+are content-addressed filesystem bytes under BOTH contracts: a shared
+database does NOT make node-local content shared. Two replicas reading
+separate volumes is unsupported — each would see only its own blobs and
+report the others' digests unreachable. `checkpoint.blob_topology`
+warns (never blocks) on the simplest honest heuristic: a store root that
+is RELATIVE (each process's own CWD) or under a temp directory looks
+node-local; any other absolute path is ASSUMED shared — confirm every
+replica mounts it. Under `best_effort` the warning names the
+single-process contract itself: multi-replica deployments need the
+postgres authority AND a shared blob volume.
 
 ## 6. Credentials and data flow
 
@@ -203,6 +280,10 @@ mutates permissions or creates infrastructure):
 | `redis` / `database` / `litellm` | The infrastructure is reachable |
 | `harness.lanes` | Per-driver credential variables are present |
 | `azdo.*` | The Azure DevOps lane is configured |
+| `credential.legacy_deadline` | The legacy-credential window's anchor, deadline and drain count (Q35-06) |
+| `checkpoint.migration_coverage` | Not-yet-migrated works while the postgres authority is active (Q35-21) |
+| `checkpoint.pointer_conflicts` | JSON/DB active-pointer disagreements → operator resolution, never timestamp selection |
+| `checkpoint.blob_topology` | The blob root does not look node-local (heuristic warning; a shared DB does not share blobs) |
 
 **The adaptive doctor additions** (in the substrate):
 - `CapabilityMatrix`: unknown profiles fail closed (not advertised)

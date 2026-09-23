@@ -71,6 +71,14 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Q35-09: the production-entry invariant traces (issue #246) — the thin
+# layer that drives the SAME entry points a customer invokes (real lane
+# and collector subprocesses, real HTTP provider writes against the fake
+# native server, real durable state). Registered so the layer is
+# selectable with `-m production_entry` without a pytest warning.
+markers = [
+    "production_entry: Q35-09 production-entry invariant traces (AT-01..AT-06 at the process/DB level)",
+]
 # B14: the suite runs warning-clean except ONE known upstream artifact —
 # aiosqlite's worker thread finalizes its anyio memory stream after the
 # event loop closed (ResourceWarning from anyio/streams/memory.__del__).

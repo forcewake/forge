@@ -468,6 +468,142 @@ async def _grandfathered_works(settings: Settings) -> str:
     return f"grandfathered generation-less works: {int(count or 0)}"
 
 
+async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
+    """Q35-21 preflight: the checkpoint metadata migration's three views.
+
+    Read-only, env-driven (``FORGE_CHECKPOINT_DURABILITY`` /
+    ``FORGE_CHECKPOINT_STORE_DIR``), best-effort on the database half
+    (a not-visible database degrades to a note, never a failure):
+
+    - ``checkpoint.migration_coverage`` — while the postgres authority
+      is ACTIVE: how many works still live only on the filesystem index
+      (their active checkpoint has no ``checkpoint_metadata`` row) —
+      the not-yet-migrated population, with the import command named;
+    - ``checkpoint.pointer_conflicts`` — works both authorities hold
+      whose DERIVED actives disagree: operator resolution demanded,
+      never a winner and never by timestamp (post-cutover drift where
+      the database active outranks a still-present old active is
+      expected and counted separately);
+    - ``checkpoint.blob_topology`` — the two-replica-separate-volumes
+      unsupported topology, in its simplest honest form: a WARNING when
+      the configured store root looks node-local (relative or under a
+      temp directory — the documented heuristic), because a shared
+      database does not make node-local content-addressed blobs shared.
+    """
+    from forge.adaptive.checkpoint_migration import preflight
+
+    try:
+        views = await preflight(database_url=str(getattr(settings, "DATABASE_URL", "") or ""))
+    except Exception as exc:  # noqa: BLE001 — preflight is observability, never a crash
+        return [_result("checkpoint.authority", False, "", _short(exc))]
+
+    results: list[CheckResult] = []
+    coverage = views["coverage"]
+    if coverage["mode"] == "postgres":
+        unmigrated = coverage["unmigrated_works"]
+        note = f", {coverage['database_note']}" if coverage["database_note"] else ""
+        detail = (
+            f"postgres authority active; {coverage['works_filesystem']} filesystem work(s), "
+            f"{coverage['works_database']} database work(s){note}, "
+            f"{coverage['blob_problems']} missing/corrupt artifact(s)"
+        )
+        if coverage["database_note"]:
+            results.append(_result("checkpoint.migration_coverage", None, detail, ""))
+        elif unmigrated:
+            named = ", ".join(unmigrated[:5]) + ("…" if len(unmigrated) > 5 else "")
+            results.append(
+                _result(
+                    "checkpoint.migration_coverage",
+                    None,
+                    f"{detail}; not yet migrated: {named} — run "
+                    "`python -m forge.adaptive.checkpoint_migration import`",
+                    "",
+                )
+            )
+        else:
+            results.append(_result("checkpoint.migration_coverage", True, detail, ""))
+    else:
+        staged = (
+            f", {coverage['works_database']} work(s) staged in the database pending cutover"
+            if coverage["works_database"] is not None
+            else ""
+        )
+        results.append(
+            _result(
+                "checkpoint.migration_coverage",
+                True,
+                f"filesystem authority active ({coverage['works_filesystem']} work(s)"
+                f"{staged}) — nothing to migrate until the postgres authority is adopted",
+                "",
+            )
+        )
+
+    conflicts = views["conflicts"]
+    if conflicts["count"]:
+        first = conflicts["works"][0]
+        detail = (
+            f"{conflicts['count']} work(s) disagree on the active checkpoint (e.g. "
+            f"{first['work_id']}: filesystem={first['filesystem_active'][:12]}… "
+            f"database={first['database_active'][:12]}…) — {first['resolution']}; run "
+            "`python -m forge.adaptive.checkpoint_migration verify`"
+        )
+        results.append(
+            _result(
+                "checkpoint.pointer_conflicts",
+                False if coverage["mode"] == "best_effort" else None,
+                detail,
+                detail,
+            )
+        )
+    else:
+        drift = conflicts["post_cutover_drift"]
+        drift_note = f", {drift} at expected post-cutover drift" if drift else ""
+        results.append(
+            _result(
+                "checkpoint.pointer_conflicts",
+                True,
+                f"no active-pointer disagreements between the old index and the "
+                f"database{drift_note}",
+                "",
+            )
+        )
+
+    topology = views["topology"]
+    if coverage["mode"] != "postgres":
+        results.append(
+            _result(
+                "checkpoint.blob_topology",
+                None,
+                "best_effort durability: the JSON index assumes ONE process on a shared "
+                "volume — multi-replica topologies need the postgres authority AND a "
+                "shared blob volume",
+                "",
+            )
+        )
+    elif topology["looks_node_local"]:
+        results.append(
+            _result(
+                "checkpoint.blob_topology",
+                None,
+                f"blob root {topology['store_root']} looks node-local ({topology['heuristic']}"
+                ") — two replicas on separate volumes are UNSUPPORTED: a shared database "
+                "does not share content-addressed blobs",
+                "",
+            )
+        )
+    else:
+        results.append(
+            _result(
+                "checkpoint.blob_topology",
+                True,
+                f"blob root {topology['store_root']} assumed shared — confirm every "
+                "replica mounts this volume (heuristic: absolute, non-temp path)",
+                "",
+            )
+        )
+    return results
+
+
 def check_capabilities() -> CheckResult:
     """NXT-02: the reachability-based capability manifest holds honestly.
 
@@ -577,6 +713,11 @@ async def run_checks(settings: Settings, project_id: int | None = None) -> list[
     # Q35-06: the legacy-credential window — configuration observability,
     # read-only, no credential values (anchor source, deadline, drain count).
     results.extend(await check_legacy_credential_window(settings))
+    # Q35-21: the checkpoint-authority preflight (migration coverage,
+    # active-pointer conflicts, blob-volume topology) — read-only and
+    # env-driven, appended before the offline capability manifest so the
+    # earlier ordering guarantees stay untouched.
+    results.extend(await check_checkpoint_authority(settings))
     if project_id is not None:
         results.extend(await check_project(settings, project_id))
     # NXT-02: offline honesty check, appended last so existing ordering

@@ -521,6 +521,57 @@ def test_cli_gate_promotes_and_archives_the_record(tmp_path: Path) -> None:
     assert document["wheel"]["note"]
 
 
+def test_cli_gate_records_the_lane_artifact_identity_when_built(tmp_path: Path) -> None:
+    """Q35-08: a release that builds the wheel set records BOTH halves of
+    its identity — filenames + digests (the legacy wheel block) AND the
+    published URLs + sha256 (the additive fields the target templates pin
+    their install defaults from)."""
+    checks_file, canary_file = _write_gate_inputs(tmp_path, failing=False)
+    wheel_url = (
+        "https://github.com/forcewake/forge/releases/download/v0.34.0/forge-0.34.0-py3-none-any.whl"
+    )
+    sdist_url = "https://github.com/forcewake/forge/releases/download/v0.34.0/forge-0.34.0.tar.gz"
+    code = rp.main(
+        [
+            "gate",
+            "--version",
+            "0.34.0",
+            "--image-ref",
+            "ghcr.io/forcewake/forge",
+            "--digest",
+            DIGEST_A,
+            "--checks-json",
+            str(checks_file),
+            "--canary-json",
+            str(canary_file),
+            "--sdist",
+            "forge-0.34.0.tar.gz",
+            "--sdist-sha256",
+            "f" * 64,
+            "--sdist-url",
+            sdist_url,
+            "--wheel",
+            "forge-0.34.0-py3-none-any.whl",
+            "--wheel-sha256",
+            "e" * 64,
+            "--wheel-url",
+            wheel_url,
+            "--out",
+            str(tmp_path / "promotion.json"),
+        ]
+    )
+    assert code == 0
+    document = json.loads((tmp_path / "promotion.json").read_text(encoding="utf-8"))
+    assert document["wheel"]["wheel"] == {
+        "name": "forge-0.34.0-py3-none-any.whl",
+        "sha256": "e" * 64,
+    }
+    assert document["wheel_sha256"] == "e" * 64
+    assert document["sdist_sha256"] == "f" * 64
+    assert document["wheel_url"] == wheel_url
+    assert document["sdist_url"] == sdist_url
+
+
 def test_cli_gate_blocks_and_exits_non_zero(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     checks_file, canary_file = _write_gate_inputs(tmp_path, failing=True)
     code = rp.main(
@@ -615,6 +666,16 @@ def _pins_root(tmp_path: Path, version: str = "0.34.0") -> Path:
         encoding="utf-8",
     )
     (root / "README.md").write_text(_LEGACY_README, encoding="utf-8")
+    # Q35-08: the default pins run renders the LANE PIN into the workflow
+    # templates too — the fixture root carries the shipped files (fences
+    # and all) exactly as the repo does.
+    for relpath in (
+        "ci/templates/forge-harness.github.yml",
+        ".github/workflows/forge-harness.yml",
+    ):
+        target = root / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / relpath).read_text(encoding="utf-8"))
     return root
 
 

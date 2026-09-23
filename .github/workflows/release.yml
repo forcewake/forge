@@ -31,6 +31,10 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       canary: ${{ steps.canary_results.outputs.json }}
+      sdist: ${{ steps.dist.outputs.sdist }}
+      sdist_sha256: ${{ steps.dist.outputs.sdist_sha256 }}
+      wheel: ${{ steps.dist.outputs.wheel }}
+      wheel_sha256: ${{ steps.dist.outputs.wheel_sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,6 +58,41 @@ jobs:
             echo "::error::tag v$TAG != src/forge/__init__.py __version__ '$CODE'. Bump __version__ to the tag (pyproject version too), then re-tag."
             exit 1
           fi
+
+      # Q35-08: the AUTHORITATIVE lane distribution is the published locked
+      # wheel set. The sdist+wheel are built from the SAME tagged tree as
+      # the image, sha256-recorded here, carried into the promotion record
+      # (additive wheel/sdist identity fields), and attached to the release
+      # below — so a cold copy of the shipped lane template installs the
+      # promoted bytes (hash-verified), never a stale git-ref fallback.
+      # Until this landed the pipeline was image-only; those archived
+      # records keep parsing with the wheel fields honestly absent.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build the lane wheel set (sdist + wheel, digest-recorded)
+        id: dist
+        run: |
+          uv build --sdist --wheel --out-dir dist
+          SDIST="$(ls dist/*.tar.gz)"
+          WHEEL="$(ls dist/*.whl)"
+          SDIST_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SDIST")"
+          WHEEL_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WHEEL")"
+          {
+            echo "sdist=$(basename "$SDIST")"
+            echo "sdist_sha256=$SDIST_SHA"
+            echo "wheel=$(basename "$WHEEL")"
+            echo "wheel_sha256=$WHEEL_SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "lane wheel  : $(basename "$WHEEL") sha256:$WHEEL_SHA"
+          echo "lane sdist  : $(basename "$SDIST") sha256:$SDIST_SHA"
+
+      - name: Keep the lane wheel set as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-dist-v${{ github.ref_name }}
+          path: dist
+          if-no-files-found: error
 
       - name: Log in to GHCR
         run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -152,6 +191,12 @@ jobs:
             --head-sha "${{ github.sha }}" \
             --checks-from-github "${{ github.repository }}@${{ github.sha }}" \
             --canary-json canary-results.json \
+            --sdist "${{ needs.publish-ghcr.outputs.sdist }}" \
+            --sdist-sha256 "${{ needs.publish-ghcr.outputs.sdist_sha256 }}" \
+            --sdist-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.sdist }}" \
+            --wheel "${{ needs.publish-ghcr.outputs.wheel }}" \
+            --wheel-sha256 "${{ needs.publish-ghcr.outputs.wheel_sha256 }}" \
+            --wheel-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.wheel }}" \
             --out promotion.json \
             --archive
 
@@ -174,12 +219,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Only now do the mutable tags move — onto the validated, gate-qualified
-  # digest.
+  # digest — and the lane wheel set is published as release assets. Rollout
+  # discipline (Q35-08): the supported lane artifact is published BEFORE any
+  # target template defaults to it; the wheel set built above is immutable
+  # once attached (the same bytes the promotion record hashed).
   attach-tags:
     needs: [publish-ghcr, promotion-gate]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # publish the lane wheel set as release assets
       packages: write
       id-token: write # cosign keyless signing (Fulcio OIDC)
       attestations: write # actions/attest-build-provenance
@@ -197,6 +245,36 @@ jobs:
             -t "$IMAGE_NAME:${GITHUB_REF_NAME#v}" \
             -t "$IMAGE_NAME:latest" \
             "$IMAGE_NAME@${{ needs.publish-ghcr.outputs.digest }}"
+
+      # Q35-08: publish the authoritative lane wheel set. The URLs recorded
+      # in the promotion record point here — a cold target template pins
+      # wheel_url + wheel_sha256 from the archived record and refuses any
+      # bytes that do not reproduce the hash.
+      - name: Fetch the lane wheel set
+        uses: actions/download-artifact@v4
+        with:
+          name: lane-dist-v${{ github.ref_name }}
+          path: dist
+
+      - name: Verify the wheel set against the recorded digests
+        run: |
+          verify() {
+            file="$1"; expected="$2"
+            actual="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "dist/$file")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::lane artifact $file hashes to sha256:$actual, the promotion record says sha256:$expected — refusing to publish."
+              exit 1
+            fi
+          }
+          verify "${{ needs.publish-ghcr.outputs.wheel }}" "${{ needs.publish-ghcr.outputs.wheel_sha256 }}"
+          verify "${{ needs.publish-ghcr.outputs.sdist }}" "${{ needs.publish-ghcr.outputs.sdist_sha256 }}"
+
+      - name: Publish the lane wheel set as release assets
+        env:
+          GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "forge ${GITHUB_REF_NAME#v}" --notes "Release ${GITHUB_REF_NAME}. Pin the image by digest; the lane wheel set below is the authoritative lane distribution (sha256 recorded in docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json)."
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
       # Keyless Sigstore signing — the digest is the thing signed, never a
       # tag. Requires a public repo (public-good Sigstore). If forge goes
@@ -230,4 +308,14 @@ jobs:
             echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \\"
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
             echo '```'
+            echo ""
+            echo "## Lane wheel set — the authoritative lane distribution (Q35-08)"
+            echo ""
+            echo '```'
+            echo "wheel  : https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ needs.publish-ghcr.outputs.wheel }}"
+            echo "sha256 : ${{ needs.publish-ghcr.outputs.wheel_sha256 }}"
+            echo '```'
+            echo ""
+            echo "Both identities are recorded in \`docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json\` — target templates pin their lane install defaults from that record."
           } >> "$GITHUB_STEP_SUMMARY"
+

@@ -273,12 +273,25 @@ class PromotionRecord:
     results with provenance, the canary stage outcomes, the derived
     decision and its timestamp. Different digest or wheel => different
     record; nothing here is inferred at read time.
+
+    Q35-08 lane-artifact identity (additive): ``wheel_sha256`` /
+    ``sdist_sha256`` and ``wheel_url`` / ``sdist_url`` name the AUTHORITATIVE
+    lane distribution — the published locked wheel set — so target templates
+    can pin install defaults straight from the archived record. The fields
+    are additive on purpose: records archived before lanes shipped with a
+    wheel set (v0.33.0/v0.34.0 were image-only) carry none of them, parse
+    to ``None`` and stay honestly "not built" — exactly like the
+    image-only note — never zero-filled.
     """
 
     version: str
     image_ref: str
     image_digest: str
     wheel: WheelIdentity = field(default_factory=WheelIdentity)
+    wheel_sha256: str | None = None
+    sdist_sha256: str | None = None
+    wheel_url: str | None = None
+    sdist_url: str | None = None
     ci_run_id: str | None = None
     head_sha: str | None = None
     required_checks: tuple[RequiredCheck, ...] = ()
@@ -295,6 +308,10 @@ class PromotionRecord:
             "image_ref": self.image_ref,
             "image_digest": self.image_digest,
             "wheel": self.wheel.to_json(),
+            "wheel_sha256": self.wheel_sha256,
+            "sdist_sha256": self.sdist_sha256,
+            "wheel_url": self.wheel_url,
+            "sdist_url": self.sdist_url,
             "ci_run_id": self.ci_run_id,
             "head_sha": self.head_sha,
             "required_checks": [check.to_json() for check in self.required_checks],
@@ -666,6 +683,12 @@ def _record_from_json(document: dict[str, object]) -> PromotionRecord:
             image_ref=str(document["image_ref"]),
             image_digest=str(document["image_digest"]),
             wheel=wheel,
+            # Q35-08 additive lane-artifact identity: absent on pre-wheel
+            # records (v0.33.0/v0.34.0) -> None = honestly not built.
+            wheel_sha256=(str(document["wheel_sha256"]) if document.get("wheel_sha256") else None),
+            sdist_sha256=(str(document["sdist_sha256"]) if document.get("sdist_sha256") else None),
+            wheel_url=str(document["wheel_url"]) if document.get("wheel_url") else None,
+            sdist_url=str(document["sdist_url"]) if document.get("sdist_url") else None,
             ci_run_id=document.get("ci_run_id"),
             head_sha=document.get("head_sha"),
             required_checks=checks,
@@ -840,6 +863,13 @@ def _cmd_gate(args: argparse.Namespace) -> int:
             wheel=FileIdentity(args.wheel, args.wheel_sha256) if args.wheel else None,
             note=wheel_note,
         ),
+        # Q35-08: the lane-artifact identity — the published wheel set the
+        # target templates pin their install defaults from. URLs are given
+        # explicitly by the release workflow (never derived at read time).
+        wheel_sha256=args.wheel_sha256,
+        sdist_sha256=args.sdist_sha256,
+        wheel_url=args.wheel_url,
+        sdist_url=args.sdist_url,
         ci_run_id=args.ci_run_id,
         head_sha=args.head_sha,
         required_checks=checks,
@@ -953,6 +983,16 @@ def main(argv: list[str] | None = None) -> int:
     gate.add_argument("--sdist-sha256", default=None)
     gate.add_argument("--wheel", default=None, help="wheel filename")
     gate.add_argument("--wheel-sha256", default=None)
+    gate.add_argument(
+        "--wheel-url",
+        default=None,
+        help="published URL of the wheel asset (the lane install's default route, Q35-08)",
+    )
+    gate.add_argument(
+        "--sdist-url",
+        default=None,
+        help="published URL of the sdist asset (recorded identity, Q35-08)",
+    )
     gate.add_argument("--wheel-note", default="")
     gate.add_argument("--out", default=None, help="also write the record JSON here")
     gate.add_argument(
