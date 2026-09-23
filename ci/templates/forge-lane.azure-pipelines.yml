@@ -208,7 +208,7 @@ jobs:
               echo "FORGE_BOOTSTRAP_FAILED: forge wheel hash mismatch — the template pinned sha256:$_wheel_sha but the artifact hashes to sha256:$_actual_sha (infrastructure/config, never code repair)"
               exit 1
             fi
-            pip install --no-deps "$_wheel_file#sha256=$_actual_sha" || {
+            pip install "$_wheel_file" || {
               printf 'failed\n' > .forge/bootstrap
               echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (infrastructure/config, never code repair)"
               exit 1

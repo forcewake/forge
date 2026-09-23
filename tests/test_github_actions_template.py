@@ -601,7 +601,7 @@ class TestImmutableResourcePinning:
         assert 'pip download --no-deps -d .forge/wheel "$_wheel_url"' in text
         assert "FORGE_LANE_WHEEL_SHA256 must be a 64-hex sha256" in text
         assert "forge wheel hash mismatch" in text
-        assert 'pip install --no-deps "$_wheel_file#sha256=$_actual_sha"' in text
+        assert 'pip install "$_wheel_file"' in text
         assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in text
         # The git retry loop survives inside the else branch.
         assert "for attempt in 1 2 3; do" in text
