@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-09-23
+
+### Added — the 0fca1b7 review P2: production wiring, supervisor health, lease draining, composed invariants (10 items)
+
+All 5 P1 + 12 of 19 P2 from the 0fca1b7 review are now closed. Suite
+5462 (+87).
+
+**Production wiring:**
+- R32-10: SystemContextProfile in the GitHub planning path — neighbors
+  from ProjectConfig feed multi-repo discovery; byte-identical without
+- R32-11: dispatch_plan_binding — /approve-revision → /go dispatches
+  with the ACTIVE digest; stale /go refused, zero dispatches
+- R32-15: validate_profile_coherence — recipe/harness/credential/egress
+  checked as ONE coherent set at lane startup
+
+**Execution reliability:**
+- R32-09: control-consumer health — mid-turn drain death degrades the
+  outcome (control_degraded); strict mode suspends the turn
+- R32-07: lease draining — local terminal ≠ native completion; the
+  slot holds until the native job is observed terminal
+- R32-16: checkpoint durability — best_effort (filesystem) or postgres
+  (DB index, migration 026); fail-closed on misconfig
+
+**Quality infrastructure:**
+- R32-17: 5 new composed invariant traces (generation restore, ownership
+  recovery, legacy deadline subprocess, concurrent lease under 4
+  approvals, resume mode through the shipped template)
+- R32-18: zero RuntimeWarnings for coroutine-never-awaited; engine
+  dispose in fixtures; autouse warning gate
+- R32-12: support matrix dimensions — (driver, source_platform,
+  runtime_recipe); tested requires registration+platform+recipe
+- R32-20: per-attempt latency breakdown; sticky-unknown missing
+  attempts as placeholder rows
+
+Suite 5462; ruff clean.
+
 ## [0.32.0] - 2026-09-23
 
 ### Fixed — the 0fca1b7 review P1: workspace generations, ownership-scoped recovery, fixed credential deadline, resume dispatch, lease parity (7 items)
