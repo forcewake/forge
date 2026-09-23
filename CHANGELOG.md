@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-09-23
+
+### Fixed — the 0fca1b7 review P1: workspace generations, ownership-scoped recovery, fixed credential deadline, resume dispatch, lease parity (7 items)
+
+All 5 P1 execution defects closed (each with the reviewer's reproduction
+regression-pinned), plus 2 P2 reliability items:
+
+**R32-01 — Workspace generation promotion:** restore promotes to a
+STABLE SIBLING generation path (`.forge-workspace-gen-<id>/`), never
+replaces cwd; the lane chdirs into the generation BEFORE the vendor
+client; `.forge/workspace-generation` pointer records the active
+generation. Subprocess test proves `os.getcwd()` and relative writes
+work after restore — the reviewer's exact FileNotFoundError scenario
+is impossible.
+
+**R32-02 — Ownership-scoped recovery:** backup/staging names carry
+the work_id; recovery processes only OWNED assets; unknown directories
+inventoried as `unrecognized` (never claimed). Two-sibling regression:
+B's backup stays byte-identical when A recovers.
+
+**R32-03 — Fixed legacy credential deadline:** anchored to a
+PERSISTED migration start (env or module-import default), not
+recomputed per check. Day-31 subprocess restart proof: legacy tokens
+refused after the window regardless of restarts.
+
+**R32-04 — Resume mode through dispatch:** `lane_resume_mode` workflow
+input (fresh/required/restart) emitted by every dispatch path; the
+template maps it to FORGE_LANE_RESUME env. Retry/revival = required;
+initial /go = fresh; restart is the explicit discard path.
+
+**R32-05 — Lease parity:** execution leases wired in GitHub + GitLab
+(every dispatch entry reserves; terminal releases). 5-issues/
+4-approvals/limit-3 test proves exactly 3 native starts.
+
+**R32-06 — One-per-run:** partial unique index on run_id WHERE
+released_at IS NULL; run-conflict adopts the existing winner
+(idempotent, bounded). Migration 024.
+
+**R32-08 — pip bootstrap:** the `#sha256=` fragment on a local wheel
+path is an INVALID pip requirement (real-pip repro); now installs the
+verified local path directly; strict exactly-one-wheel guard; AzDO
+template fixed too.
+
+Suite 5375 (+48).
+
 ## [0.31.0] - 2026-09-23
 
 ### Added — the ccab247 review P2: execution leases, supervisor, recipe decomposition, support matrix, system context (16 items)
