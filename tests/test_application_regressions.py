@@ -1526,9 +1526,16 @@ class TestR32DConcurrentLeaseUnderFourApprovals:
         assert lease["capacity"]["limit"] == 3
 
         # A terminal release frees its slot: the NEXT dispatch acquires it.
+        # Cancel one of the LEASE-HOLDING runs — which of the four raced to
+        # the park is not deterministic, and issues[0] may be the parked one:
+        # ``blocked`` is terminal, so /cancel on it is correctly a no-op and
+        # no slot frees (the parked run holds none). That assumption was a
+        # ~20% flake under load; picking from ``waiting`` makes the scenario
+        # deterministic whichever run lost the lease race.
+        cancel_issue = waiting[0]
         await service.handle_cancel(
             project_id=GH_PROJECT_ID,
-            issue_number=issues[0],
+            issue_number=cancel_issue,
             note_text="/cancel",
             author_username="alice",
         )
