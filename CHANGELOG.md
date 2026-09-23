@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-09-23
+
+### Fixed + Added — the ccab247 review P1: execution identity chain, research harness wiring, tool observations
+
+The reviewer's verdict: "Forge has moved from mechanisms to a genuinely
+working adaptive chain." This release closes the connections between
+already-written components (all 5 P1 + 3 high-impact P2):
+
+**P1 — execution identity (NEXT-01/02/03):**
+- ONE generation-scoped credential through dispatch + lane-control +
+  checkpoint APIs; legacy tokens accepted only within a migration
+  deadline; DB-outage = 503 refusal, never silent legacy acceptance
+- The pause fence is CONDITIONAL: a cleared fence refuses a candidate
+  whose grant generation is below the resumed epoch — an old attempt
+  never regains write authorization after resume; clear is one CAS
+- ResumeSpec: the producer embeds the exact checkpoint reference in
+  the resume command's payload; the consumer reads a durable
+  /resume-spec endpoint; three distinct modes (fresh / required /
+  restart), never a silent fallback to latest
+
+**P1 — research harness (NEXT-07/08/09):**
+- The production \`/implement\` path now CONSTRUCTS the ResearchHarness
+  from the run's budget-guarded LLM client (the module existed but the
+  caller never built it — the composition root was the missing link)
+- ToolObservation: \`list_paths\` returns the actual list; \`read_file\`
+  carries the full window; the next research prompt includes the
+  actual code the tools returned (the model can now see what it asked
+  for — the reviewer's sentinel-line test proves it)
+- The completion await is bounded (\`asyncio.wait_for\`, not
+  check-then-await); token aggregation is sticky-unknown
+
+**P2 (NEXT-04/17/25):** restore promotion is transactional (staged
+build + one atomic rename, rollback on failure); wheel pinned by
+SHA-256; 17 composed application regressions from the review's traces.
+
+Suite 5202 (+74). Live E2E verified on all three providers.
+
 ## [0.29.0] - 2026-09-23
 
 ### Added — the 1ae5290 review COMPLETE + the copilot-sdk-lane
