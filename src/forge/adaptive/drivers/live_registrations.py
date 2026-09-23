@@ -456,6 +456,8 @@ def provenance_report(
     *,
     installed_cli_version: str = "",
     declared_pin: str | None = None,
+    expected_resource_sha256: str = "",
+    installed_resource_sha256: str = "",
 ) -> dict[str, object]:
     """Reconcile the THREE provenance sources for one lane driver (R28-26).
 
@@ -467,14 +469,25 @@ def provenance_report(
     - what the RUNNER actually installed — *installed_cli_version* (the
       ``FORGE_DRIVER_FINGERPRINT`` the lane preamble reports).
 
+    NEXT-17 adds the IMMUTABLE-RESOURCE leg the shipped templates pin:
+    *expected_resource_sha256* is the content hash the lane template
+    declared (the forge wheel's ``#sha256=`` pin — ``.forge/
+    lane_install.json`` records both halves at install time) and
+    *installed_resource_sha256* what the runner actually hashed. The
+    report surfaces ``expected_resource_sha256``,
+    ``installed_resource_sha256`` and ``resource_hash_matches`` —
+    ``None`` when neither half is known (no claim), ``False`` (with a
+    loud warning) when a template-pinned resource hashed elsewhere
+    than the template said it would.
+
     Returns a JSON-shaped report (``driver``, ``sdk``, ``declared_pin``,
     ``registration_verified``, ``registration_date``,
     ``installed_cli_version``, ``pin_matches_install``,
     ``registration_status`` — ``match``/``drift``/``unknown_present``/
-    ``unregistered`` — and ``warnings``). Warnings never gate: the
-    doctrine is that a registration is evidence of the PAST and the
-    fingerprint is the PRESENT, so a drift is SAID, loudly, while the
-    lane keeps running.
+    ``unregistered`` — the three ``resource_sha256`` fields and
+    ``warnings``). Warnings never gate: the doctrine is that a
+    registration is evidence of the PAST and the fingerprint is the
+    PRESENT, so a drift is SAID, loudly, while the lane keeps running.
     """
     from forge.harnesses.script_render import DEFAULT_DRIVER_VERSIONS
 
@@ -482,6 +495,8 @@ def provenance_report(
         declared_pin if declared_pin is not None else DEFAULT_DRIVER_VERSIONS.get(driver, "")
     ).strip()
     installed = str(installed_cli_version or "").strip()
+    expected_hash = str(expected_resource_sha256 or "").strip().lower()
+    installed_hash = str(installed_resource_sha256 or "").strip().lower()
     warnings: list[str] = []
 
     if not pin:
@@ -496,6 +511,23 @@ def provenance_report(
             f"{driver}: the runner did not report the installed CLI version —"
             " provenance of the PRESENT is unknown"
         )
+    if expected_hash and not installed_hash:
+        warnings.append(
+            f"{driver}: the template pinned resource sha256:{expected_hash} but the "
+            "runner never reported the installed resource hash — the immutable-"
+            "resource leg of this lane's provenance is unknown"
+        )
+    resource_hash_matches: bool | None
+    if expected_hash and installed_hash:
+        resource_hash_matches = expected_hash == installed_hash
+        if resource_hash_matches is False:
+            warnings.append(
+                f"{driver}: the template pinned resource sha256:{expected_hash} but "
+                f"the installed resource hashed to sha256:{installed_hash} — the "
+                "bytes this lane runs are NOT the bytes the recipe approved"
+            )
+    else:
+        resource_hash_matches = None
 
     verdict = registration_verdict(driver, installed)
     if verdict is None:
@@ -536,5 +568,8 @@ def provenance_report(
         "installed_cli_version": installed,
         "pin_matches_install": matches,
         "registration_status": status,
+        "expected_resource_sha256": expected_hash,
+        "installed_resource_sha256": installed_hash,
+        "resource_hash_matches": resource_hash_matches,
         "warnings": warnings,
     }

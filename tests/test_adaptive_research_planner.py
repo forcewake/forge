@@ -278,6 +278,155 @@ async def test_gateway_error_stops_the_loop_partial_and_explicit():
     assert outcome.findings == ()
 
 
+# ---------------------------------------------------------------------------
+# NEXT-08 — the model sees what its tools ACTUALLY returned
+# ---------------------------------------------------------------------------
+
+
+async def test_read_file_returns_the_actual_code_to_the_next_prompt():
+    """THE regression (review ccab247 §3, Finding 2): a business rule on
+    line 3 of a read window — nowhere in the issue text — must appear in
+    the NEXT completion input as the actual code, not as
+    "read N chars from offset 0" metadata. A mutation that drops result
+    bodies fails here."""
+    files = {
+        "src/rates.py": (
+            "def rate_limit():\n"
+            '    """Ordinary header docstring."""\n'
+            "    return RATE_LIMIT_SENTINEL_9f21\n"
+            "    # the business rule lives on line 3, not line 1\n"
+        ),
+    }
+    completion = ScriptedCompletion(
+        _propose(
+            {"tool": "read_file", "repo": "own", "args": {"path": "src/rates.py", "length": 400}}
+        ),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input="Where is the per-tenant rate limit defined?",  # sentinel NOT here
+        lexical=[],
+        repos={"own": _repo(files)},
+    )
+    assert outcome.complete is True
+    finding = outcome.findings[0]
+    assert finding.kind == "research_read"
+    assert "RATE_LIMIT_SENTINEL_9f21" in finding.content
+    assert len(finding.content) > len(finding.text)  # the window, not the first line
+    second_prompt = completion.calls[1][1]
+    assert "[tool: read_file own src/rates.py" in second_prompt
+    assert "RATE_LIMIT_SENTINEL_9f21" in second_prompt
+
+
+async def test_list_paths_result_is_selectable_on_the_next_turn():
+    """A path the model never saw before (not in the issue, not in the
+    menu — the menu shows counts only) is disclosed by the listing and
+    selectable next turn: the returned list IS the observation."""
+    completion = ScriptedCompletion(
+        _propose({"tool": "list_paths", "repo": "own", "args": {"prefix": "src/app"}}),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input="Map the layout before editing anything.",
+        lexical=[],
+        repos={"own": _repo()},
+    )
+    assert outcome.complete is True
+    assert outcome.findings == ()  # a listing scouts — no citable file:line
+    assert outcome.document["calls_executed"] == 1
+    second_prompt = completion.calls[1][1]
+    assert "[tool: list_paths own prefix src/app]" in second_prompt
+    assert "src/app/service.py" in second_prompt
+
+
+async def test_grep_and_symbol_results_carry_their_lines_into_the_prompt():
+    completion = ScriptedCompletion(
+        _propose(
+            {"tool": "find_symbol", "repo": "own", "args": {"name": "start_run"}},
+        ),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo()},
+    )
+    second_prompt = completion.calls[1][1]
+    # The observation carries the actual find_symbol answer — every
+    # declaration's file:line:kind:symbol, not just a hit count.
+    assert "[tool: find_symbol own name start_run]" in second_prompt
+    assert "src/app/service.py:3: function start_run" in second_prompt
+    assert outcome.findings[0].path == "src/app/service.py"
+
+
+async def test_tool_errors_are_observed_not_swallowed():
+    """The model SEES its failed call's real error (and the omission is
+    still recorded) — an unauthorized read is indistinguishable from an
+    unknown one BY DESIGN, and the observation says exactly that."""
+    completion = ScriptedCompletion(
+        _propose({"tool": "read_file", "repo": "own", "args": {"path": "secrets/env.py"}}),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo(globs=["src/**"])},
+    )
+    second_prompt = completion.calls[1][1]
+    assert "[tool: read_file own secrets/env.py" in second_prompt
+    assert "outside the authorized snapshot" in second_prompt
+    assert outcome.document["observations"] == {"count": 1, "truncated": 0, "errors": 1}
+    assert any("outside the authorized snapshot" in item for item in outcome.document["omissions"])
+
+
+async def test_observation_truncation_is_explicit_never_silent():
+    files = {"src/big.py": "x = 1\n" * 2000}  # 12k chars — past the content cap
+    completion = ScriptedCompletion(
+        _propose({"tool": "read_file", "repo": "own", "args": {"path": "src/big.py"}}),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo(files)},
+    )
+    assert len(outcome.findings[0].content) == 2000  # capped content
+    second_prompt = completion.calls[1][1]
+    assert "output truncated" in second_prompt
+    assert outcome.document["observations"]["truncated"] == 1
+
+
+async def test_older_observations_drop_with_an_explicit_count():
+    """Beyond the observation-block budget the OLDEST results drop first,
+    with an explicit omitted count and a way to re-read them — the model
+    can never treat invisible content as reviewed."""
+    files = {f"src/f{i}.py": f"# file {i}\n" + "y = 2\n" * 290 for i in range(4)}
+    completion = ScriptedCompletion(
+        *(
+            _propose({"tool": "read_file", "repo": "own", "args": {"path": f"src/f{i}.py"}})
+            for i in range(4)
+        ),
+        _done(),
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=10, wall_seconds=30.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo(files)},
+    )
+    assert outcome.complete is True
+    last_prompt = completion.calls[4][1]  # after all four reads
+    assert "older tool results omitted: 1" in last_prompt
+    # The MOST RECENT observation stays visible in full.
+    assert "[tool: read_file own src/f3.py" in last_prompt
+    assert "older tool results omitted: 2" not in last_prompt
+
+
 async def test_malformed_model_response_stops_the_loop():
     completion = ScriptedCompletion("the planner seems fine, trust me")
     outcome = await run_research_pass(
@@ -326,7 +475,72 @@ async def test_usage_counters_accumulate_across_iterations():
         lexical=[],
         repos={"own": _repo()},
     )
-    assert outcome.document["tokens"] == {"input": 300, "output": 16}
+    # Full usage coverage: the totals are exact AND the lower bounds agree.
+    assert outcome.document["tokens"] == {
+        "input": 300,
+        "output": 16,
+        "input_lower_bound": 300,
+        "output_lower_bound": 16,
+        "unknown_usage_calls": 0,
+    }
+
+
+async def test_unknown_usage_makes_the_subtotal_a_lower_bound_not_a_total():
+    """NEXT-09: ``[None, 100]`` must NOT re-total as ``100`` — once any
+    call reports unknown usage the subtotal is sticky-unknown: the exact
+    totals are None, the KNOWN parts ride as explicit lower bounds, and
+    the unknown-usage calls are counted."""
+    completion = ScriptedCompletion(
+        UsageResult(
+            _propose({"tool": "grep", "repo": "own", "args": {"pattern": "LLMPlanner"}}), 100, 7
+        ),
+        _done(),  # a bare string result: no usage counters on this call
+    )
+    outcome = await run_research_pass(
+        ResearchHarness(complete=completion, max_calls=5, wall_seconds=30.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo()},
+    )
+    assert outcome.complete is True
+    tokens = outcome.document["tokens"]
+    assert tokens["input"] is None
+    assert tokens["output"] is None
+    assert tokens["input_lower_bound"] == 100
+    assert tokens["output_lower_bound"] == 7
+    assert tokens["unknown_usage_calls"] == 1
+
+
+async def test_a_slow_completion_is_cut_off_inside_the_remaining_window():
+    """NEXT-09: the wall budget is a BOUNDED await, not check-then-await —
+    a completion slower than the remaining pass window is cancelled inside
+    it, and (the provider may already have accepted the request) its usage
+    stays unknown: a lower bound, never silently zero."""
+    import asyncio
+
+    ticks = iter([0.0, 0.0])  # started; the first loop check
+
+    def now() -> float:
+        return next(ticks, 1.0 - 1e-6)  # then the wall nearly runs out
+
+    class SlowCompletion:
+        async def __call__(self, system: str, user: str) -> object:
+            await asyncio.sleep(0.05)
+            raise AssertionError("the slow completion must be cut off before answering")
+
+    outcome = await run_research_pass(
+        ResearchHarness(complete=SlowCompletion(), max_calls=5, wall_seconds=1.0),
+        planner_input=PLANNER_INPUT,
+        lexical=[],
+        repos={"own": _repo()},
+        now=now,
+    )
+    assert outcome.complete is False
+    assert outcome.stopped_reason == "wall_time"
+    assert outcome.iterations == 0
+    tokens = outcome.document["tokens"]
+    assert tokens["input"] is None
+    assert tokens["unknown_usage_calls"] == 1
 
 
 async def test_completion_adapter_targets_the_gateway_with_json_mode():

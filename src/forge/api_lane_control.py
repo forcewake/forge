@@ -30,6 +30,13 @@ Two routes, both mounted unconditionally and FAIL-CLOSED (the
   lane drove the vendor effect and saw it land). The lane's journal row
   is APPENDED to the row's audit journal additively — evidence, never a
   status claim.
+- ``GET /lane/controls/resume-spec?work_id=<run-id>`` — the work's LATEST
+  ``resume`` command ROW, whatever rung it sits on (NEXT-03). The pending
+  view above deliberately stops at the dispatch boundary; the resume
+  decision must survive its own acknowledgement, so this surface reads
+  the durable row (payload and all) instead of the pending queue — the
+  immutable ResumeSpec a resumed runner restores by, still reachable
+  after the command has left ``received``/``authorized``.
 
 Auth is a lane token: ``HMAC-SHA256(secret, work_id)`` under the
 server-side ``FORGE_LANE_CONTROL_SECRET``, injected into the lane job
@@ -40,17 +47,32 @@ proved possession of SOME valid token, just not this work's). No
 secret configured → BOTH routes answer 503 disabled, never
 unauthenticated-open.
 
-R28-07 — attempt-scoped generations: the token gains a generation
-component, ``HMAC-SHA256(secret, work_id + ":" + generation)``, minted
-by the dispatch at dispatch time for the run's CURRENT generation (the
-durable ``FlowRun.cancellation_generation``, bumped whenever the run's
-execution authority is superseded). The server validates against the
-run's current generation: a token from a SUPERSEDED generation is
-refused with 403 and an actionable message, so a retired lane can no
-longer poll or ack for the resumed attempt. The legacy work-id-only
-HMAC keeps validating while no generation-scoped dispatch exists — the
-honest migration default (a token that never carried a generation is
-not treated as stale).
+R28-07/NEXT-01 — attempt-scoped generations, ONE credential: the token
+gains a generation component, ``HMAC-SHA256(secret, work_id + ":" +
+generation)``, minted by the DISPATCH at dispatch time for the run's
+CURRENT generation (the durable ``FlowRun.cancellation_generation``).
+The server validates against the run's current generation: a token from
+a SUPERSEDED generation is refused with 403 and an actionable message,
+so a retired lane can no longer poll or ack for the resumed attempt.
+The legacy work-id-only HMAC is accepted ONLY inside an explicit
+migration window (``FORGE_LANE_LEGACY_TOKEN_DEADLINE``, default 30 days
+from now): old attempts finish, new dispatches must be
+generation-scoped — and an UNAVAILABLE generation authority (a failed
+lookup) is a 503 refusal, never a silent legacy acceptance.
+
+NEXT-01's generation policy — which transitions open a NEW attempt
+generation (and therefore retire the previous dispatch's token), and
+which keep the current identity:
+
+- retry / re-dispatch after a terminal or stalled attempt (GitHub
+  ``/retry``, the revival recovery scan): ``+1`` — a new lane boots with
+  its own token and any delayed callback of the previous attempt is
+  fenced;
+- resume after pause when the resume DISPATCHES a new attempt: ``+1``
+  (aligned with the pause fence's resumed publication epoch — see
+  :mod:`forge.adaptive.pause_fence`);
+- steering, checkpoint capture/upload, ack ladder transitions: SAME
+  identity — they address the live attempt, never mint a new one.
 
 R28-10 — replay-safe acks: the ``checkpointed`` composite is
 IDEMPOTENT — a replayed ack against an already-checkpointed command
@@ -65,8 +87,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-from datetime import datetime, timezone
-from typing import Any
+import os
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
+from typing import Any, Final
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -76,14 +100,70 @@ from forge.adaptive.models import ControlCommand
 
 __all__ = [
     "LANE_ACK_STATES",
+    "LANE_LEGACY_TOKEN_DEADLINE_ENV",
+    "LaneAuthorityUnavailable",
+    "authorize_work_credential",
+    "durable_run_generation",
     "lane_control_router",
     "lane_control_token",
+    "legacy_token_deadline",
     "verify_lane_token",
 ]
 
 logger = logging.getLogger(__name__)
 
 lane_control_router = APIRouter()
+
+#: NEXT-01: the migration deadline for LEGACY (work-scoped, generation-less)
+#: lane tokens. Until this instant a token that never carried a generation
+#: still authenticates — old attempts finish inside the window — and after
+#: it every credential must be the dispatch-issued, attempt-scoped one.
+#: The default is 30 days FROM NOW (the honest rollout default: the window
+#: opens with the deployment that starts minting generation tokens); set an
+#: explicit ISO date/datetime to close it on the operator's schedule.
+LANE_LEGACY_TOKEN_DEADLINE_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_DEADLINE"
+DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS: Final = 30
+
+
+def legacy_token_deadline(env: Mapping[str, str] | None = None) -> datetime:
+    """The instant legacy work-scoped tokens stop authenticating (NEXT-01).
+
+    Reads ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` (an ISO date or datetime,
+    naive values read as UTC); unset or malformed degrades to NOW + 30
+    days, never to "no deadline" — the legacy scheme is a bounded
+    migration window, not a permanent second credential.
+    """
+    source = os.environ if env is None else env
+    raw = str(source.get(LANE_LEGACY_TOKEN_DEADLINE_ENV, "")).strip()
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            logger.warning(
+                "%s=%r is not an ISO date/datetime — the default 30-day window applies",
+                LANE_LEGACY_TOKEN_DEADLINE_ENV,
+                raw,
+            )
+        else:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+    return datetime.now(timezone.utc) + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS)
+
+
+def _legacy_window_open(env: Mapping[str, str] | None = None) -> bool:
+    return datetime.now(timezone.utc) < legacy_token_deadline(env)
+
+
+class LaneAuthorityUnavailable(RuntimeError):
+    """The durable attempt-generation authority could not be read (NEXT-01).
+
+    Raised by :func:`durable_run_generation` when the lookup itself fails.
+    The authorize ladder maps this to 503: an authority outage is a
+    refusal, never a silent downgrade to the legacy token scheme (the
+    reviewer's "database outage is not a migration state").
+    """
+
 
 #: The states a lane may ack, mapped onto the PostgresMailbox's own guarded
 #: transitions. Every spelling is a ladder rung (or the checkpointed
@@ -160,33 +240,131 @@ def _superseded_generation(
     return None
 
 
-async def _current_generation(request: Request, work_id: str) -> int | None:
-    """The work's CURRENT runner generation, durably (R28-07).
+async def durable_run_generation(session_factory: Any, work_id: str) -> int | None:
+    """The work's CURRENT runner generation from durable authority (R28-07).
 
     The authority is ``FlowRun.cancellation_generation`` — the durable
-    per-run generation bumped whenever the run's execution authority is
-    superseded (a cancel today; retries as the dispatch grows
-    generation-minting). ``None`` means "no durable generation" — an
-    unknown work or an unreadable row — and the authorize ladder then
-    treats the work as pre-migration: the legacy token scheme is the
-    honest default, never a hard failure.
+    per-run attempt generation, bumped by every transition that opens a
+    NEW attempt (see the module docstring's generation policy). Returns
+    ``None`` when the work has no durable generation (an unknown work —
+    the pre-migration posture), and RAISES
+    :class:`LaneAuthorityUnavailable` when the lookup itself fails: a
+    storage outage is a refusal, never "legacy must be fine then".
     """
-    session_factory = getattr(request.app.state, "session_factory", None)
-    if session_factory is None:
-        return None
     from sqlalchemy import select
 
-    try:
-        from forge.durable.models import FlowRun
+    from forge.durable.models import FlowRun
 
+    try:
         async with session_factory() as session:
             generation = await session.scalar(
                 select(FlowRun.cancellation_generation).where(FlowRun.id == work_id)
             )
-    except Exception:  # noqa: BLE001 — an unreadable generation degrades to legacy
-        logger.warning("current-generation lookup for work %s failed", work_id, exc_info=True)
-        return None
+    except Exception as exc:  # noqa: BLE001 — the outage is a refusal, not legacy
+        raise LaneAuthorityUnavailable(
+            f"the attempt-generation authority for work {work_id!r} is unavailable"
+        ) from exc
     return int(generation) if generation is not None else None
+
+
+async def authorize_work_credential(
+    request: Request,
+    *,
+    secret: str,
+    authorization: str | None,
+    work_id: str,
+    refusal_status: int = 403,
+    require_authority: bool = True,
+) -> int | None:
+    """THE one attempt-credential check both lane surfaces share (NEXT-01).
+
+    The lane-control polling/ack surface and the checkpoint channel's
+    work-scoped upload/download authenticate through this single ladder
+    — one derivation (:func:`lane_control_token`), one authority
+    (:func:`durable_run_generation`), one migration window
+    (:func:`legacy_token_deadline`):
+
+    - the CURRENT generation's attempt-scoped token authenticates and
+      the VERIFIED generation is returned (the ack surface reuses it);
+    - the legacy work-scoped token authenticates only inside the
+      migration window — past the deadline it is refused with the
+      deadline named (401/403 by *refusal_status*);
+    - a token minted for a generation BELOW the current one is refused
+      naming both generations (the retired-lane oracle);
+    - anything else is a work-scoping refusal.
+
+    ``require_authority``: with the durable authority configured but
+    UNREADABLE, or (on the control surface) absent entirely, the answer
+    is 503 — never a legacy acceptance. A surface mounted WITHOUT any
+    session factory (the checkpoint channel's standalone deployment
+    shape) passes ``False`` and keeps the documented pre-generation
+    posture: no authority to consult, legacy inside the window, no
+    staleness oracle.
+    """
+    token = _bearer(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="missing lane bearer token")
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None and require_authority:
+        raise HTTPException(status_code=503, detail="lane control endpoint disabled")
+    current_generation: int | None = None
+    if session_factory is not None:
+        try:
+            current_generation = await durable_run_generation(session_factory, work_id)
+        except LaneAuthorityUnavailable as exc:
+            logger.warning("generation lookup for work %s failed", work_id, exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "the attempt-generation authority is unavailable — the credential "
+                    "is refused rather than degraded to the legacy scheme"
+                ),
+            ) from exc
+    if verify_lane_token(secret, token, work_id, generation=current_generation):
+        return current_generation
+    if verify_lane_token(secret, token, work_id):
+        if _legacy_window_open():
+            return current_generation
+        raise HTTPException(
+            status_code=refusal_status,
+            detail=(
+                "the legacy work-scoped lane token is past its migration deadline "
+                f"({legacy_token_deadline().isoformat()}) — the current attempt must "
+                "dial in with its dispatch-issued generation token"
+            ),
+        )
+    stale = _superseded_generation(secret, token, work_id, current_generation)
+    if stale is not None:
+        raise HTTPException(
+            status_code=refusal_status,
+            detail=(
+                f"this credential belongs to a superseded runner generation ({stale}; "
+                f"the work is at generation {current_generation}) — the current "
+                "attempt must dial in with its own dispatch-issued token"
+            ),
+        )
+    # Work-scoping refused, not authentication retried: the bearer holds
+    # A token, just not this work's.
+    raise HTTPException(status_code=refusal_status, detail="lane token does not scope this work")
+
+
+async def _current_generation(request: Request, work_id: str) -> int | None:
+    """The work's current generation behind the ack surface (R28-10).
+
+    Authority-unavailable here is the caller's 503: an ack must not be
+    judged against a generation nobody could read.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="lane control endpoint disabled")
+    try:
+        return await durable_run_generation(session_factory, work_id)
+    except LaneAuthorityUnavailable:
+        logger.warning("current-generation lookup for work %s failed", work_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="the attempt-generation authority is unavailable — the ack is refused",
+        ) from None
 
 
 def _secret(request: Request) -> str:
@@ -204,12 +382,11 @@ def _bearer(authorization: str | None) -> str:
 async def _authorize_lane(request: Request, authorization: str | None, work_id: str) -> str:
     """The shared gate: secret configured, bearer present, token scoped.
 
-    Accepts the CURRENT generation's attempt-scoped token (R28-07) or
-    the legacy work-scoped one (the migration default — a token that
-    never carried a generation cannot be treated as stale). A token
-    from a SUPERSEDED generation is refused with an actionable 403 that
-    names the stale generation and the current one; anything else is
-    plain work-scoping refusal.
+    Delegates to :func:`authorize_work_credential` — the ONE ladder the
+    lane-control surface and the checkpoint channel share (NEXT-01):
+    the CURRENT generation's attempt-scoped token, the legacy
+    work-scoped one inside the migration deadline only, and a
+    superseded generation's token refused with the actionable 403.
 
     Returns the verified secret (the caller never needs it beyond the
     check — returning it keeps the 503/401/403 ladder in ONE place).
@@ -218,27 +395,10 @@ async def _authorize_lane(request: Request, authorization: str | None, work_id: 
     secret = _secret(request)
     if not secret:
         raise HTTPException(status_code=503, detail="lane control endpoint disabled")
-    token = _bearer(authorization)
-    if not token:
-        raise HTTPException(status_code=401, detail="missing lane bearer token")
-    current_generation = await _current_generation(request, work_id)
-    if verify_lane_token(secret, token, work_id, generation=current_generation):
-        return secret
-    if verify_lane_token(secret, token, work_id):
-        return secret  # the legacy migration default, never "stale"
-    stale = _superseded_generation(secret, token, work_id, current_generation)
-    if stale is not None:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"this credential belongs to a superseded runner generation ({stale}; "
-                f"the work is at generation {current_generation}) — the current "
-                "attempt must dial in with its own dispatch-issued token"
-            ),
-        )
-    # 403, not 401: the bearer holds A token, just not this work's —
-    # work-scoping refused, not authentication retried.
-    raise HTTPException(status_code=403, detail="lane token does not scope this work")
+    await authorize_work_credential(
+        request, secret=secret, authorization=authorization, work_id=work_id
+    )
+    return secret
 
 
 def _mailbox(request: Request) -> PostgresMailbox:
@@ -338,6 +498,44 @@ async def get_lane_controls(
         "work_id": work_id,
         "after_sequence": after_sequence,
         "commands": [command.model_dump(mode="json") for command in commands],
+    }
+
+
+@lane_control_router.get("/lane/controls/resume-spec")
+async def get_lane_resume_spec(
+    request: Request,
+    work_id: str = Query(min_length=1),
+    authorization: str | None = Header(None),
+) -> Any:
+    """The work's LATEST ``resume`` command ROW, whatever rung it sits on.
+
+    NEXT-03: the pending view above stops at the dispatch boundary by
+    design — but the resume decision must outlive its own
+    acknowledgement. A resumed runner reads its ResumeSpec from THIS
+    surface: the durable ``control_commands`` row (payload immutable
+    once submitted), never a pending-queue lookup that has already
+    progressed past ``received``. ``command`` is ``None`` when the work
+    never received a resume.
+    """
+    await _authorize_lane(request, authorization, work_id)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="lane control endpoint disabled")
+    from sqlalchemy import select
+
+    from forge.adaptive.mailbox_db import _to_command
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(ControlCommandRow)
+            .where(ControlCommandRow.work_id == work_id, ControlCommandRow.kind == "resume")
+            .order_by(ControlCommandRow.sequence.desc(), ControlCommandRow.id.desc())
+            .limit(1)
+        )
+    command = _to_command(row) if row is not None else None
+    return {
+        "work_id": work_id,
+        "command": command.model_dump(mode="json") if command is not None else None,
     }
 
 

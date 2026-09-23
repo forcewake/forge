@@ -7,6 +7,8 @@ phase-by-phase through a caller-supplied factory.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from forge.adaptive.adapters import ClaudeSDKAdapter
@@ -115,6 +117,79 @@ class TestOperatorControlService:
 
         # no checkpoint captured → resume refuses
         assert await svc.resume("wp-1", "human:op", "note:2") is False
+
+    async def test_resume_embeds_the_exact_resume_spec_from_the_durable_store(
+        self, tmp_path, monkeypatch
+    ):
+        """NEXT-03: the resume command carries the ResumeSpec of the
+        store's CURRENT active checkpoint — the exact reference, its
+        sequence and the manifest's declared source — read from the
+        durable checkpoint store, never from the pending-command queue."""
+        import json
+
+        from forge.api_checkpoint_channel import (
+            CHECKPOINT_STORE_DIR_ENV,
+            CheckpointStore,
+        )
+
+        def _digest(data: bytes) -> str:
+            return hashlib.sha256(data).hexdigest()
+
+        monkeypatch.setenv(CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "cp-store"))
+        store = CheckpointStore(tmp_path / "cp-store")
+
+        def _checkpoint(files: dict[str, bytes], sequence: int, source_oid: str) -> str:
+            manifest = json.dumps(
+                {
+                    "schema": "forge.wip.manifest/2",
+                    "work_id": "wp-1",
+                    "sequence": sequence,
+                    "source_oids": {"attempt_base": source_oid},
+                    "files": {
+                        name: {"digest": _digest(data), "mode": 0o644, "role": "new"}
+                        for name, data in sorted(files.items())
+                    },
+                    "deletions": [],
+                }
+            ).encode()
+            blobs = {
+                entry["digest"]: files[name]
+                for name, entry in json.loads(manifest)["files"].items()
+            }
+            store.put_checkpoint(
+                work_id="wp-1",
+                manifest_bytes=manifest,
+                blobs=blobs,
+                sequence=sequence,
+            )
+            return hashlib.sha256(manifest).hexdigest()
+
+        older = _checkpoint({"a.py": b"v1\n"}, 3, "b" * 40)
+        newer = _checkpoint({"a.py": b"v2\n"}, 7, "c" * 40)  # the ACTIVE one
+
+        svc = self._service()
+        assert await svc.resume("wp-1", "human:op", "note:9") is True
+
+        resumes = [c for c in svc.mailbox.commands.values() if c.kind == "resume"]
+        assert len(resumes) == 1
+        payload = resumes[0].payload
+        assert payload["checkpoint_ref"] == f"wp-1@{newer}"
+        assert payload["checkpoint_sequence"] == 7
+        assert payload["source_oid"] == "c" * 40
+        assert older != newer  # the ACTIVE one won, not the first arrival
+
+    async def test_resume_without_any_store_still_gates_on_the_in_memory_capture(self):
+        """No store configured: the CTL-06 in-memory gate still applies and
+        the command carries an empty payload (the legacy spelling)."""
+        svc = self._service()
+        await svc.pause("wp-1", "human:op", "note:1")
+        from dataclasses import replace
+
+        svc.pause_states["wp-1"] = replace(svc.pause_states["wp-1"], checkpoint_captured=True)
+
+        assert await svc.resume("wp-1", "human:op", "note:2") is True
+        (resume,) = [c for c in svc.mailbox.commands.values() if c.kind == "resume"]
+        assert resume.payload == {}
 
     async def test_steer_rejects_acceptance_weakening(self):
         svc = self._service()

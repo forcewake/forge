@@ -694,6 +694,7 @@ class DiscoveryRunContext:
         repository_id: str = "default",
         allowed_globs: list[str] | None = None,
         store: ContentAddressedStore | None = None,
+        research: ResearchHarness | None = None,
     ) -> DiscoveryRunContext:
         """A context whose snapshot loads lazily from a repository reader.
 
@@ -707,17 +708,25 @@ class DiscoveryRunContext:
 
         NXT-08: this is now a one-entry delegation to
         :meth:`from_readers` — the single-repo shapes it produces are
-        byte-identical to the ones this method built directly.
+        byte-identical to the ones this method built directly. NEXT-07:
+        *research* is the composition root's seam — the
+        :class:`~forge.adaptive.research_planner.ResearchHarness` built
+        from the run's budget-guarded LLM client rides the context, so a
+        ``research-harness`` mode actually reaches the bounded loop. The
+        one entry is keyed ``"own"`` (the research menu's documented
+        namespace for the run's own repository); the repository IDENTITY
+        still fills every dispatch/evidence field.
         """
         return cls.from_readers(
-            {repository_id: reader},
-            {repository_id: repository_id},
+            {"own": reader},
+            {"own": repository_id},
             run_id=run_id,
             project_id=project_id,
             session_factory=session_factory,
-            refs={repository_id: ref},
-            allowed_globs={repository_id: allowed_globs} if allowed_globs is not None else None,
+            refs={"own": ref},
+            allowed_globs={"own": allowed_globs} if allowed_globs is not None else None,
             store=store,
+            research=research,
         )
 
     @classmethod
@@ -732,6 +741,7 @@ class DiscoveryRunContext:
         refs: Mapping[str, str] | None = None,
         allowed_globs: Mapping[str, list[str]] | None = None,
         store: ContentAddressedStore | None = None,
+        research: ResearchHarness | None = None,
     ) -> DiscoveryRunContext:
         """A context over N AUTHORIZED read-only repositories (NXT-08).
 
@@ -797,6 +807,7 @@ class DiscoveryRunContext:
             source_oid=primary.ref,
             allowed_globs=primary.allowed_globs,
             store=store,
+            research=research,
             repo_specs=specs,
         )
 

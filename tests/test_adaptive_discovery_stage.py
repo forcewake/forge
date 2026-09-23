@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 from forge.adaptive.artifact_store import ContentAddressedStore
 from forge.adaptive.discovery import dispatch_target
@@ -1970,3 +1971,311 @@ class TestQuestionResumptionIngress:
 async def get_run_row(db, run_id: str) -> FlowRun:
     async with db() as session:
         return await session.get(FlowRun, run_id)
+
+
+# ---------------------------------------------------------------------------
+# NEXT-07 — the research harness bound in the ACTUAL planning composition
+# root (review ccab247 §3, Finding 1)
+# ---------------------------------------------------------------------------
+
+
+class BudgetedFakeLLM:
+    """The ``LLMClient`` surface for the composition root.
+
+    Enforces the SAME guard contract the real client does — reserve before
+    answering (a refusal raises ``LLMError("budget_exhausted")`` with no
+    response spent), reconcile the actual usage after — and answers from
+    per-role scripted queues, so the test sees exactly which role consumed
+    which completion of the run's budget.
+    """
+
+    def __init__(self, *, research: list[str], planner: list[str]) -> None:
+        self._queues: dict[str, list[str]] = {"research": list(research), "planner": list(planner)}
+        self._budget = None
+        self.calls: list[dict] = []
+        self.refusals = 0
+
+    def set_budget(self, budget) -> None:
+        self._budget = budget
+
+    async def complete(
+        self,
+        *,
+        tier: str,
+        system: str,
+        user: str,
+        role: str,
+        flow_run_id: str | None,
+        json_mode: bool = False,
+        max_tokens: int = 4096,
+    ):
+        from forge.factory.llm import LLMError
+
+        self.calls.append(
+            {
+                "tier": tier,
+                "role": role,
+                "user": user,
+                "flow_run_id": flow_run_id,
+                "max_tokens": max_tokens,
+            }
+        )
+        reservation = None
+        if self._budget is not None:
+            reservation = await self._budget.reserve(calls=1, tokens=max_tokens)
+            if reservation is None:
+                self.refusals += 1
+                raise LLMError("budget_exhausted")
+        text = self._queues[role].pop(0)
+        if reservation is not None:
+            await self._budget.reconcile(reservation, actual_calls=1, actual_tokens=200)
+        return SimpleNamespace(text=text, input_tokens=120, output_tokens=80)
+
+
+def _research_proposal(tool: str, **args: str) -> str:
+    return json.dumps({"calls": [{"tool": tool, "repo": "own", "args": args}], "done": False})
+
+
+def _research_done() -> str:
+    return json.dumps(
+        {
+            "done": True,
+            "summary": "The planner class is declared at src/app/planner.py:1.",
+            "assumptions": [],
+            "contradictions": [],
+        }
+    )
+
+
+def _plan_json() -> str:
+    return json.dumps(
+        {
+            "summary": "Refactor the planner to cite evidence.",
+            "steps": ["Read src/app/planner.py.", "Add citation rendering."],
+            "risks": [],
+            "files_hint": ["src/app/planner.py"],
+        }
+    )
+
+
+class TestResearchCompositionRoot:
+    """NEXT-07: ``FORGE_DISCOVERY_MODE=research-harness`` reaches a REAL
+    bounded research loop through the production planning composition —
+    ``GitHubRunService.start_run`` constructs the harness from the run's
+    budget-guarded planner client (never a hand-built DiscoveryRunContext),
+    every research completion charges the SAME run budget as planning, and
+    the plan's evidence carries the research findings."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    @pytest.fixture()
+    async def db(self):
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        await engine.dispose()
+
+    @pytest.fixture()
+    def fake(self) -> FakeGitHub:
+        github = FakeGitHub()
+        github.seed_repo(GH_REPO, dict(FILES))
+        github.heads[GH_REPO]["main"] = GH_BASE_HEAD
+        github.seed_issue(GH_REPO, GH_ISSUE, GH_ISSUE_TITLE, GH_ISSUE_DESC)
+        return github
+
+    @staticmethod
+    def _service(db, fake, *, planner, profiles: str) -> GitHubRunService:
+        flow = GitHubPublishFlow(fake, proposer=StubImplementer(), base_branch="main")
+        stack = GitHubAgents(
+            client=fake,
+            reader=fake,
+            planner=planner,
+            implementer=StubImplementer(),
+            reviewer=StubReviewer(),
+            flow=flow,
+        )
+        settings_values = dict(
+            GITLAB_URL="https://gitlab.test",
+            GITLAB_TOKEN=SecretStr("glpat-test"),
+            GITLAB_WEBHOOK_SECRET=SecretStr("whsec"),
+            FORGE_APPROVERS="alice",
+            DATABASE_URL="sqlite+aiosqlite:///:memory:",
+            FORGE_GITHUB_HARNESS_WORKFLOW="",
+            FORGE_BUDGET_PROFILES=profiles,
+        )
+        return GitHubRunService(
+            db,
+            Settings(**settings_values),
+            ForgeConfig(),
+            stack=stack,
+            repo_full_name=GH_REPO,
+        )
+
+    async def test_research_harness_bound_through_the_real_planning_leg(
+        self, db, fake, monkeypatch
+    ):
+        from forge.durable.controller import FlowStatus
+        from forge.factory.planner import LLMPlanner, PLANNER_TIER
+
+        monkeypatch.setenv(FORGE_DISCOVERY_MODE_ENV, "research-harness")
+        llm = BudgetedFakeLLM(
+            research=[
+                _research_proposal("find_symbol", name="LLMPlanner"),
+                _research_done(),
+            ],
+            planner=[_plan_json()],
+        )
+        service = self._service(
+            db,
+            fake,
+            planner=LLMPlanner(llm),
+            profiles='{"standard": {"max_calls": 40, "max_tokens": 500000, "wallclock_s": 3600}}',
+        )
+
+        run_id = await service.start_run(
+            project_id=GH_PROJECT_ID,
+            issue_number=GH_ISSUE,
+            issue_title=GH_ISSUE_TITLE,
+            issue_description=GH_ISSUE_DESC,
+            author_username="alice",
+        )
+
+        # The run planned and reached the human gate.
+        run = await get_run_row(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value
+
+        # 1. The harness was composed from the planner's OWN client and
+        #    drove the loop: research-role completions on the planning
+        #    tier, charged to THIS run.
+        research_calls = [call for call in llm.calls if call["role"] == "research"]
+        assert len(research_calls) == 2
+        assert all(call["tier"] == PLANNER_TIER for call in research_calls)
+        assert all(call["flow_run_id"] == run_id for call in research_calls)
+
+        # 2. Every completion — research AND planning — charged the SAME
+        #    run budget (2 research + 1 planning, reconciled to actuals).
+        from forge.durable.budgets import budget_for_run
+
+        async with db() as session:
+            budget = await budget_for_run(session, run_id)
+        assert budget is not None
+        assert budget.consumed_calls == 3
+        assert budget.unresolved_calls == 0
+        assert budget.consumed_tokens == 600
+        assert llm.refusals == 0
+
+        # 3. The durable record carries the research leg and its findings
+        #    joined the evidence as ordinary, citable records.
+        record = dict((run.evidence or {}).get("discovery") or {})
+        assert record["status"] == "complete"
+        research = dict(record["research"])
+        assert research["complete"] is True
+        assert research["calls_executed"] == 1
+        assert research["observations"] == {"count": 1, "truncated": 0, "errors": 0}
+        research_entry = next(e for e in record["evidence"] if e["kind"] == "research_symbol")
+        assert research_entry["path"] == "src/app/planner.py"
+        assert research["findings"][0]["evidence_id"] == research_entry["id"]
+
+        # 4. The planner planned OVER the research: its input carried the
+        #    research section beside the evidence digest.
+        planner_call = next(call for call in llm.calls if call["role"] == "planner")
+        from forge.adaptive.research_planner import RESEARCH_BEGIN
+
+        assert RESEARCH_BEGIN in planner_call["user"]
+        assert DIGEST_BEGIN in planner_call["user"]
+
+    async def test_a_refused_reservation_is_an_honest_partial_stop(self, db, fake, monkeypatch):
+        """The harness reuses the run's BudgetGuard: when the budget is
+        spent, the research loop stops with an explicit gateway_error
+        partial (findings kept), and planning itself then fails honestly —
+        never a silent bypass or an unbounded loop."""
+        from forge.durable.controller import FlowStatus
+        from forge.factory.planner import LLMPlanner
+
+        monkeypatch.setenv(FORGE_DISCOVERY_MODE_ENV, "research-harness")
+        llm = BudgetedFakeLLM(
+            research=[
+                _research_proposal("find_symbol", name="LLMPlanner"),
+                _research_proposal("find_symbol", name="start_run"),
+                _research_proposal("find_symbol", name="never_reached"),
+            ],
+            planner=[_plan_json()],
+        )
+        service = self._service(
+            db,
+            fake,
+            planner=LLMPlanner(llm),
+            profiles='{"standard": {"max_calls": 2, "max_tokens": 500000, "wallclock_s": 3600}}',
+        )
+
+        from forge.factory.llm import LLMError
+
+        with pytest.raises(LLMError, match="budget_exhausted"):
+            await service.start_run(
+                project_id=GH_PROJECT_ID,
+                issue_number=GH_ISSUE,
+                issue_title=GH_ISSUE_TITLE,
+                issue_description=GH_ISSUE_DESC,
+                author_username="alice",
+            )
+
+        # Two completions fit the budget; the third reserve (and planning's
+        # own) was refused — the loop stopped honestly on the first refusal.
+        assert llm.refusals == 2
+        async with db() as session:
+            run = (await session.execute(select(FlowRun))).scalars().one()
+        research = dict((run.evidence or {}).get("discovery") or {})
+        research_doc = dict(research.get("research") or {})
+        assert research_doc["complete"] is False
+        assert research_doc["stopped_reason"] == "gateway_error: LLMError"
+        assert research_doc["calls_executed"] == 2  # the paid findings were kept
+
+        from forge.durable.budgets import budget_for_run
+
+        async with db() as session:
+            budget = await budget_for_run(session, run.id)
+        assert budget.consumed_calls == 2
+
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
+        assert "budget_exhausted" in (run.status_reason or "")
+
+    async def test_research_mode_without_an_llm_client_refuses_loudly(self, db, fake, monkeypatch):
+        """A stack whose planner carries no LLM client (the stub) cannot
+        compose the harness — the stage's configuration refusal parks the
+        run visibly; the mode never silently downgrades to lexical-only."""
+        from forge.durable.controller import FlowStatus
+        from forge.runs.stubs import StubPlanner
+
+        monkeypatch.setenv(FORGE_DISCOVERY_MODE_ENV, "research-harness")
+        service = self._service(
+            db,
+            fake,
+            planner=StubPlanner(),
+            profiles='{"standard": {"max_calls": 40, "max_tokens": 500000, "wallclock_s": 3600}}',
+        )
+
+        with pytest.raises(DiscoveryStageError, match="without a configured research"):
+            await service.start_run(
+                project_id=GH_PROJECT_ID,
+                issue_number=GH_ISSUE,
+                issue_title=GH_ISSUE_TITLE,
+                issue_description=GH_ISSUE_DESC,
+                author_username="alice",
+            )
+
+        async with db() as session:
+            run = (await session.execute(select(FlowRun))).scalars().one()
+        assert run.status == FlowStatus.BLOCKED.value  # fatal: parked, never silent
+        assert "planning_failed" in (run.status_reason or "")
+        record = dict((run.evidence or {}).get("discovery") or {})
+        assert record["status"] == "failed"
+        assert "research" in (record.get("block_reason") or "")

@@ -308,6 +308,13 @@ _STEERING_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 RESUME_ENV = "FORGE_LANE_RESUME"
 _RESUME_TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
+#: NEXT-03's third mode: ``FORGE_LANE_RESUME=restart`` — an EXPLICIT
+#: discard-WIP restart. The checkpoint is intentionally NOT downloaded:
+#: the lane runs on the dispatched base and the restore report SAYS the
+#: WIP was discarded (a distinct, documented outcome — never a silent
+#: "latest fallback" and never a required-restore halt).
+_RESUME_RESTART = "restart"
+
 #: driver key -> the adapter that wraps the SAME client object the lane
 #: drives (the pairing rule the bridge checks at construction).
 _STEERING_ADAPTERS: dict[str, type] = {
@@ -327,6 +334,26 @@ def resume_requested(env: Mapping[str, str] | None = None) -> bool:
     """Whether ``FORGE_LANE_RESUME`` is truthy in *env* (default: off)."""
     source = os.environ if env is None else env
     return source.get(RESUME_ENV, "").strip().lower() in _RESUME_TRUTHY
+
+
+def resume_mode(env: Mapping[str, str] | None = None) -> str:
+    """NEXT-03's three DISTINCT dispatch modes, from ``FORGE_LANE_RESUME``.
+
+    - ``"fresh"`` (absent/unknown): no checkpoint needed — a first run;
+      a 404-shaped restore failure is normal and never blocks the turn.
+    - ``"required"`` (truthy): the resume's exact ResumeSpec MUST
+      restore — a failed download, refused binding or corrupt manifest
+      halts the lane before any vendor client exists.
+    - ``"restart"`` (the literal ``restart``): the WIP is INTENTIONALLY
+      discarded — no download at all, the report says so.
+    """
+    source = os.environ if env is None else env
+    raw = (source.get(RESUME_ENV) or "").strip().lower()
+    if raw == _RESUME_RESTART:
+        return "restart"
+    if raw in _RESUME_TRUTHY:
+        return "required"
+    return "fresh"
 
 
 def steering_service_from_env(
@@ -729,130 +756,158 @@ async def _drain_until_result(
 #: address — the same shape the remote ref's tail carries.
 _RESUME_CHECKPOINT_ID = re.compile(r"^[0-9a-f]{64}$")
 
+#: One bounded wait for the resume-spec read (NEXT-03). The spec fetch
+#: gates the required restore; a slow control plane must delay it, not
+#: silently select "latest".
+_RESUME_SPEC_TIMEOUT_S = 10.0
+
 
 def _resume_checkpoint_target(work_id: str, url: str, token: str) -> dict[str, Any]:
-    """Resolve WHICH checkpoint the pending resume command binds (R28-05).
+    """Resolve WHICH checkpoint the durable RESUME COMMAND binds (NEXT-03).
 
-    Reads the work's pending commands off the control plane (the same
-    ``GET /lane/controls`` surface the steering channel polls) and looks
-    for the newest ``resume`` command. Its payload may carry the EXACT
-    approved checkpoint — ``checkpoint_ref`` as the durable
-    ``<work_id>@<checkpoint_id>`` reference, or ``checkpoint_id`` as the
-    bare digest — and that exact id is what the restore must download,
-    never "whatever is latest now".
+    Reads the work's LATEST ``resume`` command ROW off the control plane
+    — ``GET /lane/controls/resume-spec``, the DURABLE record whatever
+    rung it sits on — never the pending-command queue (a resume that has
+    already been acknowledged leaves ``received``/``authorized``; its
+    payload is still the immutable resume decision). The command's
+    ResumeSpec carries the EXACT approved checkpoint — ``checkpoint_ref``
+    as the durable ``<work_id>@<checkpoint_id>`` reference, or
+    ``checkpoint_id`` as the bare digest — and that exact id is what the
+    restore must download, never "whatever is latest now".
 
     Returns ``{"checkpoint_id": str | None, "resume_command": str | None,
-    "note": str, "refused": bool}``:
+    "note": str, "refused": bool, "lookup_failed": bool}``:
 
     - an explicit, well-formed, same-work reference → its checkpoint_id
       (``refused`` False, the exact binding);
-    - a resume command WITHOUT a reference (the pre-R28-05 payload), no
-      resume command at all, or an unreachable control plane →
-      ``checkpoint_id`` None with an honest note — the caller falls
-      back to the ACTIVE checkpoint and RECORDS that it did;
+    - a resume command WITHOUT a reference (the pre-NEXT-03 payload), no
+      resume command at all → ``checkpoint_id`` None with an honest
+      note — the caller falls back to the ACTIVE checkpoint, RECORDS
+      that it did, and (required mode) the fallback is labelled legacy;
+    - an unreachable or unparseable control plane → ``lookup_failed``
+      True: the caller NEVER turns that into a "latest" guess on a
+      required resume (NEXT-03: a control API timeout does not select
+      another checkpoint);
     - a malformed or cross-work reference → ``refused`` True: an
       explicit binding that cannot be honored is a refusal with
       evidence, never a silent "latest" substitute.
     """
-    from forge.adaptive.lane_channel import LaneControlChannel
+    import httpx
+
+    from forge.adaptive.checkpoint_channel import parse_checkpoint_ref
 
     fallback = {
         "checkpoint_id": None,
         "resume_command": None,
         "note": "",
         "refused": False,
+        "lookup_failed": False,
     }
     try:
-        channel = LaneControlChannel(base_url=url, token=token, work_id=work_id)
-        commands = channel.pending(work_id)
-    except Exception:  # noqa: BLE001 — the resume selection degrades honestly
-        fallback["note"] = (
-            "resume command lookup unavailable — the ACTIVE checkpoint is the fallback"
+        response = httpx.get(
+            f"{url.rstrip('/')}/lane/controls/resume-spec",
+            params={"work_id": work_id},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_RESUME_SPEC_TIMEOUT_S,
         )
-        return fallback
-    resumes = sorted(
-        (command for command in commands if command.kind == "resume"),
-        key=lambda command: command.sequence,
-    )
-    if not resumes:
-        fallback["note"] = (
-            "no pending resume command carries an explicit checkpoint reference — "
-            "the ACTIVE checkpoint is the fallback"
-        )
-        return fallback
-    command = resumes[-1]
-    fallback["resume_command"] = command.command_id
-    payload = command.payload or {}
+        response.raise_for_status()
+        document = response.json()
+    except Exception as exc:  # noqa: BLE001 — the spec lookup degrades honestly
+        return {
+            **fallback,
+            "lookup_failed": True,
+            "note": f"resume command lookup unavailable ({exc}) — no checkpoint is selected by a timeout",
+        }
+    raw_command = document.get("command") if isinstance(document, dict) else None
+    if not isinstance(raw_command, dict):
+        return {
+            **fallback,
+            "note": (
+                "no resume command carries an explicit checkpoint reference — "
+                "the ACTIVE checkpoint is the fallback"
+            ),
+        }
+    payload = raw_command.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    command_id = str(raw_command.get("command_id") or "")
+    fallback["resume_command"] = command_id
     raw_ref = str(payload.get("checkpoint_ref") or "").strip()
     raw_id = str(payload.get("checkpoint_id") or "").strip()
     if not raw_ref and not raw_id:
         fallback["note"] = (
-            f"resume command {command.command_id!r} carries no explicit checkpoint "
-            "reference — the ACTIVE checkpoint is the fallback"
+            f"resume command {command_id!r} carries no explicit checkpoint "
+            "reference — the ACTIVE checkpoint is the fallback (legacy payload)"
         )
         return fallback
-
-    from forge.adaptive.checkpoint_channel import parse_checkpoint_ref
 
     if raw_ref:
         try:
             ref_work, checkpoint_id = parse_checkpoint_ref(raw_ref)
         except ValueError:
             return {
-                "checkpoint_id": None,
-                "resume_command": command.command_id,
+                **fallback,
                 "note": f"resume command carries a malformed checkpoint reference ({raw_ref!r})",
                 "refused": True,
             }
         if ref_work != work_id:
             return {
-                "checkpoint_id": None,
-                "resume_command": command.command_id,
+                **fallback,
                 "note": (
                     f"resume command names work {ref_work!r}'s checkpoint — not this "
                     f"work's ({work_id!r}); an explicit binding to another work is refused"
                 ),
                 "refused": True,
             }
-        return {
-            "checkpoint_id": checkpoint_id,
-            "resume_command": command.command_id,
-            "note": "exact",
-            "refused": False,
-        }
+        return {**fallback, "checkpoint_id": checkpoint_id, "note": "exact", "refused": False}
     if not _RESUME_CHECKPOINT_ID.fullmatch(raw_id):
         return {
-            "checkpoint_id": None,
-            "resume_command": command.command_id,
+            **fallback,
             "note": f"resume command carries a malformed checkpoint id ({raw_id!r})",
             "refused": True,
         }
-    return {
-        "checkpoint_id": raw_id,
-        "resume_command": command.command_id,
-        "note": "exact",
-        "refused": False,
-    }
+    return {**fallback, "checkpoint_id": raw_id, "note": "exact", "refused": False}
 
 
 def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
-    """Wave D: restore WIP from the control-plane checkpoint BEFORE the turn.
+    """Wave D + NEXT-03: restore WIP from the control plane BEFORE the turn.
 
-    R28-05: the restore is BOUND to a checkpoint, not to "whatever is
-    latest". The pending resume command's exact reference
-    (``work_id@checkpoint_id``) decides which checkpoint downloads; when
-    the command carries no explicit reference — the migration-shaped
-    payload — the ACTIVE checkpoint is the fallback and the report SAYS
-    so (``checkpoint_selection: "latest"`` plus the note), so no restore
-    ever claims an exactness it did not have. A resume command whose
-    explicit reference is malformed or names another work is a REFUSAL
-    (``checkpoint_selection: "refused"`` + failures) — restoring
-    something the operator did not approve is worse than not restoring.
+    The restore is BOUND to a checkpoint, not to "whatever is latest".
+    The durable RESUME COMMAND's exact ResumeSpec
+    (``work_id@checkpoint_id``, read from the command ROW — it may long
+    have left the pending set) decides which checkpoint downloads:
+
+    - ``checkpoint_selection: "exact"`` — the spec's checkpoint, the
+      operator's approved resume point (a newer upload landing later
+      changes nothing);
+    - ``checkpoint_selection: "latest"`` — the labelled LEGACY migration
+      fallback: no resume command exists, or its payload predates the
+      ResumeSpec. The report SAYS so (``selection_note``), so no restore
+      ever claims an exactness it did not have;
+    - ``checkpoint_selection: "refused"`` — the spec's reference is
+      malformed or names another work: restoring something the operator
+      did not approve is worse than not restoring;
+    - a required resume whose spec LOOKUP failed never guesses: the
+      failure is returned and the lane's required-restore gate (R28-03)
+      halts it with zero vendor sessions.
 
     A failed restore is RETURNED (the report carries ok=False +
     failures) — the lane runs the turn on the base, never silently
     pretends the WIP landed.
     """
+    mode = resume_mode()
+
+    if mode == "restart":
+        # NEXT-03's explicit discard: no download, no fallback, documented.
+        return {
+            "restored": False,
+            "files_restored": 0,
+            "failures": [],
+            "checkpoint_selection": "discarded",
+            "note": (
+                "explicit restart (FORGE_LANE_RESUME=restart): the held WIP is "
+                "intentionally discarded — the lane runs on the dispatched base"
+            ),
+        }
 
     url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
     token = (os.environ.get("FORGE_LANE_CONTROL_TOKEN") or "").strip()
@@ -877,6 +932,17 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
             "failures": [f"resume checkpoint binding refused: {target['note']}"],
             "checkpoint_selection": "refused",
             "resume_command": target["resume_command"],
+        }
+    if target["lookup_failed"] and mode == "required":
+        # A required resume never turns an unreachable spec lookup into a
+        # "latest" guess (NEXT-03): the failure rides the report and the
+        # lane's required-restore gate halts it.
+        return {
+            "restored": False,
+            "files_restored": 0,
+            "failures": [f"resume checkpoint binding unavailable: {target['note']}"],
+            "checkpoint_selection": "unavailable",
+            "resume_command": None,
         }
     try:
         api = LaneControlAPI(base_url=url, work_token=token)
@@ -1828,20 +1894,23 @@ def main(
     except ValueError as exc:
         return _fail("driver_setup_error", str(exc))
 
-    # Wave D + R28-03: a pending resume + a stored checkpoint restores
-    # the WIP BEFORE any vendor client or session exists — the agent
-    # continues from the previous runner's files. FORGE_LANE_RESUME
-    # marks a dispatch whose WIP continuity is REQUIRED: there, a
-    # restore that did not land (failed download, refused binding,
-    # corrupt manifest, missing blob) halts the lane with ZERO model
-    # turns — nonzero exit, the evidence in the meta and the sidecar —
-    # never a silent start-over on a base that may be half-restored. A
-    # fresh run (no marker) proceeds: a 404 is normal for it.
+    # Wave D + R28-03 + NEXT-03: the dispatch's resume MODE decides the
+    # WIP-continuity contract BEFORE any vendor client or session
+    # exists. FORGE_LANE_RESUME=1 marks a dispatch whose continuity is
+    # REQUIRED: there, a restore that did not land (failed download,
+    # refused binding, corrupt manifest, missing blob, an unreachable
+    # resume-spec lookup) halts the lane with ZERO model turns — nonzero
+    # exit, the evidence in the meta and the sidecar — never a silent
+    # start-over on a base that may be half-restored. The literal
+    # ``restart`` (NEXT-03) is the EXPLICIT discard: no download at all,
+    # the report says the WIP was intentionally dropped. A fresh run (no
+    # marker) proceeds: a 404 is normal for it.
     resume_report: dict[str, Any] | None = None
     work_id_for_resume = (
         os.environ.get("FORGE_WORK_ID") or os.environ.get("FORGE_RUN_ID") or ""
     ).strip()
-    if work_id_for_resume and steering_enabled():
+    mode = resume_mode()
+    if mode == "restart" or (work_id_for_resume and steering_enabled()):
         resume_report = _maybe_restore_wip(work_id_for_resume)
     if resume_requested():
         required_ok = bool((resume_report or {}).get("restored"))

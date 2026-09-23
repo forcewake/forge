@@ -23,13 +23,20 @@ runner restores from. Three endpoints, one storage discipline:
 - ``GET /lane/checkpoints`` — the operator surface: every held
   checkpoint reference with its work, sequence and latest flag.
 
-Authentication is the lane control scheme's: while
+Authentication is the lane control scheme's (NEXT-01): while
 ``FORGE_LANE_CONTROL_SECRET`` is unset every endpoint answers 503 —
-the channel is disabled, fail closed. With the secret set, the bearer
-token must be the work-scoped HMAC of the work id under the secret
-(:func:`forge.adaptive.checkpoint_channel.work_scoped_token`; the list
-surface uses the ``checkpoints:list`` scope). A token minted for
-ANOTHER work is refused with 401 — work-scoped means exactly that.
+the channel is disabled, fail closed. With the secret set, the work
+endpoints (upload/download) authenticate through the SAME
+attempt-credential ladder the lane-control API uses
+(:func:`forge.api_lane_control.authorize_work_credential` — one token
+derivation, one durable generation authority, one migration deadline):
+the dispatch-issued GENERATION-SCOPED token for the run's current
+attempt, or the legacy work-scoped HMAC inside the
+``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` window only; a superseded
+generation's token is refused naming both generations. A token minted
+for ANOTHER work is refused with 401 — work-scoped means exactly that.
+The operator surfaces (list, health) keep the ``checkpoints:list``
+scope — an operator credential, no attempt generation attached.
 
 Storage lives under ``FORGE_CHECKPOINT_STORE_DIR`` (default
 ``data/checkpoints``) in the same fan-out shape the local artifact
@@ -995,6 +1002,35 @@ def _authorized(secret: str, scope: str, authorization: str | None) -> bool:
         return False
 
 
+async def _authorize_work(
+    request: Request, secret: str, work_id: str, authorization: str | None
+) -> None:
+    """The WORK-surface gate: the shared attempt credential (NEXT-01).
+
+    The very ladder :func:`forge.api_lane_control._authorize_lane` walks —
+    imported, not duplicated: the current generation's attempt-scoped
+    token, the legacy work-scoped one inside the migration deadline, a
+    superseded generation refused with both generations named. This
+    channel may be mounted standalone (no ``session_factory`` on the
+    app): then there is no durable generation authority to consult, and
+    the documented pre-generation posture applies (legacy inside the
+    window, no staleness oracle) — with the authority CONFIGURED, an
+    unreadable one is a 503 refusal, never a legacy acceptance.
+    Refusals carry 401 here (this surface's existing spelling of "not
+    your credential").
+    """
+    from forge.api_lane_control import authorize_work_credential
+
+    await authorize_work_credential(
+        request,
+        secret=secret,
+        authorization=authorization,
+        work_id=work_id,
+        refusal_status=401,
+        require_authority=False,
+    )
+
+
 def _require_enabled(request: Request) -> str:
     """The fail-closed gate: 503 while the shared secret is unset."""
     secret = _secret()
@@ -1162,8 +1198,7 @@ async def put_checkpoint(
     """Accept one verified checkpoint upload for *work_id* (fail-closed)."""
     secret = _require_enabled(request)
     _validate_work_id(work_id)
-    if not _authorized(secret, work_id, authorization):
-        raise HTTPException(status_code=401, detail="invalid work-scoped token")
+    await _authorize_work(request, secret, work_id, authorization)
     try:
         document = await request.json()
     except ValueError as exc:
@@ -1217,8 +1252,7 @@ async def get_checkpoint(
     """Serve the work's latest (or named) checkpoint, digest-verified on read."""
     secret = _require_enabled(request)
     _validate_work_id(work_id)
-    if not _authorized(secret, work_id, authorization):
-        raise HTTPException(status_code=401, detail="invalid work-scoped token")
+    await _authorize_work(request, secret, work_id, authorization)
     if checkpoint_id is not None and not _HEX64.fullmatch(checkpoint_id):
         raise HTTPException(status_code=400, detail="checkpoint_id must be a 64-hex digest")
 

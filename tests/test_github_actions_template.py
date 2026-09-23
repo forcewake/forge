@@ -424,3 +424,106 @@ class TestLaneControlEnv:
         for path in (TEMPLATE, MIRROR):
             env = self.driver_step(path)["env"]
             assert env["FORGE_STEERING_ENABLED"] == "${{ vars.FORGE_STEERING_ENABLED || '' }}"
+
+
+# ----------------------------------------------------------------------
+# NEXT-17: immutable lane resources. The reviewer's finding — the git+
+# install fetches from the network and the wheel is not pinned by hash,
+# the MCP binary installs from a bare version spec. The shipped
+# recipes must CONSUME immutable resources: a content-hash-pinned wheel
+# (the --hash=sha256: equivalent for a direct artifact URL, verified
+# before pip runs) and an npm LOCK (npm ci enforces the lock's per-tarball
+# sha512 integrities), with the expected-vs-actual hashes recorded for
+# the provenance report.
+# ----------------------------------------------------------------------
+
+AZURE_TEMPLATE = Path(__file__).parents[1] / "ci" / "templates" / "forge-lane.azure-pipelines.yml"
+
+
+class TestImmutableResourcePinning:
+    def brief_step(self, path: Path) -> dict:
+        workflow = yaml.safe_load(path.read_text())
+        return next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Render the implementation brief"
+        )
+
+    def test_the_wheel_pin_variables_reach_the_install_step(self):
+        """The hash pin rides repo VARIABLES exactly like FORGE_LANE_REF —
+        the pin is an operator decision, never a template constant that
+        would rot."""
+        for path in (TEMPLATE, MIRROR):
+            env = self.brief_step(path)["env"]
+            assert env["FORGE_LANE_WHEEL"] == "${{ vars.FORGE_LANE_WHEEL }}"
+            assert env["FORGE_LANE_WHEEL_SHA256"] == "${{ vars.FORGE_LANE_WHEEL_SHA256 }}"
+
+    def test_the_wheel_route_verifies_the_hash_before_pip_runs(self):
+        """Download -> hash -> refuse on mismatch -> install the VERIFIED
+        bytes (pip re-verifies via #sha256=). A mismatch is a bootstrap
+        failure (infrastructure/config), never a code-repair candidate."""
+        for path in (TEMPLATE, MIRROR):
+            run = self.brief_step(path)["run"]
+            assert 'pip download --no-deps -d .forge/wheel "$FORGE_WHEEL_URL"' in run
+            # The pin shape is validated BEFORE any download.
+            assert "FORGE_LANE_WHEEL_SHA256 must be a 64-hex sha256" in run
+            assert "grep -Eq '^[0-9a-f]{64}$'" in run
+            # A mismatch is named with both hashes and classifies infra.
+            assert "forge wheel hash mismatch" in run
+            assert 'pip install --no-deps "$WHEEL_FILE#sha256=$ACTUAL_SHA"' in run
+            assert "never code repair" in run
+
+    def test_the_install_provenance_record_carries_both_halves(self):
+        """.forge/lane_install.json is what the provenance report's
+        expected-vs-installed hash leg consumes — the template records
+        BOTH halves (wheel route) or names the unpinned git-ref route."""
+        for path in (TEMPLATE, MIRROR):
+            run = self.brief_step(path)["run"]
+            assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in run
+            assert '"pin":"git-ref","ref":"%s"' in run
+
+    def test_the_git_route_stays_the_documented_fallback(self):
+        """The released-tag default survives (the LIVE-found placeholder
+        doctrine); the wheel route wraps it, never replaces it."""
+        text = TEMPLATE.read_text()
+        assert (
+            'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}"'
+            in text
+        )
+        # The wheel route is TAKEN FIRST (the git install lives in the
+        # else branch of the wheel guard).
+        run = self.brief_step(TEMPLATE)["run"]
+        assert run.index('if [ -n "$FORGE_WHEEL_URL" ]') < run.index("git+https://")
+
+    def test_the_codegraph_binary_installs_through_a_lock_not_a_bare_spec(self):
+        """`npm ci` installs EXACTLY the materialized lock — npm verifies
+        every tarball against the lock's sha512 integrity before executing
+        it; a bare `npm install -g <spec>@version` is gone. The lock's own
+        hash is checked against FORGE_MCP_LOCK_SHA256 when pinned."""
+        for path in (TEMPLATE, MIRROR):
+            text = path.read_text()
+            run = self.brief_step(path)["run"]
+            assert "npm install -g" not in run  # the bare-version route is gone
+            assert (
+                "npm install --package-lock-only --no-fund --no-audit "
+                "@colbymchenry/codegraph@1.6.0" in run
+            )
+            assert "npm ci --no-fund --no-audit" in run
+            assert "codegraph lock hash mismatch" in run
+            assert "FORGE_MCP_LOCK_SHA256: ${{ vars.FORGE_MCP_LOCK_SHA256 }}" in text
+
+    def test_the_azure_lane_carries_the_same_wheel_hash_route(self):
+        """AzDO parity: the wheel pin rides COMPILE-TIME variable mappings
+        (an undefined $(macro) arrives as its literal text — the junk
+        class the install guards) and the same download-hash-refuse
+        sequence, recorded to the same lane_install.json."""
+        text = AZURE_TEMPLATE.read_text()
+        assert "FORGE_LANE_WHEEL: ${{ variables.FORGE_LANE_WHEEL }}" in text
+        assert "FORGE_LANE_WHEEL_SHA256: ${{ variables.FORGE_LANE_WHEEL_SHA256 }}" in text
+        assert 'pip download --no-deps -d .forge/wheel "$_wheel_url"' in text
+        assert "FORGE_LANE_WHEEL_SHA256 must be a 64-hex sha256" in text
+        assert "forge wheel hash mismatch" in text
+        assert 'pip install --no-deps "$_wheel_file#sha256=$_actual_sha"' in text
+        assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in text
+        # The git retry loop survives inside the else branch.
+        assert "for attempt in 1 2 3; do" in text

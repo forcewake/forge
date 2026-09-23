@@ -22,6 +22,7 @@ path uses. Three wirings:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -296,17 +297,29 @@ class OperatorControlService:
         return await self.surface.fence_active(work_id)
 
     async def resume(self, work_id: str, actor: str, idempotency_key: str) -> bool:
-        """Resume only from a confirmed checkpoint (CTL-06).
+        """Resume only from a confirmed checkpoint (CTL-06), pinned to ONE
+        exact checkpoint (NEXT-03).
 
         LIVE-found (wave C→D): the pause ran in the LANE process; this
         service runs in the APP process — its in-memory pause_states can
         never hold the lane's pause. The DURABLE truth is the checkpoint
         on the control plane: when the store has one for this work, the
         resume stands (the checkpoint IS the confirmed capture).
+
+        NEXT-03: the resume command carries the EXACT ResumeSpec — the
+        CURRENT active checkpoint read from the durable checkpoint store
+        (never from the pending-command queue): ``checkpoint_ref`` (the
+        durable ``<work>@<checkpoint_id>`` reference), its ``sequence``
+        and the manifest's ``source_oid``. The resumed runner restores
+        EXACTLY this checkpoint — a newer upload landing after the
+        authorization changes nothing — and the spec stays readable from
+        the durable command row long after the command leaves the
+        pending set (``GET /lane/controls/resume-spec``).
         """
         state = self.pause_states.get(work_id)
         in_memory = state is not None and state.checkpoint_captured
-        if not in_memory and not self._server_has_checkpoint(work_id):
+        spec = self._active_resume_spec(work_id)
+        if not in_memory and spec is None:
             return False  # no confirmed checkpoint — resume refuses
         self.pause_states.pop(work_id, None)
         await self.surface.submit(
@@ -320,19 +333,51 @@ class OperatorControlService:
                 actor_origin="server_authenticated_human",
                 idempotency_key=idempotency_key,
                 status="received",
+                payload=spec or {},
             )
         )
         return True
 
-    def _server_has_checkpoint(self, work_id: str) -> bool:
-        """The durable checkpoint store answers for the LANE's pause."""
+    @staticmethod
+    def _active_resume_spec(work_id: str) -> dict[str, Any] | None:
+        """The exact ResumeSpec for the work's CURRENT active checkpoint.
+
+        Reads the durable control-plane checkpoint STORE (the per-work
+        index's highest-sequence entry, R28-06 — arrival order is not
+        authority) plus the manifest's declared source identity. Returns
+        ``None`` when the store holds nothing for the work (or is not
+        configured) — the caller's confirmed-checkpoint gate then falls
+        back to the in-memory capture state, exactly as before.
+        """
         try:
             from forge.api_checkpoint_channel import CheckpointStore, _store_dir
+            from forge.adaptive.checkpoint_channel import format_checkpoint_ref
 
-            index = CheckpointStore(_store_dir())._load_index(work_id)
-            return bool(index.get("checkpoints"))
-        except Exception:  # noqa: BLE001 — no store configured, no resume
-            return False
+            store = CheckpointStore(_store_dir())
+            entry = store.entry(work_id)
+            if entry is None:
+                return None
+            checkpoint_id = str(entry.get("checkpoint_id") or "")
+            if not checkpoint_id:
+                return None
+            source_oid = ""
+            try:
+                manifest_bytes, _blobs = store.read_checkpoint(entry)
+                manifest = json.loads(manifest_bytes)
+                sources = manifest.get("source_oids")
+                if isinstance(sources, dict) and sources:
+                    # The declared base identity: the attempt base when the
+                    # lane pinned one, else the first recorded source.
+                    source_oid = str(sources.get("attempt_base") or next(iter(sources.values())))
+            except Exception:  # noqa: BLE001 — the spec degrades to the ref
+                source_oid = ""
+            return {
+                "checkpoint_ref": format_checkpoint_ref(work_id, checkpoint_id),
+                "checkpoint_sequence": int(entry.get("sequence") or 0),
+                "source_oid": source_oid,
+            }
+        except Exception:  # noqa: BLE001 — no store configured, no spec
+            return None
 
     async def steer(
         self,

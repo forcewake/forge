@@ -33,9 +33,19 @@ drain can run:
    manifest's own path set against duplicates/aliases and
    file-versus-directory conflicts, every entry's kind/mode, and every
    blob digest-verified from the store. Only when the whole plan passes
-   is the tree built in a STAGING directory and moved into the target
-   by atomic per-file renames — a failure anywhere leaves the target
-   untouched and the staging discarded, never a half-applied workspace.
+   is the NEXT GENERATION of the workspace built complete in a STAGING
+   directory beside the target and activated by ONE whole-tree switch
+   (NEXT-04: the current generation moves aside, the staged one lands —
+   two atomic directory renames with the first rolled back if the
+   second fails). A failure ANYWHERE — preflight, staging or the switch
+   itself — leaves the target at its original state, never a
+   half-applied workspace; a restore killed between the two renames
+   leaves the original generation parked under a
+   ``.forge-restore-backup-*`` name that the next restore resolves
+   (see :func:`_recover_abandoned_promotions`). Where the parent is not
+   writable and the whole-tree switch is unavailable, the plan promotes
+   per-file under a full SAVEPOINT (the original of every touched file
+   is captured first and restored on any failure).
 3. **Resume** (:func:`resume_from_checkpoint`) — NXT-18's gate: the
    CURRENT authorization is re-checked through a callable (no
    constructor-default ``permissions_valid=True``), the checkpoint
@@ -71,6 +81,7 @@ import os
 import shutil
 import stat
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -85,6 +96,7 @@ __all__ = [
     "CheckpointError",
     "CheckpointReceipt",
     "FileRestore",
+    "RestorePhase",
     "RestoreReport",
     "ResumeOutcome",
     "UploadFailed",
@@ -183,6 +195,23 @@ class UploadFailed(CheckpointError):
     """
 
 
+class _PromotionFailure(Exception):
+    """Internal: the promotion could not complete (NEXT-04).
+
+    Carries the actionable reason and the workspace verdict:
+    ``target_invalid=False`` means the target sits at its ORIGINAL state
+    (nothing was mutated, or the savepoint/backup rollback restored it);
+    ``target_invalid=True`` means the rollback ITSELF failed — the
+    workspace is missing or broken and the report must say a retry
+    rebuilds from the approved base, never that the target is usable.
+    """
+
+    def __init__(self, reason: str, *, target_invalid: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.target_invalid = target_invalid
+
+
 class WipUploadChannel(Protocol):
     """The structural transport :func:`capture_wip` accepts as ``upload=``.
 
@@ -245,14 +274,39 @@ class FileRestore:
     reason: str = ""
 
 
+#: The promotion verdict a :class:`RestoreReport` carries (NEXT-04):
+#: ``completed`` — the whole plan landed through the generation switch;
+#: ``preflight_failed`` — NOTHING was written (the verified-everything
+#: gate refused before any mutation); ``promotion_failed`` — the restore
+#: died while staging or switching generations and the TARGET WAS ROLLED
+#: BACK to its original state (or, when ``target_invalid`` is also set,
+#: the rollback itself failed and the workspace is explicitly unusable —
+#: retry from the approved base).
+RestorePhase = Literal["completed", "preflight_failed", "promotion_failed"]
+
+
 @dataclass(frozen=True)
 class RestoreReport:
-    """The second-runner restore verdict with per-file evidence."""
+    """The second-runner restore verdict with per-file evidence.
+
+    ``phase`` names WHERE the restore decided (NEXT-04): a preflight
+    refusal never wrote a byte; a promotion failure happened with the
+    workspace mutation already in flight and the target rolled back.
+    ``target_invalid`` is True only when that rollback itself failed —
+    the workspace is then MISSING or mixed-broken and a lane must treat
+    it as unusable, rebuilding from the approved base. ``recovery``
+    carries what this restore found and resolved of an EARLIER crashed
+    restore's abandoned promotion (rolled-back backups, collected
+    staging directories).
+    """
 
     artifact_id: str
     ok: bool
     files: tuple[FileRestore, ...]
     failures: tuple[str, ...]
+    phase: RestorePhase = "completed"
+    target_invalid: bool = False
+    recovery: tuple[str, ...] = ()
 
     @property
     def restored_paths(self) -> tuple[str, ...]:
@@ -593,22 +647,330 @@ def _symlink_free_target_path(
     return None
 
 
-def _staging_dir(target: Path) -> Path:
-    """A scratch directory for the staged tree — beside the target.
+#: The staging prefix beside the target (a crash leaves these behind for
+#: :func:`_recover_abandoned_promotions` to collect).
+_STAGING_PREFIX: Final = ".forge-restore-"
+#: The parked ORIGINAL generation of an interrupted whole-tree switch:
+#: present with the target MISSING means the switch died between its
+#: two renames — the next restore rolls the original back before doing
+#: anything else (NEXT-04's crash semantics).
+_BACKUP_PREFIX: Final = ".forge-restore-backup-"
 
-    ``target.parent`` keeps the staging OUTSIDE the workspace (a failure
-    leaves the tree clean and nothing half-applied inside it) and on the
-    same filesystem as the target (the per-file ``os.replace`` moves are
-    atomic). A read-only parent falls back to ``.forge/`` INSIDE the
-    target — excluded from every capture walk, and still discarded
-    whole on any failure.
+
+def _staging_dir(target: Path) -> tuple[Path, bool]:
+    """A scratch directory for the staged NEXT GENERATION of the target.
+
+    Beside the target when the parent allows it (the same filesystem —
+    the whole-tree switch's directory renames are atomic there), and
+    the returned flag is ``True``. A read-only parent falls back to
+    ``.forge/`` INSIDE the target — excluded from every capture walk,
+    and still discarded whole on any failure — where the whole-tree
+    switch is IMPOSSIBLE, so the caller promotes per-file under a
+    savepoint instead (flag ``False``).
     """
     try:
-        return Path(tempfile.mkdtemp(dir=target.parent, prefix=".forge-restore-"))
+        return Path(tempfile.mkdtemp(dir=target.parent, prefix=_STAGING_PREFIX)), True
     except OSError:
         inside = target / ".forge"
         inside.mkdir(parents=True, exist_ok=True)
-        return Path(tempfile.mkdtemp(dir=inside, prefix="restore-"))
+        return Path(tempfile.mkdtemp(dir=inside, prefix="restore-")), False
+
+
+def _recover_abandoned_promotions(target: Path) -> tuple[str, ...]:
+    """Resolve the leftovers of a restore that died mid-promotion.
+
+    NEXT-04's crash recovery, run BEFORE any preflight touches the
+    target (a preflight against a missing target would otherwise
+    validate against the void):
+
+    - a parked ``.forge-restore-backup-*`` WITH the target present means
+      the interrupted switch landed its generation and only the cleanup
+      died — the promoted generation stands, the parked copy is
+      discarded;
+    - a parked backup with the target MISSING means the switch died
+      BETWEEN its two renames — the original generation is rolled back
+      into place (the honest posture: the restore as a whole failed, so
+      the workspace returns to its pre-restore state);
+    - any abandoned ``.forge-restore-*`` staging directory is collected
+      (removed) — a fresh generation is always built from scratch, never
+      resumed out of a stale staging tree.
+    """
+    notes: list[str] = []
+    parent = target.parent
+    if not parent.is_dir():
+        return ()
+    for backup in sorted(parent.glob(f"{_BACKUP_PREFIX}*")):
+        if not backup.is_dir():
+            continue
+        if target.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+            notes.append(
+                f"discarded abandoned backup {backup.name}: the promoted generation "
+                "stands — the interrupted restore died after landing it, before cleanup"
+            )
+        else:
+            try:
+                os.replace(backup, target)
+            except OSError as exc:
+                notes.append(
+                    f"abandoned backup {backup.name} could not be resolved ({exc}) — "
+                    "the target stays absent; rebuild from the approved base"
+                )
+                continue
+            notes.append(
+                f"rolled back abandoned backup {backup.name}: the interrupted promotion "
+                "never landed its generation — the target is at its original state"
+            )
+    for leftover in sorted(parent.glob(f"{_STAGING_PREFIX}*")):
+        if leftover.is_dir():
+            shutil.rmtree(leftover, ignore_errors=True)
+            notes.append(f"collected abandoned staging directory {leftover.name}")
+    return tuple(notes)
+
+
+def _apply_plan_to_generation(
+    tree: Path,
+    planned: list[_PlannedFile],
+    planned_deletions: list[tuple[str, PurePosixPath]],
+    blobs: Mapping[str, bytes],
+) -> list[FileRestore]:
+    """Apply the VERIFIED plan to a private COPY of the workspace.
+
+    Writes files, restores their modes, applies deletions — all inside
+    *tree*, which nothing else can observe. Returns the per-deletion
+    outcomes computed against the copy (identical to the original by
+    construction). An OSError here aborts the promotion with the LIVE
+    target never mutated.
+    """
+    for item in planned:
+        staged = tree.joinpath(*item.parts)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(blobs[item.digest])
+        os.chmod(staged, item.mode)
+    outcomes: list[FileRestore] = []
+    for rel, pure in planned_deletions:
+        doomed = tree.joinpath(*pure.parts)
+        if doomed.exists():
+            doomed.unlink()
+            outcomes.append(FileRestore(rel, "deleted"))
+        else:
+            outcomes.append(FileRestore(rel, "already-absent"))
+    return outcomes
+
+
+def _switch_workspace_generation(target: Path, tree: Path) -> None:
+    """Activate the staged generation by ONE whole-tree switch (NEXT-04).
+
+    Filesystem assumptions (documented, not guessed): *tree* sits on the
+    same filesystem as *target* (the staging is created in the target's
+    parent), and directory renames are atomic there. Crash semantics:
+    the switch is two renames — ``target -> backup`` then ``tree ->
+    target``. A crash before the first leaves everything as it was; a
+    crash between the two leaves the original parked under
+    ``.forge-restore-backup-*`` with the target ABSENT (explicitly
+    unusable — never mixed) for :func:`_recover_abandoned_promotions` to
+    roll back on the next run; a failure of the second rename under our
+    own hands rolls the first back BEFORE raising, so a caught failure
+    still leaves the original generation in place.
+    """
+    if not target.exists():
+        # A fresh runner with no workspace yet: there is no original to
+        # retire — the staged generation lands directly.
+        try:
+            os.replace(tree, target)
+        except OSError as exc:
+            raise _PromotionFailure(
+                f"landing the staged workspace failed: {exc} — the target was "
+                "never present, nothing to roll back",
+                target_invalid=False,
+            ) from exc
+        return
+    backup = target.parent / f"{_BACKUP_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        os.replace(target, backup)
+    except OSError as exc:
+        raise _PromotionFailure(
+            f"moving the current workspace generation aside failed: {exc} — "
+            "the target was never mutated",
+            target_invalid=False,
+        ) from exc
+    try:
+        os.replace(tree, target)
+    except OSError as landing:
+        try:
+            os.replace(backup, target)
+        except OSError as rollback:
+            raise _PromotionFailure(
+                f"landing the staged workspace failed ({landing}) AND the rollback "
+                f"of the original generation failed ({rollback}) — the workspace is "
+                f"INVALID (absent; the original stays parked at {backup.name}): a "
+                "retry must rebuild from the approved base",
+                target_invalid=True,
+            ) from rollback
+        raise _PromotionFailure(
+            f"landing the staged workspace failed: {landing} — the original "
+            "workspace generation was rolled back; the restore failed as a whole",
+            target_invalid=False,
+        ) from landing
+    shutil.rmtree(backup, ignore_errors=True)  # the retired generation is garbage
+
+
+def _promote_whole_tree(
+    target: Path,
+    staging: Path,
+    planned: list[_PlannedFile],
+    planned_deletions: list[tuple[str, PurePosixPath]],
+    blobs: Mapping[str, bytes],
+) -> list[FileRestore]:
+    """Build the COMPLETE next generation in staging, then switch once.
+
+    The whole target (legitimate new files, modes, untracked content —
+    everything the plan does not name rides along unchanged) is copied
+    into ``staging/tree``, the verified plan is applied to the COPY, and
+    the copy becomes the target by one whole-tree switch. No per-file
+    exposure of the live target exists on this path at all.
+    """
+    tree = staging / "tree"
+    try:
+        if target.exists():
+            shutil.copytree(target, tree, symlinks=True)
+        else:
+            tree.mkdir(parents=True)
+        deletion_outcomes = _apply_plan_to_generation(tree, planned, planned_deletions, blobs)
+        _switch_workspace_generation(target, tree)
+    except _PromotionFailure:
+        raise
+    except OSError as exc:
+        raise _PromotionFailure(
+            f"building the staged workspace generation failed: {exc} — "
+            "the live target was never mutated",
+            target_invalid=False,
+        ) from exc
+    return [FileRestore(item.rel, "restored", digest=item.digest) for item in planned] + (
+        deletion_outcomes
+    )
+
+
+def _promote_under_savepoint(
+    target: Path,
+    staging: Path,
+    planned: list[_PlannedFile],
+    planned_deletions: list[tuple[str, PurePosixPath]],
+    blobs: Mapping[str, bytes],
+) -> list[FileRestore]:
+    """Per-file promotion under a FULL savepoint (the degraded path).
+
+    Used only when the whole-tree switch is unavailable (a read-only
+    target parent parked the staging inside ``target/.forge``). The
+    original of EVERY file the plan touches — replaced or deleted — is
+    captured into ``staging/savepoint`` BEFORE the first mutation; on
+    any failure the inverse is replayed in reverse order (replaced
+    originals moved back, new files removed, deleted originals
+    recreated), so the target returns to its original state and the
+    report carries ``promotion_failed``, never a mixed workspace. A
+    rollback that itself fails marks the target explicitly invalid.
+    """
+    savepoint = staging / "savepoint"
+    staged_files = staging / "files"
+    for item in planned:
+        dest = target.joinpath(*item.parts)
+        if dest.exists():
+            original = savepoint.joinpath(*item.parts)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, original)
+    for _rel, pure in planned_deletions:
+        doomed = target.joinpath(*pure.parts)
+        if doomed.exists():
+            original = savepoint.joinpath(*pure.parts)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(doomed, original)
+
+    for item in planned:
+        staged = staged_files.joinpath(*item.parts)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(blobs[item.digest])
+        os.chmod(staged, item.mode)
+
+    applied: list[_PlannedFile] = []
+    deleted: list[tuple[str, PurePosixPath]] = []
+    try:
+        for item in planned:
+            os.replace(staged_files.joinpath(*item.parts), target.joinpath(*item.parts))
+            applied.append(item)
+        for entry in planned_deletions:
+            doomed = target.joinpath(*entry[1].parts)
+            if doomed.exists():
+                doomed.unlink()
+            deleted.append(entry)
+    except OSError as exc:
+        rollback_failures = _rollback_to_savepoint(target, savepoint, applied, deleted)
+        reason = (
+            f"applying the verified checkpoint failed: {exc} — the savepoint "
+            "restored the target to its original state"
+            if not rollback_failures
+            else (
+                f"applying the verified checkpoint failed ({exc}) AND the savepoint "
+                f"rollback failed ({'; '.join(rollback_failures)}) — the workspace is "
+                "INVALID: a retry must rebuild from the approved base"
+            )
+        )
+        raise _PromotionFailure(reason, target_invalid=bool(rollback_failures)) from exc
+
+    outcomes = [FileRestore(item.rel, "restored", digest=item.digest) for item in planned]
+    for rel, pure in planned_deletions:
+        outcomes.append(
+            FileRestore(
+                rel, "deleted" if savepoint.joinpath(*pure.parts).exists() else "already-absent"
+            )
+        )
+    return outcomes
+
+
+def _rollback_to_savepoint(
+    target: Path,
+    savepoint: Path,
+    applied: list[_PlannedFile],
+    deleted: list[tuple[str, PurePosixPath]],
+) -> list[str]:
+    """Replay the inverse of the applied mutations, newest first.
+
+    Returns the failures that made the rollback incomplete (empty =
+    the target is back at its original state, byte for byte).
+    """
+    failures: list[str] = []
+    for rel, pure in reversed(deleted):
+        original = savepoint.joinpath(*pure.parts)
+        if not original.exists():
+            continue  # nothing had been deleted (or never existed)
+        try:
+            shutil.copy2(original, target.joinpath(*pure.parts))
+        except OSError as exc:
+            failures.append(f"recreating deleted {rel}: {exc}")
+    for item in reversed(applied):
+        original = savepoint.joinpath(*item.parts)
+        dest = target.joinpath(*item.parts)
+        try:
+            if original.exists():
+                os.replace(original, dest)  # the captured original returns
+            else:
+                dest.unlink(missing_ok=True)  # the file was NEW — remove it
+        except OSError as exc:
+            failures.append(f"restoring original {item.rel}: {exc}")
+    return failures
+
+
+def _promotion_failure_outcomes(
+    planned: list[_PlannedFile],
+    planned_deletions: list[tuple[str, PurePosixPath]],
+    reason: str,
+) -> tuple[FileRestore, ...]:
+    """Per-file evidence for a failed promotion: NOTHING landed."""
+    note = f"promotion failed: {reason}"
+    outcomes = [
+        FileRestore(item.rel, "failed", digest=item.digest, reason=note) for item in planned
+    ]
+    outcomes.extend(FileRestore(rel, "failed", reason=note) for rel, _pure in planned_deletions)
+    return tuple(outcomes)
 
 
 def restore_wip(
@@ -624,18 +986,36 @@ def restore_wip(
     The manifest is fetched through the store's VERIFIED read under
     *principal* — an ungranted principal learns nothing (``None``, the
     same as absence) and tampered bytes raise before anything is
-    written. Then the restore is TRANSACTIONAL (R28-02): every path,
-    kind, mode, blob and conflict is verified BEFORE the first write —
-    escapes, reserved namespaces (``.git``, the checkpoint store,
+    written. Then the restore is TRANSACTIONAL (R28-02/NEXT-04): every
+    path, kind, mode, blob and conflict is verified BEFORE the first
+    write — escapes, reserved namespaces (``.git``, the checkpoint store,
     credential-shaped names), symlinked ancestors (``lstat``, never
     followed), duplicate/aliasing normalized paths and
     file-versus-directory conflicts each refuse the WHOLE restore with
-    the precise reason. Only a fully verified plan is materialized: the
-    complete tree is built in a STAGING directory beside the target and
-    moved in by atomic per-file renames, with deletions applied from
-    the same verified plan — a failure anywhere leaves the target
-    untouched and the staging discarded, never a half-applied workspace
-    resume could mistake for a restored one.
+    the precise reason (``phase="preflight_failed"`` — nothing was
+    written). Only a fully verified plan is promoted: the COMPLETE next
+    generation of the workspace is built in a STAGING directory beside
+    the target and activated by ONE whole-tree switch — the current
+    generation moves aside and the staged one lands, with the move-aside
+    rolled back if the landing fails. A failure during promotion reports
+    ``phase="promotion_failed"`` with the target at its original state
+    (``target_invalid=True`` only when even the rollback failed — then
+    the workspace is explicitly unusable and a retry rebuilds from the
+    approved base). Several atomic file renames are NEVER treated as an
+    atomic multi-file transaction; where the read-only parent forces the
+    per-file fallback, a full savepoint (the captured original of every
+    touched file) is replayed in reverse on any failure.
+
+    Crash semantics and filesystem assumptions: a restore killed
+    mid-promotion never exposes a mixed workspace — it leaves either the
+    untouched original, or (between the switch's two renames) a MISSING
+    target with the original parked under a ``.forge-restore-backup-*``
+    sibling, which the NEXT restore identifies and resolves (roll back,
+    and collect abandoned staging directories) before its own preflight;
+    the report's ``recovery`` names everything it resolved. The switch
+    assumes the workspace holds regular files, directories and symlinks
+    only (a checkout tree) and that directory renames are atomic on the
+    target's filesystem — both hold on every supported runner.
 
     ``download`` (wave C/D, optional): a transport channel — when
     given, ``artifact_id`` is read as the REMOTE durable reference
@@ -647,6 +1027,7 @@ def restore_wip(
     single file is written.
     """
     target = Path(target)
+    recovery = _recover_abandoned_promotions(target)
     if download is not None:
         try:
             artifact_id = download.fetch_checkpoint(artifact_id, store)
@@ -661,6 +1042,8 @@ def restore_wip(
                         "restore refuses rather than reconstructing from nothing"
                     ),
                 ),
+                phase="preflight_failed",
+                recovery=recovery,
             )
     try:
         manifest_bytes = store.get_verified(artifact_id, principal=principal)
@@ -670,6 +1053,8 @@ def restore_wip(
             ok=False,
             files=(),
             failures=(f"manifest {artifact_id} is corrupt: {exc}",),
+            phase="preflight_failed",
+            recovery=recovery,
         )
     if manifest_bytes is None:
         return RestoreReport(
@@ -680,6 +1065,8 @@ def restore_wip(
                 f"manifest {artifact_id} is absent or not granted to principal "
                 f"{principal!r} — knowing the address probes nothing",
             ),
+            phase="preflight_failed",
+            recovery=recovery,
         )
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -689,6 +1076,8 @@ def restore_wip(
             ok=False,
             files=(),
             failures=(f"manifest {artifact_id} is not valid JSON: {exc}",),
+            phase="preflight_failed",
+            recovery=recovery,
         )
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
         schema = manifest.get("schema") if isinstance(manifest, dict) else None
@@ -700,6 +1089,8 @@ def restore_wip(
                 f"unsupported manifest schema {schema!r}: restore requires "
                 f"{MANIFEST_SCHEMA} — a filename list without content blobs restores nothing",
             ),
+            phase="preflight_failed",
+            recovery=recovery,
         )
 
     files = manifest.get("files")
@@ -710,6 +1101,8 @@ def restore_wip(
             ok=False,
             files=(),
             failures=("manifest is malformed: files/deletions sections missing",),
+            phase="preflight_failed",
+            recovery=recovery,
         )
 
     # -- verify the ENTIRE plan before touching the target (R28-02) ------
@@ -854,35 +1247,27 @@ def restore_wip(
             ok=False,
             files=tuple(outcomes),
             failures=tuple(failures),
+            phase="preflight_failed",
+            recovery=recovery,
         )
 
-    # -- stage the whole tree, then move it in atomically -----------------
-    staging = _staging_dir(target)
+    # -- promote: ONE whole-generation switch, never a mixed workspace --
+    staging, beside_target = _staging_dir(target)
     try:
-        for item in planned:
-            staged = staging.joinpath(*item.parts)
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            staged.write_bytes(blobs[item.digest])
-            os.chmod(staged, item.mode)
-        for item in planned:
-            destination = target.joinpath(*item.parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging.joinpath(*item.parts), destination)
-            outcomes.append(FileRestore(item.rel, "restored", digest=item.digest))
-        for rel, pure in planned_deletions:
-            doomed = target.joinpath(*pure.parts)
-            if doomed.exists():
-                doomed.unlink()
-                outcomes.append(FileRestore(rel, "deleted"))
-            else:
-                outcomes.append(FileRestore(rel, "already-absent"))
-    except OSError as exc:
-        failures.append(f"applying the verified checkpoint failed: {exc}")
+        if beside_target:
+            outcomes = _promote_whole_tree(target, staging, planned, planned_deletions, blobs)
+        else:
+            outcomes = _promote_under_savepoint(target, staging, planned, planned_deletions, blobs)
+    except _PromotionFailure as exc:
+        failures.append(exc.reason)
         return RestoreReport(
             artifact_id=artifact_id,
             ok=False,
-            files=tuple(outcomes),
+            files=_promotion_failure_outcomes(planned, planned_deletions, exc.reason),
             failures=tuple(failures),
+            phase="promotion_failed",
+            target_invalid=exc.target_invalid,
+            recovery=recovery,
         )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -892,6 +1277,8 @@ def restore_wip(
         ok=not failures,
         files=tuple(outcomes),
         failures=tuple(failures),
+        phase="completed",
+        recovery=recovery,
     )
 
 

@@ -427,6 +427,147 @@ class TestWorkScopedAuth:
         assert "belongs to work" in response.json()["detail"]
 
 
+class TestAttemptScopedAuthConvergence:
+    """NEXT-01: the checkpoint channel authenticates through the SAME
+    attempt-credential ladder as the lane-control API. The fixture here
+    mounts the router WITH a durable generation authority (a session
+    factory + a FlowRun at a known generation) — the production shape
+    (create_app); the standalone ``server`` fixture above covers the
+    no-authority deployment shape."""
+
+    GENERATION = 3
+
+    @pytest.fixture()
+    def authority_server(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        """The router mounted WITH the generation authority, seeded in the
+        TestClient's own lifespan loop (aiosqlite owns one loop)."""
+        from contextlib import asynccontextmanager
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        from forge.durable.models import FlowRun
+        from forge.models.base import Base
+
+        monkeypatch.setenv(api_channel.LANE_CONTROL_SECRET_ENV, SECRET)
+        monkeypatch.setenv(api_channel.CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "store"))
+
+        @asynccontextmanager
+        async def _lifespan(app: FastAPI):
+            engine = create_async_engine(
+                "sqlite+aiosqlite:///:memory:",
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                session.add(
+                    FlowRun(
+                        id=WORK_ID,
+                        project_id=1,
+                        provider="github",
+                        cancellation_generation=self.GENERATION,
+                    )
+                )
+                await session.commit()
+            app.state.session_factory = factory
+            try:
+                yield
+            finally:
+                await engine.dispose()
+
+        application = FastAPI(lifespan=_lifespan)
+        application.include_router(api_channel.checkpoint_channel_router)
+        with TestClient(application) as client:
+            yield client
+
+    def _gen_bearer(self, generation: int) -> str:
+        return f"Bearer {work_scoped_token(SECRET, WORK_ID, generation=generation)}"
+
+    def test_the_current_generations_token_reaches_the_work_surface(
+        self, authority_server, tmp_path
+    ):
+        tree = _wip_tree(tmp_path / "runner-a")
+        store = ContentAddressedStore(tmp_path / "store-a", tenant=TENANT)
+        receipt = _capture(store, tree)
+
+        put = authority_server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            json=_wire_payload(store, receipt.artifact_id),
+            headers={"Authorization": self._gen_bearer(self.GENERATION)},
+        )
+        get = authority_server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": self._gen_bearer(3)}
+        )
+
+        assert put.status_code == 200, put.text
+        assert get.status_code == 200
+
+    def test_the_legacy_token_still_validates_inside_the_default_window(self, authority_server):
+        response = authority_server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert response.status_code == 404  # authenticated — nothing held yet
+
+    def test_the_legacy_token_past_the_deadline_is_refused(self, authority_server, monkeypatch):
+        monkeypatch.setenv("FORGE_LANE_LEGACY_TOKEN_DEADLINE", "2020-01-01T00:00:00+00:00")
+
+        response = authority_server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert response.status_code == 401
+        assert "migration deadline" in response.json()["detail"]
+
+    def test_a_superseded_generations_token_is_refused_with_both_generations(
+        self, authority_server
+    ):
+        response = authority_server.get(
+            f"/lane/checkpoints/{WORK_ID}",
+            headers={"Authorization": self._gen_bearer(self.GENERATION - 1)},
+        )
+
+        assert response.status_code == 401
+        detail = response.json()["detail"]
+        assert "superseded runner generation" in detail
+        assert f"({self.GENERATION - 1};" in detail and f"generation {self.GENERATION}" in detail
+
+    def test_an_authority_outage_is_a_refusal_never_legacy_acceptance(
+        self, authority_server, monkeypatch
+    ):
+        import forge.api_lane_control as api_lane_control
+
+        async def _broken(session_factory, work_id):
+            raise api_lane_control.LaneAuthorityUnavailable("storage down")
+
+        monkeypatch.setattr(api_lane_control, "durable_run_generation", _broken)
+        response = authority_server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert response.status_code == 503
+        assert "authority is unavailable" in response.json()["detail"]
+
+    def test_the_standalone_mount_keeps_the_pre_generation_posture(self, server, tmp_path):
+        """No session factory on the app: no authority to consult — the
+        legacy work token inside the window stays the documented default
+        (the standalone deployment shape never 503s for want of a DB)."""
+        tree = _wip_tree(tmp_path / "runner-a")
+        store = ContentAddressedStore(tmp_path / "store-a", tenant=TENANT)
+        receipt = _capture(store, tree)
+
+        put = server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            json=_wire_payload(store, receipt.artifact_id),
+            headers={"Authorization": _bearer(WORK_ID)},
+        )
+
+        assert put.status_code == 200
+
+
 class TestSizeCapRefusal:
     def test_the_client_refuses_over_cap_before_any_network_byte(self, tmp_path, httpx_mock):
         tree = _wip_tree(tmp_path / "runner-a")
@@ -1192,9 +1333,12 @@ LANE_ENV = {
 class TestExactResumeSelection:
     """``forge.lane_driver._maybe_restore_wip`` over a faked control plane.
 
-    R28-05: the resume command's explicit reference decides WHICH
-    checkpoint downloads; the fallback to the active one is recorded in
-    the report, never silent."""
+    R28-05/NEXT-03: the durable RESUME COMMAND ROW's explicit ResumeSpec
+    decides WHICH checkpoint downloads (read from
+    ``GET /lane/controls/resume-spec`` — the row, never the pending
+    queue); the fallback to the active one is recorded in the report,
+    never silent, and a REQUIRED resume never turns a timeout into a
+    "latest" guess."""
 
     @pytest.fixture()
     def captures(self, tmp_path: Path):
@@ -1219,26 +1363,30 @@ class TestExactResumeSelection:
             url=f"{CP}/lane/checkpoints/{WORK_ID}?checkpoint_id={artifact_id}", json=document
         )
 
+    @staticmethod
+    def _serve_resume_spec(httpx_mock, command: dict | None) -> None:
+        """Fake the DURABLE resume-command read (NEXT-03): the latest
+        resume ROW, whatever rung it sits on — never the pending queue."""
+        httpx_mock.add_response(
+            url=f"{CP}/lane/controls/resume-spec?work_id={WORK_ID}",
+            json={"work_id": WORK_ID, "command": command},
+        )
+
     def test_the_resume_reference_downloads_that_exact_checkpoint(
         self, httpx_mock, lane_cwd, captures
     ):
         from forge.lane_driver import _maybe_restore_wip
 
         tree, store, newer, older = captures
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={
-                "work_id": WORK_ID,
-                "commands": [
-                    _resume_command(
-                        5,
-                        {
-                            "checkpoint_ref": format_checkpoint_ref(WORK_ID, older.artifact_id),
-                            "run_id": WORK_ID,
-                        },
-                    )
-                ],
-            },
+        self._serve_resume_spec(
+            httpx_mock,
+            _resume_command(
+                5,
+                {
+                    "checkpoint_ref": format_checkpoint_ref(WORK_ID, older.artifact_id),
+                    "run_id": WORK_ID,
+                },
+            ),
         )
         self._serve_checkpoint(httpx_mock, store, older.artifact_id, 10)
 
@@ -1264,12 +1412,8 @@ class TestExactResumeSelection:
         from forge.lane_driver import _maybe_restore_wip
 
         _, store, newer, older = captures
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={
-                "work_id": WORK_ID,
-                "commands": [_resume_command(6, {"checkpoint_id": older.artifact_id})],
-            },
+        self._serve_resume_spec(
+            httpx_mock, _resume_command(6, {"checkpoint_id": older.artifact_id})
         )
         self._serve_checkpoint(httpx_mock, store, older.artifact_id, 10)
 
@@ -1278,16 +1422,110 @@ class TestExactResumeSelection:
         assert report["checkpoint_selection"] == "exact"
         assert report["checkpoint_ref"] == format_checkpoint_ref(WORK_ID, older.artifact_id)
 
+    def test_the_spec_binds_even_after_the_command_left_the_pending_set(
+        self, httpx_mock, lane_cwd, captures
+    ):
+        """NEXT-03: the resume decision is the durable ROW, not the pending
+        queue. A resume command already ACKED all the way to
+        ``checkpointed`` still names the exact checkpoint — the pending
+        view would return nothing here and the old consumer silently
+        fell back to latest."""
+        from forge.lane_driver import _maybe_restore_wip
+
+        _, store, newer, older = captures
+        command = _resume_command(
+            5, {"checkpoint_ref": format_checkpoint_ref(WORK_ID, older.artifact_id)}
+        )
+        command["status"] = "checkpointed"  # long gone from pending
+        self._serve_resume_spec(httpx_mock, command)
+        self._serve_checkpoint(httpx_mock, store, older.artifact_id, 10)
+
+        report = _maybe_restore_wip(WORK_ID)
+
+        assert report["restored"] is True, report
+        assert report["checkpoint_selection"] == "exact"
+        assert report["checkpoint_ref"] == format_checkpoint_ref(WORK_ID, older.artifact_id)
+
+    def test_a_required_resume_with_an_unreachable_spec_never_selects_latest(
+        self, httpx_mock, lane_cwd, monkeypatch
+    ):
+        """NEXT-03: a control API timeout must not select another
+        checkpoint. With FORGE_LANE_RESUME=1 the failed spec lookup is a
+        refusal the required-restore gate halts on — and no checkpoint
+        GET ever leaves the lane."""
+        from forge.lane_driver import _maybe_restore_wip
+
+        monkeypatch.setenv("FORGE_LANE_RESUME", "1")
+        httpx_mock.add_exception(
+            httpx.ConnectError("control plane unreachable"),
+            url=f"{CP}/lane/controls/resume-spec?work_id={WORK_ID}",
+        )
+
+        report = _maybe_restore_wip(WORK_ID)
+
+        assert report is not None
+        assert report["restored"] is False
+        assert report["checkpoint_selection"] == "unavailable"
+        assert any("unavailable" in failure for failure in report["failures"])
+        assert [
+            request
+            for request in httpx_mock.get_requests()
+            if request.url.path.startswith("/lane/checkpoints")
+        ] == []
+
+    def test_a_fresh_run_with_an_unreachable_spec_still_falls_back_to_active(
+        self, httpx_mock, lane_cwd, captures
+    ):
+        """The labelled legacy fallback stays available to a FRESH run (no
+        resume marker): the unreachable spec degrades to the active
+        checkpoint with the note, never a halt."""
+        from forge.lane_driver import _maybe_restore_wip
+
+        _, store, newer, older = captures
+        httpx_mock.add_exception(
+            httpx.ConnectError("control plane unreachable"),
+            url=f"{CP}/lane/controls/resume-spec?work_id={WORK_ID}",
+        )
+        document = _wire_payload(store, newer.artifact_id)
+        document["checkpoint_id"] = newer.artifact_id
+        document["sequence"] = 20
+        httpx_mock.add_response(url=f"{CP}/lane/checkpoints/{WORK_ID}", json=document)
+
+        report = _maybe_restore_wip(WORK_ID)
+
+        assert report["restored"] is True, report
+        assert report["checkpoint_selection"] == "latest"
+        assert "unavailable" in report["selection_note"]
+
+    def test_an_explicit_restart_discards_the_wip_without_any_download(
+        self, httpx_mock, lane_cwd, monkeypatch
+    ):
+        """NEXT-03's third mode: FORGE_LANE_RESUME=restart intentionally
+        drops the WIP — zero requests to the control plane, a documented
+        discard in the report."""
+        import forge.lane_driver as lane_driver
+        from forge.lane_driver import _maybe_restore_wip
+
+        assert lane_driver.resume_mode({"FORGE_LANE_RESUME": "restart"}) == "restart"
+        assert lane_driver.resume_requested({"FORGE_LANE_RESUME": "restart"}) is False
+        monkeypatch.setenv("FORGE_LANE_RESUME", "restart")  # the discard branch reads env
+
+        report = _maybe_restore_wip(WORK_ID)
+
+        assert report is not None
+        assert report["restored"] is False
+        assert report["checkpoint_selection"] == "discarded"
+        assert "intentionally discarded" in report["note"]
+        # No request ever left — not even the resume-spec read.
+        assert httpx_mock.get_requests() == []
+
     def test_a_resume_without_a_reference_falls_back_and_records_it(
         self, httpx_mock, lane_cwd, captures
     ):
         from forge.lane_driver import _maybe_restore_wip
 
         _, store, newer, older = captures
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={"work_id": WORK_ID, "commands": [_resume_command(7, {})]},
-        )
+        self._serve_resume_spec(httpx_mock, _resume_command(7, {}))
         document = _wire_payload(store, newer.artifact_id)
         document["checkpoint_id"] = newer.artifact_id
         document["sequence"] = 20
@@ -1314,10 +1552,7 @@ class TestExactResumeSelection:
         from forge.lane_driver import _maybe_restore_wip
 
         _, store, newer, older = captures
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={"work_id": WORK_ID, "commands": []},
-        )
+        self._serve_resume_spec(httpx_mock, None)
         document = _wire_payload(store, newer.artifact_id)
         document["checkpoint_id"] = newer.artifact_id
         document["sequence"] = 20
@@ -1333,16 +1568,11 @@ class TestExactResumeSelection:
     ):
         from forge.lane_driver import _maybe_restore_wip
 
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={
-                "work_id": WORK_ID,
-                "commands": [
-                    _resume_command(
-                        8, {"checkpoint_ref": format_checkpoint_ref("wp-someone-else", "a" * 64)}
-                    )
-                ],
-            },
+        self._serve_resume_spec(
+            httpx_mock,
+            _resume_command(
+                8, {"checkpoint_ref": format_checkpoint_ref("wp-someone-else", "a" * 64)}
+            ),
         )
 
         report = _maybe_restore_wip(WORK_ID)
@@ -1361,10 +1591,7 @@ class TestExactResumeSelection:
     def test_a_malformed_reference_is_a_refusal(self, httpx_mock, lane_cwd):
         from forge.lane_driver import _maybe_restore_wip
 
-        httpx_mock.add_response(
-            url=f"{CP}/lane/controls?work_id={WORK_ID}&after_sequence=0",
-            json={"work_id": WORK_ID, "commands": [_resume_command(9, {"checkpoint_ref": "junk"})]},
-        )
+        self._serve_resume_spec(httpx_mock, _resume_command(9, {"checkpoint_ref": "junk"}))
 
         report = _maybe_restore_wip(WORK_ID)
 

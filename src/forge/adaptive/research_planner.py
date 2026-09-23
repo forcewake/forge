@@ -23,12 +23,21 @@ The loop is deliberately NOT a general agent:
   use. No repository write credentials exist on this path; a path
   outside ``allowed_globs`` does not exist for the toolbox, so it cannot
   exist for the model either.
+- **The model SEES what its tools returned (NEXT-08)**: every executed
+  call produces a bounded :class:`ToolObservation` whose content — the
+  real read window, the actual path listing, the matched lines — rides
+  the NEXT completion's prompt (``[tool: read_file path offset N]`` +
+  the actual code below it). A tool's output is never silently
+  discarded; truncated or dropped (too-old) observations are flagged and
+  counted so invisible content can never pose as reviewed content.
 - **The budget bounds the loop from three sides at once**: a maximum
   number of tool calls (:data:`FORGE_RESEARCH_MAX_CALLS_ENV`, default
   :data:`RESEARCH_MAX_CALLS_DEFAULT`), a wall-clock deadline
-  (:data:`FORGE_RESEARCH_MAX_WALL_SECONDS_ENV`), and the token budget
-  the gateway's own guard enforces (a refused reservation stops the loop
-  like any other exhaustion).
+  (:data:`FORGE_RESEARCH_MAX_WALL_SECONDS_ENV`, enforced as a BOUNDED
+  await on each completion — a slow final call is cut off inside the
+  remaining window, never after it), and the token budget the gateway's
+  own guard enforces (a refused reservation stops the loop like any
+  other exhaustion).
 - **Exhaustion is honest**: a loop that stops on any budget returns the
   partial investigation with ``complete: false`` and a ``stopped_reason``
   — never an evidence-backed success claim. The research document
@@ -44,6 +53,7 @@ authorized snapshot binding exactly like a lexical citation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -69,11 +79,14 @@ __all__ = [
     "RESEARCH_MAX_WALL_SECONDS_DEFAULT",
     "RESEARCH_SUMMARY_MAX_CHARS",
     "RESEARCH_SCHEMA",
+    "OBSERVATION_CONTENT_MAX_CHARS",
+    "OBSERVATION_BLOCK_MAX_CHARS",
     "CompletionFn",
     "ResearchFinding",
     "ResearchHarness",
     "ResearchOutcome",
     "ResearchRepo",
+    "ToolObservation",
     "attach_research",
     "completion_from_llm_client",
     "discovery_mode",
@@ -126,6 +139,18 @@ _MAX_FINDINGS_PER_CALL = 3
 #: How many omissions are recorded verbatim (the count is always exact;
 #: the list is capped for the record's size).
 _MAX_OMISSIONS_RECORDED = 12
+
+#: The per-observation content cap (chars) — NEXT-08: the ACTUAL tool
+#: output (a full read window, a real path listing, the matched lines)
+#: the next model iteration must see, bounded so one call cannot flood
+#: the prompt or the durable record.
+OBSERVATION_CONTENT_MAX_CHARS = 2000
+
+#: The total budget of the prompt's tool-observation block (chars). Older
+#: observations drop out FIRST with an explicit omitted count — the model
+#: always knows what it can no longer see, and can re-read the exact
+#: window with ``read_file`` (never treat invisible content as reviewed).
+OBSERVATION_BLOCK_MAX_CHARS = 6000
 
 #: The closed tool vocabulary the model may propose. Everything executes
 #: through :class:`SnapshotToolbox` — read-only by construction.
@@ -262,6 +287,48 @@ class ResearchFinding:
     kind: str
     detail: str
     text: str
+    #: The ACTUAL bounded tool output behind the finding (NEXT-08) — the
+    #: full read window or the matched line, not just metadata: what the
+    #: research model observed and what the cited bytes actually said.
+    content: str = ""
+
+
+@dataclass(frozen=True)
+class ToolObservation:
+    """What one proposed call ACTUALLY returned (NEXT-08, review ccab247 §3).
+
+    The observation is the research model's FEEDBACK channel: the loop's
+    next completion sees the tool's real bounded output — or its real
+    error — never a silently discarded result. It is deliberately a
+    SEPARATE representation from :class:`ResearchFinding` (the citation
+    anchor bound to repository/OID/path/line): an observation says what a
+    tool returned on the last turn; a finding says what a plan may cite.
+    """
+
+    tool: str
+    repo_key: str
+    #: The compact call identity rendered into the prompt header (e.g.
+    #: ``"src/app/service.py offset 0 length 40"``).
+    call: str
+    #: The bounded ACTUAL output ("" when the call errored).
+    content: str
+    #: "" on success; the omission reason on failure.
+    error: str = ""
+    #: True when the content was cut (toolbox budget or the char cap) —
+    #: the model must know the output continues beyond what it sees.
+    truncated: bool = False
+
+    def render(self) -> str:
+        """The prompt block: ``[tool: name repo args]`` + the actual output."""
+        header = f"[tool: {self.tool} {self.repo_key} {self.call}]".rstrip()
+        if self.error:
+            return f"{header}\nerror: {self.error}"
+        suffix = (
+            "\n(output truncated — re-read with offset/length for the rest)"
+            if self.truncated
+            else ""
+        )
+        return f"{header}\n{self.content}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -373,14 +440,69 @@ def _normalize_completion(result: Any) -> tuple[str, int | None, int | None]:
     )
 
 
+def _bounded_content(text: str, *, cap: int = OBSERVATION_CONTENT_MAX_CHARS) -> tuple[str, bool]:
+    """``(content, truncated)`` — the actual output capped at *cap* chars."""
+    if len(text) <= cap:
+        return text, False
+    return text[:cap], True
+
+
+def _render_match_lines(matches: list[Mapping[str, Any]]) -> str:
+    """``path:line: text`` per match — grep / find_references output."""
+    return "\n".join(
+        f"{match.get('path')}:{match.get('line_no')}: {match.get('text')}" for match in matches
+    )
+
+
+def _render_symbol_lines(symbols: list[Mapping[str, Any]]) -> str:
+    """``path:line: kind symbol`` per declaration — find_symbol output."""
+    return "\n".join(
+        f"{symbol.get('path')}:{symbol.get('line_no')}: {symbol.get('kind')} {symbol.get('symbol')}"
+        for symbol in symbols
+    )
+
+
+def _render_observations(observations: list[ToolObservation]) -> str:
+    """The recent observations, oldest-first, within the block budget.
+
+    Older observations drop FIRST and the block says exactly how many are
+    gone — the model can never treat invisible content as reviewed, and
+    ``read_file`` re-reads any exact window still needed (NEXT-08's
+    "retained provenance and a way to re-read exact content").
+    """
+    if not observations:
+        return "(none yet — this is your first iteration)"
+    kept: list[str] = []
+    budget = OBSERVATION_BLOCK_MAX_CHARS
+    omitted = 0
+    for index in range(len(observations) - 1, -1, -1):
+        rendered = observations[index].render()
+        if kept and len(rendered) + 1 > budget:
+            omitted = index + 1
+            break
+        kept.append(rendered)
+        budget -= len(rendered) + 1
+    kept.reverse()
+    block = "\n\n".join(kept)
+    if omitted:
+        block += (
+            f"\n\n[older tool results omitted: {omitted} — re-read exact windows "
+            "with read_file if still needed]"
+        )
+    return block
+
+
 def _render_user_prompt(
     planner_input: str,
     lexical: list[dict[str, Any]],
     repos: Mapping[str, ResearchRepo],
     findings: list[ResearchFinding],
+    observations: list[ToolObservation],
     remaining_calls: int,
 ) -> str:
-    """The iteration prompt: issue, lexical evidence, repo menu, findings so far."""
+    """The iteration prompt: issue, lexical evidence, repo menu, findings,
+    and — NEXT-08 — what the previous calls' tools ACTUALLY returned (the
+    real bounded output, not path/kind/metadata alone)."""
     menu = json.dumps(
         {
             key: {
@@ -408,7 +530,9 @@ def _render_user_prompt(
         f"ISSUE:\n{planner_input[:4000]}\n\n"
         f"LEXICAL EVIDENCE ALREADY GATHERED:\n{json.dumps(lexical[:36], sort_keys=True)}\n\n"
         f"AUTHORIZED REPOSITORIES (call tools with these repo keys):\n{menu}\n\n"
-        f"FINDINGS SO FAR:\n{gathered}\n\n"
+        f"FINDINGS SO FAR (citable file:line anchors):\n{gathered}\n\n"
+        f"LAST TOOL RESULTS (what your previous calls actually returned):\n"
+        f"{_render_observations(observations)}\n\n"
         f"TOOL CALLS REMAINING: {remaining_calls}\n"
     )
 
@@ -419,6 +543,7 @@ def _finding_from_symbol(repo: ResearchRepo, symbol: Mapping[str, Any]) -> Resea
     if not path or line_no < 1:
         return None
     window = repo.toolbox.read_file(path, offset=line_no - 1, length=1)
+    line_text = str(window.get("content") or "")
     return ResearchFinding(
         repo_key=repo.repo_key,
         repository_id=repo.repository_id,
@@ -427,7 +552,8 @@ def _finding_from_symbol(repo: ResearchRepo, symbol: Mapping[str, Any]) -> Resea
         line=line_no,
         kind="research_symbol",
         detail=str(symbol.get("symbol") or ""),
-        text=str(window.get("content") or ""),
+        text=line_text,
+        content=line_text,
     )
 
 
@@ -438,6 +564,7 @@ def _finding_from_line(
     line_no = int(match.get("line_no") or 0)
     if not path or line_no < 1:
         return None
+    line_text = str(match.get("text") or "")
     return ResearchFinding(
         repo_key=repo.repo_key,
         repository_id=repo.repository_id,
@@ -446,33 +573,69 @@ def _finding_from_line(
         line=line_no,
         kind=kind,
         detail=detail[:160],
-        text=str(match.get("text") or "")[:400],
+        text=line_text[:400],
+        content=line_text,
     )
+
+
+def _call_args_doc(tool: str, args: Mapping[str, Any]) -> str:
+    """The compact call identity rendered into the observation header."""
+    if tool == "read_file":
+        length = args.get("length")
+        span = f"offset {args.get('offset') or 0}"
+        if length is not None:
+            span += f" length {length}"
+        return f"{args.get('path') or ''} {span}".strip()
+    if tool == "list_paths":
+        return f"prefix {args.get('prefix') or ''}".strip()
+    if tool == "grep":
+        return f"pattern {args.get('pattern') or ''}".strip()
+    return f"name {args.get('name') or ''}".strip()  # find_symbol / find_references
 
 
 def _execute_call(
     call: Mapping[str, Any], repos: Mapping[str, ResearchRepo]
-) -> tuple[list[ResearchFinding], str]:
+) -> tuple[list[ResearchFinding], ToolObservation]:
     """Execute ONE proposed call through the frozen toolboxes.
 
-    Returns ``(findings, note)`` where *note* is ``""`` on success or the
-    OMISSION reason (unknown tool/repo, unauthorized path, bad arguments)
-    — the caller records it so the document says what was NOT consulted.
+    Returns ``(findings, observation)``: the findings are the citable
+    anchors (the stage mints their evidence ids); the observation is the
+    call's ACTUAL bounded output — or its real error — so the next model
+    iteration sees what its tool really returned (NEXT-08: ``list_paths``
+    results are no longer discarded, ``read_file`` no longer keeps only
+    the window's first line). The observation's ``error`` replaces the
+    old omission note: the caller records it AND the model sees it.
     """
     tool = str(call.get("tool") or "")
-    if tool not in _TOOL_NAMES:
-        return [], f"unknown tool {tool!r}"
     repo_key = str(call.get("repo") or call.get("repository") or "")
+    args = call.get("args") if isinstance(call.get("args"), Mapping) else {}
+    header = _call_args_doc(tool, args) if tool in _TOOL_NAMES else json.dumps(dict(args))[:160]
+
+    def _observed(content: str, *, error: str = "", truncated: bool = False) -> ToolObservation:
+        return ToolObservation(
+            tool=tool or "?",
+            repo_key=repo_key,
+            call=header,
+            content=content,
+            error=error,
+            truncated=truncated,
+        )
+
+    if tool not in _TOOL_NAMES:
+        return [], _observed("", error=f"unknown tool {tool!r}")
     repo = repos.get(repo_key)
     if repo is None:
         known = ", ".join(sorted(repos))
-        return [], f"unknown repository key {repo_key!r} (authorized: {known})"
-    args = call.get("args") if isinstance(call.get("args"), Mapping) else {}
+        return [], _observed("", error=f"unknown repository key {repo_key!r} (authorized: {known})")
     try:
         if tool == "list_paths":
-            # A listing scouts; it contributes no citable file:line finding.
-            repo.toolbox.list_paths(str(args.get("prefix") or ""))
-            return [], ""
+            # A listing contributes no citable file:line finding — but its
+            # RESULT is the observation: every returned path is visible to
+            # the next turn, selectable without prior disclosure.
+            result = repo.toolbox.list_paths(str(args.get("prefix") or ""))
+            paths = [str(path) for path in (result.get("paths") or [])]
+            content, capped = _bounded_content("\n".join(paths))
+            return [], _observed(content, truncated=bool(result.get("truncated")) or capped)
         if tool == "read_file":
             path = str(args.get("path") or "")
             offset = max(0, int(args.get("offset") or 0))
@@ -481,6 +644,7 @@ def _execute_call(
                 path, offset=offset, length=int(length) if length is not None else None
             )
             content = str(window.get("content") or "")
+            bounded, capped = _bounded_content(content)
             lines = content.splitlines()
             cited = offset + 1
             text = lines[0] if lines else ""
@@ -494,31 +658,49 @@ def _execute_call(
                     kind="research_read",
                     detail=f"read {len(content)} chars from offset {offset}",
                     text=text[:400],
+                    content=bounded,
                 )
-            ], ""
+            ], _observed(bounded, truncated=bool(window.get("truncated")) or capped)
         if tool == "grep":
             pattern = str(args.get("pattern") or "")
             result = repo.toolbox.grep(pattern, is_regex=bool(args.get("is_regex")))
+            matches = [
+                match for match in (result.get("matches") or []) if isinstance(match, Mapping)
+            ]
             findings = [
                 finding
-                for match in (result.get("matches") or [])[:_MAX_FINDINGS_PER_CALL]
+                for match in matches[:_MAX_FINDINGS_PER_CALL]
                 if (finding := _finding_from_line(repo, match, "research_match", pattern))
                 is not None
             ]
-            return findings, ""
+            content, capped = _bounded_content(_render_match_lines(matches))
+            return findings, _observed(
+                content, truncated=not bool(result.get("complete")) or capped
+            )
         if tool == "find_symbol":
             name = str(args.get("name") or "")
             result = repo.toolbox.find_symbol(name)
+            symbols = [
+                symbol for symbol in (result.get("symbols") or []) if isinstance(symbol, Mapping)
+            ]
             findings = [
                 finding
-                for symbol in (result.get("symbols") or [])[:_MAX_FINDINGS_PER_CALL]
+                for symbol in symbols[:_MAX_FINDINGS_PER_CALL]
                 if (finding := _finding_from_symbol(repo, symbol)) is not None
             ]
-            return findings, ""
+            content, capped = _bounded_content(_render_symbol_lines(symbols))
+            return findings, _observed(
+                content, truncated=not bool(result.get("complete")) or capped
+            )
         result = repo.toolbox.find_references(str(args.get("name") or ""))
+        references = [
+            reference
+            for reference in (result.get("references") or [])
+            if isinstance(reference, Mapping)
+        ]
         findings = [
             finding
-            for match in (result.get("references") or [])[:_MAX_FINDINGS_PER_CALL]
+            for match in references[:_MAX_FINDINGS_PER_CALL]
             if (
                 finding := _finding_from_line(
                     repo, match, "research_reference", str(args.get("name") or "")
@@ -526,13 +708,14 @@ def _execute_call(
             )
             is not None
         ]
-        return findings, ""
+        content, capped = _bounded_content(_render_match_lines(references))
+        return findings, _observed(content, truncated=not bool(result.get("complete")) or capped)
     except KeyError as exc:
         # Unauthorized and unknown paths are indistinguishable BY DESIGN —
         # the omission says nothing about whether the path exists.
-        return [], f"path {exc.args[0]!r} is outside the authorized snapshot"
+        return [], _observed("", error=f"path {exc.args[0]!r} is outside the authorized snapshot")
     except (ValueError, TypeError) as exc:
-        return [], f"invalid arguments: {exc}"
+        return [], _observed("", error=f"invalid arguments: {exc}")
 
 
 async def run_research_pass(
@@ -547,7 +730,8 @@ async def run_research_pass(
     """Drive the bounded research loop over the authorized snapshot.
 
     Loop shape: propose (one gateway completion) → execute (bounded
-    read-only calls through the frozen toolboxes) → observe → repeat,
+    read-only calls through the frozen toolboxes) → OBSERVE (the next
+    prompt carries the tools' actual bounded output, NEXT-08) → repeat,
     until the model declares ``done`` or a budget side exhausts. Every
     proposed call — executed or refused — is charged to the call budget,
     so the iteration count is bounded by the call budget by
@@ -562,13 +746,21 @@ async def run_research_pass(
     deadline = started + wall_seconds
     remaining_calls = max_calls
     findings: list[ResearchFinding] = []
+    observations: list[ToolObservation] = []
     omissions: list[str] = []
     consulted: set[str] = set()
     calls_proposed = 0
     calls_executed = 0
     iterations = 0
-    tokens_in: int | None = 0
-    tokens_out: int | None = 0
+    # NEXT-09: token totals are exact ONLY under full usage coverage. A
+    # None anywhere in the sequence makes the subtotal sticky-unknown: the
+    # document then carries the KNOWN parts as an explicit lower bound and
+    # counts the unknown-usage calls — never a None silently re-totalled.
+    input_exact = True
+    output_exact = True
+    known_input = 0
+    known_output = 0
+    unknown_usage_calls = 0
     stopped = ""
     complete = False
     summary = ""
@@ -582,16 +774,47 @@ async def run_research_pass(
         if now() >= deadline:
             stopped = "wall_time"
             break
-        prompt = _render_user_prompt(planner_input, lexical, repos, findings, remaining_calls)
+        prompt = _render_user_prompt(
+            planner_input, lexical, repos, findings, observations, remaining_calls
+        )
+        # NEXT-09: the completion itself is bounded by the REMAINING wall
+        # budget — a bounded await, not check-then-await — so a slow final
+        # completion cannot return ``done`` after the configured pass
+        # window closed. And because the provider may already have
+        # accepted the request, a cut-off call's usage stays UNKNOWN (a
+        # lower bound, never silently zero).
+        remaining_wall = deadline - now()
         try:
-            result = await harness.complete(_SYSTEM_PROMPT, prompt)
+            result = await asyncio.wait_for(
+                harness.complete(_SYSTEM_PROMPT, prompt),
+                timeout=remaining_wall,
+            )
+        except asyncio.TimeoutError:
+            stopped = "wall_time"
+            unknown_usage_calls += 1
+            input_exact = False
+            output_exact = False
+            logger.warning(
+                "research pass completion exceeded the remaining wall budget "
+                "(%.3fs) — cutting it off",
+                remaining_wall,
+            )
+            break
         except Exception as exc:  # noqa: BLE001 — the loop must record, not crash
             stopped = f"gateway_error: {type(exc).__name__}"
             logger.warning("research pass completion failed: %s", exc)
             break
         text, in_tok, out_tok = _normalize_completion(result)
-        tokens_in = None if in_tok is None else (tokens_in or 0) + in_tok
-        tokens_out = None if out_tok is None else (tokens_out or 0) + out_tok
+        if in_tok is None:
+            input_exact = False
+        else:
+            known_input += in_tok
+        if out_tok is None:
+            output_exact = False
+        else:
+            known_output += out_tok
+        if in_tok is None or out_tok is None:
+            unknown_usage_calls += 1
         iterations += 1
         parsed = _first_json_object(text)
         if parsed is None:
@@ -620,12 +843,13 @@ async def run_research_pass(
             # spent budget slot, so the loop cannot iterate for free.
             remaining_calls -= 1
             calls_proposed += 1
-            call_findings, note = _execute_call(call, repos)
-            if note:
-                omissions.append(f"call {calls_proposed}: {note}")
+            call_findings, observation = _execute_call(call, repos)
+            observations.append(observation)
+            if observation.error:
+                omissions.append(f"call {calls_proposed}: {observation.error}")
                 continue
             calls_executed += 1
-            consulted.add(str(call.get("repo") or call.get("repository") or ""))
+            consulted.add(observation.repo_key)
             findings.extend(call_findings)
         if stopped:
             break
@@ -638,9 +862,23 @@ async def run_research_pass(
         "iterations": iterations,
         "calls_proposed": calls_proposed,
         "calls_executed": calls_executed,
+        # NEXT-08: explicit observation counts — truncated and failed
+        # observations are visible in the durable record, so invisible
+        # content can never be mistaken for reviewed content.
+        "observations": {
+            "count": len(observations),
+            "truncated": sum(1 for observation in observations if observation.truncated),
+            "errors": sum(1 for observation in observations if observation.error),
+        },
         "budget": {"max_calls": max_calls, "wall_seconds": wall_seconds},
         "wall_seconds_used": round(now() - started, 3),
-        "tokens": {"input": tokens_in, "output": tokens_out},
+        "tokens": {
+            "input": known_input if input_exact else None,
+            "output": known_output if output_exact else None,
+            "input_lower_bound": known_input,
+            "output_lower_bound": known_output,
+            "unknown_usage_calls": unknown_usage_calls,
+        },
         "repos_consulted": sorted(consulted),
         "repos_authorized": sorted(repos),
         "findings": [],  # the stage fills each finding's evidence_id in
@@ -653,7 +891,9 @@ async def run_research_pass(
             "Bounded research pass over the authorized snapshot. complete=false "
             "means a budget stopped the investigation early — the findings are "
             "partial, not exhaustive. Findings cite evidence:<id> recorded by "
-            "this discovery."
+            "this discovery. tokens.input/output are the EXACT totals only "
+            "when unknown_usage_calls is 0; otherwise the *_lower_bound "
+            "fields are what was actually observed."
         ),
     }
     return ResearchOutcome(

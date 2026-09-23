@@ -649,6 +649,359 @@ class TestTransactionalRestoreSafety:
         assert os.stat(script).st_mode & 0o111
 
 
+class TestPromotionTransaction:
+    """NEXT-04: the promotion is a TRANSACTION, not a series of per-file
+    renames. The reviewed defect: preflight verified everything, but the
+    apply loop could die on the second ``os.replace`` with the first
+    file already changed — a half-applied workspace resume would mistake
+    for a restored one. The contract pinned here: the COMPLETE next
+    generation is built in staging and activated by ONE whole-tree
+    switch; a failure at ANY boundary (staging, the switch's second
+    rename, a deletion, the process itself) leaves the target at its
+    ORIGINAL state or explicitly invalid — never mixed; the report says
+    ``promotion_failed`` (rolled back) apart from ``preflight_failed``
+    (nothing was written); a restart identifies and resolves an
+    abandoned promotion's leftovers."""
+
+    ORIG_A = b"original a\n"
+    ORIG_B = b"original b\n"
+    ORIG_DOOMED = b"stale baseline copy\n"
+    NEW_A = b"checkpointed a\n"
+    NEW_B = b"checkpointed b\n"
+
+    @staticmethod
+    def _two_files_one_deletion() -> tuple[dict, dict[str, bytes]]:
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": WORK_ID,
+            "sequence": 0,
+            "source_oids": {},
+            "files": {
+                "a.txt": {
+                    "digest": _digest(b"checkpointed a\n"),
+                    "mode": 0o644,
+                    "role": "modified",
+                },
+                "b.txt": {
+                    "digest": _digest(b"checkpointed b\n"),
+                    "mode": 0o644,
+                    "role": "modified",
+                },
+            },
+            "deletions": ["doomed.txt"],
+        }
+        blobs = {
+            _digest(b"checkpointed a\n"): b"checkpointed a\n",
+            _digest(b"checkpointed b\n"): b"checkpointed b\n",
+        }
+        return manifest, blobs
+
+    def _prepared_target(self, tmp_path: Path) -> Path:
+        target = tmp_path / "runner-b"
+        target.mkdir()
+        (target / "a.txt").write_bytes(self.ORIG_A)
+        (target / "b.txt").write_bytes(self.ORIG_B)
+        (target / "doomed.txt").write_bytes(self.ORIG_DOOMED)
+        (target / "untracked.txt").write_bytes(b"rides along\n")
+        return target
+
+    def _restore(self, tmp_path: Path, target: Path, manifest: dict, blobs: dict) -> object:
+        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        for data in blobs.values():
+            store.put(data)
+        artifact_id = store.put(json.dumps(manifest).encode(), content_type="application/json")
+        return restore_wip(artifact_id=artifact_id, store=store, target=target, principal=TENANT)
+
+    def test_the_whole_tree_switch_promotes_everything_or_nothing(self, tmp_path: Path):
+        """The happy path: modified files, the deletion AND the untouched
+        rider all land together through one generation switch."""
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is True
+        assert report.phase == "completed"
+        assert report.target_invalid is False
+        assert (target / "a.txt").read_bytes() == self.NEW_A
+        assert (target / "b.txt").read_bytes() == self.NEW_B
+        assert not (target / "doomed.txt").exists()
+        assert (target / "untracked.txt").read_bytes() == b"rides along\n"
+        outcomes = {item.path: item.outcome for item in report.files}
+        assert outcomes == {"a.txt": "restored", "b.txt": "restored", "doomed.txt": "deleted"}
+
+    def test_a_failed_second_rename_rolls_the_first_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The reviewer's exact repro: the SECOND promotion boundary fails
+        (an injected OSError on the generation switch's landing rename)
+        — BOTH files are at their ORIGINAL content after the failure,
+        not mixed."""
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        landed = {"n": 0}
+        real_replace = os.replace
+
+        def failing_second_rename(src, dst):
+            # The switch's renames are the ones whose DESTINATION is the
+            # workspace itself (the store's atomic writes use os.replace
+            # too — key on dst, not call order).
+            if dst == target:
+                landed["n"] += 1
+                if landed["n"] == 1:  # tree->target, the LANDING (move-aside went to backup)
+                    raise OSError("injected: the landing rename fails")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", failing_second_rename)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert any("rolled back" in failure for failure in report.failures)
+        # BOTH files at their original content — never mixed.
+        assert (target / "a.txt").read_bytes() == self.ORIG_A
+        assert (target / "b.txt").read_bytes() == self.ORIG_B
+        assert (target / "doomed.txt").read_bytes() == self.ORIG_DOOMED
+        assert (target / "untracked.txt").read_bytes() == b"rides along\n"
+        # Per-file evidence: NOTHING landed.
+        assert {item.outcome for item in report.files} == {"failed"}
+        assert list(target.parent.glob(".forge-restore-*")) == []  # no leftovers
+
+    def test_a_failed_move_aside_never_touches_the_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The switch's FIRST rename fails: the target was never mutated
+        and the report still distinguishes the promotion phase."""
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        real_replace = os.replace
+
+        def failing_first_rename(src, dst):
+            # The MOVE-ASIDE: destination is the parked backup name.
+            if ".forge-restore-backup-" in str(dst):
+                raise OSError("injected: the move-aside fails")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", failing_first_rename)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert (target / "a.txt").read_bytes() == self.ORIG_A
+        assert (target / "doomed.txt").read_bytes() == self.ORIG_DOOMED
+
+    def test_a_failed_deletion_aborts_before_the_target_is_touched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A deletion that fails inside the staged generation aborts the
+        promotion with the LIVE target untouched — deletions are applied
+        to the copy, never per-file onto the live workspace."""
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        real_unlink = os.unlink
+
+        def failing_doomed_unlink(path, *args, **kwargs):
+            if str(path).endswith("doomed.txt"):
+                raise OSError("injected: the deletion fails")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", failing_doomed_unlink)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert (target / "a.txt").read_bytes() == self.ORIG_A
+        assert (target / "b.txt").read_bytes() == self.ORIG_B
+        assert (target / "doomed.txt").read_bytes() == self.ORIG_DOOMED
+
+    def test_a_killed_restore_between_the_renames_is_rolled_back_by_the_next_run(
+        self, tmp_path: Path
+    ):
+        """The kill-midway trace, simulated at the exact crash point: the
+        original generation is parked beside a MISSING target. The next
+        restore identifies it, rolls the original back FIRST, and only
+        then proceeds — the report's ``recovery`` carries the evidence."""
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+
+        # The crash state: the switch died between its two renames.
+        parked = target.parent / ".forge-restore-backup-9999-deadbeef"
+        os.replace(target, parked)
+        (target.parent / ".forge-restore-stale-staging").mkdir()
+        (target.parent / ".forge-restore-stale-staging" / "tree").mkdir()
+        assert not target.exists()  # explicitly unusable, never mixed
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is True
+        assert report.phase == "completed"
+        assert any("rolled back abandoned backup" in note for note in report.recovery)
+        assert any("collected abandoned staging" in note for note in report.recovery)
+        # The retry then restored on top of the RECOVERED original.
+        assert (target / "a.txt").read_bytes() == self.NEW_A
+        assert (target / "b.txt").read_bytes() == self.NEW_B
+        assert not (target / "doomed.txt").exists()
+        assert (target / "untracked.txt").read_bytes() == b"rides along\n"
+        assert list(target.parent.glob(".forge-restore-*")) == []
+
+    def test_a_parked_backup_beside_a_landed_target_is_discarded(self, tmp_path: Path):
+        """The other crash point: the landing rename SUCCEEDED and only
+        the cleanup died. The next restore keeps the promoted generation
+        and discards the parked copy — no rollback of good work."""
+        target = self._prepared_target(tmp_path)
+        (target / "a.txt").write_bytes(self.NEW_A)  # an earlier promotion landed
+        parked = target.parent / ".forge-restore-backup-7777-cafe"
+        parked.mkdir()
+        (parked / "a.txt").write_bytes(self.ORIG_A)
+
+        report = self._restore(
+            tmp_path, target, *self._two_files_one_deletion()
+        )  # a fresh, unrelated restore
+
+        assert report.ok is True
+        assert any("discarded abandoned backup" in note for note in report.recovery)
+        assert not parked.exists()
+
+    def test_preflight_failures_say_so_and_write_nothing(self, tmp_path: Path):
+        """The phase distinction: a reserved-namespace entry refuses at
+        PREFLIGHT — nothing was written — and the report says
+        ``preflight_failed``, never ``promotion_failed``."""
+        target = self._prepared_target(tmp_path)
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": WORK_ID,
+            "sequence": 0,
+            "source_oids": {},
+            "files": {
+                "a.txt": {"digest": _digest(self.NEW_A), "mode": 0o644, "role": "modified"},
+                ".git/config": {"digest": _digest(b"[core]\n"), "mode": 0o644, "role": "new"},
+            },
+            "deletions": [],
+        }
+
+        report = self._restore(tmp_path, target, manifest, {_digest(self.NEW_A): self.NEW_A})
+
+        assert report.ok is False
+        assert report.phase == "preflight_failed"
+        assert report.target_invalid is False
+        assert (target / "a.txt").read_bytes() == self.ORIG_A  # nothing was written
+
+    def test_the_savepoint_fallback_rolls_a_half_applied_plan_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The degraded path (a read-only parent parks the staging inside
+        ``target/.forge``): per-file promotion under a FULL savepoint.
+        The second per-file replace fails — the first file's original is
+        restored, the plan's new state never surfaces, and the report
+        carries ``promotion_failed`` with a usable (original) target."""
+        import forge.adaptive.checkpointing as cp
+
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        inside = target / ".forge"
+
+        def inside_staging(t: Path) -> tuple[Path, bool]:
+            inside.mkdir(parents=True, exist_ok=True)
+            import tempfile as _tempfile
+
+            return Path(_tempfile.mkdtemp(dir=inside, prefix="restore-")), False
+
+        monkeypatch.setattr(cp, "_staging_dir", inside_staging)
+        calls = {"n": 0}
+        real_replace = os.replace
+
+        def failing_second_file(src, dst):
+            if str(dst).endswith("b.txt"):
+                calls["n"] += 1
+                if calls["n"] == 1:  # the first promotion of b.txt (a.txt landed)
+                    raise OSError("injected: the second file replace fails")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", failing_second_file)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert any("savepoint" in failure for failure in report.failures)
+        # BOTH files at their original content; the deletion never applied.
+        assert (target / "a.txt").read_bytes() == self.ORIG_A
+        assert (target / "b.txt").read_bytes() == self.ORIG_B
+        assert (target / "doomed.txt").read_bytes() == self.ORIG_DOOMED
+
+    def test_the_savepoint_fallback_rolls_a_failed_deletion_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Same degraded path, failure at the DELETION boundary: a.txt and
+        b.txt already promoted, the deletion of doomed.txt fails — the
+        savepoint recreates it and un-promotes both files."""
+        import forge.adaptive.checkpointing as cp
+
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        inside = target / ".forge"
+
+        def inside_staging(t: Path) -> tuple[Path, bool]:
+            inside.mkdir(parents=True, exist_ok=True)
+            import tempfile as _tempfile
+
+            return Path(_tempfile.mkdtemp(dir=inside, prefix="restore-")), False
+
+        monkeypatch.setattr(cp, "_staging_dir", inside_staging)
+        real_unlink = os.unlink
+
+        def failing_doomed_unlink(path, *args, **kwargs):
+            if str(path).endswith("doomed.txt") and inside.as_posix() not in str(path):
+                raise OSError("injected: the deletion fails on the live target")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", failing_doomed_unlink)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert (target / "a.txt").read_bytes() == self.ORIG_A
+        assert (target / "b.txt").read_bytes() == self.ORIG_B
+        assert (target / "doomed.txt").read_bytes() == self.ORIG_DOOMED
+
+    def test_the_savepoint_fallback_restores_cleanly_when_it_works(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The degraded path's happy day: same end state as the whole-tree
+        switch — modified, deleted and rider all land."""
+        import forge.adaptive.checkpointing as cp
+
+        target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        inside = target / ".forge"
+
+        def inside_staging(t: Path) -> tuple[Path, bool]:
+            inside.mkdir(parents=True, exist_ok=True)
+            import tempfile as _tempfile
+
+            return Path(_tempfile.mkdtemp(dir=inside, prefix="restore-")), False
+
+        monkeypatch.setattr(cp, "_staging_dir", inside_staging)
+
+        report = self._restore(tmp_path, target, manifest, blobs)
+
+        assert report.ok is True
+        assert report.phase == "completed"
+        assert (target / "a.txt").read_bytes() == self.NEW_A
+        assert (target / "b.txt").read_bytes() == self.NEW_B
+        assert not (target / "doomed.txt").exists()
+        assert (target / "untracked.txt").read_bytes() == b"rides along\n"
+
+
 class TestBoundedCaptureScope:
     """R28-04: the capture scope is the agent's work tree only, the delta
     is bounded by ONE canonical digest scheme, and repeated captures

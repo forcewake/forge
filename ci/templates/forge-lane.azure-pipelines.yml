@@ -170,19 +170,68 @@ jobs:
       # artifact's meta exit (the Actions lane's audit-trail preservation).
       - bash: |
           set -uo pipefail
-          # The forge install ref ships a REAL released tag as its default —
-          # never a placeholder token a raw, un-edited copy of this file would
-          # carry to the runner (pip would attempt the literal token and the
-          # lane would die in bootstrap). Override per repo by setting the
-          # FORGE_LANE_REF pipeline variable (mapped below with the
-          # compile-time expression, NOT the $(macro): an UNDEFINED macro
-          # expands to its literal text — the junk class guarded further
-          # down — and would override the default with garbage).
-          for attempt in 1 2 3; do
-            pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}" && break
-            echo "pip install of forge failed (attempt $attempt), retrying..."
-            sleep $((attempt * 5))
-          done
+          mkdir -p .forge
+          # NEXT-17: the lane's own code is an IMMUTABLE resource. The
+          # preferred route is the content-hash-pinned wheel — set the
+          # FORGE_LANE_WHEEL + FORGE_LANE_WHEEL_SHA256 pipeline VARIABLES
+          # (a release-artifact URL + its sha256, mapped below with the
+          # compile-time expression like FORGE_LANE_REF): the wheel is
+          # downloaded, hashed, and REFUSED unless the bytes reproduce the
+          # pin (pip re-verifies via #sha256= at install), with both halves
+          # recorded to .forge/lane_install.json for the provenance
+          # report's expected-vs-installed hash reconciliation.
+          _wheel_junk="$(printf '$(%s)' 'FORGE_LANE_WHEEL')"
+          _wheel_sha_junk="$(printf '$(%s)' 'FORGE_LANE_WHEEL_SHA256')"
+          case "${FORGE_LANE_WHEEL:-}" in
+            '' | "$_wheel_junk") _wheel_url='' ;;
+            *) _wheel_url="$FORGE_LANE_WHEEL" ;;
+          esac
+          case "${FORGE_LANE_WHEEL_SHA256:-}" in
+            '' | "$_wheel_sha_junk") _wheel_sha='' ;;
+            *) _wheel_sha="$FORGE_LANE_WHEEL_SHA256" ;;
+          esac
+          if [ -n "$_wheel_url" ]; then
+            if ! printf '%s' "$_wheel_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              printf 'failed\n' > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: FORGE_LANE_WHEEL_SHA256 must be a 64-hex sha256 when FORGE_LANE_WHEEL is set (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            pip download --no-deps -d .forge/wheel "$_wheel_url" || {
+              printf 'failed\n' > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the hash-pinned forge wheel could not be downloaded (infrastructure/config, never code repair)"
+              exit 1
+            }
+            _wheel_file="$(ls .forge/wheel/*.whl .forge/wheel/*.tar.gz 2>/dev/null | head -1)"
+            _actual_sha="$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$_wheel_file")"
+            if [ "$_actual_sha" != "$_wheel_sha" ]; then
+              printf 'failed\n' > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: forge wheel hash mismatch — the template pinned sha256:$_wheel_sha but the artifact hashes to sha256:$_actual_sha (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            pip install --no-deps "$_wheel_file#sha256=$_actual_sha" || {
+              printf 'failed\n' > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (infrastructure/config, never code repair)"
+              exit 1
+            }
+            printf '{"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"}\n' \
+              "$_wheel_sha" "$_actual_sha" > .forge/lane_install.json
+          else
+            # The forge install ref ships a REAL released tag as its default —
+            # never a placeholder token a raw, un-edited copy of this file would
+            # carry to the runner (pip would attempt the literal token and the
+            # lane would die in bootstrap). Override per repo by setting the
+            # FORGE_LANE_REF pipeline variable (mapped below with the
+            # compile-time expression, NOT the $(macro): an UNDEFINED macro
+            # expands to its literal text — the junk class guarded further
+            # down — and would override the default with garbage).
+            for attempt in 1 2 3; do
+              pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-v0.27.0}" && break
+              echo "pip install of forge failed (attempt $attempt), retrying..."
+              sleep $((attempt * 5))
+            done
+            printf '{"pin":"git-ref","ref":"%s"}\n' \
+              "${FORGE_LANE_REF:-v0.27.0}" > .forge/lane_install.json
+          fi
           # Brief transport: when the repo owner provisions a READ-ONLY
           # work-item token (FORGE_AZDO_READ_TOKEN — a pipeline secret that
           # is YOURS, never forge's), the lane fetches the work item + the
@@ -249,6 +298,12 @@ jobs:
           # is the released tag). Compile-time expression on purpose — see
           # the install step's comment.
           FORGE_LANE_REF: ${{ variables.FORGE_LANE_REF }}
+          # NEXT-17: the IMMUTABLE wheel pin (optional; preferred over the
+          # git ref) — compile-time expressions like FORGE_LANE_REF so an
+          # undefined variable arrives EMPTY, never as its $(macro) literal
+          # (the junk class the install step guards).
+          FORGE_LANE_WHEEL: ${{ variables.FORGE_LANE_WHEEL }}
+          FORGE_LANE_WHEEL_SHA256: ${{ variables.FORGE_LANE_WHEEL_SHA256 }}
           # MCP (ADR-0022): canonical mcpServers JSON from a pipeline
           # VARIABLE (not secret — it references secrets by name); an empty
           # value means strict isolation with no servers.

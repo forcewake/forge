@@ -101,6 +101,7 @@ from forge.durable import (
     short_run_id,
 )
 from forge.durable.controller import TERMINAL_STATUSES, InvalidTransition
+from forge.durable.claims import current_claim
 from forge.execution.github_actions import ActionsHandle, GitHubActionsExecutor
 from forge.factory.implementer import IMPLEMENTER_TIER
 from forge.factory.llm import LLMError, LLMResponseError
@@ -113,7 +114,13 @@ from forge.adaptive.discovery_stage import (
     record_answers,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
-from forge.factory.planner import PLAN_SUMMARY_CHARS
+from forge.adaptive.research_planner import (
+    RESEARCH_HARNESS_MODE,
+    ResearchHarness,
+    completion_from_llm_client,
+    discovery_mode,
+)
+from forge.factory.planner import PLAN_SUMMARY_CHARS, PLANNER_TIER
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import (
@@ -287,6 +294,20 @@ def _workflow_identity(run: Mapping[str, Any]) -> str:
     if path:
         return f"path:{path}"
     return f"name:{run.get('name') or ''}"
+
+
+def _claim_generation() -> int | None:
+    """The executing claim's pinned attempt generation (NEXT-02).
+
+    The generation THIS candidate's publication grant was minted under —
+    the value the pause-fence decision compares against the fence's
+    resumed epoch (a candidate from an attempt the resume retired stays
+    refused even after the fence clears). ``None`` when no execution
+    claim is bound (direct service-level callers, pre-claim transports):
+    the fence then answers its plain fenced/cleared contract.
+    """
+    claim = current_claim()
+    return claim.cancellation_generation if claim is not None else None
 
 
 #: Backoff the publication-intent scanner applies to an open intent whose
@@ -576,7 +597,12 @@ class GitHubRunService:
             # failure, never a silent fallback to an unresearched plan.
             # The snapshot ref is the SAME frozen SHA resolved above —
             # discovery evidence and the attempt base are one immutable
-            # source set.
+            # source set. NEXT-07: when the mode gate resolves
+            # ``research-harness``, the harness is composed HERE from the
+            # run's budget-guarded LLM client (the planner's own client —
+            # no new gateway) and rides the context, so the advertised
+            # mode actually exercises the bounded research loop through
+            # this entry point.
             issue_description = await maybe_run_discovery(
                 DiscoveryRunContext.from_reader(
                     run_id=run_id,
@@ -586,6 +612,7 @@ class GitHubRunService:
                     ref=frozen_ref,
                     repository_id=self._repo_full_name,
                     allowed_globs=path_scope or None,
+                    research=self._research_harness(run_id),
                 ),
                 issue_description,
             )
@@ -1260,6 +1287,11 @@ class GitHubRunService:
 
         # One durable, idempotent transition (A11): attempt + CAS walk commit
         # atomically.
+        # NEXT-02: the pause fence's resumed publication epoch is the floor
+        # for the new attempt generation — the resumed attempt's identity
+        # starts ABOVE every grant the pause/resume already retired.
+        fence = await pause_fence_decision(self._session_factory, run_id)
+        fence_floor = fence.resumed_publication_epoch or 0
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -1283,6 +1315,14 @@ class GitHubRunService:
                 )
                 run = await self._get_run(session, run_id)
                 run.commit_cycle = cycle + 1
+                # NEXT-01: the retry opens a NEW attempt — bump the durable
+                # attempt generation (aligned with the pause fence's resumed
+                # epoch, NEXT-02) so the re-dispatch mints a fresh
+                # attempt-scoped lane token and every credential/claim of
+                # the dead attempt is retired at once.
+                run.cancellation_generation = max(
+                    int(run.cancellation_generation or 0) + 1, fence_floor
+                )
                 await session.commit()
         except RevivalInFlight:
             await self._post_journaled_note(
@@ -1548,11 +1588,23 @@ class GitHubRunService:
         )
 
     async def _redispatch_revival(self, run_id: str) -> None:
-        """Re-dispatch a revived run — same branch, attempt base = last candidate."""
+        """Re-dispatch a revived run — same branch, attempt base = last candidate.
+
+        NEXT-01: a revival re-dispatch opens a NEW attempt — the durable
+        attempt generation is bumped (aligned with the pause fence's
+        resumed epoch) BEFORE the lane launches, so the dispatched token
+        is attempt-scoped to the revival and every credential of the
+        stalled attempt retires with it.
+        """
+        fence = await pause_fence_decision(self._session_factory, run_id)
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
             issue_number = run.issue_iid
+            run.cancellation_generation = max(
+                int(run.cancellation_generation or 0) + 1, fence.resumed_publication_epoch or 0
+            )
+            await session.commit()
         if issue_number is None:
             logger.warning("GitHub revival of run %s without an issue — skipping", run_id[:8])
             return
@@ -3050,6 +3102,12 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             attempt_base = attempt_base_for(run)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
+            # NEXT-01: the attempt generation the dispatch mints the lane
+            # credential FOR — FlowRun.cancellation_generation, the one
+            # durable attempt counter the lane-control and checkpoint APIs
+            # verify against. Read here, used at launch: the dispatched
+            # token is attempt-scoped by construction.
+            generation = int(run.cancellation_generation or 0)
             # A03: the approved brief envelope rides the dispatch — the lane
             # re-computes the digest over the plan comment's APPROVED
             # sections against these values and fails closed on mismatch.
@@ -3090,12 +3148,16 @@ class GitHubRunService:
                 handle,
                 inputs={
                     "run_id": run_id,
-                    # NXT-10/11: the per-work lane-control token — HMAC of
-                    # this run id under FORGE_LANE_CONTROL_SECRET (the server
-                    # side verifies exactly this). Computed by the DISPATCH,
+                    # NXT-10/11 + NEXT-01: the per-work lane-control token —
+                    # HMAC of this run id AND its CURRENT attempt generation
+                    # under FORGE_LANE_CONTROL_SECRET (the server side
+                    # verifies exactly this). Computed by the DISPATCH,
                     # never stored; empty when no secret is configured (the
-                    # lane's steering channel stays off, fail-closed).
-                    "lane_control_token": self._lane_control_token(run_id),
+                    # lane's steering channel stays off, fail-closed). The
+                    # generation component makes the credential
+                    # ATTEMPT-SCOPED: a retry/resume that opens a new
+                    # generation retires this token at both APIs.
+                    "lane_control_token": self._lane_control_token(run_id, generation=generation),
                     # R04/A02: the model input is the route frozen in the
                     # spec — the gate approved exactly this execution shape.
                     "model": spec.harness_model,
@@ -4054,13 +4116,19 @@ class GitHubRunService:
                 branch=github_factory_branch(issue_number, run_id),
             )
 
-        # R28-08: the durable PAUSE fence — the same persisted authority
-        # the control plane raised when the pause landed. Checked here
-        # (before any paid validation work) AND re-read by the transport
+        # R28-08 + NEXT-02: the durable PAUSE fence — the same persisted
+        # authority the control plane raised when the pause landed. Checked
+        # here (before any paid validation work) AND re-read by the transport
         # at the native-effect boundary via the injected fence callable:
         # a pause that survives an API restart refuses a late candidate
-        # from the old lane at BOTH points.
-        fence = await pause_fence_decision(self._session_factory, run_id)
+        # from the old lane at BOTH points. The candidate's GRANT
+        # generation (the executing claim's pinned attempt generation)
+        # rides the decision: after a resume that opened a new attempt,
+        # a candidate from the retired attempt stays refused even though
+        # the fence itself is cleared.
+        fence = await pause_fence_decision(
+            self._session_factory, run_id, expected_generation=_claim_generation()
+        )
         if fence.fenced:
             from forge.integrations.github_flow import GitHubPublishOutcome as _Outcome
 
@@ -4077,9 +4145,13 @@ class GitHubRunService:
             )
 
         async def _publication_fence(work_id: str):
-            """R28-08: the durable fence read the transport evaluates at
-            the final boundary — committed storage, never process memory."""
-            return await pause_fence_decision(self._session_factory, work_id)
+            """R28-08/NEXT-02: the durable fence read the transport
+            evaluates at the final boundary — committed storage, never
+            process memory, always judged against the candidate's own
+            grant generation."""
+            return await pause_fence_decision(
+                self._session_factory, work_id, expected_generation=_claim_generation()
+            )
 
         async def _final_boundary_guard() -> bool:
             """FND-02: re-check the grant at the NATIVE-effect boundary —
@@ -4092,11 +4164,15 @@ class GitHubRunService:
                     run_id[:8],
                 )
                 return False
-            if (await pause_fence_decision(self._session_factory, run_id)).fenced:
+            decision = await pause_fence_decision(
+                self._session_factory, run_id, expected_generation=_claim_generation()
+            )
+            if decision.fenced:
                 logger.warning(
-                    "GitHub run %s fenced by a pause during publish reads — "
+                    "GitHub run %s fenced (%s) during publish reads — "
                     "native write refused at the final boundary",
                     run_id[:8],
+                    "stale grant" if decision.stale_generation is not None else "pause",
                 )
                 return False
             return True
@@ -4774,8 +4850,15 @@ class GitHubRunService:
             f"- Cancel it first: `/cancel {run.id}`"
         )
 
-    def _lane_control_token(self, run_id: str) -> str:
-        """The per-work HMAC token for the lane control channel (or "")."""
+    def _lane_control_token(self, run_id: str, *, generation: int | None = None) -> str:
+        """The per-work HMAC token for the lane control channel (or "").
+
+        NEXT-01: with *generation* the token is ATTEMPT-SCOPED — the
+        dispatch passes the run's CURRENT ``cancellation_generation`` so
+        the credential dies with the attempt it was minted for (both the
+        lane-control API and the checkpoint channel verify exactly this
+        derivation).
+        """
         secret = getattr(self._settings, "FORGE_LANE_CONTROL_SECRET", None)
         if not secret:
             return ""
@@ -4786,7 +4869,7 @@ class GitHubRunService:
         # HMAC because both sides hashed DIFFERENT literals of the same
         # secret). get_secret_value() is the value.
         raw = secret.get_secret_value() if hasattr(secret, "get_secret_value") else str(secret)
-        return lane_control_token(raw, run_id)
+        return lane_control_token(raw, run_id, generation=generation)
 
     def _approvers(self) -> list[str]:
         """The trusted approver list (GitHub logins, connection-scoped).
@@ -4953,6 +5036,30 @@ class GitHubRunService:
             client = getattr(agent, "_llm", None)
             if client is not None and hasattr(client, "set_budget"):
                 client.set_budget(guard)
+
+    def _research_harness(self, run_id: str) -> ResearchHarness | None:
+        """NEXT-07: compose the research harness when the mode demands it.
+
+        The harness's completion callable is the run's EXISTING
+        budget-guarded ``LLMClient`` — the same client the planner itself
+        reserves through, whose guard ``_apply_run_budget`` bound above —
+        so every research completion charges the RUN's budget like any
+        planning call (a refused reservation surfaces as the loop's
+        honest ``gateway_error`` partial stop, never a bypass) and no new
+        gateway or framework appears. ``None`` in every other mode keeps
+        the ``none``/``lexical`` paths byte-compatible; a
+        ``research-harness`` mode whose stack carries no LLM client also
+        returns ``None`` and falls through to the stage's loud
+        configuration refusal — never a silent lexical downgrade.
+        """
+        if discovery_mode() != RESEARCH_HARNESS_MODE:
+            return None
+        client = getattr(self._stack.planner, "_llm", None)
+        if client is None:
+            return None
+        return ResearchHarness(
+            complete=completion_from_llm_client(client, tier=PLANNER_TIER, flow_run_id=run_id),
+        )
 
     async def _budget_episode_block(
         self, run_id: str, *, now: datetime | None = None

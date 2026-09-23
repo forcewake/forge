@@ -185,6 +185,20 @@ jobs:
           # template uses with a released-tag default; override via the
           # FORGE_LANE_REF repo variable when testing a specific ref.
           FORGE_LANE_REF: ${{ vars.FORGE_LANE_REF }}
+          # NEXT-17: the IMMUTABLE wheel pin (preferred over the git ref).
+          # FORGE_LANE_WHEEL is a release-artifact URL and
+          # FORGE_LANE_WHEEL_SHA256 its sha256; the install step downloads,
+          # hashes and REFUSES the artifact unless the bytes reproduce the
+          # pin (pip re-verifies via #sha256= at install), recording both
+          # halves to .forge/lane_install.json for the provenance report's
+          # expected-vs-installed hash reconciliation.
+          FORGE_LANE_WHEEL: ${{ vars.FORGE_LANE_WHEEL }}
+          FORGE_LANE_WHEEL_SHA256: ${{ vars.FORGE_LANE_WHEEL_SHA256 }}
+          # NEXT-17: the expected sha256 of the codegraph MCP lock the
+          # install step materializes (empty = the lock is generated but
+          # not yet pinned; npm ci still enforces the lock's own per-tarball
+          # sha512 integrities).
+          FORGE_MCP_LOCK_SHA256: ${{ vars.FORGE_MCP_LOCK_SHA256 }}
         run: |
           # A18 environment classification: a FAILED environment bootstrap
           # is lane INFRASTRUCTURE/CONFIG — the environment never matched
@@ -194,11 +208,49 @@ jobs:
           # .forge/bootstrap (ok|failed) for the candidate meta and echoes
           # the FORGE_BOOTSTRAP_FAILED marker into the job log (the
           # control plane's log classifier carries it).
-          pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-main}" || {
-            echo "failed" > .forge/bootstrap
-            echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
-            exit 1
-          }
+          mkdir -p .forge
+          # NEXT-17: the lane's own code is an IMMUTABLE resource. Preferred
+          # route — the content-hash-pinned wheel (the --hash=sha256:
+          # equivalent for a direct artifact URL): download, hash, refuse on
+          # any mismatch, then install the verified bytes. The git+ref
+          # fallback stays (a released tag), loudly recorded as the
+          # not-pinned-by-content-hash route.
+          FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-}"
+          FORGE_WHEEL_SHA="${FORGE_LANE_WHEEL_SHA256:-}"
+          if [ -n "$FORGE_WHEEL_URL" ]; then
+            if ! printf '%s' "$FORGE_WHEEL_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: FORGE_LANE_WHEEL_SHA256 must be a 64-hex sha256 when FORGE_LANE_WHEEL is set (missing tool - infrastructure/config, never code repair)"
+              exit 1
+            fi
+            pip download --no-deps -d .forge/wheel "$FORGE_WHEEL_URL" || {
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the hash-pinned forge wheel could not be downloaded (missing tool - infrastructure/config, never code repair)"
+              exit 1
+            }
+            WHEEL_FILE="$(ls .forge/wheel/*.whl .forge/wheel/*.tar.gz 2>/dev/null | head -1)"
+            ACTUAL_SHA="$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WHEEL_FILE")"
+            if [ "$ACTUAL_SHA" != "$FORGE_WHEEL_SHA" ]; then
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: forge wheel hash mismatch — the template pinned sha256:$FORGE_WHEEL_SHA but the artifact hashes to sha256:$ACTUAL_SHA (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            pip install --no-deps "$WHEEL_FILE#sha256=$ACTUAL_SHA" || {
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
+              exit 1
+            }
+            printf '{"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"}\n' \
+              "$FORGE_WHEEL_SHA" "$ACTUAL_SHA" > .forge/lane_install.json
+          else
+            pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF:-main}" || {
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
+              exit 1
+            }
+            printf '{"pin":"git-ref","ref":"%s"}\n' \
+              "${FORGE_LANE_REF:-main}" > .forge/lane_install.json
+          fi
           # The brief's quality bar tells the agent to run the tests — the
           # lane must carry the tooling for that (LIVE-found: bare hosted
           # python has no pytest, and the agent burned turns on denied
@@ -234,7 +286,32 @@ jobs:
             pip install ${PYTEST_VER:+pytest==${PYTEST_VER}} || pip install pytest || true
           fi
           if echo "$FORGE_HARNESS_MCP" | grep -q codegraph; then
-            npm install -g --no-fund --no-audit @colbymchenry/codegraph@1.6.0
+            # NEXT-17: the MCP binary rides a LOCK, not a bare version
+            # spec. The lock is materialized from the pinned spec
+            # (--package-lock-only), checked against the template's
+            # FORGE_MCP_LOCK_SHA256 when set (resolution drift is refused,
+            # not silently taken), and `npm ci` installs EXACTLY the lock —
+            # npm verifies every tarball against the lock's sha512
+            # integrity before executing it (a tampered registry artifact
+            # fails the install instead of running).
+            mkdir -p .forge/tools/codegraph
+            (
+              cd .forge/tools/codegraph
+              npm install --package-lock-only --no-fund --no-audit @colbymchenry/codegraph@1.6.0
+              if [ -n "${FORGE_MCP_LOCK_SHA256:-}" ]; then
+                LOCK_SHA="$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' package-lock.json)"
+                if [ "$LOCK_SHA" != "$FORGE_MCP_LOCK_SHA256" ]; then
+                  echo "FORGE_BOOTSTRAP_FAILED: codegraph lock hash mismatch — expected sha256:$FORGE_MCP_LOCK_SHA256, got sha256:$LOCK_SHA (infrastructure/config, never code repair)"
+                  exit 1
+                fi
+              fi
+              npm ci --no-fund --no-audit
+            ) || {
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the locked codegraph MCP install failed (infrastructure/config, never code repair)"
+              exit 1
+            }
+            export PATH="$PWD/.forge/tools/codegraph/node_modules/.bin:$PATH"
             codegraph telemetry off
             timeout 300 codegraph init
           fi

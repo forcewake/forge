@@ -75,6 +75,21 @@ def registry() -> AgentRegistry:
     return reg
 
 
+def _mock_gitlab() -> AsyncMock:
+    """A GitLab client double whose ``identity()`` is SYNC (NEXT-25).
+
+    The repository-identity resolver calls ``identity()`` synchronously;
+    AsyncMock's auto-created attribute made it a never-awaited coroutine
+    (6 RuntimeWarnings per run — the R28-01 tail fix swept
+    test_project_config.py; this is the remaining file). The double
+    returns None — the not-adopted-contract path the resolver handles —
+    and keeps every other method async like the real client.
+    """
+    client = AsyncMock()
+    client.identity = MagicMock(return_value=None)
+    return client
+
+
 def _make_note_event(note_text: str, **overrides) -> NoteEvent:
     defaults = dict(
         object_kind="note",
@@ -108,7 +123,7 @@ class TestSlashCommandRouting:
         event = _make_note_event("@forge /help")
 
         with patch("forge.orchestrator.orchestrator.GitLabClient") as MockClient:
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -133,7 +148,7 @@ class TestSlashCommandRouting:
             patch("forge.orchestrator.orchestrator.GitLabClient") as MockClient,
             patch.object(orch, "_run_agent", new_callable=AsyncMock) as mock_run,
         ):
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             mock_gitlab.get_file = AsyncMock(side_effect=Exception("not found"))
@@ -171,7 +186,7 @@ class TestSlashCommandRouting:
             patch("forge.orchestrator.orchestrator.ContextEngine") as MockCtxEngine,
             patch("forge.orchestrator.orchestrator.get_model") as mock_get_model,
         ):
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             mock_gitlab.get_file = AsyncMock(side_effect=Exception("not found"))
@@ -210,7 +225,7 @@ class TestSlashCommandRouting:
             patch("forge.orchestrator.orchestrator.GitLabClient") as MockClient,
             patch("forge.orchestrator.orchestrator.match_agents", return_value=[]) as mock_match,
         ):
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             mock_gitlab.get_file = AsyncMock(side_effect=Exception("not found"))
@@ -237,7 +252,7 @@ class TestChatMentionFlow:
             patch("forge.orchestrator.orchestrator.ContextEngine") as MockCtxEngine,
             patch("forge.orchestrator.orchestrator.get_model") as mock_get_model,
         ):
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             mock_gitlab.get_file = AsyncMock(side_effect=Exception("not found"))
@@ -284,7 +299,7 @@ class TestChatMentionFlow:
             patch("forge.orchestrator.orchestrator.ContextEngine") as MockCtxEngine,
             patch("forge.orchestrator.orchestrator.get_model") as mock_get_model,
         ):
-            mock_gitlab = AsyncMock()
+            mock_gitlab = _mock_gitlab()
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_gitlab)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
             mock_gitlab.get_file = AsyncMock(side_effect=Exception("not found"))

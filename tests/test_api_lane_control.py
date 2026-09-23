@@ -13,7 +13,10 @@ the lane's drain climbs. Pinned here:
   component minted by the dispatch; the server validates against the
   run's CURRENT durable generation (FlowRun.cancellation_generation), a
   SUPERSEDED generation's token answers 403 with an actionable message,
-  and the legacy work-id-only HMAC keeps validating during migration;
+  and the legacy work-id-only HMAC validates only inside the explicit
+  NEXT-01 migration window (FORGE_LANE_LEGACY_TOKEN_DEADLINE, default
+  30 days from now) — an unavailable generation authority is a 503
+  refusal, never a silent legacy acceptance;
 - pending means received/authorized ONLY, in durable sequence order, and
   ``after_sequence`` is an honest cursor;
 - every ack is the PostgresMailbox's own guarded CAS: rung skips are 409,
@@ -26,6 +29,8 @@ the lane's drain climbs. Pinned here:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
@@ -33,8 +38,10 @@ from pydantic import SecretStr
 from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
 from forge.api_lane_control import (
+    LANE_LEGACY_TOKEN_DEADLINE_ENV,
     _superseded_generation,
     lane_control_token,
+    legacy_token_deadline,
     verify_lane_token,
 )
 from forge.config import Settings
@@ -709,3 +716,147 @@ async def _row(app, command_id: str) -> ControlCommandRow:
         )
     assert row is not None
     return row
+
+
+# -- the legacy migration window (NEXT-01) -------------------------------------
+
+
+class TestLegacyTokenDeadline:
+    def test_the_deadline_defaults_to_thirty_days_from_now(self):
+        deadline = legacy_token_deadline({})
+        remaining = deadline - datetime.now(timezone.utc)
+
+        assert timedelta(days=29) <= remaining <= timedelta(days=30)
+
+    def test_an_explicit_iso_deadline_is_honored(self):
+        fixed = "2020-01-01T00:00:00+00:00"
+        assert legacy_token_deadline(
+            {LANE_LEGACY_TOKEN_DEADLINE_ENV: fixed}
+        ) == datetime.fromisoformat(fixed)
+        naive = legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "2020-01-01"})
+        assert naive.tzinfo is not None  # naive reads as UTC
+        # malformed degrades to the default window, never to "no deadline"
+        assert legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "soon"}) > (
+            datetime.now(timezone.utc)
+        )
+
+    async def test_a_legacy_token_past_the_deadline_is_refused(
+        self, app, client, mailbox, monkeypatch
+    ):
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+        monkeypatch.setenv(LANE_LEGACY_TOKEN_DEADLINE_ENV, "2020-01-01T00:00:00+00:00")
+
+        pending = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+        ack = await client.post(
+            f"/lane/controls/cmd-{WORK}-1/ack", json={"state": "authorized"}, headers=auth()
+        )
+
+        assert pending.status_code == 403
+        assert "migration deadline" in pending.json()["detail"]
+        assert ack.status_code == 403
+
+    async def test_a_generation_token_survives_past_the_deadline(
+        self, app, client, mailbox, monkeypatch
+    ):
+        """The deadline retires the LEGACY derivation only: the
+        dispatch-issued attempt credential is the standing contract."""
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+        monkeypatch.setenv(LANE_LEGACY_TOKEN_DEADLINE_ENV, "2020-01-01T00:00:00+00:00")
+
+        pending = await client.get(
+            "/lane/controls", params={"work_id": WORK}, headers=_gen_headers(WORK, 2)
+        )
+
+        assert pending.status_code == 200
+
+    async def test_a_generation_authority_outage_refuses_rather_than_degrading(
+        self, app, client, mailbox, monkeypatch
+    ):
+        """NEXT-01's reviewer case: a FAILED generation lookup is an
+        unavailable authority (503), never "the work must be legacy"."""
+        import forge.api_lane_control as api_lane_control
+
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+
+        async def _broken(session_factory, work_id):
+            raise api_lane_control.LaneAuthorityUnavailable("storage down")
+
+        monkeypatch.setattr(api_lane_control, "durable_run_generation", _broken)
+        response = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+
+        assert response.status_code == 503
+        assert "authority is unavailable" in response.json()["detail"]
+
+
+# -- the durable resume-spec read (NEXT-03) --------------------------------------
+
+
+class TestResumeSpecRead:
+    async def test_the_latest_resume_command_row_is_served_whatever_its_rung(
+        self, app, client, mailbox
+    ):
+        """The resume decision outlives the pending set: a resume command
+        ACKed all the way past ``authorized`` still answers with its
+        payload (the lane restores by the ROW, not the queue)."""
+        command = _cmd(
+            4,
+            kind="resume",
+            payload={
+                "checkpoint_ref": f"{WORK}@{'a' * 64}",
+                "checkpoint_sequence": 7,
+                "source_oid": "0" * 40,
+            },
+        )
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+        await mailbox.dispatch(
+            command.command_id, current_plan_revision=1, current_execution_epoch=1
+        )
+
+        response = await client.get(
+            "/lane/controls/resume-spec", params={"work_id": WORK}, headers=auth()
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["command"]["command_id"] == command.command_id
+        assert body["command"]["status"] == "dispatching"  # gone from pending
+        assert body["command"]["payload"]["checkpoint_ref"] == f"{WORK}@{'a' * 64}"
+        assert body["command"]["payload"]["checkpoint_sequence"] == 7
+
+    async def test_the_latest_of_several_resumes_wins(self, app, client, mailbox):
+        older = _cmd(1, kind="resume", payload={"checkpoint_ref": f"{WORK}@{'1' * 64}"})
+        newer = _cmd(2, kind="resume", payload={"checkpoint_ref": f"{WORK}@{'2' * 64}"})
+        await mailbox.submit(older)
+        await mailbox.submit(newer)
+
+        response = await client.get(
+            "/lane/controls/resume-spec", params={"work_id": WORK}, headers=auth()
+        )
+
+        assert response.json()["command"]["command_id"] == newer.command_id
+
+    async def test_no_resume_ever_answers_command_none(self, app, client, mailbox):
+        await mailbox.submit(_cmd(1))  # a steer, not a resume
+
+        response = await client.get(
+            "/lane/controls/resume-spec", params={"work_id": WORK}, headers=auth()
+        )
+
+        assert response.status_code == 200
+        assert response.json()["command"] is None
+
+    async def test_the_read_cannot_cross_works(self, app, client, mailbox):
+        await mailbox.submit(_cmd(1, kind="resume"))
+
+        response = await client.get(
+            "/lane/controls/resume-spec", params={"work_id": WORK}, headers=auth(OTHER_WORK)
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "lane token does not scope this work"

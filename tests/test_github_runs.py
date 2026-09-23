@@ -3353,6 +3353,255 @@ class TestPauseFenceIsDurableAcrossRestart:
 
 
 # ----------------------------------------------------------------------
+# NEXT-01/NEXT-02: the execution-identity chain — one attempt credential
+# per dispatch, conditional pause/resume authority transitions
+# ----------------------------------------------------------------------
+
+LANE_SECRET = "lane-secret-github"  # noqa: S105 — a fake shared secret for tests
+
+
+class TestAttemptScopedDispatchCredential:
+    """NEXT-01: the production dispatch mints the GENERATION-SCOPED lane
+    token — the same credential both lane APIs verify — and a retry that
+    opens a new attempt retires the previous dispatch's token."""
+
+    def _harness_settings(self) -> Settings:
+        return make_settings(
+            FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW,
+            FORGE_HARNESS_MODEL=HARNESS_MODEL,
+            FORGE_LANE_CONTROL_SECRET=LANE_SECRET,
+        )
+
+    async def test_the_dispatch_mints_a_generation_scoped_lane_token(self, db, fake):
+        from forge.api_lane_control import lane_control_token
+
+        service = make_service(db, fake, settings=self._harness_settings())
+        run_id = await start(service)
+        await go(service, run_id)
+
+        (dispatch,) = fake.dispatch_inputs
+        token = dispatch["inputs"]["lane_control_token"]
+        run = await get_run(db, run_id)
+        assert token
+        # scoped to the run's CURRENT durable attempt generation — exactly
+        # what both lane APIs verify
+        assert token == lane_control_token(
+            LANE_SECRET, run_id, generation=int(run.cancellation_generation)
+        )
+        # ...and NOT the legacy work-only derivation
+        assert token != lane_control_token(LANE_SECRET, run_id)
+
+    async def test_no_secret_configured_leaves_the_token_empty(self, db, fake):
+        service = make_service(db, fake, settings=self._harness_settings())
+        service._settings = make_settings(FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW)
+        run_id = await start(service)
+        await go(service, run_id)
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_control_token"] == ""
+
+    async def test_a_retry_opens_a_new_attempt_generation_and_retires_the_old_token(self, db, fake):
+        from forge.api_lane_control import lane_control_token
+
+        service = make_service(db, fake, settings=self._harness_settings())
+        run_id = await start(service)
+        await go(service, run_id)
+        (first,) = fake.dispatch_inputs
+        old_token = first["inputs"]["lane_control_token"]
+
+        # The attempt dies with a candidate on record (retryable shape).
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.FAILED.value
+            run.status_reason = "harness_start_failed: boom"
+            run.candidate_shas = ["c1"]
+            await session.commit()
+        fake.dispatch_inputs.clear()
+
+        await service.handle_retry(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/retry {run_id}",
+            author_username="alice",
+            delivery_id="retry-delivery-1",
+        )
+
+        run = await get_run(db, run_id)
+        assert int(run.cancellation_generation) == 1  # the new attempt's generation
+        (second,) = fake.dispatch_inputs
+        new_token = second["inputs"]["lane_control_token"]
+        assert new_token == lane_control_token(LANE_SECRET, run_id, generation=1)
+        assert new_token != old_token  # the dead attempt's credential is retired
+
+
+class TestConditionalFenceTransitions:
+    """NEXT-02: the fence's clear is a compare-and-swap; a cleared fence
+    still refuses candidates whose GRANT generation died with the resume."""
+
+    async def test_a_clear_with_a_stale_expected_epoch_fails_and_keeps_the_fence(self, db):
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=4)
+
+        cleared = await clear_pause_fence(db, "run-1", expected_publication_epoch=3)
+
+        assert cleared is False
+        assert (await pause_fence_decision(db, "run-1")).fenced is True
+
+    async def test_a_clear_with_the_expected_epoch_wins_once(self, db):
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=4)
+
+        first = await clear_pause_fence(db, "run-1", expected_publication_epoch=4)
+        replay = await clear_pause_fence(db, "run-1", expected_publication_epoch=4)
+
+        assert first is True
+        assert replay is False  # already cleared — one winner, ever
+        after = await pause_fence_decision(db, "run-1")
+        assert after.fenced is False
+        assert after.resumed_publication_epoch == 5  # bumped + 1, atomically
+
+    async def test_a_re_armed_pause_is_not_cleared_under_the_old_expectation(self, db):
+        """Resume raced a NEW pause: the re-armed fence's epoch differs from
+        the expectation the resume read — the CAS refuses, the new pause
+        stands."""
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=4)
+        await clear_pause_fence(db, "run-1", expected_publication_epoch=4)
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=5)  # pause after resume
+
+        stale_resume = await clear_pause_fence(db, "run-1", expected_publication_epoch=4)
+
+        assert stale_resume is False
+        assert (await pause_fence_decision(db, "run-1")).fenced is True
+
+    async def test_a_delayed_candidate_from_the_old_generation_stays_refused(self, db):
+        """The composed NEXT-02 chain, fence-leg only: pause at epoch 1 →
+        resume (resumed generation 2) → the retry aligns the run's own
+        generation to 2 → the gen-1 candidate is refused, the gen-2 one
+        publishes."""
+        async with db() as session:
+            session.add(FlowRun(id="run-1", project_id=1, provider="github"))
+            await session.commit()
+
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=1)  # pause at gen 1
+        await clear_pause_fence(db, "run-1")  # resume: generation 2
+
+        async with db() as session:
+            run = await session.get(FlowRun, "run-1")
+            run.cancellation_generation = 2  # the resume's re-dispatch aligned it
+            await session.commit()
+
+        stale = await pause_fence_decision(db, "run-1", expected_generation=1)
+        assert stale.fenced is True
+        assert stale.stale_generation == 1
+        assert "stale publication grant" in stale.reason
+
+        current = await pause_fence_decision(db, "run-1", expected_generation=2)
+        assert current.fenced is False
+
+    async def test_an_unaligned_resume_keeps_the_live_attempts_grants(self, db):
+        """A same-attempt steering resume (no new attempt dispatched, the
+        run's generation never moved): the cleared fence reopens
+        publication for the CONTINUING attempt — its claim is not renamed
+        by the resume."""
+        async with db() as session:
+            session.add(
+                FlowRun(id="run-1", project_id=1, provider="github", cancellation_generation=0)
+            )
+            await session.commit()
+
+        await raise_pause_fence(db, "run-1", publication_epoch_bumped=1)
+        await clear_pause_fence(db, "run-1")  # resumed epoch 2; run still at 0
+
+        decision = await pause_fence_decision(db, "run-1", expected_generation=0)
+
+        assert decision.fenced is False
+
+    async def test_the_publisher_refuses_the_old_attempts_candidate_and_publishes_the_new(
+        self, db, fake
+    ):
+        """The composed NEXT-02 chain through the REAL publisher: pause →
+        resume → retry (new attempt, generation aligned to the fence) → a
+        delayed candidate from the OLD attempt's claim is refused at the
+        pre-dispatch guard with the stale-grant reason and ZERO native
+        writes; the new attempt's candidate publishes."""
+        from forge.durable.claims import ExecutionClaim, bind_claim
+
+        service = make_service(
+            db,
+            fake,
+            settings=make_settings(
+                FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW,
+                FORGE_HARNESS_MODEL=HARNESS_MODEL,
+            ),
+        )
+        run_id = await start(service)
+        await go(service, run_id)
+
+        # The pause/resume pair: fence raised at epoch 1, cleared under 2.
+        await raise_pause_fence(db, run_id, publication_epoch_bumped=1)
+        await clear_pause_fence(db, run_id)
+
+        # The run dies with a candidate; /retry opens the new attempt —
+        # its generation aligned with (never below) the resumed epoch.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.FAILED.value
+            run.status_reason = "harness_start_failed: boom"
+            run.candidate_shas = ["c1"]
+            await session.commit()
+        await service.handle_retry(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/retry {run_id}",
+            author_username="alice",
+            delivery_id="retry-delivery-2",
+        )
+        assert int((await get_run(db, run_id)).cancellation_generation) == 2
+
+        def _changeset() -> ChangeSet:
+            return ChangeSet(
+                branch=github_factory_branch(ISSUE, run_id),
+                commit_message="stale grant probe",
+                changes=[
+                    Change(
+                        path="forge-demo/stale.py",
+                        operation=Operation.CREATE,
+                        content="VALUE = 1\n",
+                    )
+                ],
+            )
+
+        old_attempt_claim = ExecutionClaim(
+            step_id=1, attempt=1, owner="old-lane", fence_token=1, cancellation_generation=1
+        )
+        with bind_claim(old_attempt_claim):
+            refused = await service._publish_candidate_run_aware(
+                run_id,
+                issue_number=ISSUE,
+                changeset=_changeset(),
+                expected_head=BASE_HEAD,
+                operation_key="stale-probe",
+            )
+
+        assert refused.ok is False
+        assert "stale publication grant" in (refused.reason or "")
+        assert fake.calls_of("create_commit_on_branch") == []  # ZERO native writes
+
+        new_attempt_claim = ExecutionClaim(
+            step_id=2, attempt=2, owner="new-lane", fence_token=2, cancellation_generation=2
+        )
+        with bind_claim(new_attempt_claim):
+            published = await service._publish_candidate_run_aware(
+                run_id,
+                issue_number=ISSUE,
+                changeset=_changeset(),
+                expected_head=BASE_HEAD,
+                operation_key="fresh-probe",
+            )
+
+        assert published.ok is True
+        assert len(fake.calls_of("create_commit_on_branch")) == 1
+
+
+# ----------------------------------------------------------------------
 # R28-15: discovery and implementation on ONE immutable source set
 # ----------------------------------------------------------------------
 
