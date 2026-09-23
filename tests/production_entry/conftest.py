@@ -302,7 +302,10 @@ def _control_plane_app(session_factory, secret: str) -> FastAPI:
     from forge.api_lane_control import lane_control_router
 
     application = FastAPI()
-    application.state.settings = Settings(FORGE_LANE_CONTROL_SECRET=SecretStr(secret))
+    # The full required-field set via pe_settings — a bare Settings() here
+    # validated only where a developer .env happens to supply GITLAB_* (the
+    # CI bite: 3 missing-field errors in a clean environment).
+    application.state.settings = pe_settings(FORGE_LANE_CONTROL_SECRET=SecretStr(secret))
     application.state.session_factory = session_factory
     application.include_router(lane_control_router)
     application.include_router(checkpoint_channel_router)
