@@ -53,7 +53,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Final
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -121,6 +121,9 @@ from forge.adaptive.research_planner import (
     discovery_mode,
 )
 from forge.factory.planner import PLAN_SUMMARY_CHARS, PLANNER_TIER
+from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
+from forge.adaptive.admission import execution_capacity_comment
+from forge.adaptive.admission import lease_snapshot, release_run_leases, try_acquire_lease
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
 from forge.integrations.github import GitHubAPIError
 from forge.integrations.github_flow import (
@@ -330,6 +333,27 @@ _RESUMABLE_PUBLISH_STATUSES = frozenset(
 #: discovery answers (NOT a failure): the run re-enters planning through
 #: the fenced plan-restart edge once every question is answered.
 QUESTION_BLOCK_PREFIX = "waiting_question"
+
+#: R32-04: the WIP-continuity contract the DISPATCH selects for the lane
+#: (the workflow input ``lane_resume_mode`` — the lane receives it as
+#: ``FORGE_LANE_RESUME``). The three modes are DISTINCT product actions,
+#: never three combinations of accidentally absent env variables:
+#:
+#: - ``fresh`` — the initial dispatch: nothing restores accidentally; a
+#:   missing checkpoint (404) is normal for it;
+#: - ``required`` — retry/revival re-dispatch: the work CONTINUES, so the
+#:   pre-turn restore of the held checkpoint is REQUIRED (a failed
+#:   download halts the lane before any vendor session exists);
+#: - ``restart`` — the operator EXPLICITLY discards the held WIP and
+#:   re-implements: no download at all, the restore report says so.
+LANE_RESUME_MODES: frozenset[str] = frozenset({"fresh", "required", "restart"})
+LANE_RESUME_MODE_FRESH: Final = "fresh"
+LANE_RESUME_MODE_REQUIRED: Final = "required"
+LANE_RESUME_MODE_RESTART: Final = "restart"
+#: The workflow_dispatch input name carrying the selected mode (the
+#: shipped template declares it and maps it onto the driver step's
+#: ``FORGE_LANE_RESUME`` env).
+LANE_RESUME_MODE_INPUT: Final = "lane_resume_mode"
 
 
 class GitHubRunService:
@@ -1372,6 +1396,10 @@ class GitHubRunService:
                 issue_number=retry_issue_number,
                 repair_context=repair_context,
                 repair_reason=repair_reason,
+                # R32-04: the retry CONTINUES the work in place ("no
+                # re-planning" — the ack above) — the held checkpoint's
+                # restore is REQUIRED, never a silent start-over.
+                resume_mode=LANE_RESUME_MODE_REQUIRED,
             )
         except Exception as exc:
             await self._complete_action(action_id, "failed", {"error": str(exc)})
@@ -1608,7 +1636,16 @@ class GitHubRunService:
         if issue_number is None:
             logger.warning("GitHub revival of run %s without an issue — skipping", run_id[:8])
             return
-        await self._advance_harness(run_id, project_id=project_id, issue_number=issue_number)
+        await self._advance_harness(
+            run_id,
+            project_id=project_id,
+            issue_number=issue_number,
+            # R32-04: a revival re-opens a STALLED attempt — the same
+            # WIP-continuity contract as /retry: the held checkpoint's
+            # restore is REQUIRED (a resumed attempt never silently
+            # starts over on its base).
+            resume_mode=LANE_RESUME_MODE_REQUIRED,
+        )
 
     # ------------------------------------------------------------------
     # A13 config-block gate + reconciler recovery pass
@@ -2738,7 +2775,17 @@ class GitHubRunService:
         from live settings or a live issue re-read. A missing, tampered or
         legacy (v2) spec parks the run (``spec_invalid`` / ``spec_legacy``),
         never a silent fallback.
+
+        NEXT-11/R32-05: this is the dispatch boundary — the execution
+        lease is reserved here (idempotently per run), so no path that
+        reaches execution (``/go``, ``/retry``, the reconciler's re-drive)
+        can bypass the project's slot limit — the same choke point the
+        Azure path crosses.
         """
+        if not await self._reserve_execution_capacity(
+            run_id, project_id=project_id, issue_number=issue_number
+        ):
+            return
         spec = await self._spec_or_block(run_id)
         if spec is None:
             return
@@ -3058,6 +3105,7 @@ class GitHubRunService:
         driver: str | None = None,
         repair_context: str = "",
         repair_reason: str | None = None,
+        resume_mode: str = LANE_RESUME_MODE_FRESH,
     ) -> None:
         """Dispatch the harness workflow and park the run in ``waiting_harness``.
 
@@ -3079,7 +3127,30 @@ class GitHubRunService:
         selection for a fallback advance. Called for a fallback the run is
         already ``waiting_harness`` — it stays parked, only the handle moves
         (ADR-0004 has no waiting_harness self-loop).
+
+        R32-04: *resume_mode* is the WIP-continuity contract the dispatch
+        SELECTS for the lane (the ``lane_resume_mode`` workflow input; the
+        shipped template maps it onto the driver step's
+        ``FORGE_LANE_RESUME`` env). ``fresh`` (the default — the initial
+        dispatch and a repair cycle that re-implements from the attempt
+        base) restores nothing accidentally; ``required`` (``/retry``, the
+        revival recovery scan) makes the held checkpoint's restore a
+        precondition of the turn; ``restart`` is the operator's explicit
+        discard of the held WIP.
         """
+        if resume_mode not in LANE_RESUME_MODES:
+            raise ValueError(
+                f"resume_mode must be one of {sorted(LANE_RESUME_MODES)}, got {resume_mode!r}"
+            )
+        # NEXT-11/R32-05: the lane dispatch is a dispatch boundary too — the
+        # ``/retry`` revival, the recovery scan's re-drive and a repair
+        # re-dispatch all reach this leg directly, so the execution lease is
+        # (idempotently) reserved here as well; none of them can bypass the
+        # slot limit.
+        if not await self._reserve_execution_capacity(
+            run_id, project_id=project_id, issue_number=issue_number
+        ):
+            return
         # R13: dispatch-time budget gate (partial enforcement — episode count
         # and wall clock are the axes this lane can honestly enforce).
         block = await self._budget_episode_block(run_id)
@@ -3179,6 +3250,13 @@ class GitHubRunService:
                     # legacy replay → the lane's loud unenforced fallback.
                     "envelope_digest": envelope_digest,
                     "spec_digest": spec_digest,
+                    # R32-04: the WIP-continuity contract THIS dispatch
+                    # selected (fresh | required | restart) — the shipped
+                    # workflow template maps it onto the driver step's
+                    # FORGE_LANE_RESUME env, so the lane's resume behavior
+                    # arrives from the DISPATCH, not from lane-side env
+                    # setup only tests happened to perform.
+                    LANE_RESUME_MODE_INPUT: resume_mode,
                     # Bounded verification-failure context (check names +
                     # reason) on a repair re-dispatch; cycle 1 dispatches
                     # the same shape as always.
@@ -4758,6 +4836,10 @@ class GitHubRunService:
             controller = Controller(session)
             await controller.transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
             await session.commit()
+        # NEXT-11/R32-05: ready_for_human is terminal — the run's execution
+        # slot returns to the project here (idempotent; the lazy reclaim at
+        # the next acquire is the backstop for anything that slips past).
+        await self._release_execution_lease(run_id, "terminal:ready_for_human")
         logger.info("GitHub run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
 
     async def _observed_candidate_head(
@@ -5436,10 +5518,100 @@ class GitHubRunService:
     async def _transition_in_session(
         self, session: AsyncSession, run_id: str, status: FlowStatus, reason: str | None = None
     ) -> None:
-        """One transition inside the caller's open session (committed here)."""
+        """One transition inside the caller's open session (committed here).
+
+        NEXT-11/R32-05: a TERMINAL transition frees the run's execution
+        lease in the same breath — the slot is held from dispatch until
+        terminal status, and the terminal landing is the single moment it
+        must return (the same contract the Azure path enforces). A worker
+        that dies before any terminal transition leaks only until the
+        next dispatch in the project reclaims the lease of a terminal run.
+        """
         controller = Controller(session)
         await controller.transition(run_id, status, reason=reason)
         await session.commit()
+        if status in TERMINAL_STATUSES:
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
+
+    async def _release_execution_lease(self, run_id: str, reason: str) -> None:
+        """Free the run's execution slot (idempotent; no lease = no-op)."""
+        released = await release_run_leases(self._session_factory, run_id, reason=reason)
+        if released:
+            logger.info(
+                "GitHub run %s released %d execution lease(s): %s",
+                run_id[:8],
+                released,
+                reason,
+            )
+
+    async def _reserve_execution_capacity(
+        self, run_id: str, *, project_id: int, issue_number: int
+    ) -> bool:
+        """NEXT-11/R32-05: take the execution lease at DISPATCH — or park honestly.
+
+        The single choke point every GitHub dispatch leg crosses (``/go``,
+        the ``/retry`` revival, a repair re-dispatch, the recovery scan's
+        re-drive): a durable CAS insert reserves one of the project's
+        execution slots, idempotent per run, held until the terminal
+        transition releases it. Queue admission counted ACTIVE runs at
+        ``/implement`` time — four approved tasks could otherwise all
+        activate together, exactly as on Azure. A dispatch that cannot
+        reserve parks the run ``blocked(execution_capacity)`` with the
+        capacity snapshot in its evidence and an issue comment carrying
+        the precise next action — a queued state with a reason, never
+        work an observer must later stop, and never a repair-budget
+        consumer. Returns whether the dispatch may run.
+        """
+        policy = FairUsePolicy.from_env()
+        lease = await try_acquire_lease(
+            policy, project_id, self._session_factory, run_id=run_id, provider="github"
+        )
+        if lease is not None:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "execution_lease": {
+                        "check": "execution_lease",
+                        "acquired": True,
+                        "lease_id": lease.lease_id,
+                        "slot": lease.slot,
+                    }
+                },
+            )
+            return True
+        snapshot = await lease_snapshot(
+            policy, project_id, self._session_factory, provider="github"
+        )
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "execution_lease": {
+                    "check": "execution_lease",
+                    "acquired": False,
+                    "capacity": snapshot,
+                }
+            },
+        )
+        await self._to_terminal(
+            run_id,
+            FlowStatus.BLOCKED,
+            "execution_capacity: no execution slot free in this project — "
+            "retry once the running work drains",
+        )
+        await self._post_journaled_note(
+            project_id,
+            issue_number,
+            execution_capacity_comment(run_id, snapshot),
+            run_id,
+            "execution_capacity",
+        )
+        logger.warning(
+            "GitHub run %s parked blocked(execution_capacity) — %s of %s slots held",
+            run_id[:8],
+            snapshot.get("held"),
+            snapshot.get("limit"),
+        )
+        return False
 
     async def _transition(self, run_id: str, status: FlowStatus, reason: str | None = None) -> None:
         async with self._session_factory() as session:
@@ -5451,8 +5623,11 @@ class GitHubRunService:
         Mirrors the GitLab service: a ``failed`` terminalization is classified
         first (Tier-1 revival) — transient causes schedule a bounded
         auto-revive, fatal ones park ``blocked`` with the precise reason.
+        The execution lease frees either way (NEXT-11): directly here, or
+        through the terminal state the revival machinery parks the run in.
         """
         if status is FlowStatus.FAILED:
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
             await terminalize_failure(
                 self._session_factory, self._settings, run_id, reason=reason, log=logger
             )

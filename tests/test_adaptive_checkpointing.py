@@ -116,6 +116,21 @@ def _backdate_store(store_root: Path, age_s: int = 7200) -> None:
                 os.utime(artifact, (stamp, stamp))
 
 
+def _store_with(
+    tmp_path: Path, manifest: dict, blobs: dict[str, bytes]
+) -> tuple[ContentAddressedStore, str]:
+    """A store carrying *manifest* plus *blobs*, and the manifest's address."""
+    store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+    for data in blobs.values():
+        store.put(data)
+    return store, store.put(json.dumps(manifest).encode(), content_type="application/json")
+
+
+def _generation_of(target: Path, artifact_id: str) -> Path:
+    """The sibling generation path *artifact_id* restores into (R32-01)."""
+    return target.parent / f".forge-workspace-gen-{artifact_id[:12]}"
+
+
 class TestCaptureTransaction:
     def test_capture_uploads_blobs_and_commits_a_verified_manifest(self, tmp_path: Path):
         tree, store, receipt = _capture(tmp_path)
@@ -541,7 +556,7 @@ class TestTransactionalRestoreSafety:
         for rel in reserved:
             assert rel in joined, f"{rel} must be named in the refusal"
         assert ".git namespace" in joined
-        assert "checkpoint store itself" in joined
+        assert "restore-owned" in joined  # the .forge/checkpoints store is refused
         assert "credential-shaped" in joined
         assert not (target / ".git" / "config").exists()
         assert not (target / "deploy.pem").exists()
@@ -705,12 +720,25 @@ class TestPromotionTransaction:
         (target / "untracked.txt").write_bytes(b"rides along\n")
         return target
 
-    def _restore(self, tmp_path: Path, target: Path, manifest: dict, blobs: dict) -> object:
-        store = ContentAddressedStore(tmp_path / "store", tenant=TENANT)
-        for data in blobs.values():
-            store.put(data)
-        artifact_id = store.put(json.dumps(manifest).encode(), content_type="application/json")
-        return restore_wip(artifact_id=artifact_id, store=store, target=target, principal=TENANT)
+    def _restore(
+        self,
+        tmp_path: Path,
+        target: Path,
+        manifest: dict,
+        blobs: dict,
+        *,
+        work_id: str = WORK_ID,
+        promote: str = "switch",
+    ) -> object:
+        store, artifact_id = _store_with(tmp_path, manifest, blobs)
+        return restore_wip(
+            artifact_id=artifact_id,
+            store=store,
+            target=target,
+            principal=TENANT,
+            work_id=work_id,
+            promote=promote,
+        )
 
     def test_the_whole_tree_switch_promotes_everything_or_nothing(self, tmp_path: Path):
         """The happy path: modified files, the deletion AND the untouched
@@ -824,20 +852,30 @@ class TestPromotionTransaction:
         self, tmp_path: Path
     ):
         """The kill-midway trace, simulated at the exact crash point: the
-        original generation is parked beside a MISSING target. The next
-        restore identifies it, rolls the original back FIRST, and only
-        then proceeds — the report's ``recovery`` carries the evidence."""
+        original generation is parked under an OWNED backup name (R32-02 —
+        the work id binds it) beside a MISSING target. The next restore of
+        the SAME work identifies it, rolls the original back FIRST, and
+        only then proceeds — the report's ``recovery`` carries the
+        evidence."""
         target = self._prepared_target(tmp_path)
         manifest, blobs = self._two_files_one_deletion()
+        store, artifact_id = _store_with(tmp_path, manifest, blobs)
 
         # The crash state: the switch died between its two renames.
-        parked = target.parent / ".forge-restore-backup-9999-deadbeef"
+        parked = target.parent / f".forge-restore-backup-{WORK_ID}-{artifact_id[:8]}-9999-deadbeef"
         os.replace(target, parked)
-        (target.parent / ".forge-restore-stale-staging").mkdir()
-        (target.parent / ".forge-restore-stale-staging" / "tree").mkdir()
+        stale = target.parent / f".forge-restore-{WORK_ID}-p3jx_1k9"
+        stale.mkdir()
+        (stale / "tree").mkdir()
         assert not target.exists()  # explicitly unusable, never mixed
 
-        report = self._restore(tmp_path, target, manifest, blobs)
+        report = restore_wip(
+            artifact_id=artifact_id,
+            store=store,
+            target=target,
+            principal=TENANT,
+            work_id=WORK_ID,
+        )
 
         assert report.ok is True
         assert report.phase == "completed"
@@ -855,14 +893,16 @@ class TestPromotionTransaction:
         the cleanup died. The next restore keeps the promoted generation
         and discards the parked copy — no rollback of good work."""
         target = self._prepared_target(tmp_path)
+        manifest, blobs = self._two_files_one_deletion()
+        store, artifact_id = _store_with(tmp_path, manifest, blobs)
         (target / "a.txt").write_bytes(self.NEW_A)  # an earlier promotion landed
-        parked = target.parent / ".forge-restore-backup-7777-cafe"
+        parked = target.parent / f".forge-restore-backup-{WORK_ID}-{artifact_id[:8]}-7777-cafe"
         parked.mkdir()
         (parked / "a.txt").write_bytes(self.ORIG_A)
 
-        report = self._restore(
-            tmp_path, target, *self._two_files_one_deletion()
-        )  # a fresh, unrelated restore
+        report = restore_wip(
+            artifact_id=artifact_id, store=store, target=target, principal=TENANT, work_id=WORK_ID
+        )  # a fresh, unrelated restore of the same work/checkpoint
 
         assert report.ok is True
         assert any("discarded abandoned backup" in note for note in report.recovery)
@@ -906,7 +946,7 @@ class TestPromotionTransaction:
         manifest, blobs = self._two_files_one_deletion()
         inside = target / ".forge"
 
-        def inside_staging(t: Path) -> tuple[Path, bool]:
+        def inside_staging(t: Path, work_id: str = "") -> tuple[Path, bool]:
             inside.mkdir(parents=True, exist_ok=True)
             import tempfile as _tempfile
 
@@ -948,7 +988,7 @@ class TestPromotionTransaction:
         manifest, blobs = self._two_files_one_deletion()
         inside = target / ".forge"
 
-        def inside_staging(t: Path) -> tuple[Path, bool]:
+        def inside_staging(t: Path, work_id: str = "") -> tuple[Path, bool]:
             inside.mkdir(parents=True, exist_ok=True)
             import tempfile as _tempfile
 
@@ -984,7 +1024,7 @@ class TestPromotionTransaction:
         manifest, blobs = self._two_files_one_deletion()
         inside = target / ".forge"
 
-        def inside_staging(t: Path) -> tuple[Path, bool]:
+        def inside_staging(t: Path, work_id: str = "") -> tuple[Path, bool]:
             inside.mkdir(parents=True, exist_ok=True)
             import tempfile as _tempfile
 
@@ -1000,6 +1040,444 @@ class TestPromotionTransaction:
         assert (target / "b.txt").read_bytes() == self.NEW_B
         assert not (target / "doomed.txt").exists()
         assert (target / "untracked.txt").read_bytes() == b"rides along\n"
+
+
+class TestGenerationPromotion:
+    """R32-01: a restore whose caller sits INSIDE the target (the lane, at
+    ``Path.cwd()``) must never rename or remove that directory — the
+    reviewer's P03 proved the whole-tree switch leaves the process in a
+    deleted directory and strands the parent CI shell. The contract
+    pinned here: the staged tree lands as a SIBLING
+    ``.forge-workspace-gen-<checkpoint[:12]>`` generation, the original
+    target keeps its bytes, the target's ``.forge/workspace-generation``
+    POINTER names the active generation for the collector step, and the
+    report carries the landed path — while every crash/failure boundary
+    still leaves either the untouched checkout or a named, recoverable
+    state, never a mixed tree."""
+
+    NOTES = b"checkpointed notes\n"
+    APP_V1 = b'print("v1")\n'
+    APP_V2 = b'print("v2")\n'
+
+    @staticmethod
+    def _checkout(tmp_path: Path) -> Path:
+        target = tmp_path / "lane-checkout"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "app.py").write_bytes(TestGenerationPromotion.APP_V1)
+        return target
+
+    @staticmethod
+    def _artifact(
+        tmp_path: Path, files: dict[str, tuple[bytes, int]] | None = None, work_id: str = WORK_ID
+    ) -> tuple[ContentAddressedStore, str]:
+        files = files or {
+            "notes.md": (TestGenerationPromotion.NOTES, 0o644),
+            "src/app.py": (TestGenerationPromotion.APP_V2, 0o644),
+        }
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "work_id": work_id,
+            "sequence": 0,
+            "source_oids": {},
+            "files": {
+                rel: {"digest": _digest(data), "mode": mode, "role": "new"}
+                for rel, (data, mode) in files.items()
+            },
+            "deletions": [],
+        }
+        blobs = {_digest(data): data for _rel, (data, _mode) in files.items()}
+        return _store_with(tmp_path, manifest, blobs)
+
+    def _restore(
+        self, tmp_path: Path, target: Path, artifact_id: str, store: ContentAddressedStore
+    ) -> object:
+        return restore_wip(
+            artifact_id=artifact_id,
+            store=store,
+            target=target,
+            principal=TENANT,
+            work_id=WORK_ID,
+            promote="generation",
+        )
+
+    def test_the_generation_lands_beside_the_untouched_checkout(self, tmp_path: Path):
+        target = self._checkout(tmp_path)
+        store, artifact_id = self._artifact(tmp_path)
+
+        report = self._restore(tmp_path, target, artifact_id, store)
+
+        assert report.ok is True, report.failures
+        assert report.phase == "completed"
+        generation = Path(report.workspace_generation)
+        assert generation == _generation_of(target, artifact_id)
+        assert generation.is_dir()
+        # The restored WIP lives in the GENERATION...
+        assert (generation / "src" / "app.py").read_bytes() == self.APP_V2
+        assert (generation / "notes.md").read_bytes() == self.NOTES
+        # ...while the checkout the process sits in keeps its ORIGINAL bytes.
+        assert (target / "src" / "app.py").read_bytes() == self.APP_V1
+        assert not (target / "notes.md").exists()
+        # The collector contract: the checkout's pointer names the ACTIVE
+        # generation; the generation describes itself with the same record.
+        pointer = json.loads((target / ".forge" / "workspace-generation").read_text())
+        assert pointer["schema"] == "forge.workspace-generation/1"
+        assert pointer["work_id"] == WORK_ID
+        assert pointer["checkpoint_id"] == artifact_id
+        assert pointer["generation"] == generation.name
+        assert pointer["generation_path"] == str(generation)
+        self_pointer = json.loads((generation / ".forge" / "workspace-generation").read_text())
+        assert self_pointer["generation"] == generation.name
+        # No promotion leftovers beside the workspace.
+        assert list(target.parent.glob(".forge-restore-*")) == []
+
+    def test_a_subprocess_restoring_into_its_own_cwd_stays_usable(self, tmp_path: Path):
+        """The reviewer's P03, inverted: a REAL subprocess sits inside the
+        workspace, runs the production restore entry point against
+        ``Path.cwd()``, and afterwards still resolves ``os.getcwd()`` and
+        writes a RELATIVE file. The old whole-tree switch left both as
+        FileNotFoundError once the parked original was deleted."""
+        import subprocess
+        import sys
+
+        target = self._checkout(tmp_path)
+        store, artifact_id = self._artifact(tmp_path)
+        script = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "os.chdir(sys.argv[1])  # the lane's posture: INSIDE the workspace\n"
+            "from forge.adaptive.artifact_store import ContentAddressedStore\n"
+            "from forge.adaptive.checkpointing import restore_wip\n"
+            "report = restore_wip(\n"
+            "    artifact_id=sys.argv[3],\n"
+            "    store=ContentAddressedStore(Path(sys.argv[2]), tenant=sys.argv[5]),\n"
+            "    target=Path.cwd(),\n"
+            "    principal=sys.argv[5],\n"
+            "    work_id=sys.argv[4],\n"
+            "    promote='generation',\n"
+            ")\n"
+            "assert report.ok, report.failures\n"
+            "Path('relative-note.txt').write_text('relative write after restore\\n')\n"
+            "pointer = json.loads(Path('.forge/workspace-generation').read_text())\n"
+            "print(json.dumps({\n"
+            "    'cwd': os.getcwd(),\n"
+            "    'reported': report.workspace_generation,\n"
+            "    'relative_write': Path('relative-note.txt').read_text(),\n"
+            "    'pointer': pointer,\n"
+            "}))\n"
+        )
+        import forge
+
+        env = dict(os.environ, PYTHONPATH=str(Path(forge.__file__).resolve().parent.parent))
+        result = subprocess.run(  # noqa: S603 — the fixture script above, fixed argv
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(target),
+                str(tmp_path / "store"),
+                artifact_id,
+                WORK_ID,
+                TENANT,
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+
+        payload = json.loads(result.stdout)
+        generation = _generation_of(target, artifact_id)
+        # The subprocess's directory was never replaced: getcwd RESOLVES (the
+        # old defect raised FileNotFoundError) and the relative write landed.
+        assert payload["cwd"] == str(target)
+        assert payload["relative_write"] == "relative write after restore\n"
+        assert (target / "relative-note.txt").read_text() == "relative write after restore\n"
+        # The restored WIP lives one directory up, and the report/pointer agree.
+        assert payload["reported"] == str(generation)
+        assert (generation / "notes.md").read_bytes() == self.NOTES
+        assert payload["pointer"]["generation"] == generation.name
+        assert (target / "src" / "app.py").read_bytes() == self.APP_V1  # base untouched
+
+    def test_re_restoring_the_same_checkpoint_replaces_its_generation(self, tmp_path: Path):
+        target = self._checkout(tmp_path)
+        store, artifact_id = self._artifact(tmp_path)
+
+        first = self._restore(tmp_path, target, artifact_id, store)
+        assert first.ok is True
+        generation = Path(first.workspace_generation)
+        (generation / "stale-artifact.txt").write_bytes(b"stale from the first attempt\n")
+
+        # A retry (a new process on the same runner): a FRESH store instance.
+        retried = self._restore(
+            tmp_path, target, artifact_id, ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        )
+
+        assert retried.ok is True, retried.failures
+        assert retried.workspace_generation == str(generation)  # same stable path
+        assert not (generation / "stale-artifact.txt").exists()  # replaced, never merged
+        assert (generation / "notes.md").read_bytes() == self.NOTES
+        assert (target / "src" / "app.py").read_bytes() == self.APP_V1
+        assert list(target.parent.glob(".forge-restore-*")) == []  # the retired gen was collected
+
+    def test_a_failed_landing_rolls_the_retired_generation_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Failure at the generation landing boundary with a PREVIOUS
+        generation in place: the retired generation is rolled back byte
+        for byte, the checkout never feels anything, and the report says
+        promotion_failed with no generation claimed."""
+        target = self._checkout(tmp_path)
+        store, artifact_id = self._artifact(tmp_path)
+        first = self._restore(tmp_path, target, artifact_id, store)
+        generation = Path(first.workspace_generation)
+        resumed_work = b"mutated by the resumed agent\n"
+        (generation / "notes.md").write_bytes(resumed_work)
+
+        real_replace = os.replace
+        landed = {"n": 0}
+
+        def failing_landing(src, dst):
+            if dst == generation:
+                landed["n"] += 1
+                if landed["n"] == 1:  # tree->generation; the rollback is next
+                    raise OSError("injected: the landing rename fails")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", failing_landing)
+        failed = self._restore(
+            tmp_path, target, artifact_id, ContentAddressedStore(tmp_path / "store", tenant=TENANT)
+        )
+
+        assert failed.ok is False
+        assert failed.phase == "promotion_failed"
+        assert failed.target_invalid is False
+        assert failed.workspace_generation == ""
+        assert {item.outcome for item in failed.files} == {"failed"}
+        # The retired generation returned byte-identical; the checkout untouched.
+        assert (generation / "notes.md").read_bytes() == resumed_work
+        assert (target / "src" / "app.py").read_bytes() == self.APP_V1
+        assert list(target.parent.glob(".forge-restore-*")) == []
+
+    def test_a_read_only_parent_is_a_typed_refusal_in_generation_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The degraded in-target staging fallback REWRITES the live target
+        per-file — exactly what the generation mode exists not to do. A
+        parent that cannot host the staging directory is refused with a
+        typed promotion failure, never silently downgraded."""
+        import forge.adaptive.checkpointing as cp
+
+        target = self._checkout(tmp_path)
+        store, artifact_id = self._artifact(tmp_path)
+        inside = target / ".forge"
+
+        def inside_staging(t: Path, work_id: str = "") -> tuple[Path, bool]:
+            inside.mkdir(parents=True, exist_ok=True)
+            import tempfile as _tempfile
+
+            return Path(_tempfile.mkdtemp(dir=inside, prefix="restore-")), False
+
+        monkeypatch.setattr(cp, "_staging_dir", inside_staging)
+
+        report = self._restore(tmp_path, target, artifact_id, store)
+
+        assert report.ok is False
+        assert report.phase == "promotion_failed"
+        assert report.target_invalid is False
+        assert any("requires a staging directory BESIDE" in f for f in report.failures)
+        assert (target / "src" / "app.py").read_bytes() == self.APP_V1  # never rewritten
+        assert not (target / "notes.md").exists()
+        assert report.workspace_generation == ""
+
+    def test_a_manifest_cannot_forge_the_generation_pointer(self, tmp_path: Path):
+        """The pointer is restore-owned infrastructure: a checkpoint that
+        carries its own ``.forge/workspace-generation`` is refused at
+        preflight — it must not redirect where the parent shell resolves
+        the active workspace."""
+        target = self._checkout(tmp_path)
+        forged = {".forge/workspace-generation": (b'{"schema": "evil"}\n', 0o644)}
+        store, artifact_id = self._artifact(tmp_path, files=forged)
+
+        report = self._restore(tmp_path, target, artifact_id, store)
+
+        assert report.ok is False
+        assert report.phase == "preflight_failed"
+        assert any(".forge/workspace-generation" in failure for failure in report.failures)
+        assert not (target / ".forge" / "workspace-generation").exists()
+        assert not _generation_of(target, artifact_id).exists()
+
+
+class TestOwnershipScopedRecovery:
+    """R32-02: recovery assets under a SHARED parent (two workspaces side
+    by side) are bound to their owning work by NAME. Recovery for
+    workspace A touches only A's own leftovers; B's backups and staging
+    directories are inventoried as ``unrecognized`` and left
+    byte-identical — never claimed, never deleted. Legacy pre-ownership
+    names carry no binding at all and are inventory-only too."""
+
+    A_ORIG = b"A original\n"
+    B_ORIG = b"B original\n"
+    A_WIP = b"A checkpointed\n"
+
+    @staticmethod
+    def _workspaces(tmp_path: Path) -> tuple[Path, Path, Path]:
+        parent = tmp_path / "shared-parent"
+        ws_a = parent / "workspace-a"
+        ws_b = parent / "workspace-b"
+        ws_a.mkdir(parents=True)
+        ws_b.mkdir()
+        (ws_a / "a.txt").write_bytes(TestOwnershipScopedRecovery.A_ORIG)
+        (ws_b / "b.txt").write_bytes(TestOwnershipScopedRecovery.B_ORIG)
+        return parent, ws_a, ws_b
+
+    @staticmethod
+    def _artifact_for_a(tmp_path: Path) -> tuple[ContentAddressedStore, str]:
+        return TestGenerationPromotion._artifact(
+            tmp_path,
+            files={"a.txt": (TestOwnershipScopedRecovery.A_WIP, 0o644)},
+            work_id="workspace-a",
+        )
+
+    @staticmethod
+    def _restore_a(store: ContentAddressedStore, artifact_id: str, ws_a: Path) -> object:
+        return restore_wip(
+            artifact_id=artifact_id,
+            store=store,
+            target=ws_a,
+            principal=TENANT,
+            work_id="workspace-a",
+        )
+
+    def test_recovery_never_touches_a_sibling_workspaces_backup(self, tmp_path: Path):
+        """The reviewer's P04: B's interrupted promotion parked B's original
+        under B's OWNED name with B's target missing. A's restore must not
+        roll B's backup into B (or anywhere), delete it, or leave it
+        unreported."""
+        _parent, ws_a, ws_b = self._workspaces(tmp_path)
+        store, artifact_id = self._artifact_for_a(tmp_path)
+        # B crashed between its own promotion's two renames (a DIFFERENT
+        # checkpoint, B's own owned names).
+        b_backup = ws_b.parent / f".forge-restore-backup-workspace-b-{'b' * 8}-4242-{'c' * 8}"
+        os.replace(ws_b, b_backup)
+        b_staging = ws_b.parent / ".forge-restore-workspace-b-9kmqx7t"
+        b_staging.mkdir()
+        (b_staging / "tree").mkdir()
+        assert not ws_b.exists()
+
+        report = self._restore_a(store, artifact_id, ws_a)
+
+        assert report.ok is True, report.failures
+        # B's backup: byte-identical, untouched, and REPORTED as not ours.
+        assert (b_backup / "b.txt").read_bytes() == self.B_ORIG
+        assert any(entry.startswith(b_backup.name) for entry in report.unrecognized)
+        assert any(entry.startswith(b_staging.name) for entry in report.unrecognized)
+        assert not ws_b.exists()  # A never resurrected B's workspace
+        # A's own promotion worked and left nothing of ITS own behind.
+        assert (ws_a / "a.txt").read_bytes() == self.A_WIP
+        leftovers = {p.name for p in ws_a.parent.glob(".forge-restore-*")}
+        assert leftovers == {b_backup.name, b_staging.name}
+
+    def test_recovery_resolves_this_works_own_backup_only(self, tmp_path: Path):
+        """The positive side of the scoping: A's OWN parked backup (same
+        work, same checkpoint) is rolled back before A's restore builds
+        its next generation on top."""
+        _parent, ws_a, _ws_b = self._workspaces(tmp_path)
+        store, artifact_id = self._artifact_for_a(tmp_path)
+        a_backup = (
+            ws_a.parent / f".forge-restore-backup-workspace-a-{artifact_id[:8]}-1111-aaaa1111"
+        )
+        os.replace(ws_a, a_backup)
+        assert not ws_a.exists()
+
+        report = self._restore_a(store, artifact_id, ws_a)
+
+        assert report.ok is True, report.failures
+        assert any("rolled back abandoned backup" in note for note in report.recovery)
+        # The rolled-back original (role=modified) then took the
+        # checkpoint's content — A's WIP survived the crash.
+        assert (ws_a / "a.txt").read_bytes() == self.A_WIP
+        assert not a_backup.exists()
+
+    def test_recovery_collects_only_owned_staging_directories(self, tmp_path: Path):
+        _parent, ws_a, _ws_b = self._workspaces(tmp_path)
+        store, artifact_id = self._artifact_for_a(tmp_path)
+        a_staging = ws_a.parent / ".forge-restore-workspace-a-4tq8dz3"
+        b_staging = ws_a.parent / ".forge-restore-workspace-b-p1nw6v2"
+        for staged in (a_staging, b_staging):
+            staged.mkdir()
+            (staged / "tree").mkdir()
+
+        report = self._restore_a(store, artifact_id, ws_a)
+
+        assert report.ok is True, report.failures
+        assert not a_staging.exists()  # OWNED: collected
+        assert any("collected abandoned staging" in note for note in report.recovery)
+        assert b_staging.is_dir()  # NOT ours: untouched and inventoried
+        assert any(entry.startswith(b_staging.name) for entry in report.unrecognized)
+
+    def test_legacy_unowned_leftovers_are_inventoried_never_acted_on(self, tmp_path: Path):
+        """A pre-R32-02 lane's crash leftovers carry no work binding at all:
+        even A's OWN earlier crash, parked under a legacy name, is not
+        guessed at — the restore proceeds on the missing-target branch and
+        the parked original waits for the operator."""
+        _parent, ws_a, _ws_b = self._workspaces(tmp_path)
+        store, artifact_id = self._artifact_for_a(tmp_path)
+        legacy_backup = ws_a.parent / ".forge-restore-backup-9999-deadbeef"
+        os.replace(ws_a, legacy_backup)
+        legacy_staging = ws_a.parent / ".forge-restore-oldformat"
+        legacy_staging.mkdir()
+        assert not ws_a.exists()
+
+        report = self._restore_a(store, artifact_id, ws_a)
+
+        assert report.ok is True  # the restore itself rebuilt the workspace
+        assert report.recovery == ()  # …but ZERO recovery actions were taken
+        assert len(report.unrecognized) == 2
+        assert any(entry.startswith(legacy_backup.name) for entry in report.unrecognized)
+        assert any(entry.startswith(legacy_staging.name) for entry in report.unrecognized)
+        assert (legacy_backup / "a.txt").read_bytes() == self.A_ORIG  # untouched
+        assert legacy_staging.is_dir()
+        # The rebuilt workspace came from the checkpoint alone (fresh runner
+        # posture): the checkpointed file landed on a clean tree.
+        assert (ws_a / "a.txt").read_bytes() == self.A_WIP
+
+    def test_a_crashed_generation_promotion_is_resumed_by_the_same_work(self, tmp_path: Path):
+        """The generation mode's crash window: the retry died between
+        retiring the previous generation and landing the new one. The next
+        restore of the SAME work and checkpoint rolls the parked generation
+        back into its stable path and re-promotes from there."""
+        target = TestGenerationPromotion._checkout(tmp_path)
+        store, artifact_id = TestGenerationPromotion._artifact(
+            tmp_path,
+            files={"notes.md": (TestGenerationPromotion.NOTES, 0o644)},
+            work_id="workspace-a",
+        )
+        generation = _generation_of(target, artifact_id)
+        generation.mkdir()
+        (generation / "notes.md").write_bytes(b"the resumed agent's work\n")
+        parked = (
+            target.parent / f".forge-restore-backup-workspace-a-{artifact_id[:8]}-3131-bbbb2222"
+        )
+        os.replace(generation, parked)
+        assert not generation.exists()
+
+        report = restore_wip(
+            artifact_id=artifact_id,
+            store=store,
+            target=target,
+            principal=TENANT,
+            work_id="workspace-a",
+            promote="generation",
+        )
+
+        assert report.ok is True, report.failures
+        assert any("rolled back abandoned backup" in note for note in report.recovery)
+        assert not parked.exists()
+        # The rolled-back generation served as the base the plan applied to.
+        assert (generation / "notes.md").read_bytes() == TestGenerationPromotion.NOTES
+        assert report.workspace_generation == str(generation)
+        assert list(target.parent.glob(".forge-restore-*")) == []
 
 
 class TestBoundedCaptureScope:

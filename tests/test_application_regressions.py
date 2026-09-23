@@ -590,6 +590,14 @@ def _resume_command_row(seq: int, checkpoint_id: str) -> dict:
 
 
 class TestG04ExactResumeSurvivesAckAndNewerUpload:
+    @staticmethod
+    def _active_generation(checkout: Path) -> Path:
+        """The workspace generation the restore pointer names (R32-01): the
+        lane's restored bytes live in a SIBLING generation, never in the
+        checkout the process sits in."""
+        pointer = json.loads((checkout / ".forge" / "workspace-generation").read_text())
+        return checkout.parent / pointer["generation"]
+
     @pytest.fixture()
     def captures(self, tmp_path: Path):
         """Checkpoint A (approved resume point, sequence 10) and checkpoint
@@ -657,8 +665,13 @@ class TestG04ExactResumeSurvivesAckAndNewerUpload:
         assert report["checkpoint_selection"] == "exact"
         assert report["checkpoint_sequence"] == 10
         assert report["checkpoint_ref"] == format_checkpoint_ref(WORK_ID, checkpoint_a.artifact_id)
-        # A's bytes — never B's — landed on the fresh runner.
-        assert (lane_cwd / "src" / "app.py").read_bytes() == b'print("v2 - approved")\n'
+        # A's bytes — never B's — landed in the ACTIVE workspace GENERATION
+        # beside the checkout (R32-01: the lane never rewrites its own cwd;
+        # the pointer file resolves the generation for the collector step).
+        assert (
+            self._active_generation(lane_cwd) / "src" / "app.py"
+        ).read_bytes() == b'print("v2 - approved")\n'
+        assert (lane_cwd / "src" / "app.py").read_bytes() == b'print("v1")\n'
         # The checkpoint GET NAMED A: B never substituted.
         checkpoint_gets = [
             request
@@ -722,7 +735,12 @@ class TestG04ExactResumeSurvivesAckAndNewerUpload:
         assert report["restored"] is True, report
         assert report["checkpoint_selection"] == "latest"
         assert "fallback" in report["selection_note"]
-        assert (lane_cwd / "src" / "app.py").read_bytes() == b'print("v2 - approved")\n'
+        # The fallback still landed the ACTIVE checkpoint's bytes — in the
+        # sibling GENERATION, with the checkout's original bytes intact.
+        assert (
+            self._active_generation(lane_cwd) / "src" / "app.py"
+        ).read_bytes() == b'print("v2 - approved")\n'
+        assert (lane_cwd / "src" / "app.py").read_bytes() == b'print("v1")\n'
 
 
 # ---------------------------------------------------------------------------

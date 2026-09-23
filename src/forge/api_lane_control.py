@@ -55,10 +55,14 @@ The server validates against the run's current generation: a token from
 a SUPERSEDED generation is refused with 403 and an actionable message,
 so a retired lane can no longer poll or ack for the resumed attempt.
 The legacy work-id-only HMAC is accepted ONLY inside an explicit
-migration window (``FORGE_LANE_LEGACY_TOKEN_DEADLINE``, default 30 days
-from now): old attempts finish, new dispatches must be
-generation-scoped — and an UNAVAILABLE generation authority (a failed
-lookup) is a 503 refusal, never a silent legacy acceptance.
+migration window (``FORGE_LANE_LEGACY_TOKEN_DEADLINE``, or the
+recorded migration START plus 30 days —
+``FORGE_LANE_LEGACY_TOKEN_START``; with neither recorded, the window
+opens at THIS process's import and closes 30 days later, a FIXED
+instant the running process actually reaches): old attempts finish,
+new dispatches must be generation-scoped — and an UNAVAILABLE
+generation authority (a failed lookup) is a 503 refusal, never a
+silent legacy acceptance.
 
 NEXT-01's generation policy — which transitions open a NEW attempt
 generation (and therefore retire the previous dispatch's token), and
@@ -101,12 +105,14 @@ from forge.adaptive.models import ControlCommand
 __all__ = [
     "LANE_ACK_STATES",
     "LANE_LEGACY_TOKEN_DEADLINE_ENV",
+    "LANE_LEGACY_TOKEN_START_ENV",
     "LaneAuthorityUnavailable",
     "authorize_work_credential",
     "durable_run_generation",
     "lane_control_router",
     "lane_control_token",
     "legacy_token_deadline",
+    "legacy_token_start",
     "verify_lane_token",
 ]
 
@@ -118,40 +124,104 @@ lane_control_router = APIRouter()
 #: lane tokens. Until this instant a token that never carried a generation
 #: still authenticates — old attempts finish inside the window — and after
 #: it every credential must be the dispatch-issued, attempt-scoped one.
-#: The default is 30 days FROM NOW (the honest rollout default: the window
-#: opens with the deployment that starts minting generation tokens); set an
-#: explicit ISO date/datetime to close it on the operator's schedule.
+#: An explicit ISO date/datetime (naive values read as UTC) closes the
+#: window on the operator's exact schedule.
 LANE_LEGACY_TOKEN_DEADLINE_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_DEADLINE"
+#: R32-03: the RECORDED migration START — the instant the legacy-token
+#: compatibility window OPENED (the deployment that began minting
+#: generation-scoped tokens). The deadline is ``start + 30 days``, a
+#: FIXED instant derived from the recorded value, never from the request
+#: clock: record it once (deployment env) and process restarts cannot
+#: extend the window. Naive values read as UTC.
+LANE_LEGACY_TOKEN_START_ENV: Final = "FORGE_LANE_LEGACY_TOKEN_START"
 DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS: Final = 30
+
+#: R32-03: the migration start captured ONCE, at module import (process
+#: start). This is the anchor for the DEFAULT window when the operator
+#: recorded neither a deadline nor a start: the deadline is
+#: ``_PROCESS_MIGRATION_START + 30 days`` — computed at import, reused by
+#: EVERY check, so a long-running control plane actually reaches it on
+#: day 30. The reviewer's proof against the previous derivation: a
+#: deadline recomputed as ``now() + 30 days`` on each authorization
+#: request never arrives (day 3650 still accepted). A restart without a
+#: recorded start re-anchors here; deployments that must survive
+#: restarts record ``FORGE_LANE_LEGACY_TOKEN_START`` (or the explicit
+#: deadline) instead.
+_PROCESS_MIGRATION_START: Final[datetime] = datetime.now(timezone.utc)
+
+
+def _parse_iso_utc(raw: str, *, env: str) -> datetime | None:
+    """Parse an ISO date/datetime from *env*; None when malformed.
+
+    Naive values read as UTC; a malformed value logs the operator-facing
+    warning (the caller falls back to a BOUNDED default window, never to
+    "no deadline" and never to a fresh sliding one).
+    """
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an ISO date/datetime — the process-anchored default "
+            "window applies (record %s or %s for a restart-stable deadline)",
+            env,
+            raw,
+            LANE_LEGACY_TOKEN_START_ENV,
+            LANE_LEGACY_TOKEN_DEADLINE_ENV,
+        )
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def legacy_token_start(env: Mapping[str, str] | None = None) -> datetime:
+    """The instant the legacy migration window OPENED (R32-03).
+
+    ``FORGE_LANE_LEGACY_TOKEN_START`` when the deployment recorded one
+    (restart-stable: the value is operator state, never the request
+    clock); otherwise this process's import time — captured ONCE, so the
+    default deadline is a fixed instant rather than a forever-moving
+    "now + 30 days".
+    """
+    source = os.environ if env is None else env
+    recorded = _parse_iso_utc(
+        str(source.get(LANE_LEGACY_TOKEN_START_ENV, "")).strip(), env=LANE_LEGACY_TOKEN_START_ENV
+    )
+    return recorded if recorded is not None else _PROCESS_MIGRATION_START
 
 
 def legacy_token_deadline(env: Mapping[str, str] | None = None) -> datetime:
     """The instant legacy work-scoped tokens stop authenticating (NEXT-01).
 
-    Reads ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` (an ISO date or datetime,
-    naive values read as UTC); unset or malformed degrades to NOW + 30
-    days, never to "no deadline" — the legacy scheme is a bounded
-    migration window, not a permanent second credential.
+    Resolution order, every branch a FIXED instant (R32-03 — never
+    ``now() + 30 days`` recomputed per check):
+
+    1. ``FORGE_LANE_LEGACY_TOKEN_DEADLINE`` — the operator's explicit
+       ISO deadline (naive reads as UTC);
+    2. ``FORGE_LANE_LEGACY_TOKEN_START + 30 days`` — the RECORDED
+       migration start plus the window (restart-stable);
+    3. ``_PROCESS_MIGRATION_START + 30 days`` — the default: the window
+       opens with THIS process (the honest rollout default) and closes
+       30 days later at a fixed instant the process actually reaches.
+
+    Unset or malformed values degrade DOWN this ladder, never to "no
+    deadline" — the legacy scheme is a bounded migration window, not a
+    permanent second credential.
     """
     source = os.environ if env is None else env
-    raw = str(source.get(LANE_LEGACY_TOKEN_DEADLINE_ENV, "")).strip()
-    if raw:
-        try:
-            parsed = datetime.fromisoformat(raw)
-        except ValueError:
-            logger.warning(
-                "%s=%r is not an ISO date/datetime — the default 30-day window applies",
-                LANE_LEGACY_TOKEN_DEADLINE_ENV,
-                raw,
-            )
-        else:
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed
-    return datetime.now(timezone.utc) + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS)
+    explicit = _parse_iso_utc(
+        str(source.get(LANE_LEGACY_TOKEN_DEADLINE_ENV, "")).strip(),
+        env=LANE_LEGACY_TOKEN_DEADLINE_ENV,
+    )
+    if explicit is not None:
+        return explicit
+    return legacy_token_start(env) + timedelta(days=DEFAULT_LEGACY_TOKEN_DEADLINE_DAYS)
 
 
 def _legacy_window_open(env: Mapping[str, str] | None = None) -> bool:
+    """Whether the FIXED legacy deadline (:func:`legacy_token_deadline`) is
+    still in the future. The deadline itself never moves per check (R32-03)
+    — only the comparison clock does."""
     return datetime.now(timezone.utc) < legacy_token_deadline(env)
 
 

@@ -14,11 +14,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.adaptive.admission import (
@@ -323,6 +324,47 @@ class TestImplementWiring:
         assert (row.evidence or {}).get("requested_by") == "alice"
 
 
+class TestExecutionLeaseAtGitLabDispatch:
+    """R32-05 parity: the GitLab dispatch boundary takes the SAME lease
+    the Azure and GitHub paths take — the second approval under a limit of
+    one parks blocked(execution_capacity) with the snapshot in evidence
+    and a journaled issue note, and the parked run never executed."""
+
+    async def test_second_go_parks_execution_capacity(self, db, fake_gitlab, monkeypatch):
+        from forge.adaptive.admission import AdmissionPolicy, lease_snapshot
+
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "1")
+        fake_gitlab.seed_issue(ISSUE_IID + 1, "second task", "second body")
+        service = make_service(db, fake_gitlab)
+        first = await service.start_run(PROJECT_ID, ISSUE_IID, "title", "description", "alice")
+        second = await service.start_run(
+            PROJECT_ID, ISSUE_IID + 1, "second task", "second body", "alice"
+        )
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {first}", "alice", ISSUE_IID, author_user_id=11
+        )
+        assert (await _run_row(db, first)).status == FlowStatus.WAITING_CI.value
+
+        await service.handle_command_note(
+            PROJECT_ID, f"@forge /go {second}", "alice", ISSUE_IID + 1, author_user_id=11
+        )
+        parked = await _run_row(db, second)
+        assert parked.status == FlowStatus.BLOCKED.value
+        assert "execution_capacity" in (parked.status_reason or "")
+        lease_evidence = dict(parked.evidence or {})["execution_lease"]
+        assert lease_evidence["acquired"] is False
+        assert lease_evidence["capacity"]["held"] == 1
+        bodies = [note["body"] for note in fake_gitlab.notes]
+        assert any("execution slot" in body for body in bodies)
+
+        snapshot = await lease_snapshot(
+            AdmissionPolicy(max_active_per_project=1), PROJECT_ID, db, provider="gitlab"
+        )
+        assert snapshot["held"] == 1  # the parked run holds nothing
+        assert snapshot["completed"] == 0  # and consumed no execution attempt
+
+
 # ----------------------------------------------------------------------
 # NEXT-11: durable execution leases — the reservation at dispatch
 # ----------------------------------------------------------------------
@@ -456,6 +498,234 @@ class TestExecutionLeases:
 
 
 # ----------------------------------------------------------------------
+# R32-06 (review 0fca1b7): one OPEN lease per RUN — the slot index alone
+# let one run hold two slots. The idempotency unit is the run; the
+# open-run index enforces it and the run-conflict loser reads the winner.
+# ----------------------------------------------------------------------
+
+
+class TestOneOpenLeasePerRun:
+    async def test_the_database_refuses_a_second_open_lease_for_one_run(self, db):
+        """The invariant itself: the partial unique index (not a helper's
+        discipline) makes a second OPEN lease for the same run an
+        IntegrityError; a RELEASED row never collides (the audit trail
+        stays)."""
+        from sqlalchemy.exc import IntegrityError
+
+        policy = AdmissionPolicy(max_active_per_project=3)
+        run_id = uuid4().hex
+        first = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+        assert first is not None
+
+        async with db() as session:
+            session.add(
+                ExecutionLease(
+                    id=uuid4().hex,
+                    project_id=PROJECT_ID,
+                    provider="gitlab",
+                    run_id=run_id,
+                    slot=2,
+                )
+            )
+            with pytest.raises(IntegrityError):
+                await session.commit()
+
+        # After the terminal release, history does not block a NEW lease.
+        assert await release_run_leases(db, run_id, reason="terminal:cancelled") == 1
+        again = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+        assert again is not None and again.lease_id != first.lease_id
+
+    async def test_two_racing_acquires_for_one_run_get_the_same_lease(self, tmp_path):
+        """The R32-06 acceptance: two INDEPENDENT connections (a file-backed
+        database — the in-memory StaticPool shares one connection and one
+        transaction, which is not a race) both miss the pre-read; the
+        loser's INSERT trips the open-run index and must read the winner
+        back, not consume a second slot."""
+        policy = AdmissionPolicy(max_active_per_project=3)
+        run_id = uuid4().hex
+        url = f"sqlite+aiosqlite:///{tmp_path}/leases.db"
+        factories = []
+        for _connection in range(2):
+            engine = create_async_engine(
+                url,
+                connect_args={"check_same_thread": False, "timeout": 10},
+                poolclass=StaticPool,
+            )
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factories.append((async_sessionmaker(engine, expire_on_commit=False), engine))
+
+        try:
+            first, second = await asyncio.gather(
+                try_acquire_lease(policy, PROJECT_ID, factories[0][0], run_id=run_id),
+                try_acquire_lease(policy, PROJECT_ID, factories[1][0], run_id=run_id),
+            )
+        finally:
+            for _factory, engine in factories:
+                await engine.dispose()
+
+        assert first is not None and second is not None
+        assert second.lease_id == first.lease_id  # ONE reservation identity
+        check = create_async_engine(url, connect_args={"check_same_thread": False})
+        try:
+            async with async_sessionmaker(check, expire_on_commit=False)() as session:
+                open_rows = (
+                    (
+                        await session.execute(
+                            select(ExecutionLease).where(
+                                ExecutionLease.run_id == run_id,
+                                ExecutionLease.released_at.is_(None),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+        finally:
+            await check.dispose()
+        assert len(open_rows) == 1  # exactly one slot held for the run
+
+    async def test_a_run_conflict_after_a_missed_pre_read_adopts_the_winner(self, db):
+        """The P02 schedule, characterized head-on: the winner landed where
+        the acquirer's project-scoped pre-read cannot see it (the open-run
+        index is global on run_id, the pre-read is not) — the CAS INSERT
+        must trip the RUN constraint and return the existing winner, never
+        a fresh slot."""
+        policy = AdmissionPolicy(max_active_per_project=3)
+        run_id = uuid4().hex
+        winner_id = uuid4().hex
+        async with db() as session:
+            session.add(
+                ExecutionLease(
+                    id=winner_id,
+                    project_id=PROJECT_ID + 999,  # a foreign row: the local
+                    provider="",  # pre-read misses; the run index does not
+                    run_id=run_id,
+                    slot=2,
+                )
+            )
+            await session.commit()
+
+        adopted = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+
+        assert adopted is not None
+        assert adopted.lease_id == winner_id
+        assert adopted.slot == 2
+
+    async def test_the_disabled_limit_cannot_loop_on_an_unrelated_constraint(self, db):
+        """R32-06: an IntegrityError that is neither the slot race nor the
+        run race is RAISED — the unbounded disabled-limit loop must not
+        mine it for retry signal forever."""
+        from sqlalchemy.exc import IntegrityError
+
+        class _PoisonedSession:
+            """A real session whose INSERT commit fails with an unrelated
+            constraint violation (a check constraint, say)."""
+
+            def __init__(self, inner: AsyncSession) -> None:
+                self._inner = inner
+
+            async def __aenter__(self):
+                await self._inner.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc):
+                return await self._inner.__aexit__(*exc)
+
+            def add(self, obj):
+                self._inner.add(obj)
+
+            async def execute(self, *args, **kwargs):
+                return await self._inner.execute(*args, **kwargs)
+
+            async def rollback(self):
+                await self._inner.rollback()
+
+            async def commit(self):
+                raise IntegrityError(
+                    "INSERT INTO execution_leases ...",
+                    None,
+                    Exception("CHECK constraint failed: ck_execution_leases_slot"),
+                )
+
+        def poisoned_factory():
+            return _PoisonedSession(db())
+
+        policy = AdmissionPolicy(max_active_per_project=0)  # unbounded mode
+        with pytest.raises(IntegrityError, match="ck_execution_leases_slot"):
+            await try_acquire_lease(policy, PROJECT_ID, poisoned_factory, run_id=uuid4().hex)
+
+
+class TestLeaseConflictKind:
+    """The three distinct outcomes R32-06 demands: slot, run, unrelated."""
+
+    @staticmethod
+    def _error(message: str):
+        from sqlalchemy.exc import IntegrityError
+
+        return IntegrityError("INSERT ...", None, Exception(message))
+
+    def test_postgresql_names_the_index_in_the_message(self):
+        from forge.adaptive.admission import lease_conflict_kind
+
+        assert (
+            lease_conflict_kind(
+                self._error(
+                    'duplicate key value violates unique constraint "uq_execution_lease_slot"'
+                )
+            )
+            == "uq_execution_lease_slot"
+        )
+        assert (
+            lease_conflict_kind(
+                self._error(
+                    'duplicate key value violates unique constraint "uq_execution_lease_open_run"'
+                )
+            )
+            == "uq_execution_lease_open_run"
+        )
+
+    def test_sqlite_reports_the_column_list(self):
+        from forge.adaptive.admission import lease_conflict_kind
+
+        assert (
+            lease_conflict_kind(
+                self._error(
+                    "UNIQUE constraint failed: execution_leases.project_id, "
+                    "execution_leases.provider, execution_leases.slot"
+                )
+            )
+            == "uq_execution_lease_slot"
+        )
+        assert (
+            lease_conflict_kind(self._error("UNIQUE constraint failed: execution_leases.run_id"))
+            == "uq_execution_lease_open_run"
+        )
+
+    def test_unrelated_constraints_are_not_mineable(self):
+        from forge.adaptive.admission import lease_conflict_kind
+
+        assert lease_conflict_kind(self._error("FOREIGN KEY constraint failed: runs")) == ""
+        assert lease_conflict_kind(self._error("NOT NULL constraint failed: x.y")) == ""
+        assert lease_conflict_kind(self._error("checkpoint is bad")) == ""
+
+
+def test_the_capacity_park_comment_names_the_next_action():
+    """R32-05's shared renderer: capacity, not refusal — the /retry command,
+    the operator knob, and the observed-against-limit counts."""
+    from forge.adaptive.admission import execution_capacity_comment
+
+    body = execution_capacity_comment("a" * 32, {"held": 3, "limit": 3, "available": 0})
+    assert "parked" in body
+    assert "3 of 3 slots held" in body
+    assert "/retry " + "a" * 32 in body
+    assert "FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT" in body
+
+    unlimited = execution_capacity_comment("b" * 32, {"held": 7, "limit": None, "available": None})
+    assert "7 slots held" in unlimited and " of " not in unlimited
+
+
+# ----------------------------------------------------------------------
 # NEXT-12: rejected requests, admitted work, execution attempts
 # ----------------------------------------------------------------------
 
@@ -540,3 +810,143 @@ class TestLifetimeCapWording:
 
         assert refused.refusal is RefusalReason.QUEUE_FULL
         assert "work drains" in refused.reason
+
+
+class TestMigration024:
+    """The R32-06 migration: reconcile pre-existing duplicate OPEN leases
+    per run (release the later ones — history stays), then add the
+    partial unique index; downgrade drops the invariant, keeps the data.
+    Follows the TestMigration009 pattern (module-level alembic ops)."""
+
+    @staticmethod
+    def _load_migration():
+        import importlib.util
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "alembic"
+            / "versions"
+            / "024_execution_lease_one_open_per_run.py"
+        )
+        spec = importlib.util.spec_from_file_location("migration_024", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _create_023_surface(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE execution_leases (
+                    id VARCHAR(32) PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    provider VARCHAR(32) NOT NULL DEFAULT '',
+                    run_id VARCHAR(32),
+                    slot INTEGER NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    released_at DATETIME,
+                    release_reason VARCHAR(100),
+                    CONSTRAINT ck_execution_leases_slot CHECK (slot >= 1)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_execution_lease_slot ON execution_leases "
+                "(project_id, provider, slot) WHERE released_at IS NULL"
+            )
+        )
+
+    def test_upgrade_reconciles_duplicates_then_enforces_one_open_per_run(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine, inspect
+
+        module = self._load_migration()
+        engine = create_engine("sqlite:///:memory:")
+        duplicated_run, healthy_run = uuid4().hex, uuid4().hex
+        try:
+            with engine.connect() as conn:
+                self._create_023_surface(conn)
+                # The R32-06 defect, live: ONE run holding TWO open slots
+                # (both pre-reads missed; the loser of slot 1 won slot 2).
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at)"
+                        " VALUES (:a, 7, :r, 1, :early)"
+                    ),
+                    {"a": uuid4().hex, "r": duplicated_run, "early": "2026-01-01T00:00:00+00:00"},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at)"
+                        " VALUES (:a, 7, :r, 2, :late)"
+                    ),
+                    {"a": uuid4().hex, "r": duplicated_run, "late": "2026-06-01T00:00:00+00:00"},
+                )
+                # A healthy single open lease + released history: untouched.
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at)"
+                        " VALUES (:a, 7, :r, 3, :now)"
+                    ),
+                    {"a": uuid4().hex, "r": healthy_run, "now": "2026-07-01T00:00:00+00:00"},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at,"
+                        " released_at, release_reason) VALUES (:a, 7, :r, 1, :t, :t2, 'terminal:cancelled')"
+                    ),
+                    {
+                        "a": uuid4().hex,
+                        "r": uuid4().hex,
+                        "t": "2026-01-01T00:00:00+00:00",
+                        "t2": "2026-02-01T00:00:00+00:00",
+                    },
+                )
+                conn.commit()
+
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    module.upgrade()
+
+                indexes = {ix["name"] for ix in inspect(conn).get_indexes("execution_leases")}
+                assert "uq_execution_lease_open_run" in indexes
+                # The EARLIEST open lease survives; the later one is RELEASED
+                # with the explicit reconcile reason — no row deleted.
+                rows = conn.execute(
+                    text(
+                        "SELECT slot, released_at IS NOT NULL, release_reason "
+                        "FROM execution_leases WHERE run_id = :r ORDER BY slot"
+                    ),
+                    {"r": duplicated_run},
+                ).all()
+                assert rows == [
+                    (1, 0, None),
+                    (2, 1, "reconciled: duplicate open lease per run (024, R32-06)"),
+                ]
+                # The invariant now holds and the healthy rows are untouched.
+                duplicates = conn.execute(
+                    text(
+                        "SELECT count(*) FROM (SELECT run_id FROM execution_leases "
+                        "WHERE released_at IS NULL GROUP BY run_id HAVING count(*) > 1)"
+                    )
+                ).scalar_one()
+                assert duplicates == 0
+                kept = conn.execute(
+                    text("SELECT released_at IS NULL FROM execution_leases WHERE run_id = :r"),
+                    {"r": healthy_run},
+                ).scalar_one()
+                assert kept == 1
+
+                with Operations.context(ctx):
+                    module.downgrade()
+                assert "uq_execution_lease_open_run" not in {
+                    ix["name"] for ix in inspect(conn).get_indexes("execution_leases")
+                }
+                assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 4
+        finally:
+            engine.dispose()

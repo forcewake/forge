@@ -9,7 +9,7 @@
 #
 # Dispatched by forge via workflow_dispatch with inputs:
 #   run_id, attempt_base_oid, driver, model, issue_number, plan_note_id,
-#   envelope_digest, spec_digest
+#   envelope_digest, spec_digest, lane_resume_mode, repair_context
 #   (see forge.execution.github_actions; the approved plan/task bytes are
 #   fetched by the lane from the plan comment addressed by plan_note_id and
 #   re-verified against envelope_digest + spec_digest — A03: fail-closed on
@@ -50,6 +50,16 @@ on:
         type: string
         required: false
         default: ""
+      lane_resume_mode:
+        description: >-
+          WIP-continuity contract the dispatch selected: fresh (initial
+          dispatch — nothing restores), required (retry/revival — the held
+          checkpoint MUST restore or the lane halts), restart (explicit
+          discard of held WIP). Mapped onto the driver step's
+          FORGE_LANE_RESUME env.
+        type: string
+        required: false
+        default: "fresh"
       plan_note_id:
         description: "issue comment id of the approved forge plan (empty = legacy scan)"
         required: false
@@ -180,9 +190,9 @@ jobs:
           # FORGE_LANE_WHEEL is a release-artifact URL and
           # FORGE_LANE_WHEEL_SHA256 its sha256; the install step downloads,
           # hashes and REFUSES the artifact unless the bytes reproduce the
-          # pin (pip re-verifies via #sha256= at install), recording both
-          # halves to .forge/lane_install.json for the provenance report's
-          # expected-vs-installed hash reconciliation.
+          # pin, then installs the exact verified local path (R32-08),
+          # recording both halves to .forge/lane_install.json for the
+          # provenance report's expected-vs-installed hash reconciliation.
           FORGE_LANE_WHEEL: ${{ vars.FORGE_LANE_WHEEL }}
           FORGE_LANE_WHEEL_SHA256: ${{ vars.FORGE_LANE_WHEEL_SHA256 }}
           # NEXT-17: the expected sha256 of the codegraph MCP lock the
@@ -219,14 +229,32 @@ jobs:
               echo "FORGE_BOOTSTRAP_FAILED: the hash-pinned forge wheel could not be downloaded (missing tool - infrastructure/config, never code repair)"
               exit 1
             }
-            WHEEL_FILE="$(ls .forge/wheel/*.whl .forge/wheel/*.tar.gz 2>/dev/null | head -1)"
+            # R32-08: the trusted lane-code route accepts EXACTLY ONE wheel.
+            # A source archive (its build metadata executes at install,
+            # before any hash-policy decision) or multiple candidates is a
+            # deterministic refusal — never a guessed pick.
+            set -- .forge/wheel/*.whl
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "failed" > .forge/bootstrap
+              echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane artifact must be exactly one wheel (got: $*) — source archives and ambiguous candidates are refused before execution (infrastructure/config, never code repair)"
+              exit 1
+            fi
+            WHEEL_FILE="$1"
             ACTUAL_SHA="$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$WHEEL_FILE")"
             if [ "$ACTUAL_SHA" != "$FORGE_WHEEL_SHA" ]; then
               echo "failed" > .forge/bootstrap
               echo "FORGE_BOOTSTRAP_FAILED: forge wheel hash mismatch — the template pinned sha256:$FORGE_WHEEL_SHA but the artifact hashes to sha256:$ACTUAL_SHA (infrastructure/config, never code repair)"
               exit 1
             fi
-            pip install --no-deps "$WHEEL_FILE#sha256=$ACTUAL_SHA" || {
+            # R32-08 (review probe P06, proven with real pip): a fragment
+            # appended to a PLAIN local path is not a requirement — pip
+            # parses "path#sha256=..." as an invalid dependency specifier
+            # and the bootstrap died before installing anything. The digest
+            # was verified above, so install the exact verified local path
+            # and let pip resolve forge's runtime dependencies normally: the
+            # CODE is the verified bytes, and --no-deps would strand the
+            # lane without its imports.
+            pip install "$WHEEL_FILE" || {
               echo "failed" > .forge/bootstrap
               echo "FORGE_BOOTSTRAP_FAILED: the pinned forge lane code failed to install (missing tool - infrastructure/config, never code repair)"
               exit 1
@@ -368,6 +396,14 @@ jobs:
           # stays on its local mailbox.
           FORGE_LANE_CONTROL_URL: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane' || inputs.driver == 'copilot-sdk-lane') && vars.FORGE_LANE_CONTROL_URL || '' }}
           FORGE_LANE_CONTROL_TOKEN: ${{ (inputs.driver == 'claude-sdk-lane' || inputs.driver == 'codex-sdk-lane' || inputs.driver == 'opencode-sdk-lane' || inputs.driver == 'copilot-sdk-lane') && inputs.lane_control_token || '' }}
+          # R32-04: the WIP-continuity contract the DISPATCH selected —
+          # mapped onto the env spelling lane_driver's resume_mode()
+          # reads: required → the truthy marker (the checkpoint restore is
+          # a precondition of the turn), restart → the literal discard
+          # marker, fresh/absent → '' (a first run; a 404 restore is
+          # normal). Never a repo variable: the resume behavior is the
+          # dispatch's product decision, not lane-local setup.
+          FORGE_LANE_RESUME: ${{ (inputs.lane_resume_mode == 'required' && '1') || (inputs.lane_resume_mode == 'restart' && 'restart') || '' }}
         run: |
           # Driver provisioning + invocation is rendered by forge's
           # HarnessDriver (claude-code | grok-build | opencode | copilot):

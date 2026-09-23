@@ -3434,6 +3434,113 @@ class TestAttemptScopedDispatchCredential:
         assert new_token != old_token  # the dead attempt's credential is retired
 
 
+# ----------------------------------------------------------------------
+# R32-04: the dispatch SELECTS the lane's WIP-continuity mode. The resume
+# guard read FORGE_LANE_RESUME from lane env only tests used to set — the
+# production dispatch now carries lane_resume_mode (fresh | required |
+# restart) through the workflow_dispatch inputs, and the shipped template
+# maps it onto the driver step's FORGE_LANE_RESUME env.
+# ----------------------------------------------------------------------
+
+
+class TestDispatchSelectsResumeMode:
+    def _service(self, db, fake) -> GitHubRunService:
+        return make_service(
+            db,
+            fake,
+            settings=make_settings(
+                FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW,
+                FORGE_HARNESS_MODEL=HARNESS_MODEL,
+            ),
+        )
+
+    async def _drive_to_failed_with_candidate(self, db, fake, service) -> str:
+        """The retryable shape: dispatched once, then terminal with a
+        candidate on record (the /retry and revival precondition)."""
+        run_id = await start(service)
+        await go(service, run_id)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.FAILED.value
+            run.status_reason = "harness_start_failed: boom"
+            run.candidate_shas = ["c1"]
+            await session.commit()
+        return run_id
+
+    async def test_the_initial_dispatch_selects_fresh(self, db, fake):
+        """The first /go dispatch restores nothing accidentally: a 404
+        checkpoint read is NORMAL for it, never a required-restore halt."""
+        service = self._service(db, fake)
+        run_id = await start(service)
+
+        await go(service, run_id)
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "fresh"
+
+    async def test_a_retry_dispatches_the_required_mode(self, db, fake):
+        """/retry continues the work in place (no re-planning) — the held
+        checkpoint's restore is a PRECONDITION of the retried lane, decided
+        by the dispatch, not lane-side env setup."""
+        service = self._service(db, fake)
+        run_id = await self._drive_to_failed_with_candidate(db, fake, service)
+        fake.dispatch_inputs.clear()
+
+        await service.handle_retry(
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            note_text=f"/retry {run_id}",
+            author_username="alice",
+            delivery_id="retry-delivery-mode-1",
+        )
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "required"
+
+    async def test_a_revival_redispatch_dispatches_the_required_mode(self, db, fake):
+        """The revival recovery scan's re-dispatch (a stalled attempt
+        re-opened through the revival graph edge) carries the SAME
+        WIP-continuity contract as /retry."""
+        from forge.durable.controller import Controller
+
+        service = self._service(db, fake)
+        run_id = await self._drive_to_failed_with_candidate(db, fake, service)
+        async with db() as session:
+            controller = Controller(session)
+            await controller.revive_transition(
+                run_id, reason="test revival", authorized_by="operator:test"
+            )
+            await session.commit()
+        fake.dispatch_inputs.clear()
+
+        await service._redispatch_revival(run_id)
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "required"
+
+    async def test_the_restart_mode_is_dispatchable_and_unknown_modes_are_refused(self, db, fake):
+        """The operator's explicit discard-WIP decision rides the same
+        input; a mode outside the closed set is a programming error raised
+        BEFORE any dispatch I/O (no branch, no workflow call)."""
+        service = self._service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)  # waiting_harness: a fallback-shape advance
+        fake.dispatch_inputs.clear()
+
+        await service._advance_harness(
+            run_id, project_id=PROJECT_ID, issue_number=ISSUE, resume_mode="restart"
+        )
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "restart"
+
+        fake.dispatch_inputs.clear()
+        with pytest.raises(ValueError, match="resume_mode must be one of"):
+            await service._advance_harness(
+                run_id, project_id=PROJECT_ID, issue_number=ISSUE, resume_mode="urgent"
+            )
+        assert fake.dispatch_inputs == []  # refused before any dispatch
+
+
 class TestConditionalFenceTransitions:
     """NEXT-02: the fence's clear is a compare-and-swap; a cleared fence
     still refuses candidates whose GRANT generation died with the resume."""
@@ -3732,3 +3839,154 @@ class TestDiscoveryFreezesOneSourceSet:
         # Only the head read + config/profile reads happened — no tree
         # listing (the disabled stage never pays the snapshot read).
         assert [name for name, _ in fake.calls[len(calls_before) :] if name == "get_tree"] == []
+
+
+# ----------------------------------------------------------------------
+# NEXT-11/R32-05: the execution lease at the GitHub dispatch boundary —
+# the same choke point Azure crosses. Four approvals under a limit of
+# three produce at most THREE native job-start requests; the fourth
+# parks blocked(execution_capacity) with the snapshot in its evidence
+# and an issue comment carrying the next action; a terminal release
+# frees its slot for the next dispatch; a re-driven dispatch adopts the
+# reservation instead of consuming another slot.
+# ----------------------------------------------------------------------
+
+
+class TestExecutionLeaseAtDispatch:
+    @staticmethod
+    def _harness_service(db, fake) -> GitHubRunService:
+        # The Actions lane: each successful dispatch is one native
+        # workflow_dispatch (the job-start request counted below).
+        return make_service(
+            db, fake, settings=make_settings(FORGE_GITHUB_HARNESS_WORKFLOW=WORKFLOW)
+        )
+
+    @staticmethod
+    async def _start_on(service: GitHubRunService, fake: FakeGitHub, issue: int) -> str:
+        fake.seed_issue(REPO, issue, f"task {issue}", f"body {issue}")
+        return await service.start_run(
+            project_id=PROJECT_ID,
+            issue_number=issue,
+            issue_title=f"task {issue}",
+            issue_description=f"body {issue}",
+            author_username="alice",
+        )
+
+    @staticmethod
+    async def _go_on(service: GitHubRunService, issue: int, run_id: str) -> None:
+        await service.handle_go(
+            project_id=PROJECT_ID,
+            issue_number=issue,
+            note_text=f"/go {run_id}",
+            author_username="alice",
+        )
+
+    async def test_four_approvals_under_limit_three_start_three_jobs(self, db, fake, monkeypatch):
+        """The R32-05 acceptance on GitHub: capacity policy does not depend
+        on the source-control provider — the fourth approved run parks with
+        a typed capacity reason while exactly three native dispatches went
+        out, and zero dispatch-API work happened for the parked run."""
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "3")
+        service = self._harness_service(db, fake)
+        issues = [ISSUE + 10, ISSUE + 20, ISSUE + 30, ISSUE + 40, ISSUE + 50]
+        runs = {issue: await self._start_on(service, fake, issue) for issue in issues}
+
+        for issue in issues[:3]:
+            await self._go_on(service, issue, runs[issue])
+        for issue in issues[:3]:
+            assert (await get_run(db, runs[issue])).status == FlowStatus.WAITING_HARNESS.value
+        assert len(fake.calls_of("dispatch_workflow")) == 3
+
+        dispatches_before_park = len(fake.calls_of("dispatch_workflow"))
+        create_branch_before = len(fake.calls_of("create_branch"))
+        await self._go_on(service, issues[3], runs[issues[3]])
+        parked = await get_run(db, runs[issues[3]])
+        assert parked.status == FlowStatus.BLOCKED.value
+        assert "execution_capacity" in (parked.status_reason or "")
+        lease_evidence = dict(parked.evidence or {})["execution_lease"]
+        assert lease_evidence["acquired"] is False
+        assert lease_evidence["capacity"]["held"] == 3
+        assert lease_evidence["capacity"]["limit"] == 3
+        # ZERO native start work for the parked run — no dispatch, no branch.
+        assert len(fake.calls_of("dispatch_workflow")) == dispatches_before_park
+        assert len(fake.calls_of("create_branch")) == create_branch_before
+        parked_comments = [
+            call[1][3]
+            for call in fake.calls
+            if call[0] == "create_issue_comment" and call[1][2] == issues[3]
+        ]
+        assert any("execution slot" in body for body in parked_comments)
+
+        # A terminal outcome releases the slot: cancel the first run, and
+        # the NEXT dispatch (a fifth, never-approved run — the parked one
+        # consumed its gate when it parked, its recovery spelling is
+        # /retry) acquires what it freed.
+        await service.handle_cancel(
+            project_id=PROJECT_ID,
+            issue_number=issues[0],
+            note_text="/cancel",
+            author_username="alice",
+        )
+        assert (await get_run(db, runs[issues[0]])).status == FlowStatus.CANCELLED.value
+        await self._go_on(service, issues[4], runs[issues[4]])
+        assert (await get_run(db, runs[issues[4]])).status == FlowStatus.WAITING_HARNESS.value
+        assert len(fake.calls_of("dispatch_workflow")) == dispatches_before_park + 1
+
+    async def test_the_run_evidence_records_the_acquired_lease(self, db, fake):
+        service = self._harness_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)
+
+        evidence = dict((await get_run(db, run_id)).evidence or {})
+        assert evidence["execution_lease"]["check"] == "execution_lease"
+        assert evidence["execution_lease"]["acquired"] is True
+        assert evidence["execution_lease"]["slot"] == 1
+        assert evidence["execution_lease"]["lease_id"]
+
+    async def test_a_redriven_dispatch_adopts_the_reservation_not_a_new_slot(
+        self, db, fake, monkeypatch
+    ):
+        """Duplicate/resumed dispatches (the recovery scan's re-drive of a
+        crashed worker's leg) adopt the EXISTING reservation — one run,
+        one slot, however many drivers re-cross the boundary."""
+        from forge.adaptive.admission import lease_snapshot
+        from forge.adaptive.admission import AdmissionPolicy
+
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "1")
+        service = self._harness_service(db, fake)
+        run_id = await start(service)
+        await go(service, run_id)
+        first = dict((await get_run(db, run_id)).evidence or {})["execution_lease"]
+
+        # The recovery re-drive: the same run crosses the boundary again.
+        await service._advance_harness(run_id, project_id=PROJECT_ID, issue_number=ISSUE)
+        second = dict((await get_run(db, run_id)).evidence or {})["execution_lease"]
+
+        assert second["lease_id"] == first["lease_id"]  # adopted, not doubled
+        assert second["slot"] == first["slot"]
+        snapshot = await lease_snapshot(
+            AdmissionPolicy(max_active_per_project=1), PROJECT_ID, db, provider="github"
+        )
+        assert snapshot["held"] == 1  # one slot, one run — R32-06's invariant
+
+    async def test_the_parked_capacity_run_consumed_no_execution_attempt(
+        self, db, fake, monkeypatch
+    ):
+        """NEXT-12: the parked-at-dispatch run never held a lease — the
+        refusal is visible as capacity, not as an executed attempt."""
+        from forge.adaptive.admission import AdmissionPolicy, lease_snapshot
+
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "1")
+        service = self._harness_service(db, fake)
+        first_issue, second_issue = ISSUE + 50, ISSUE + 60
+        first = await self._start_on(service, fake, first_issue)
+        second = await self._start_on(service, fake, second_issue)
+        await self._go_on(service, first_issue, first)
+        await self._go_on(service, second_issue, second)
+
+        assert (await get_run(db, second)).status == FlowStatus.BLOCKED.value
+        snapshot = await lease_snapshot(
+            AdmissionPolicy(max_active_per_project=1), PROJECT_ID, db, provider="github"
+        )
+        assert snapshot["held"] == 1
+        assert snapshot["completed"] == 0  # the parked run never executed

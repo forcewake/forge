@@ -14,9 +14,11 @@ the lane's drain climbs. Pinned here:
   run's CURRENT durable generation (FlowRun.cancellation_generation), a
   SUPERSEDED generation's token answers 403 with an actionable message,
   and the legacy work-id-only HMAC validates only inside the explicit
-  NEXT-01 migration window (FORGE_LANE_LEGACY_TOKEN_DEADLINE, default
-  30 days from now) — an unavailable generation authority is a 503
-  refusal, never a silent legacy acceptance;
+  NEXT-01 migration window (FORGE_LANE_LEGACY_TOKEN_DEADLINE, or the
+  recorded FORGE_LANE_LEGACY_TOKEN_START + 30 days — the default window
+  is anchored at the PROCESS's import, a fixed instant, never "now + 30
+  days" recomputed per check) — an unavailable generation authority is a
+  503 refusal, never a silent legacy acceptance;
 - pending means received/authorized ONLY, in durable sequence order, and
   ``after_sequence`` is an honest cursor;
 - every ack is the PostgresMailbox's own guarded CAS: rung skips are 409,
@@ -29,6 +31,7 @@ the lane's drain climbs. Pinned here:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -39,9 +42,13 @@ from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
 from forge.api_lane_control import (
     LANE_LEGACY_TOKEN_DEADLINE_ENV,
+    LANE_LEGACY_TOKEN_START_ENV,
+    _PROCESS_MIGRATION_START,
+    _legacy_window_open,
     _superseded_generation,
     lane_control_token,
     legacy_token_deadline,
+    legacy_token_start,
     verify_lane_token,
 )
 from forge.config import Settings
@@ -718,15 +725,32 @@ async def _row(app, command_id: str) -> ControlCommandRow:
     return row
 
 
-# -- the legacy migration window (NEXT-01) -------------------------------------
+# -- the legacy migration window (NEXT-01, R32-03) ------------------------------
 
 
 class TestLegacyTokenDeadline:
-    def test_the_deadline_defaults_to_thirty_days_from_now(self):
-        deadline = legacy_token_deadline({})
-        remaining = deadline - datetime.now(timezone.utc)
+    """R32-03: the deadline is a FIXED instant, never "now + 30 days"
+    recomputed per check (the reviewer's proof: a sliding deadline is
+    accepted on day 3650). Anchors, in order: the explicit deadline env,
+    the RECORDED migration start env + 30 days (restart-stable), this
+    process's import time + 30 days."""
 
-        assert timedelta(days=29) <= remaining <= timedelta(days=30)
+    def test_the_default_deadline_is_anchored_at_the_process_start(self):
+        deadline = legacy_token_deadline({})
+
+        assert deadline == _PROCESS_MIGRATION_START + timedelta(days=30)
+
+    def test_the_default_deadline_does_not_slide_between_checks(self):
+        """The reviewer's P01 core: two checks after one another must see
+        the SAME deadline — the old derivation moved it 30 days into the
+        future on every authorization request, so it never arrived."""
+        first = legacy_token_deadline({})
+        second = legacy_token_deadline({})
+
+        assert first == second
+        # ...and it is reachable: a controlled clock AT the anchored
+        # deadline closes the window (equality is past the window).
+        assert _legacy_window_open({}) is (datetime.now(timezone.utc) < first)
 
     def test_an_explicit_iso_deadline_is_honored(self):
         fixed = "2020-01-01T00:00:00+00:00"
@@ -735,10 +759,121 @@ class TestLegacyTokenDeadline:
         ) == datetime.fromisoformat(fixed)
         naive = legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "2020-01-01"})
         assert naive.tzinfo is not None  # naive reads as UTC
-        # malformed degrades to the default window, never to "no deadline"
-        assert legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "soon"}) > (
-            datetime.now(timezone.utc)
+        # malformed degrades to the PROCESS-ANCHORED default window — a
+        # fixed instant, never a fresh "now + 30 days" and never open-ended
+        assert legacy_token_deadline({LANE_LEGACY_TOKEN_DEADLINE_ENV: "soon"}) == (
+            _PROCESS_MIGRATION_START + timedelta(days=30)
         )
+
+    def test_a_recorded_migration_start_fixes_the_deadline_thirty_days_out(self):
+        """The persisted shape: FORGE_LANE_LEGACY_TOKEN_START records when
+        the window OPENED; the deadline is start + 30 days regardless of
+        when the check runs (a pure function of the recorded value)."""
+        start = datetime(2030, 5, 1, 12, 0, tzinfo=timezone.utc)
+        env = {LANE_LEGACY_TOKEN_START_ENV: start.isoformat()}
+
+        assert legacy_token_deadline(env) == start + timedelta(days=30)
+        assert legacy_token_start(env) == start
+        # A naive start reads as UTC, same as the deadline spelling.
+        naive = legacy_token_start({LANE_LEGACY_TOKEN_START_ENV: "2030-05-01"})
+        assert naive == datetime(2030, 5, 1, tzinfo=timezone.utc)
+        # Malformed start: fall back to the process anchor, never slide.
+        assert legacy_token_start({LANE_LEGACY_TOKEN_START_ENV: "soon"}) == (
+            _PROCESS_MIGRATION_START
+        )
+        # The explicit deadline still wins over a recorded start.
+        both = {
+            LANE_LEGACY_TOKEN_START_ENV: "2030-05-01",
+            LANE_LEGACY_TOKEN_DEADLINE_ENV: "2029-01-01",
+        }
+        assert legacy_token_deadline(both) == datetime(2029, 1, 1, tzinfo=timezone.utc)
+
+    def test_a_start_recorded_31_days_ago_closes_the_window_for_this_process(self):
+        """With a controlled start (the clock advanced past it): start + 31
+        days > deadline → the window is closed, NOW, in this process."""
+        start = datetime.now(timezone.utc) - timedelta(days=31)
+        env = {LANE_LEGACY_TOKEN_START_ENV: start.isoformat()}
+
+        assert legacy_token_deadline(env) < datetime.now(timezone.utc)
+        assert _legacy_window_open(env) is False
+
+    def test_the_boundary_itself_is_closed(self):
+        """At exactly the deadline the legacy window is past it (the
+        comparison is strict): the boundary refuses, not the microsecond
+        after."""
+        boundary = datetime.now(timezone.utc) - timedelta(days=30)
+        start = {LANE_LEGACY_TOKEN_START_ENV: (boundary - timedelta(days=30)).isoformat()}
+
+        class _Clock(datetime):  # a controlled clock AT start + 30 days
+            @classmethod
+            def now(cls, tz=None):
+                return boundary
+
+        import forge.api_lane_control as api
+
+        real_datetime = api.datetime
+        api.datetime = _Clock
+        try:
+            assert legacy_token_deadline(start) == boundary
+            assert _legacy_window_open(start) is False
+        finally:
+            api.datetime = real_datetime
+
+    async def test_the_window_is_closed_after_31_days_even_across_a_restart(
+        self, app, client, mailbox, monkeypatch
+    ):
+        """R32-03's acceptance: a start RECORDED 31 days ago refuses the
+        legacy token through the real surface, and a fresh process derives
+        the SAME (past) deadline — the decision survives restarts because
+        it lives in the recorded env value, never in process memory."""
+        import subprocess
+        import sys
+
+        await _put_run(app, WORK, generation=2)
+        await mailbox.submit(_cmd(1))
+        start = datetime.now(timezone.utc) - timedelta(days=31)
+        recorded = start.isoformat()
+        monkeypatch.setenv(LANE_LEGACY_TOKEN_START_ENV, recorded)
+
+        pending = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+        assert pending.status_code == 403
+        assert "migration deadline" in pending.json()["detail"]
+
+        # The "restarted" process: the deadline is re-derived from the
+        # recorded start alone (no process state exists to extend it).
+        fresh = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from forge.api_lane_control import legacy_token_deadline;"
+                "print(legacy_token_deadline().isoformat())",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, LANE_LEGACY_TOKEN_START_ENV: recorded},
+        )
+        restarted = datetime.fromisoformat(fresh.stdout.strip())
+        assert restarted == start + timedelta(days=30)  # exactly start + window
+        assert restarted < datetime.now(timezone.utc)  # and it stays in the past
+
+    async def test_a_start_recorded_inside_the_window_still_accepts_the_legacy_token(
+        self, app, client, mailbox, monkeypatch
+    ):
+        """The bounded window is a WINDOW: a start recorded 5 days ago
+        keeps validating the legacy derivation (old attempts finish)."""
+        await _put_run(app, WORK, generation=2)
+        command = _cmd(1)
+        await mailbox.submit(command)
+        await _authorize(mailbox, command)
+        monkeypatch.setenv(
+            LANE_LEGACY_TOKEN_START_ENV,
+            (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(),
+        )
+
+        pending = await client.get("/lane/controls", params={"work_id": WORK}, headers=auth())
+
+        assert pending.status_code == 200
 
     async def test_a_legacy_token_past_the_deadline_is_refused(
         self, app, client, mailbox, monkeypatch

@@ -55,6 +55,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from forge.adaptive.admission import QUEUED_STATUSES
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import check_admission as check_fair_use
+from forge.adaptive.admission import (
+    execution_capacity_comment,
+    lease_snapshot,
+    release_run_leases,
+    try_acquire_lease,
+)
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -2422,6 +2428,13 @@ class RunService:
         left behind are not re-entered — the walk continues from where the
         durable state says it is (ADR-0017 §3).
         """
+        # NEXT-11/R32-05: this is the dispatch boundary — the execution
+        # lease is reserved here (idempotently per run), so no path that
+        # reaches the paid proposal (``/go``, ``/retry``, a repair
+        # re-dispatch, the recovery scan) can bypass the project's slot
+        # limit — the same choke point the Azure and GitHub paths cross.
+        if not await self._reserve_execution_capacity(project_id, run_id):
+            return
         # F22/R13: (re)bind this run's budget guard before any paid call —
         # the guard lives per run in the database, and the service instance
         # handling this leg may be fresh (the worker builds one per command),
@@ -2727,6 +2740,13 @@ class RunService:
         fallback the run is already ``waiting_harness`` — it stays parked,
         only the handle moves (ADR-0004 has no waiting_harness self-loop).
         """
+        # NEXT-11/R32-05: the harness dispatch is a dispatch boundary too —
+        # the ``/retry`` revival, the recovery scan's re-drive and a repair
+        # re-dispatch all reach this leg directly, so the execution lease is
+        # (idempotently) reserved here as well; none of them can bypass the
+        # slot limit.
+        if not await self._reserve_execution_capacity(project_id, run_id):
+            return
         # R13: an exhausted budget (or a spent wall clock) starts no new
         # harness episode — the dispatch is the only enforcement point a
         # non-intercepted lane has, so it is checked before any I/O.
@@ -5423,11 +5443,91 @@ class RunService:
             await controller.complete_action(action_id, status, remote_result)  # type: ignore[arg-type]
             await session.commit()
 
+    async def _release_execution_lease(self, run_id: str, reason: str) -> None:
+        """Free the run's execution slot (idempotent; no lease = no-op)."""
+        released = await release_run_leases(self._session_factory, run_id, reason=reason)
+        if released:
+            logger.info("Run %s released %d execution lease(s): %s", run_id[:8], released, reason)
+
+    async def _reserve_execution_capacity(self, project_id: int, run_id: str) -> bool:
+        """NEXT-11/R32-05: take the execution lease at DISPATCH — or park honestly.
+
+        The single choke point every GitLab dispatch leg crosses (``/go``,
+        the ``/retry`` revival, a repair re-dispatch, the recovery scan's
+        re-drive): a durable CAS insert reserves one of the project's
+        execution slots, idempotent per run, held until the terminal
+        transition releases it — the same contract the Azure and GitHub
+        paths enforce. Queue admission counted ACTIVE runs at
+        ``/implement`` time; four approved tasks could otherwise all
+        activate together. A dispatch that cannot reserve parks the run
+        ``blocked(execution_capacity)`` with the capacity snapshot in its
+        evidence and an issue note carrying the precise next action — a
+        queued state with a reason, never work an observer must later
+        stop, and never a repair-budget consumer. Returns whether the
+        dispatch may run.
+        """
+        policy = FairUsePolicy.from_env()
+        lease = await try_acquire_lease(
+            policy, project_id, self._session_factory, run_id=run_id, provider="gitlab"
+        )
+        if lease is not None:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "execution_lease": {
+                        "check": "execution_lease",
+                        "acquired": True,
+                        "lease_id": lease.lease_id,
+                        "slot": lease.slot,
+                    }
+                },
+            )
+            return True
+        snapshot = await lease_snapshot(
+            policy, project_id, self._session_factory, provider="gitlab"
+        )
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "execution_lease": {
+                    "check": "execution_lease",
+                    "acquired": False,
+                    "capacity": snapshot,
+                }
+            },
+        )
+        await self._to_terminal(
+            run_id,
+            FlowStatus.BLOCKED,
+            "execution_capacity: no execution slot free in this project — "
+            "retry once the running work drains",
+        )
+        issue_iid = await self._read_issue_iid(run_id)
+        if issue_iid is not None:
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                execution_capacity_comment(run_id, snapshot),
+                run_id,
+                "execution_capacity",
+            )
+        logger.warning(
+            "Run %s parked blocked(execution_capacity) — %s of %s slots held",
+            run_id[:8],
+            snapshot.get("held"),
+            snapshot.get("limit"),
+        )
+        return False
+
     async def _transition(self, run_id: str, status: FlowStatus, reason: str | None = None) -> None:
         async with self._session_factory() as session:
             controller = Controller(session)
             await controller.transition(run_id, status, reason=reason)
             await session.commit()
+        if status in TERMINAL_STATUSES:
+            # NEXT-11/R32-05: the slot is held from dispatch until the
+            # terminal landing — the single moment it must return.
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
 
     async def _to_terminal(self, run_id: str, status: FlowStatus, reason: str) -> None:
         """Park the run in ``blocked``/``failed`` with an operator-facing reason.
@@ -5436,9 +5536,12 @@ class RunService:
         a transient cause schedules a bounded auto-revive on the same branch,
         a fatal one parks ``blocked`` with the precise reason — a run never
         dies ``failed`` for an operator to notice; ``/retry`` walks the
-        genuinely dead ones forward.
+        genuinely dead ones forward. The execution lease frees either way
+        (NEXT-11): directly here, or through the terminal state the
+        revival machinery parks the run in.
         """
         if status is FlowStatus.FAILED:
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
             await terminalize_failure(
                 self._session_factory, self._settings, run_id, reason=reason, log=logger
             )

@@ -243,6 +243,9 @@ class TestGoDispatchesHarness:
             "spec_digest": run.spec_digest,
             # NXT-10: the per-work HMAC — empty with no secret configured.
             "lane_control_token": "",
+            # R32-04: the WIP-continuity contract — the INITIAL dispatch
+            # selects fresh (nothing restores accidentally).
+            "lane_resume_mode": "fresh",
         }
         assert fake.calls_of("create_commit_on_branch") == []
         assert fake.calls_of("create_draft_pr") == []

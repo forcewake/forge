@@ -8,6 +8,7 @@ artifact contract (name + files) the trusted publisher consumes.
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 TEMPLATE = Path(__file__).parents[1] / "ci" / "templates" / "forge-harness.github.yml"
@@ -56,6 +57,10 @@ class TestWorkflowTemplateContract:
             "spec_digest",
             # NXT-10: the per-work lane-control HMAC (empty default).
             "lane_control_token",
+            # R32-04: the WIP-continuity contract the dispatch selected
+            # (fresh | required | restart) — mapped onto the driver step's
+            # FORGE_LANE_RESUME env below.
+            "lane_resume_mode",
         }
         # Strings only: workflow_dispatch inputs lose typing on the wire.
         assert all(spec["type"] == "string" for spec in inputs.values())
@@ -427,6 +432,62 @@ class TestLaneControlEnv:
 
 
 # ----------------------------------------------------------------------
+# R32-04: the resume mode travels through the SHIPPED dispatch surface.
+# The lane's required-restore guard reads FORGE_LANE_RESUME — before this
+# the input existed nowhere: only tests set the env. The dispatch now
+# selects the mode (github_service._advance_harness's lane_resume_mode
+# input) and the workflow template maps it onto the driver step's env.
+# ----------------------------------------------------------------------
+
+
+class TestLaneResumeModeSurface:
+    def driver_step(self, path: Path) -> dict:
+        workflow = yaml.safe_load(path.read_text())
+        return next(
+            step
+            for step in workflow["jobs"]["harness"]["steps"]
+            if step.get("name") == "Run harness driver"
+        )
+
+    def test_the_input_is_declared_with_the_documented_modes(self):
+        """Both workflow files declare lane_resume_mode — optional, a
+        string, defaulting to fresh (the absent-value legacy spelling of
+        a first dispatch)."""
+        for path in (TEMPLATE, MIRROR):
+            workflow = yaml.safe_load(path.read_text())
+            dispatch = (workflow["on"] if "on" in workflow else workflow[True])["workflow_dispatch"]
+            spec = dispatch["inputs"]["lane_resume_mode"]
+            assert spec["type"] == "string"
+            assert spec["required"] is False
+            assert spec["default"] == "fresh"
+            for mode in ("fresh", "required", "restart"):
+                assert mode in spec["description"]
+
+    def test_the_driver_step_receives_the_dispatched_mode_as_forge_lane_resume(self):
+        """The mapping onto the env spelling lane_driver's resume_mode()
+        reads: required → the truthy marker, restart → the literal
+        discard marker, anything else → '' (a first run — a 404 restore
+        is normal for it, never a required-restore halt)."""
+        expected = (
+            "${{ (inputs.lane_resume_mode == 'required' && '1') || "
+            "(inputs.lane_resume_mode == 'restart' && 'restart') || '' }}"
+        )
+        for path in (TEMPLATE, MIRROR):
+            env = self.driver_step(path)["env"]
+            assert env["FORGE_LANE_RESUME"] == expected
+
+    def test_the_mode_comes_from_the_dispatch_input_not_a_repo_variable(self):
+        """The resume behavior is the dispatch's product decision, never
+        lane-local configuration: the env line references the INPUT, and
+        no vars./secrets. spelling appears in it."""
+        for path in (TEMPLATE, MIRROR):
+            line = self.driver_step(path)["env"]["FORGE_LANE_RESUME"]
+            assert "inputs.lane_resume_mode" in line
+            assert "vars." not in line
+            assert "secrets." not in line
+
+
+# ----------------------------------------------------------------------
 # NEXT-17: immutable lane resources. The reviewer's finding — the git+
 # install fetches from the network and the wheel is not pinned by hash,
 # the MCP binary installs from a bare version spec. The shipped
@@ -460,8 +521,10 @@ class TestImmutableResourcePinning:
 
     def test_the_wheel_route_verifies_the_hash_before_pip_runs(self):
         """Download -> hash -> refuse on mismatch -> install the VERIFIED
-        bytes (pip re-verifies via #sha256=). A mismatch is a bootstrap
-        failure (infrastructure/config), never a code-repair candidate."""
+        local path (R32-08: a #sha256= fragment appended to a plain local
+        path is not a requirement — real pip refused it; the digest was
+        already verified manually). A mismatch is a bootstrap failure
+        (infrastructure/config), never a code-repair candidate."""
         for path in (TEMPLATE, MIRROR):
             run = self.brief_step(path)["run"]
             assert 'pip download --no-deps -d .forge/wheel "$FORGE_WHEEL_URL"' in run
@@ -470,8 +533,23 @@ class TestImmutableResourcePinning:
             assert "grep -Eq '^[0-9a-f]{64}$'" in run
             # A mismatch is named with both hashes and classifies infra.
             assert "forge wheel hash mismatch" in run
-            assert 'pip install --no-deps "$WHEEL_FILE#sha256=$ACTUAL_SHA"' in run
+            # R32-08: the install consumes the exact verified local path —
+            # never the path-with-fragment form pip cannot parse.
+            assert 'pip install "$WHEEL_FILE"' in run
+            assert "$WHEEL_FILE#sha256=" not in run
             assert "never code repair" in run
+
+    def test_the_wheel_route_accepts_exactly_one_wheel(self):
+        """R32-08: the trusted lane-code route refuses source archives and
+        ambiguous candidates BEFORE execution — a deterministic refusal,
+        never `ls ... | head -1` guessing."""
+        for path in (TEMPLATE, MIRROR):
+            run = self.brief_step(path)["run"]
+            assert "set -- .forge/wheel/*.whl" in run
+            assert 'if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then' in run
+            assert "must be exactly one wheel" in run
+            # The sdist glob of the old form is gone.
+            assert "*.tar.gz" not in run
 
     def test_the_install_provenance_record_carries_both_halves(self):
         """.forge/lane_install.json is what the provenance report's
@@ -527,3 +605,308 @@ class TestImmutableResourcePinning:
         assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in text
         # The git retry loop survives inside the else branch.
         assert "for attempt in 1 2 3; do" in text
+
+
+# ----------------------------------------------------------------------
+# R32-08: the wheel bootstrap runs against REAL pip. The review's P06
+# probe proved, offline with a synthetic wheel, that the shipped
+# `pip install --no-deps "$WHEEL_FILE#sha256=$ACTUAL_SHA"` dies with
+# "Invalid requirement" — a plain local path with a fragment is not a
+# requirement. These tests extract the SHIPPED script fragment and run
+# it with a synthetic dependency-free wheel under --no-index semantics
+# (PIP_NO_INDEX=1), installing into a throwaway PIP_TARGET so the test
+# interpreter stays clean. Not a live Actions run — a real parser/install
+# behavior check, never a substring-only assertion.
+# ----------------------------------------------------------------------
+
+
+def _synthetic_wheel(dest: Path, name: str = "forge_probe_example") -> tuple[Path, str]:
+    """A valid, dependency-free wheel (the P06 construction). Returns
+    (wheel path, sha256 hex)."""
+    import base64
+    import csv
+    import hashlib
+    import io
+    import zipfile
+
+    wheel = dest / f"{name}-0.0.1-py3-none-any.whl"
+    files = {
+        f"{name}/__init__.py": b'__version__ = "0.0.1"\n',
+        f"{name}-0.0.1.dist-info/METADATA": (
+            b"Metadata-Version: 2.1\nName: "
+            + name.replace("_", "-").encode()
+            + b"\nVersion: 0.0.1\n"
+        ),
+        f"{name}-0.0.1.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: r32-08\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    out = io.StringIO()
+    rows = csv.writer(out)
+    for member, data in files.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        rows.writerow((member, "sha256=" + digest, len(data)))
+    rows.writerow((f"{name}-0.0.1.dist-info/RECORD", "", ""))
+    files[f"{name}-0.0.1.dist-info/RECORD"] = out.getvalue().encode()
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for member, data in files.items():
+            archive.writestr(member, data)
+    return wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+
+def _wheel_branch(path: Path) -> str:
+    """The shipped wheel-pin branch, verbatim, dedented to column 0 — from
+    the ``mkdir -p .forge`` preamble through the lane_install.json record.
+    The closing ``fi`` is appended by the harness: the template opens the
+    wheel route's ``if`` and closes it after the git-ref ``else`` branch,
+    so selecting ONLY the wheel route means closing it here — everything
+    between is byte-verbatim shipped script."""
+    lines = path.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "mkdir -p .forge")
+    end = next(
+        i
+        for i, line in enumerate(lines)
+        if line.strip() == 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-}"'
+    )
+    stop = next(i for i, line in enumerate(lines[end:], end) if ".forge/lane_install.json" in line)
+    block = lines[start : stop + 1]
+    indent = len(block[0]) - len(block[0].lstrip())
+    return "\n".join(line[indent:] if line.strip() else line for line in block) + "\nfi"
+
+
+@pytest.fixture(scope="session")
+def pip_runner(tmp_path_factory):
+    """An ISOLATED interpreter with pip on PATH: the repo's uv-managed venv
+    ships without the pip module (and its base python's ensurepip is
+    stripped), while the bootstrap fragment invokes bare ``pip`` /
+    ``python`` the way a clean Actions runner would. Seeded via
+    ``uv venv --seed`` (this repo's own toolchain), falling back to
+    :mod:`venv` with pip. Built once per session; tests install into a
+    per-test PIP_TARGET under it."""
+    import os
+    import shutil
+    import subprocess as sp
+    import venv
+
+    root = tmp_path_factory.mktemp("forge-pip-runner")
+    bin_python = root / "venv" / "bin" / ("python.exe" if os.name == "nt" else "python")
+    uv = shutil.which("uv")
+    if uv:
+        seeded = sp.run(
+            [uv, "venv", "--seed", str(root / "venv")],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if seeded.returncode == 0 and bin_python.exists():
+            return {
+                "PATH": f"{root / 'venv' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PYTHON": str(bin_python),
+            }
+        raise AssertionError(f"uv venv --seed failed: {seeded.stderr}")
+    venv.create(root / "venv", with_pip=True)
+    return {
+        "PATH": f"{root / 'venv' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PYTHON": str(bin_python),
+    }
+
+
+def _bootstrap_env(
+    pip_runner: dict, tmp_path: Path, wheel_url: str, wheel_sha: str
+) -> dict[str, str]:
+    import os
+
+    env = dict(os.environ)
+    env.update(
+        FORGE_LANE_WHEEL=wheel_url,
+        FORGE_LANE_WHEEL_SHA256=wheel_sha,
+        # Offline + hermetic: no index, no version check, and the install
+        # lands in a throwaway target (the synthetic wheel is dependency
+        # free, so resolution needs no network).
+        PIP_NO_INDEX="1",
+        PIP_DISABLE_PIP_VERSION_CHECK="1",
+        PIP_TARGET=str(tmp_path / "pip-target"),
+        PATH=pip_runner["PATH"],
+    )
+    return env
+
+
+class TestWheelBootstrapRunsOnRealPip:
+    def test_the_shipped_fragment_installs_the_synthetic_wheel(self, tmp_path, pip_runner):
+        """The acceptance shape: the RENDERED bootstrap (not a copy of it)
+        installs a valid wheel on a clean interpreter — the exact fragment
+        the runner would execute, offline."""
+        import json
+        import subprocess
+
+        wheel, digest = _synthetic_wheel(tmp_path)
+        script = _wheel_branch(TEMPLATE)
+        workdir = tmp_path / "run"
+        workdir.mkdir()
+
+        result = subprocess.run(
+            ["bash", "-e", "-c", script],
+            cwd=workdir,
+            env=_bootstrap_env(pip_runner, workdir, wheel.as_uri(), digest),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        # The provenance record carries BOTH halves (expected = observed).
+        recorded = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert recorded == {
+            "pin": "wheel",
+            "expected_sha256": digest,
+            "actual_sha256": digest,
+        }
+        # The installed lane code imports from the throwaway target.
+        import os
+
+        probe = subprocess.run(
+            [pip_runner["PYTHON"], "-c", "import forge_probe_example as m; print(m.__version__)"],
+            env=dict(os.environ, PYTHONPATH=str(workdir / "pip-target")),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stdout.strip() == "0.0.1"
+
+    def test_the_dogfood_mirror_ships_the_same_effective_command(self, tmp_path, pip_runner):
+        """Azure/GitHub parity concern, on the two files that ship the fix:
+        the mirror's fragment behaves identically (same exit, same
+        provenance record) under the same fixture."""
+        import json
+        import subprocess
+
+        wheel, digest = _synthetic_wheel(tmp_path)
+        outcomes = {}
+        for label, path in (("template", TEMPLATE), ("mirror", MIRROR)):
+            workdir = tmp_path / label
+            workdir.mkdir()
+            result = subprocess.run(
+                ["bash", "-e", "-c", _wheel_branch(path)],
+                cwd=workdir,
+                env=_bootstrap_env(pip_runner, workdir, wheel.as_uri(), digest),
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            outcomes[label] = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert outcomes["template"] == outcomes["mirror"]
+
+    def test_the_pre_fix_path_fragment_form_fails_on_real_pip(self, tmp_path, pip_runner):
+        """The negative regression (P06 verbatim): the OLD bootstrap line —
+        a plain local path with a #sha256= fragment appended — is not a
+        valid requirement. Real pip refuses it BEFORE the fix; the fixed
+        template must not contain that shape (asserted above) and the
+        broken invocation is kept here as the reproducer."""
+        import subprocess
+
+        wheel, digest = _synthetic_wheel(tmp_path)
+        result = subprocess.run(
+            [
+                pip_runner["PYTHON"],
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                "--disable-pip-version-check",
+                "--target",
+                str(tmp_path / "broken-target"),
+                f"{wheel}#sha256={digest}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "Invalid requirement" in result.stdout + result.stderr
+
+    def test_a_wrong_digest_is_refused_before_pip_installs(self, tmp_path, pip_runner):
+        """Expected-vs-observed mismatch: deterministic refusal, both hashes
+        in the marker, nothing installed."""
+        import subprocess
+
+        wheel, _digest = _synthetic_wheel(tmp_path)
+        workdir = tmp_path / "run"
+        workdir.mkdir()
+        result = subprocess.run(
+            ["bash", "-e", "-c", _wheel_branch(TEMPLATE)],
+            cwd=workdir,
+            env=_bootstrap_env(pip_runner, workdir, wheel.as_uri(), "0" * 64),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "forge wheel hash mismatch" in result.stdout + result.stderr
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        assert not (workdir / "pip-target").exists() or not any((workdir / "pip-target").iterdir())
+
+    def test_multiple_wheel_candidates_are_refused_not_guessed(self, tmp_path, pip_runner):
+        """Two wheels in the wheelhouse: the deterministic one-artifact
+        refusal fires BEFORE any pip install (never `head -1`)."""
+        import subprocess
+
+        wheel, digest = _synthetic_wheel(tmp_path)
+        _synthetic_wheel(tmp_path, name="forge_probe_other")
+        workdir = tmp_path / "run"
+        (workdir / ".forge" / "wheel").mkdir(parents=True)
+        # The pre-planted second candidate + the download's copy = two.
+        import shutil
+
+        shutil.copy(
+            tmp_path / "forge_probe_other-0.0.1-py3-none-any.whl", workdir / ".forge" / "wheel"
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-c", _wheel_branch(TEMPLATE)],
+            cwd=workdir,
+            env=_bootstrap_env(pip_runner, workdir, wheel.as_uri(), digest),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "must be exactly one wheel" in result.stdout + result.stderr
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+
+    def test_a_source_archive_is_refused_before_execution(self, tmp_path, pip_runner):
+        """R32-08: pointing the pin at a source archive is a deterministic
+        refusal BEFORE anything installs — a plain PKG-INFO tarball is not
+        a wheel project (pip refuses it), and even a buildable sdist would
+        have to EXECUTE build metadata, which the trusted lane-code route
+        never does (the wheel-only glob below cannot pick a .tar.gz). No
+        lane_install.json, no install target."""
+        import hashlib
+        import io
+        import subprocess
+        import tarfile
+
+        sdist = tmp_path / "forge_probe_sdist-0.0.1.tar.gz"
+        with tarfile.open(sdist, "w:gz") as archive:
+            info = tarfile.TarInfo("forge_probe_sdist-0.0.1/PKG-INFO")
+            payload = b"Metadata-Version: 2.1\nName: forge-probe-sdist\nVersion: 0.0.1\n"
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        workdir = tmp_path / "run"
+        workdir.mkdir()
+
+        digest = hashlib.sha256(sdist.read_bytes()).hexdigest()
+        result = subprocess.run(
+            ["bash", "-e", "-c", _wheel_branch(TEMPLATE)],
+            cwd=workdir,
+            env=_bootstrap_env(pip_runner, workdir, sdist.as_uri(), digest),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "FORGE_BOOTSTRAP_FAILED" in result.stdout + result.stderr
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        target = workdir / "pip-target"
+        assert not target.exists() or not any(target.iterdir())

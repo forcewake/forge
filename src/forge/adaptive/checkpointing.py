@@ -33,19 +33,37 @@ drain can run:
    manifest's own path set against duplicates/aliases and
    file-versus-directory conflicts, every entry's kind/mode, and every
    blob digest-verified from the store. Only when the whole plan passes
-   is the NEXT GENERATION of the workspace built complete in a STAGING
-   directory beside the target and activated by ONE whole-tree switch
-   (NEXT-04: the current generation moves aside, the staged one lands —
-   two atomic directory renames with the first rolled back if the
-   second fails). A failure ANYWHERE — preflight, staging or the switch
-   itself — leaves the target at its original state, never a
-   half-applied workspace; a restore killed between the two renames
-   leaves the original generation parked under a
-   ``.forge-restore-backup-*`` name that the next restore resolves
-   (see :func:`_recover_abandoned_promotions`). Where the parent is not
-   writable and the whole-tree switch is unavailable, the plan promotes
-   per-file under a full SAVEPOINT (the original of every touched file
-   is captured first and restored on any failure).
+   is the next generation of the workspace built complete in a STAGING
+   directory and activated in ONE promotion. Two promotion modes:
+
+   - ``promote="switch"`` (default) — the staged tree replaces the
+     target by two atomic directory renames with the first rolled back
+     if the second fails. Meant for a caller OUTSIDE the workspace.
+   - ``promote="generation"`` (R32-01, the lane's mode) — the staged
+     tree lands as a SIBLING generation
+     (``<parent>/.forge-workspace-gen-<checkpoint[:12]>``) and the
+     ORIGINAL TARGET IS NEVER RENAMED OR REMOVED: a process sitting in
+     the target (the lane, and the CI shell that spawned it) keeps a
+     valid ``os.getcwd()`` and relative writes keep working. The target
+     only gains the ``.forge/workspace-generation`` POINTER naming the
+     active generation for the collector step, and the report carries
+     ``workspace_generation``.
+
+   A failure ANYWHERE — preflight, staging or the switch itself —
+   leaves the target at its original state, never a half-applied
+   workspace; a restore killed between a promotion's two renames leaves
+   the interrupted original parked under an OWNED
+   ``.forge-restore-backup-<work_id>-...`` name that the next restore
+   of the SAME work resolves (see :func:`_recover_abandoned_promotions`).
+   R32-02: every backup/staging directory the promotion creates carries
+   the owning WORK'S id in its name, and recovery processes ONLY this
+   work's directories — another workspace's assets under the same
+   parent are inventoried as ``unrecognized`` and never touched. Where
+   the parent is not writable and the whole-tree switch is unavailable,
+   the switch mode promotes per-file under a full SAVEPOINT (the
+   original of every touched file is captured first and restored on any
+   failure); the generation mode REFUSES there instead (rewriting the
+   live target is exactly what it exists to avoid).
 3. **Resume** (:func:`resume_from_checkpoint`) — NXT-18's gate: the
    CURRENT authorization is re-checked through a callable (no
    constructor-default ``permissions_valid=True``), the checkpoint
@@ -78,6 +96,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -96,6 +115,7 @@ __all__ = [
     "CheckpointError",
     "CheckpointReceipt",
     "FileRestore",
+    "PromoteMode",
     "RestorePhase",
     "RestoreReport",
     "ResumeOutcome",
@@ -137,6 +157,17 @@ def _excluded_from_capture(name: str) -> bool:
     return name in _CAPTURE_EXCLUDED_DIRS or name.endswith(".egg-info")
 
 
+#: ``.forge`` entries the RESTORE owns and a manifest may never write:
+#: the checkpoint store itself, and the active-generation POINTER the
+#: generation promotion records for the collector step (R32-01) — a
+#: restored checkpoint must not forge where the parent shell looks for
+#: the active workspace.
+_RESERVED_FORGE_ENTRIES: Final = frozenset({"checkpoints", "workspace-generation"})
+
+#: The pointer document's schema (``<workspace>/.forge/workspace-generation``).
+_GENERATION_POINTER_SCHEMA: Final = "forge.workspace-generation/1"
+
+
 def _reserved_manifest_path(pure: PurePosixPath) -> str | None:
     """Why *pure* may not be restored, or None when it may (R28-02).
 
@@ -144,14 +175,18 @@ def _reserved_manifest_path(pure: PurePosixPath) -> str | None:
     a checkpoint crossed a network boundary, so reserved namespaces are
     refused here, not trusted to have been excluded at capture. Refused:
     ``.git`` (repository/control infrastructure — config, hooks), the
-    ``.forge/checkpoints`` store itself, and credential-shaped paths
-    (a restored checkpoint must not drop private keys into a runner).
+    ``.forge/checkpoints`` store and the ``.forge/workspace-generation``
+    pointer (restore-owned records), and credential-shaped paths (a
+    restored checkpoint must not drop private keys into a runner).
     """
     parts = pure.parts
     if parts[0] == ".git":
         return f"{pure.as_posix()!r} is inside the .git namespace — repository and control state is never restored over"
-    if len(parts) >= 2 and parts[0] == ".forge" and parts[1] == "checkpoints":
-        return f"{pure.as_posix()!r} is inside the checkpoint store itself — the store is never restored over"
+    if len(parts) >= 2 and parts[0] == ".forge" and parts[1] in _RESERVED_FORGE_ENTRIES:
+        return (
+            f"{pure.as_posix()!r} is inside .forge/{parts[1]} — a restore-owned "
+            "record the checkpoint never writes"
+        )
     name = parts[-1].lower()
     if name.endswith(".pem") or name.endswith(".key"):
         return f"{pure.as_posix()!r} is credential-shaped (private key material) — never restored"
@@ -284,6 +319,14 @@ class FileRestore:
 #: retry from the approved base).
 RestorePhase = Literal["completed", "preflight_failed", "promotion_failed"]
 
+#: How :func:`restore_wip` activates the staged generation (R32-01):
+#: ``"switch"`` — the staged tree REPLACES the target by two atomic
+#: renames (a caller outside the workspace); ``"generation"`` — the
+#: staged tree lands as a SIBLING ``.forge-workspace-gen-*`` directory
+#: and the target is never renamed or removed (the lane's mode: the
+#: process and its parent CI shell may be sitting inside the target).
+PromoteMode = Literal["switch", "generation"]
+
 
 @dataclass(frozen=True)
 class RestoreReport:
@@ -297,7 +340,12 @@ class RestoreReport:
     it as unusable, rebuilding from the approved base. ``recovery``
     carries what this restore found and resolved of an EARLIER crashed
     restore's abandoned promotion (rolled-back backups, collected
-    staging directories).
+    staging directories). ``workspace_generation`` (R32-01) is the
+    ABSOLUTE path of the landed generation under ``promote="generation"``
+    — empty in switch mode and on any failure. ``unrecognized``
+    (R32-02) inventories the promotion leftovers under the shared
+    parent prefixes that are NOT owned by this work — reported, never
+    touched (another workspace's recovery assets).
     """
 
     artifact_id: str
@@ -307,6 +355,8 @@ class RestoreReport:
     phase: RestorePhase = "completed"
     target_invalid: bool = False
     recovery: tuple[str, ...] = ()
+    workspace_generation: str = ""
+    unrecognized: tuple[str, ...] = ()
 
     @property
     def restored_paths(self) -> tuple[str, ...]:
@@ -648,84 +698,247 @@ def _symlink_free_target_path(
 
 
 #: The staging prefix beside the target (a crash leaves these behind for
-#: :func:`_recover_abandoned_promotions` to collect).
+#: :func:`_recover_abandoned_promotions` to collect). R32-02: the name
+#: continues with the OWNING work's token, so recovery never mistakes a
+#: sibling workspace's staging for this work's.
 _STAGING_PREFIX: Final = ".forge-restore-"
-#: The parked ORIGINAL generation of an interrupted whole-tree switch:
-#: present with the target MISSING means the switch died between its
-#: two renames — the next restore rolls the original back before doing
-#: anything else (NEXT-04's crash semantics).
+#: The parked ORIGINAL of an interrupted promotion: present with the
+#: promoted path MISSING means the promotion died between its two
+#: renames — the next restore of the SAME work rolls the original back
+#: before doing anything else (NEXT-04's crash semantics). R32-02: the
+#: name binds it to its owner,
+#: ``.forge-restore-backup-<work_id>[-<checkpoint_id[:8]>]-<pid>-<uuid>``,
+#: so a shared parent can hold several workspaces' leftovers without
+#: one workspace's recovery ever claiming another's.
 _BACKUP_PREFIX: Final = ".forge-restore-backup-"
+#: The sibling generation a ``promote="generation"`` restore lands in
+#: (R32-01): ``<parent>/.forge-workspace-gen-<checkpoint_id[:12]>`` — a
+#: STABLE path that is never the target and never removed while the
+#: lane or its CI shell sits in the workspace.
+_GENERATION_PREFIX: Final = ".forge-workspace-gen-"
+#: The pointer recording the ACTIVE generation inside the workspace
+#: (``<workspace>/.forge/workspace-generation``) for the collector step
+#: — the parent CI shell resolves THIS, never its inherited directory
+#: inode (which a promotion may have retired underneath it).
+_GENERATION_POINTER: Final = ".forge/workspace-generation"
+
+_WORK_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_HEX8_RE: Final = re.compile(r"[0-9a-f]{8}")
 
 
-def _staging_dir(target: Path) -> tuple[Path, bool]:
-    """A scratch directory for the staged NEXT GENERATION of the target.
+def _work_token(work_id: str) -> str:
+    """The directory-name token binding promotion assets to *work_id*.
+
+    A plain id passes through unchanged; anything that could smuggle a
+    path separator or an overlong name into a directory name is folded
+    to its sha256 prefix (the token only has to be STABLE and namespaced
+    per work, not readable).
+    """
+    token = (work_id or "").strip()
+    if _WORK_TOKEN_RE.fullmatch(token):
+        return token
+    return _sha256(token.encode("utf-8", "replace")).hex()[:16]
+
+
+def _generation_dir(parent: Path, checkpoint_id: str) -> Path:
+    """The stable generation path *checkpoint_id* restores into (R32-01)."""
+    return parent / f"{_GENERATION_PREFIX}{checkpoint_id[:12]}"
+
+
+def _backup_dir_name(work_id: str, checkpoint_id: str) -> str:
+    """An OWNED park name for the original a promotion moves aside (R32-02).
+
+    ``.forge-restore-backup-<work_id>[-<checkpoint_id[:8]>]-<pid>-<uuid>``:
+    the work token binds the directory to the transaction's owner, the
+    optional checkpoint fragment lets recovery distinguish a backup of
+    THIS checkpoint's promotion from an older one's, and pid+uuid keep
+    concurrent promotions from colliding.
+    """
+    token = _work_token(work_id)
+    fragment = f"-{checkpoint_id[:8]}" if checkpoint_id else ""
+    return f"{_BACKUP_PREFIX}{token}{fragment}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _backup_checkpoint_fragment(name: str, token: str) -> str:
+    """The 8-hex checkpoint fragment an OWNED backup name carries (``""`` none).
+
+    The name is read from the right — ``<pid>-<uuid>`` trail first — so
+    dash-bearing work tokens stay intact; the fragment is the 8-hex run
+    before the trail when one is present.
+    """
+    rest = name.removeprefix(f"{_BACKUP_PREFIX}{token}-").split("-")
+    if len(rest) >= 3 and _HEX8_RE.fullmatch(rest[-3]):
+        return rest[-3]
+    return ""
+
+
+def _landed_generation_for(parent: Path, fragment: str) -> Path | None:
+    """The LANDED generation directory *fragment* names, if one exists.
+
+    Generation names carry ``checkpoint_id[:12]``; a parked backup
+    carries ``[:8]`` — the match is the prefix relation between them,
+    which is exact for the checkpoint that minted both.
+    """
+    if not fragment:
+        return None
+    for candidate in sorted(parent.glob(f"{_GENERATION_PREFIX}*")):
+        if candidate.is_dir() and candidate.name.removeprefix(_GENERATION_PREFIX).startswith(
+            fragment
+        ):
+            return candidate
+    return None
+
+
+def _write_generation_pointer(
+    root: Path, *, work_id: str, checkpoint_id: str, generation: Path
+) -> None:
+    """Record the ACTIVE generation at ``root/.forge/workspace-generation``.
+
+    R32-01's CI contract: the parent shell (and every step after the
+    lane) resolves the workspace the restored WIP lives in through this
+    POINTER — never through an inherited cwd that a promotion may have
+    retired. The document names the checkpoint that produced the
+    generation, its directory NAME beside the workspace, and the
+    absolute path for convenience.
+    """
+    pointer = root / _GENERATION_POINTER
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "schema": _GENERATION_POINTER_SCHEMA,
+        "work_id": work_id,
+        "checkpoint_id": checkpoint_id,
+        "generation": generation.name,
+        "generation_path": str(generation),
+    }
+    pointer.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+
+def _staging_dir(target: Path, work_id: str) -> tuple[Path, bool]:
+    """A scratch directory for the staged next generation of the target.
 
     Beside the target when the parent allows it (the same filesystem —
-    the whole-tree switch's directory renames are atomic there), and
-    the returned flag is ``True``. A read-only parent falls back to
-    ``.forge/`` INSIDE the target — excluded from every capture walk,
-    and still discarded whole on any failure — where the whole-tree
-    switch is IMPOSSIBLE, so the caller promotes per-file under a
-    savepoint instead (flag ``False``).
+    the promotion's directory renames are atomic there), OWNED by
+    *work_id* (R32-02), and the returned flag is ``True``. A read-only
+    parent falls back to ``.forge/`` INSIDE the target — excluded from
+    every capture walk, and still discarded whole on any failure —
+    where the whole-tree switch is IMPOSSIBLE, so the caller promotes
+    per-file under a savepoint instead (flag ``False``).
     """
     try:
-        return Path(tempfile.mkdtemp(dir=target.parent, prefix=_STAGING_PREFIX)), True
+        staged = Path(
+            tempfile.mkdtemp(dir=target.parent, prefix=f"{_STAGING_PREFIX}{_work_token(work_id)}-")
+        )
+        return staged, True
     except OSError:
         inside = target / ".forge"
         inside.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(dir=inside, prefix="restore-")), False
 
 
-def _recover_abandoned_promotions(target: Path) -> tuple[str, ...]:
-    """Resolve the leftovers of a restore that died mid-promotion.
+def _recover_abandoned_promotions(
+    target: Path,
+    *,
+    work_id: str,
+    checkpoint_id: str = "",
+    subject: Path | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolve the leftovers of THIS WORK's restore that died mid-promotion.
 
-    NEXT-04's crash recovery, run BEFORE any preflight touches the
-    target (a preflight against a missing target would otherwise
-    validate against the void):
+    NEXT-04's crash recovery, R32-02's ownership scope: every directory
+    examined lives under the target's parent (a SHARED parent in
+    multi-workspace deployments), so a leftover is only ever touched
+    when its name carries the CURRENT work's id — everything else under
+    the prefixes is inventoried in ``unrecognized`` and left untouched
+    (another workspace's backup is not this restore's to resolve, and a
+    legacy pre-ownership name carries no binding at all). For an OWNED
+    leftover:
 
-    - a parked ``.forge-restore-backup-*`` WITH the target present means
-      the interrupted switch landed its generation and only the cleanup
-      died — the promoted generation stands, the parked copy is
+    - a parked backup whose checkpoint fragment names a LANDED
+      generation means the interrupted promotion completed and only the
+      cleanup died — the landed generation stands, the parked copy is
       discarded;
-    - a parked backup with the target MISSING means the switch died
-      BETWEEN its two renames — the original generation is rolled back
-      into place (the honest posture: the restore as a whole failed, so
-      the workspace returns to its pre-restore state);
-    - any abandoned ``.forge-restore-*`` staging directory is collected
-      (removed) — a fresh generation is always built from scratch, never
-      resumed out of a stale staging tree.
+    - a parked backup of THIS checkpoint's promotion with the promoted
+      path (*subject* — the target in switch mode, the generation in
+      generation mode) MISSING means the promotion died between its two
+      renames — the original is rolled back into place (the honest
+      posture: the restore as a whole failed, so the workspace returns
+      to its pre-restore state); with the subject present, the parked
+      copy is the retired pre-promotion original and is discarded;
+    - an owned backup of ANOTHER checkpoint's promotion has no
+      deterministic destination under this restore — inventoried, never
+      guessed;
+    - an abandoned OWNED ``.forge-restore-<work>-*`` staging directory
+      is collected (removed) — a fresh generation is always built from
+      scratch, never resumed out of a stale staging tree.
+
+    Returns ``(recovery_notes, unrecognized_inventory)``.
     """
     notes: list[str] = []
+    unrecognized: list[str] = []
     parent = target.parent
     if not parent.is_dir():
-        return ()
+        return (), ()
+    subject = target if subject is None else subject
+    token = _work_token(work_id)
+    fragment_now = checkpoint_id[:8] if checkpoint_id else ""
     for backup in sorted(parent.glob(f"{_BACKUP_PREFIX}*")):
         if not backup.is_dir():
             continue
-        if target.exists():
+        if not backup.name.startswith(f"{_BACKUP_PREFIX}{token}-"):
+            unrecognized.append(
+                f"{backup.name}: not owned by work {work_id!r} — left untouched "
+                "for the operator (another workspace's recovery asset)"
+            )
+            continue
+        fragment = _backup_checkpoint_fragment(backup.name, token)
+        landed = _landed_generation_for(parent, fragment)
+        if landed is not None:
             shutil.rmtree(backup, ignore_errors=True)
             notes.append(
-                f"discarded abandoned backup {backup.name}: the promoted generation "
-                "stands — the interrupted restore died after landing it, before cleanup"
+                f"discarded abandoned backup {backup.name}: the generation "
+                f"{landed.name} stands — the interrupted restore died after "
+                "landing it, before cleanup"
             )
-        else:
-            try:
-                os.replace(backup, target)
-            except OSError as exc:
-                notes.append(
-                    f"abandoned backup {backup.name} could not be resolved ({exc}) — "
-                    "the target stays absent; rebuild from the approved base"
-                )
-                continue
+            continue
+        if not fragment or fragment != fragment_now:
+            unrecognized.append(
+                f"{backup.name}: owned by work {work_id!r} but bound to checkpoint "
+                f"{fragment or '?'} which this restore does not continue — left "
+                "untouched for the operator"
+            )
+            continue
+        if subject.exists():
+            shutil.rmtree(backup, ignore_errors=True)
             notes.append(
-                f"rolled back abandoned backup {backup.name}: the interrupted promotion "
-                "never landed its generation — the target is at its original state"
+                f"discarded abandoned backup {backup.name}: the promotion it was "
+                f"parked for has landed — {subject.name} stands and the parked "
+                "copy is its retired original"
             )
+            continue
+        try:
+            os.replace(backup, subject)
+        except OSError as exc:
+            notes.append(
+                f"abandoned backup {backup.name} could not be resolved ({exc}) — "
+                f"{subject.name} stays absent; rebuild from the approved base"
+            )
+            continue
+        notes.append(
+            f"rolled back abandoned backup {backup.name}: the interrupted "
+            f"promotion never landed — {subject.name} is at its prior state"
+        )
     for leftover in sorted(parent.glob(f"{_STAGING_PREFIX}*")):
-        if leftover.is_dir():
+        if not leftover.is_dir() or leftover.name.startswith(_BACKUP_PREFIX):
+            continue  # the backup loop owns those names
+        if leftover.name.startswith(f"{_STAGING_PREFIX}{token}-"):
             shutil.rmtree(leftover, ignore_errors=True)
             notes.append(f"collected abandoned staging directory {leftover.name}")
-    return tuple(notes)
+        else:
+            unrecognized.append(
+                f"{leftover.name}: not owned by work {work_id!r} — left untouched "
+                "for the operator (another workspace's staging tree)"
+            )
+    return tuple(notes), tuple(unrecognized)
 
 
 def _apply_plan_to_generation(
@@ -758,7 +971,9 @@ def _apply_plan_to_generation(
     return outcomes
 
 
-def _switch_workspace_generation(target: Path, tree: Path) -> None:
+def _switch_workspace_generation(
+    target: Path, tree: Path, *, work_id: str, checkpoint_id: str
+) -> None:
     """Activate the staged generation by ONE whole-tree switch (NEXT-04).
 
     Filesystem assumptions (documented, not guessed): *tree* sits on the
@@ -766,12 +981,18 @@ def _switch_workspace_generation(target: Path, tree: Path) -> None:
     parent), and directory renames are atomic there. Crash semantics:
     the switch is two renames — ``target -> backup`` then ``tree ->
     target``. A crash before the first leaves everything as it was; a
-    crash between the two leaves the original parked under
-    ``.forge-restore-backup-*`` with the target ABSENT (explicitly
-    unusable — never mixed) for :func:`_recover_abandoned_promotions` to
-    roll back on the next run; a failure of the second rename under our
-    own hands rolls the first back BEFORE raising, so a caught failure
+    crash between the two leaves the original parked under an OWNED
+    ``.forge-restore-backup-<work_id>-...`` name (R32-02) with the
+    target ABSENT (explicitly unusable — never mixed) for
+    :func:`_recover_abandoned_promotions` to roll back on the next run
+    of the same work; a failure of the second rename under our own
+    hands rolls the first back BEFORE raising, so a caught failure
     still leaves the original generation in place.
+
+    The caller must NOT be sitting inside *target* (R32-01): the switch
+    renames the directory a live process's cwd is bound to and then
+    deletes the parked original — a lane restores with
+    ``promote="generation"`` instead.
     """
     if not target.exists():
         # A fresh runner with no workspace yet: there is no original to
@@ -785,7 +1006,7 @@ def _switch_workspace_generation(target: Path, tree: Path) -> None:
                 target_invalid=False,
             ) from exc
         return
-    backup = target.parent / f"{_BACKUP_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    backup = target.parent / _backup_dir_name(work_id, checkpoint_id)
     try:
         os.replace(target, backup)
     except OSError as exc:
@@ -821,6 +1042,9 @@ def _promote_whole_tree(
     planned: list[_PlannedFile],
     planned_deletions: list[tuple[str, PurePosixPath]],
     blobs: Mapping[str, bytes],
+    *,
+    work_id: str = "",
+    checkpoint_id: str = "",
 ) -> list[FileRestore]:
     """Build the COMPLETE next generation in staging, then switch once.
 
@@ -837,7 +1061,100 @@ def _promote_whole_tree(
         else:
             tree.mkdir(parents=True)
         deletion_outcomes = _apply_plan_to_generation(tree, planned, planned_deletions, blobs)
-        _switch_workspace_generation(target, tree)
+        _switch_workspace_generation(target, tree, work_id=work_id, checkpoint_id=checkpoint_id)
+    except _PromotionFailure:
+        raise
+    except OSError as exc:
+        raise _PromotionFailure(
+            f"building the staged workspace generation failed: {exc} — "
+            "the live target was never mutated",
+            target_invalid=False,
+        ) from exc
+    return [FileRestore(item.rel, "restored", digest=item.digest) for item in planned] + (
+        deletion_outcomes
+    )
+
+
+def _promote_to_generation(
+    target: Path,
+    staging: Path,
+    generation: Path,
+    planned: list[_PlannedFile],
+    planned_deletions: list[tuple[str, PurePosixPath]],
+    blobs: Mapping[str, bytes],
+    *,
+    work_id: str = "",
+    checkpoint_id: str = "",
+) -> list[FileRestore]:
+    """Build the COMPLETE next generation and land it as a SIBLING (R32-01).
+
+    The ORIGINAL TARGET is never renamed and never removed — the lane
+    process (and the CI shell that spawned it) may be sitting inside it,
+    and the reviewer's P03 proved a whole-tree switch there leaves
+    ``os.getcwd()`` resolving to a deleted directory. Instead:
+
+    - the complete next generation (a copy of the target with the
+      verified plan applied, plus its own self-describing
+      ``.forge/workspace-generation`` pointer) lands at *generation* —
+      ``<parent>/.forge-workspace-gen-<checkpoint_id[:12]>``, a STABLE
+      path that outlives any single attempt;
+    - a previous generation of the SAME checkpoint is retired aside
+      under an OWNED backup name first, rolled back if the landing
+      fails, and discarded after (the checkpoint reconstructs it);
+    - the target only gains the ``.forge/workspace-generation`` POINTER
+      naming the active generation — the collector step's contract.
+
+    A failure at any boundary leaves the target at its ORIGINAL state
+    with no usable generation reported — the caller (the lane's
+    required-restore gate) treats that as a failed restore.
+    """
+    tree = staging / "tree"
+    try:
+        if target.exists():
+            shutil.copytree(target, tree, symlinks=True)
+        else:
+            tree.mkdir(parents=True)
+        _write_generation_pointer(
+            tree, work_id=work_id, checkpoint_id=checkpoint_id, generation=generation
+        )
+        deletion_outcomes = _apply_plan_to_generation(tree, planned, planned_deletions, blobs)
+        backup: Path | None = None
+        if generation.exists():
+            # A previous restore of the SAME checkpoint landed here: retire
+            # it aside (owned name) so the landing stays ONE rename.
+            backup = generation.parent / _backup_dir_name(work_id, checkpoint_id)
+            try:
+                os.replace(generation, backup)
+            except OSError as exc:
+                raise _PromotionFailure(
+                    f"retiring the previous workspace generation failed: {exc} — "
+                    "the live target was never mutated",
+                    target_invalid=False,
+                ) from exc
+        try:
+            os.replace(tree, generation)
+        except OSError as landing:
+            if backup is not None:
+                try:
+                    os.replace(backup, generation)
+                except OSError as rollback:
+                    raise _PromotionFailure(
+                        f"landing the staged workspace generation failed ({landing}) AND "
+                        f"rolling the retired generation back failed ({rollback}) — the "
+                        f"generation is INVALID (absent; the original stays parked at "
+                        f"{backup.name} for recovery): retry from the checkpoint",
+                        target_invalid=False,
+                    ) from rollback
+            raise _PromotionFailure(
+                f"landing the staged workspace generation failed: {landing} — the "
+                "original workspace was never touched; the restore failed as a whole",
+                target_invalid=False,
+            ) from landing
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)  # the retired generation is garbage
+        _write_generation_pointer(
+            target, work_id=work_id, checkpoint_id=checkpoint_id, generation=generation
+        )
     except _PromotionFailure:
         raise
     except OSError as exc:
@@ -980,6 +1297,8 @@ def restore_wip(
     target: Path,
     principal: str,
     download: RemoteCheckpointSource | None = None,
+    work_id: str = "",
+    promote: PromoteMode = "switch",
 ) -> RestoreReport:
     """Reconstruct the checkpointed WIP into *target* on a second runner.
 
@@ -988,34 +1307,57 @@ def restore_wip(
     same as absence) and tampered bytes raise before anything is
     written. Then the restore is TRANSACTIONAL (R28-02/NEXT-04): every
     path, kind, mode, blob and conflict is verified BEFORE the first
-    write — escapes, reserved namespaces (``.git``, the checkpoint store,
-    credential-shaped names), symlinked ancestors (``lstat``, never
-    followed), duplicate/aliasing normalized paths and
-    file-versus-directory conflicts each refuse the WHOLE restore with
-    the precise reason (``phase="preflight_failed"`` — nothing was
-    written). Only a fully verified plan is promoted: the COMPLETE next
-    generation of the workspace is built in a STAGING directory beside
-    the target and activated by ONE whole-tree switch — the current
-    generation moves aside and the staged one lands, with the move-aside
-    rolled back if the landing fails. A failure during promotion reports
-    ``phase="promotion_failed"`` with the target at its original state
-    (``target_invalid=True`` only when even the rollback failed — then
-    the workspace is explicitly unusable and a retry rebuilds from the
-    approved base). Several atomic file renames are NEVER treated as an
-    atomic multi-file transaction; where the read-only parent forces the
-    per-file fallback, a full savepoint (the captured original of every
-    touched file) is replayed in reverse on any failure.
+    write — escapes, reserved namespaces (``.git``, the checkpoint
+    store, the generation pointer, credential-shaped names), symlinked
+    ancestors (``lstat``, never followed), duplicate/aliasing normalized
+    paths and file-versus-directory conflicts each refuse the WHOLE
+    restore with the precise reason (``phase="preflight_failed"`` —
+    nothing was written). Only a fully verified plan is promoted, in one
+    of two modes (:data:`PromoteMode`):
 
-    Crash semantics and filesystem assumptions: a restore killed
-    mid-promotion never exposes a mixed workspace — it leaves either the
-    untouched original, or (between the switch's two renames) a MISSING
-    target with the original parked under a ``.forge-restore-backup-*``
-    sibling, which the NEXT restore identifies and resolves (roll back,
-    and collect abandoned staging directories) before its own preflight;
-    the report's ``recovery`` names everything it resolved. The switch
-    assumes the workspace holds regular files, directories and symlinks
-    only (a checkout tree) and that directory renames are atomic on the
-    target's filesystem — both hold on every supported runner.
+    - ``promote="switch"`` (default) — the COMPLETE next generation is
+      built in a STAGING directory beside the target and activated by
+      ONE whole-tree switch: the current generation moves aside and the
+      staged one lands, with the move-aside rolled back if the landing
+      fails. For callers OUTSIDE the workspace only (R32-01: the switch
+      renames the directory a process sitting in the target — and its
+      parent shell — is bound to).
+    - ``promote="generation"`` — the staged tree lands as a SIBLING
+      ``<parent>/.forge-workspace-gen-<checkpoint_id[:12]>`` directory
+      and the TARGET IS NEVER RENAMED OR REMOVED. The report carries the
+      landed path in ``workspace_generation``, and the target gains the
+      ``.forge/workspace-generation`` POINTER naming the active
+      generation for the collector step. This is the lane's mode: a
+      process restoring into its own ``Path.cwd()`` keeps a valid
+      ``os.getcwd()`` and relative writes keep working after success.
+
+    A failure during promotion reports ``phase="promotion_failed"`` with
+    the target at its original state (``target_invalid=True`` only when
+    even the rollback failed — then the workspace is explicitly unusable
+    and a retry rebuilds from the approved base; the generation mode
+    never risks the target, so it reports ``target_invalid=False``).
+    Several atomic file renames are NEVER treated as an atomic
+    multi-file transaction; where the read-only parent forces the
+    per-file fallback in switch mode, a full savepoint (the captured
+    original of every touched file) is replayed in reverse on any
+    failure — the generation mode REFUSES there instead.
+
+    Crash semantics, ownership and filesystem assumptions (R32-02): a
+    restore killed mid-promotion never exposes a mixed workspace — it
+    leaves either the untouched original, or the promoted path MISSING
+    with the original parked under an OWNED
+    ``.forge-restore-backup-<work_id>[-<checkpoint[:8]>]-<pid>-<uuid>``
+    sibling. The NEXT restore resolves ONLY leftovers whose name carries
+    ITS work's id (*work_id* here, falling back to the manifest's) — in
+    a shared parent another workspace's backups and staging directories
+    are inventoried in ``unrecognized`` and never touched, and a
+    refused restore (failed fetch, corrupt or unauthorized manifest)
+    resolves NOTHING at all: recovery assets only move once the
+    requested checkpoint itself validated. The report's ``recovery``
+    names everything it resolved. The promotion assumes the workspace
+    holds regular files, directories and symlinks only (a checkout
+    tree) and that directory renames are atomic on the target's
+    filesystem — both hold on every supported runner.
 
     ``download`` (wave C/D, optional): a transport channel — when
     given, ``artifact_id`` is read as the REMOTE durable reference
@@ -1027,7 +1369,8 @@ def restore_wip(
     single file is written.
     """
     target = Path(target)
-    recovery = _recover_abandoned_promotions(target)
+    recovery: tuple[str, ...] = ()
+    unrecognized: tuple[str, ...] = ()
     if download is not None:
         try:
             artifact_id = download.fetch_checkpoint(artifact_id, store)
@@ -1104,6 +1447,17 @@ def restore_wip(
             phase="preflight_failed",
             recovery=recovery,
         )
+
+    # -- R32-02: recover THIS WORK's abandoned promotion — but only now
+    # that the requested checkpoint itself validated. A refused restore
+    # (failed fetch, corrupt/unauthorized manifest) resolves NOTHING:
+    # recovery assets move only for a checkpoint this runner could
+    # actually restore, and only the ones the WORK's own name owns.
+    owner = (work_id or "").strip() or str(manifest.get("work_id") or "").strip()
+    subject = target if promote == "switch" else _generation_dir(target.parent, artifact_id)
+    recovery, unrecognized = _recover_abandoned_promotions(
+        target, work_id=owner, checkpoint_id=artifact_id, subject=subject
+    )
 
     # -- verify the ENTIRE plan before touching the target (R28-02) ------
     outcomes: list[FileRestore] = []
@@ -1249,15 +1603,49 @@ def restore_wip(
             failures=tuple(failures),
             phase="preflight_failed",
             recovery=recovery,
+            unrecognized=unrecognized,
         )
 
-    # -- promote: ONE whole-generation switch, never a mixed workspace --
-    staging, beside_target = _staging_dir(target)
+    # -- promote: ONE whole-generation activation, never a mixed workspace --
+    staging, beside_target = _staging_dir(target, owner)
+    workspace_generation = ""
     try:
-        if beside_target:
-            outcomes = _promote_whole_tree(target, staging, planned, planned_deletions, blobs)
-        else:
+        if promote == "generation" and not beside_target:
+            # Typed refusal (R32-01): the generation mode exists so the live
+            # target is never rewritten underneath a process sitting in it —
+            # the in-target per-file fallback would do exactly that.
+            raise _PromotionFailure(
+                "the generation promotion requires a staging directory BESIDE "
+                "the workspace (a writable parent): the in-target fallback "
+                "rewrites the live target in place, which is exactly what the "
+                "generation mode refuses",
+                target_invalid=False,
+            )
+        if not beside_target:
             outcomes = _promote_under_savepoint(target, staging, planned, planned_deletions, blobs)
+        elif promote == "generation":
+            generation = _generation_dir(target.parent, artifact_id)
+            outcomes = _promote_to_generation(
+                target,
+                staging,
+                generation,
+                planned,
+                planned_deletions,
+                blobs,
+                work_id=owner,
+                checkpoint_id=artifact_id,
+            )
+            workspace_generation = str(generation)
+        else:
+            outcomes = _promote_whole_tree(
+                target,
+                staging,
+                planned,
+                planned_deletions,
+                blobs,
+                work_id=owner,
+                checkpoint_id=artifact_id,
+            )
     except _PromotionFailure as exc:
         failures.append(exc.reason)
         return RestoreReport(
@@ -1268,6 +1656,7 @@ def restore_wip(
             phase="promotion_failed",
             target_invalid=exc.target_invalid,
             recovery=recovery,
+            unrecognized=unrecognized,
         )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -1279,6 +1668,8 @@ def restore_wip(
         failures=tuple(failures),
         phase="completed",
         recovery=recovery,
+        workspace_generation=workspace_generation,
+        unrecognized=unrecognized,
     )
 
 

@@ -29,7 +29,13 @@ transport (wave C/D):
    :meth:`ContentAddressedStore.get_verified` (the store's own
    grant+digest semantics). The returned :class:`DownloadedCheckpoint`
    is the restore handle :func:`forge.adaptive.checkpointing.restore_wip`
-   consumes.
+   consumes. The lane passes it on with ``work_id=`` and
+   ``promote="generation"`` (R32-01): the lane process sits INSIDE its
+   target, so the restore lands a stable sibling
+   ``.forge-workspace-gen-*`` workspace generation instead of replacing
+   the checkout under the running process — see the checkpointing
+   module's restore contract for the pointer-file and ownership
+   (R32-02) semantics the downloaded handle inherits.
 
 Authentication shares the lane control scheme's shared secret: the env
 ``FORGE_LANE_CONTROL_URL`` names the control plane and
@@ -618,7 +624,11 @@ class CheckpointChannel:
         The seam :func:`forge.adaptive.checkpointing.restore_wip`
         consumes through ``download=``: parse the reference, download
         digest-verified into *store*, and return the manifest's content
-        address the local restore continues from.
+        address the local restore continues from. Callers restoring the
+        lane's OWN working directory pass ``promote="generation"`` and
+        their ``work_id`` alongside (R32-01/R32-02) so the promotion
+        lands a stable sibling generation and only touches recovery
+        assets this work owns.
         """
         work_id, checkpoint_id = parse_checkpoint_ref(remote_ref)
         handle = self.download_checkpoint(work_id, store, checkpoint_id=checkpoint_id)

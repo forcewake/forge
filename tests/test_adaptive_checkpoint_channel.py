@@ -1607,6 +1607,44 @@ class TestExactResumeSelection:
         assert report["checkpoint_selection"] == "refused"
         assert report["restored"] is False
 
+    def test_the_lane_restore_lands_a_generation_and_points_the_checkout_at_it(
+        self, httpx_mock, lane_cwd, captures
+    ):
+        """R32-01 at the lane seam: the restore never replaces the checkout
+        the lane process sits in — it lands a SIBLING generation, the
+        report names it (``workspace_generation``), and the checkout's
+        ``.forge/workspace-generation`` pointer records it for the
+        collector step. The parent shell's directory stays exactly where
+        it was."""
+        from forge.lane_driver import _maybe_restore_wip
+
+        _tree, store, _newer, older = captures
+        self._serve_resume_spec(
+            httpx_mock, _resume_command(5, {"checkpoint_id": older.artifact_id})
+        )
+        self._serve_checkpoint(httpx_mock, store, older.artifact_id, 10)
+
+        report = _maybe_restore_wip(WORK_ID)
+
+        assert report["restored"] is True, report
+        generation = Path(report["workspace_generation"])
+        assert generation.parent == lane_cwd.parent
+        assert generation.name == f".forge-workspace-gen-{older.artifact_id[:12]}"
+        assert generation.is_dir()
+        # The checkpointed bytes live in the GENERATION, not the checkout.
+        assert (generation / "src" / "app.py").read_bytes() == _APP_V3
+        assert not (lane_cwd / "src").exists()
+        # The collector contract: the pointer inside the checkout names the
+        # active generation and the checkpoint that produced it.
+        pointer = json.loads((lane_cwd / ".forge" / "workspace-generation").read_text())
+        assert pointer["schema"] == "forge.workspace-generation/1"
+        assert pointer["work_id"] == WORK_ID
+        assert pointer["checkpoint_id"] == older.artifact_id
+        assert pointer["generation"] == generation.name
+        assert pointer["generation_path"] == str(generation)
+        # No promotion leftovers beside the checkout.
+        assert list(lane_cwd.parent.glob(".forge-restore-*")) == []
+
 
 # -- R28-14: the unified storage policy, quotas and health report -------------------
 

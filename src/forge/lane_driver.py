@@ -1024,11 +1024,18 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
         store_dir.mkdir(parents=True, exist_ok=True)
         store = ContentAddressedStore(root=store_dir, tenant=work_id)
         downloaded = download_checkpoint(work_id, api, store, checkpoint_id=target["checkpoint_id"])
+        # R32-01: the lane process is INSIDE its target (``Path.cwd()``), so
+        # the restore lands a STABLE GENERATION beside the checkout and
+        # never renames or removes the directory the process (and the CI
+        # shell waiting on it) is bound to. The report carries the landed
+        # path; ``main`` chdirs into it before any vendor client exists.
         report = restore_wip(
             artifact_id=downloaded.artifact_id,
             store=store,
             target=_P.cwd(),
             principal=work_id,
+            work_id=work_id,
+            promote="generation",
         )
         restored: dict[str, Any] = {
             "restored": report.ok,
@@ -1041,6 +1048,14 @@ def _maybe_restore_wip(work_id: str) -> dict[str, Any] | None:
             "checkpoint_sequence": downloaded.sequence,
             "checkpoint_selection": selection,
             "resume_command": target["resume_command"],
+            # R32-01: the ACTIVE workspace generation — the sibling directory
+            # the restored WIP lives in (empty when the restore failed; the
+            # checkout's ``.forge/workspace-generation`` pointer names it for
+            # the collector step).
+            "workspace_generation": report.workspace_generation or None,
+            # R32-02: recovery assets under the shared parent this restore did
+            # NOT own (another workspace's) — inventory, never touched.
+            "recovery_unrecognized": list(report.unrecognized[:5]),
         }
         if selection == "latest":
             # The honest fallback record: this restore was NOT bound to an
@@ -1859,6 +1874,7 @@ def write_artifacts(
     meta_path: str = _META_PATH,
     usage_path: str = _USAGE_PATH,
     driver_id: str = LANE_DRIVER_ID,
+    workspace_generation: str = "",
 ) -> dict[str, Any]:
     """Write the batch lane's meta + usage contract for *outcome*.
 
@@ -1868,6 +1884,12 @@ def write_artifacts(
     carries the same receipt beside it (the batch lane's layout). Unknown
     usage stays ``null`` — never a zeroed dict. *driver_id* is the lane's
     registered harness id (:data:`LANE_DRIVER_IDS` value).
+    *workspace_generation* (R32-01) records the ACTIVE workspace
+    generation the restored WIP landed in — the absolute path the
+    collector step resolves (also named by the checkout's
+    ``.forge/workspace-generation`` pointer); the meta paths stay
+    anchored at the STABLE checkout, never inside a generation the
+    promotion may retire.
     """
     meta: dict[str, Any] = {
         "attempt_base": str(attempt_base or ""),
@@ -1877,6 +1899,8 @@ def write_artifacts(
         "terminal_reason": outcome.terminal_reason,
         "usage": outcome.usage,
     }
+    if workspace_generation:
+        meta["workspace_generation"] = workspace_generation
     if outcome.error:
         meta["error"] = outcome.error[:500]
     if getattr(outcome, "reply_excerpt", None):
@@ -1911,7 +1935,7 @@ def write_artifacts(
     return meta
 
 
-def _write_wip_restore_sidecar(report: dict[str, Any]) -> None:
+def _write_wip_restore_sidecar(report: dict[str, Any], *, root: Path | None = None) -> None:
     """Land the wip-restore report in ``.forge/steering.json`` (R28-03).
 
     The report rides the STEERING SIDECAR (the same ``.forge/steering.json``
@@ -1919,9 +1943,11 @@ def _write_wip_restore_sidecar(report: dict[str, Any]) -> None:
     reaches the uploaded artifact because the emit step rebuilds it at
     forge-output/). LIVE-found. Used by BOTH the halted-required-restore
     path (the failure IS the lane's verdict) and the normal post-turn
-    record.
+    record. *root* anchors the write at a STABLE directory (R32-01): the
+    lane may have chdir'd into a restored workspace GENERATION, but the
+    CI shell reads the sidecar from the checkout it started in.
     """
-    sidecar = Path(".forge/steering.json")
+    sidecar = (Path.cwd() if root is None else root) / ".forge/steering.json"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     try:
         existing = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
@@ -2074,6 +2100,26 @@ def main(
             )
             return _fail("wip_restore_failed", detail)
 
+    # R32-01: a successful restore landed a STABLE GENERATION beside the
+    # checkout (the checkout itself was never renamed or removed — the
+    # reviewer's P03 proved the whole-tree switch leaves a process sitting
+    # in the target with a deleted cwd and a stranded parent CI shell).
+    # The lane ENTERS the generation before any vendor client exists: the
+    # Python process chdir'd (the parent shell's cwd is untouched), the
+    # vendor cwd envs are rebound to the generation so an ambient
+    # ``*_CWD`` cannot drag the agent back into the retired checkout, and
+    # the artifacts/sidecar stay anchored at the STABLE checkout while the
+    # candidate meta NAMES the active generation. Subsequent CI steps
+    # resolve the workspace through the checkout's
+    # ``.forge/workspace-generation`` pointer, never through an inherited
+    # directory inode.
+    original_cwd = Path.cwd()
+    workspace_generation = str((resume_report or {}).get("workspace_generation") or "")
+    if workspace_generation and Path(workspace_generation).is_dir():
+        os.chdir(workspace_generation)
+        for var in ("FORGE_CLAUDE_CWD", "CODEX_CWD", "COPILOT_CWD"):
+            os.environ[var] = workspace_generation
+
     # NXT-11: the lane-local control consumer, honestly OFF unless the
     # dispatch env turned it on (see steering_service_from_env).
     control = steering_service_from_env()
@@ -2149,9 +2195,17 @@ def main(
     except Exception as exc:  # noqa: BLE001 — the lane always emits its meta
         outcome = LaneOutcome(exit_status="failed", terminal_reason="driver_error", error=str(exc))
 
-    write_artifacts(outcome, attempt_base=attempt_base, model=model, driver_id=driver_id)
+    write_artifacts(
+        outcome,
+        attempt_base=attempt_base,
+        model=model,
+        driver_id=driver_id,
+        meta_path=str(original_cwd / _META_PATH),
+        usage_path=str(original_cwd / _USAGE_PATH),
+        workspace_generation=workspace_generation,
+    )
     if resume_report is not None:
-        _write_wip_restore_sidecar(resume_report)
+        _write_wip_restore_sidecar(resume_report, root=original_cwd)
     print(
         f"lane_driver: {driver_id} exit={outcome.exit_status} reason={outcome.terminal_reason}",
         file=sys.stderr,

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 import uuid
 from pathlib import Path
 from types import ModuleType
@@ -2181,6 +2182,78 @@ class TestWipRestoreGate:
 
         assert len(sdk.sole_client.queries) >= 1  # exactly the driven turn
         assert read_meta(lane_env)["exit"] == "completed"
+
+    def test_main_enters_the_restored_generation_before_the_vendor_client(
+        self, lane_env, monkeypatch
+    ):
+        """R32-01: a successful generation restore REBINDS the lane process
+        into the restored generation BEFORE any vendor client exists. The
+        Python process chdir'd (the parent shell's cwd is untouched by
+        definition), a STALE ``FORGE_CLAUDE_CWD`` pointing back at the
+        retired checkout is rewritten so the vendor works IN the
+        generation, and the candidate meta + steering sidecar stay at the
+        STABLE checkout location — naming the active generation for the
+        collector step."""
+        generation = lane_env.parent / ".forge-workspace-gen-abc123def456"
+        (generation / "src").mkdir(parents=True)
+        (generation / "src" / "app.py").write_text('print("restored")\n')
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setenv(lane_driver.RESUME_ENV, "1")
+        monkeypatch.setenv("FORGE_CLAUDE_CWD", str(lane_env))  # a STALE checkout binding
+        monkeypatch.setattr(
+            lane_driver,
+            "_maybe_restore_wip",
+            lambda work_id: {
+                "restored": True,
+                "files_restored": 3,
+                "failures": [],
+                "workspace_generation": str(generation),
+            },
+        )
+        sdk = FakeSDK(CompletedTurnClient)
+
+        try:
+            assert main(sdk=sdk.module) == 0
+            # The lane process now sits INSIDE the restored generation.
+            assert Path.cwd() == generation
+            # The vendor cwd env was rebound — no ambient binding can drag
+            # the agent back into the checkout the promotion retired.
+            assert os.environ["FORGE_CLAUDE_CWD"] == str(generation)
+            assert len(sdk.sole_client.queries) >= 1  # the turn DID run
+        finally:
+            os.chdir(lane_env)
+
+        # The artifacts stay anchored at the STABLE checkout and NAME the
+        # generation: the collector step resolves the workspace through
+        # them (and the checkout's pointer file), never a deleted cwd.
+        meta = read_meta(lane_env)
+        assert meta["exit"] == "completed"
+        assert meta["workspace_generation"] == str(generation)
+        sidecar = json.loads((lane_env / ".forge" / "steering.json").read_text())
+        assert sidecar["wip_restore"]["workspace_generation"] == str(generation)
+        assert not (generation / ".forge" / "candidate.meta.json").exists()
+
+    def test_main_stays_in_the_checkout_when_no_generation_was_restored(
+        self, lane_env, monkeypatch
+    ):
+        """A fresh run (no workspace_generation in the report) leaves the
+        process cwd exactly where the CI shell put it."""
+        monkeypatch.setenv(STEERING_ENV, "1")
+        monkeypatch.setenv("FORGE_RUN_ID", "run-9")
+        monkeypatch.setenv("FORGE_WORK_ID", "run-9")
+        monkeypatch.setattr(
+            lane_driver,
+            "_maybe_restore_wip",
+            lambda work_id: {"restored": False, "files_restored": 0, "failures": ["404"]},
+        )
+        sdk = FakeSDK(CompletedTurnClient)
+
+        assert main(sdk=sdk.module) == 0
+
+        assert Path.cwd() == lane_env  # never moved
+        assert "workspace_generation" not in read_meta(lane_env)
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,17 @@ admitted work waits in the queue, and execution attempts are the leases
 actually held or completed — :func:`admission_report` returns the three
 counters over the same durable rows, so an operator never again reads a
 queue-full refusal as an execution attempt.
+
+R32-06 (review 0fca1b7) closes the second hole in the CAS: the
+open-slot index alone still let ONE run hold TWO slots — two acquirers
+both observe no existing lease for the run, one wins slot 1, the loser
+of slot 1 legally wins slot 2. The idempotency unit is the RUN: the
+partial unique index ``uq_execution_lease_open_run`` over ``run_id``
+WHERE ``released_at IS NULL`` makes "one OPEN lease per run" a database
+invariant, and :func:`try_acquire_lease` answers the run conflict by
+reading the existing winner back (idempotent success), while an
+UNRELATED :class:`IntegrityError` is refused loudly instead of being
+read as "try the next slot forever".
 """
 
 from __future__ import annotations
@@ -77,6 +88,8 @@ __all__ = [
     "RefusalReason",
     "admission_report",
     "check_admission",
+    "execution_capacity_comment",
+    "lease_conflict_kind",
     "lease_snapshot",
     "release_lease",
     "release_run_leases",
@@ -288,6 +301,44 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: The two CAS constraints an INSERT into ``execution_leases`` can lose:
+#: the open-SLOT race (another run took this slot) and the open-RUN race
+#: (THIS run already holds a slot). Everything else is an unrelated
+#: constraint violation and must be refused, never retried (R32-06).
+_SLOT_CONSTRAINT = "uq_execution_lease_slot"
+_RUN_CONSTRAINT = "uq_execution_lease_open_run"
+
+
+def lease_conflict_kind(exc: BaseException) -> str:
+    """Classify an :class:`IntegrityError` from a lease INSERT.
+
+    Returns :data:`_SLOT_CONSTRAINT` (the loser of a slot race — the next
+    slot may be tried), :data:`_RUN_CONSTRAINT` (the run already holds an
+    open lease — the existing winner is the answer) or ``""`` (unrelated
+    — raise it, never mine it for retry signal).
+
+    Best-effort by necessity: PostgreSQL names the violated index in the
+    message and in ``orig.diag.constraint_name``; SQLite reports the
+    violated column list for a partial unique index. The slot index
+    covers ``(project_id, provider, slot)``; the open-run index covers
+    ``(run_id)`` alone — the column set distinguishes them.
+    """
+    message = f"{exc}"
+    for name in (_SLOT_CONSTRAINT, _RUN_CONSTRAINT):
+        if name in message:
+            return name
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    if constraint in (_SLOT_CONSTRAINT, _RUN_CONSTRAINT):
+        return constraint
+    if "UNIQUE constraint failed" in message:
+        if "execution_leases.run_id" in message and "execution_leases.slot" not in message:
+            return _RUN_CONSTRAINT
+        if "execution_leases.slot" in message:
+            return _SLOT_CONSTRAINT
+    return ""
+
+
 class ExecutionLease(Base):
     """ONE reserved execution slot for a project (NEXT-11), durable.
 
@@ -297,11 +348,12 @@ class ExecutionLease(Base):
     reservation: acquired at dispatch (``/go``) through a
     compare-and-set INSERT against the unique OPEN-slot index
     (``uq_execution_lease_slot`` over ``(project_id, provider, slot)``
-    WHERE ``released_at IS NULL``), held until the run's terminal
-    status, released explicitly (:func:`release_lease`) or reclaimed
-    lazily by the next acquirer that observes its run terminal — a
-    worker death leaks capacity only until the next dispatch in the
-    same project.
+    WHERE ``released_at IS NULL``) and — since R32-06 — the unique
+    OPEN-run index (``uq_execution_lease_open_run`` over ``run_id``),
+    held until the run's terminal status, released explicitly
+    (:func:`release_lease`) or reclaimed lazily by the next acquirer
+    that observes its run terminal — a worker death leaks capacity only
+    until the next dispatch in the same project.
 
     ``slot`` is the CAS key, not a scheduler decision: acquirers try
     1..max_active_per_project until one INSERT wins; the winner of a
@@ -344,6 +396,20 @@ class ExecutionLease(Base):
             sqlite_where=_LEASE_OPEN,
             postgresql_where=_LEASE_OPEN,
         ),
+        # R32-06: the idempotency unit is the RUN — one OPEN lease per
+        # run_id, alongside the slot uniqueness. Without it the legal SQL
+        # schedule "both pre-reads miss; A wins slot 1; B loses slot 1 and
+        # wins slot 2" leaves ONE run holding TWO slots. ``run_id`` is
+        # nullable (a lease may be taken anonymously); NULLs are distinct
+        # in both SQLite and PostgreSQL unique indexes, so anonymous rows
+        # never collide.
+        Index(
+            "uq_execution_lease_open_run",
+            "run_id",
+            unique=True,
+            sqlite_where=_LEASE_OPEN,
+            postgresql_where=_LEASE_OPEN,
+        ),
     )
 
 
@@ -373,6 +439,27 @@ class Lease:
             "provider": self.provider,
             "acquired_at": self.acquired_at.isoformat(),
         }
+
+
+def execution_capacity_comment(run_id: str, snapshot: dict) -> str:
+    """The parked-at-dispatch operator note (R32-05) — the ONE renderer
+    every provider's dispatch choke point posts when capacity refuses.
+
+    Capacity, not refusal: the run was approved and stays parked in a
+    queued state with the precise next action; a waiting human decision
+    never holds an execution slot and a capacity wait never consumed one.
+    """
+    held = snapshot.get("held")
+    limit = snapshot.get("limit")
+    capacity = f"{held} of {limit} slots held" if limit is not None else f"{held} slots held"
+    return (
+        "## Forge — run parked at dispatch\n\n"
+        f"Run `{run_id[:8]}` was approved but is **parked**: no execution slot is free "
+        f"in this project ({capacity}). Nothing is executing for it.\n\n"
+        f"- Retry when the running work drains: `/retry {run_id}`\n"
+        "- An operator can raise the bound via `FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT`\n\n"
+        "*This is an automated message.*"
+    )
 
 
 def _lease_of(row: ExecutionLease) -> Lease:
@@ -456,10 +543,12 @@ async def try_acquire_lease(
     unbounded, so leases are still recorded (honest accounting) but a
     slot is always granted.
 
-    Idempotent per run: an OPEN lease naming *run_id* is returned as-is
-    (a re-driven dispatch — a revival, a reconciler recovery — must not
-    double-reserve what the same run already holds; only a terminal
-    release or reclaim closes it).
+    Idempotent per run, at BOTH layers (R32-06): an OPEN lease naming
+    *run_id* is returned as-is by the pre-read, and — when the pre-read
+    raced a concurrent acquire — the database's unique OPEN-RUN index
+    refuses the second reservation and the loser reads the winner back.
+    A re-driven dispatch (a revival, a reconciler recovery) therefore
+    holds exactly one slot, never one per racing driver.
     """
     moment = now or _utcnow()
     limit = policy.max_active_per_project
@@ -482,6 +571,7 @@ async def try_acquire_lease(
             if existing is not None:
                 return _lease_of(existing)
         slot = 1
+        run_conflict_misses = 0
         while limit <= 0 or slot <= limit:
             row = ExecutionLease(
                 id=uuid4().hex,
@@ -495,9 +585,42 @@ async def try_acquire_lease(
             try:
                 await session.commit()
                 return _lease_of(row)
-            except IntegrityError:
-                await session.rollback()  # this slot lost the race — next slot
-                slot += 1
+            except IntegrityError as exc:
+                await session.rollback()
+                conflict = lease_conflict_kind(exc)
+                if conflict == _RUN_CONSTRAINT:
+                    # R32-06: THIS run already holds a slot — the open-run
+                    # index refused the double reservation. The existing
+                    # winner IS the reservation (idempotent success), not a
+                    # signal to consume another slot.
+                    winner = (
+                        (
+                            await session.execute(
+                                select(ExecutionLease).where(
+                                    ExecutionLease.run_id == run_id,
+                                    ExecutionLease.released_at.is_(None),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    if winner is not None:
+                        return _lease_of(winner)
+                    # The winner released between our refused INSERT and
+                    # this read — retry the insert on the SAME slot. Bounded:
+                    # a winner that keeps vanishing is not a race shape a
+                    # real schedule produces; fail loudly after three tries.
+                    run_conflict_misses += 1
+                    if run_conflict_misses >= 3:
+                        raise
+                    continue
+                if conflict != _SLOT_CONSTRAINT:
+                    # R32-06: an unrelated constraint violation is never a
+                    # "busy slot" — retrying the next slot forever (the
+                    # disabled-limit mode loops unbounded) would hide it.
+                    raise
+                slot += 1  # this slot lost the race — next slot
         return None
 
 
