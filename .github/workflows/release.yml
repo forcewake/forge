@@ -269,18 +269,14 @@ jobs:
           verify "${{ needs.publish-ghcr.outputs.wheel }}" "${{ needs.publish-ghcr.outputs.wheel_sha256 }}"
           verify "${{ needs.publish-ghcr.outputs.sdist }}" "${{ needs.publish-ghcr.outputs.sdist_sha256 }}"
 
-      - name: Publish the lane wheel set as release assets
-        env:
-          GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "forge ${GITHUB_REF_NAME#v}" --notes "Release ${GITHUB_REF_NAME}. Pin the image by digest; the lane wheel set below is the authoritative lane distribution (sha256 recorded in docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json)."
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-
-      # Keyless Sigstore signing — the digest is the thing signed, never a
+      # Keyless Sigstore signing FIRST — the digest is the thing signed, never a
       # tag. Requires a public repo (public-good Sigstore). If forge goes
       # private, or Rekor transparency is unacceptable, drop the two steps
       # below and keep digest pinning + the provenance attestation
       # (docs/research/2026-09-17-schema-upgrade-gates.md, open question 6).
+      # Signing precedes asset publishing so a gh/GitHub hiccup can never
+      # ship an unsigned digest (the v0.35.0 first-attempt bite: the wheel
+      # step failed on a git-less job and these went skipped).
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Sign the digest (keyless)
         run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }}"
@@ -290,6 +286,16 @@ jobs:
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ needs.publish-ghcr.outputs.digest }}
+
+      - name: Publish the lane wheel set as release assets
+        env:
+          GH_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+          # gh resolves the repository from git remotes by default; this job
+          # runs where the checkout is not a git workspace — name the repo.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "forge ${GITHUB_REF_NAME#v}" --notes "Release ${GITHUB_REF_NAME}. Pin the image by digest; the lane wheel set below is the authoritative lane distribution (sha256 recorded in docs/releases/evidence/v${GITHUB_REF_NAME#v}/promotion.json)."
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
       - name: Publish the pinning digest
         if: always() && needs.publish-ghcr.outputs.digest != ''
