@@ -30,6 +30,19 @@ was recorded on. A stale registration is evidence about the PAST, so
 :func:`seed_live_matrix` with ``installed_versions`` refuses to seed
 present-tense support when the installed binary no longer matches the
 recorded one.
+
+NEXT-13 — the capability vocabulary extends past the LIVE-registered
+sdks to ``copilot-acp``: the ACP client's capability profile is
+published from CONTRACT-TEST evidence
+(:mod:`forge.adaptive.drivers.copilot_acp`'s suite over the
+shape-faithful wire fake + the wire facts
+``docs/research/2026-09-23-copilot-sdk-lane.md`` documents), NEVER from
+a live smoke that has not run — so the row names its ``evidence``
+class explicitly, no ``LiveRegistration`` backs it, and
+:data:`DRIVER_SDK_OF` keeps the copilot lanes unregistered (no
+present-tense live claim). The profile is honest about what is NOT
+supported: ACP v1 has no steer method (protocol absence, §5), so
+``mid_turn_steer`` stays unobserved however well the client tests.
 """
 
 from __future__ import annotations
@@ -42,10 +55,13 @@ from pathlib import Path
 from forge.adaptive.adapters import DriverMatrix, SDKS
 
 __all__ = [
+    "COPILOT_ACP_SDK",
     "DRIVER_SDK_OF",
+    "EVIDENCE_CLASSES",
     "LIVE_OBSERVED_CAPABILITIES",
     "LIVE_REGISTRATIONS",
     "LiveRegistration",
+    "OBSERVED_CAPABILITY_SDKS",
     "OBSERVED_CAPABILITY_VALUES",
     "ObservedCapabilities",
     "RegistrationVerdict",
@@ -189,6 +205,28 @@ def sdk_version_of(sdk: str) -> str | None:
 # NXT-27 — capabilities as versioned observed behavior
 # ---------------------------------------------------------------------------
 
+#: The ACP driver's sdk name (NEXT-13). NOT in :data:`SDKS`/the
+#: :class:`~forge.adaptive.adapters.DriverMatrix` vocabulary: the matrix
+#: registers LIVE-verified combinations, and no live smoke has run against
+#: ``copilot --acp`` — the capability row below is contract-test evidence,
+#: which is a different (weaker, honestly labelled) evidence class.
+COPILOT_ACP_SDK = "copilot-acp"
+
+#: The closed sdk vocabulary of the OBSERVATION rows: the three
+#: LIVE-registered sdks plus the contract-tested copilot-acp row. Wider
+#: than :data:`~forge.adaptive.adapters.SDKS` by exactly that one name —
+#: observation rows may cite evidence the registration matrix refuses to
+#: seed, never the reverse.
+OBSERVED_CAPABILITY_SDKS: tuple[str, ...] = (*SDKS, COPILOT_ACP_SDK)
+
+#: The closed evidence-class vocabulary an observation row may cite.
+#: ``live-smoke`` — a real binary run recorded under ``docs/evaluation/``
+#: (what every registration-backed row is). ``contract-tests`` — the
+#: driver's own suite over a shape-faithful wire fake plus the research
+#: doc's documented wire facts: it proves the CLIENT's behavior model, and
+#: makes NO present-tense claim about any installed binary.
+EVIDENCE_CLASSES: tuple[str, ...] = ("live-smoke", "contract-tests")
+
 #: The closed observed-capability vocabulary. These are BEHAVIORS a smoke
 #: watched a real binary do — deliberately distinct from the adapter
 #: METHOD names (a method existing is not a capability working) and from
@@ -220,17 +258,20 @@ OBSERVED_CAPABILITY_VALUES: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class ObservedCapabilities:
-    """What ONE smoke watched ONE binary version actually do (NXT-27).
+    """What ONE evidence run watched ONE binary version actually do (NXT-27).
 
-    ``binary_version`` is the exact ``--version`` string the evidence
-    recorded (``LiveRegistration.verified_against[0]``); ``install_pin``
-    is the CLI-installable version spec the lane templates pin by
-    default (the npm tag / installer ``--version`` argument), so the
-    templates' defaults and the evidence cannot drift apart silently.
-    ``observed`` is the closed :data:`OBSERVED_CAPABILITY_VALUES`
-    vocabulary — anything NOT in it was not observed on this version,
-    and :func:`observed_capabilities` never answers for a different
-    version.
+    ``binary_version`` is the exact version string the evidence recorded
+    (``LiveRegistration.verified_against[0]`` for a live smoke; the
+    handshake ``agentInfo`` string the contract-test fake reports for
+    copilot-acp); ``install_pin`` is the CLI-installable version spec the
+    lane templates pin by default (the npm tag / installer ``--version``
+    argument), so the templates' defaults and the evidence cannot drift
+    apart silently. ``observed`` is the closed
+    :data:`OBSERVED_CAPABILITY_VALUES` vocabulary — anything NOT in it
+    was not observed on this version, and :func:`observed_capabilities`
+    never answers for a different version. ``evidence`` (NEXT-13) names
+    the evidence class: a ``contract-tests`` row proves the client's
+    behavior model, never a live claim about the pinned binary.
     """
 
     sdk: str
@@ -238,14 +279,19 @@ class ObservedCapabilities:
     install_pin: str
     observed: tuple[str, ...]
     date: str
+    evidence: str = "live-smoke"
 
     def __post_init__(self) -> None:
-        if self.sdk not in SDKS:
-            raise ValueError(f"sdk must be one of {SDKS}, got {self.sdk!r}")
+        if self.sdk not in OBSERVED_CAPABILITY_SDKS:
+            raise ValueError(f"sdk must be one of {OBSERVED_CAPABILITY_SDKS}, got {self.sdk!r}")
         if not self.binary_version:
             raise ValueError("binary_version must be the recorded --version string")
         if not self.install_pin:
             raise ValueError("install_pin must be the CLI-installable version spec")
+        if self.evidence not in EVIDENCE_CLASSES:
+            raise ValueError(
+                f"evidence class must be one of {EVIDENCE_CLASSES}, got {self.evidence!r}"
+            )
         unknown = set(self.observed) - set(OBSERVED_CAPABILITY_VALUES)
         if unknown:
             raise ValueError(
@@ -274,12 +320,21 @@ class ObservedCapabilities:
         return tuple(c for c in OBSERVED_CAPABILITY_VALUES if c not in self.observed)
 
 
-#: The per-driver observed-capability rows, one per LIVE registration's
-#: binary version. Grounded in the evidence files' own ``steps`` — no
-#: capability is listed that a recorded step does not show, and the
-#: absent ones (wip export, cross-runner restore on every driver so far)
-#: stay absent: DriverMatrix can never infer checkpoint portability from
-#: an interrupt smoke.
+#: The per-driver observed-capability rows. The three registration-backed
+#: rows are grounded in the evidence files' own ``steps`` — no capability
+#: is listed that a recorded step does not show, and the absent ones (wip
+#: export, cross-runner restore on every driver so far) stay absent:
+#: DriverMatrix can never infer checkpoint portability from an interrupt
+#: smoke. The copilot-acp row (NEXT-13) is CONTRACT-TEST evidence: exactly
+#: what ``tests/test_adaptive_driver_copilot_acp.py`` exercises — the
+#: prompt flow to a terminal record (``turn``), the session/cancel
+#: notification with its ledger bookkeeping (``native_interrupt``), and
+#: serial next-turn prompts on the same session (``next_turn_input``) —
+#: nothing more. ``mid_turn_steer`` is a PROTOCOL absence on ACP v1 (§5,
+#: the client raises TurnInProgressError rather than queueing), and
+#: ``interrupt_outcome_observed`` requires a real binary's wire (#4561's
+#: lying ``end_turn``), which no fake can testify to; both stay
+#: unobserved, and so do both checkpoint portability behaviors.
 LIVE_OBSERVED_CAPABILITIES: tuple[ObservedCapabilities, ...] = (
     ObservedCapabilities(
         sdk="claude-sdk",
@@ -314,6 +369,25 @@ LIVE_OBSERVED_CAPABILITIES: tuple[ObservedCapabilities, ...] = (
             "native_interrupt",  # abort(long session) issued; events kept flowing
         ),
         date="2026-09-21",
+    ),
+    # NEXT-13 — the tested Copilot ACP capability profile. binary_version
+    # is the handshake ``agentInfo`` string the contract-test fake (and the
+    # documented real handshake shape, research §3.1) reports for the
+    # PINNED CLI; install_pin is the same DEFAULT_DRIVER_VERSIONS spec the
+    # copilot lanes install. NO LiveRegistration backs this row: a live
+    # smoke has not run, so seeding/verdict paths make no present-tense
+    # claim — this row describes the CLIENT's tested behavior model.
+    ObservedCapabilities(
+        sdk=COPILOT_ACP_SDK,
+        binary_version="Copilot 1.0.86 (protocol v1)",
+        install_pin="1.0.86",
+        observed=(
+            "turn",  # session/prompt → terminal record (stopReason, ledger-corrected)
+            "native_interrupt",  # session/cancel notification + the CancelLedger bookkeeping
+            "next_turn_input",  # send() = a NEW prompt on the same session, serially
+        ),
+        date="2026-09-23",
+        evidence="contract-tests",
     ),
 )
 

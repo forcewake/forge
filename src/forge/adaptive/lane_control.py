@@ -458,9 +458,46 @@ class LaneSteeringSession:
     # -- the drain loop ------------------------------------------------------
 
     async def _poll_loop(self) -> None:
-        while True:
+        while not self._closing:
             await self.drain_once()
             await asyncio.sleep(self._poll_interval)
+
+    async def quiesce(self, *, timeout_s: float = 5.0) -> list[SteeringAction]:
+        """Graceful stop for a SUPERVISED drain (NEXT-14, lane_supervisor).
+
+        The hard teardown (:meth:`__aexit__`'s cancel) can land mid-cycle
+        and book an in-flight command ``delivery_unknown`` — honest, but
+        unnecessary when the caller can WAIT. Quiesce instead: the closing
+        flag is armed FIRST (the loop stops at its check — no new cycle,
+        and the teardown resume-guard is active), the IN-FLIGHT cycle is
+        allowed to COMPLETE (its command's outcome is persisted on the
+        ladder, never torn), and one final pass consumes commands that
+        arrived while the turn was ending — the same contract
+        :meth:`__aexit__` gives, minus the mid-cycle cancellation. Only a
+        cycle still running after *timeout_s* is hard-cancelled (bounded
+        degradation: the unknown-outcome bookkeeping is the honest
+        fallback). Returns the final pass's actions.
+        """
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self._closing = True
+        task, self._loop_task = self._loop_task, None
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+            except TimeoutError:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            except asyncio.CancelledError:
+                # OUR OWN teardown was cancelled — degrade to the hard
+                # path, still run the final pass, then propagate.
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                await self.drain_once()
+                raise
+        return await self.drain_once()
 
     async def drain_once(self) -> list[SteeringAction]:
         """Apply every owned pending command once, in durable sequence order.

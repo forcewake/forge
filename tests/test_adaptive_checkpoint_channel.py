@@ -35,13 +35,22 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
+
+try:  # POSIX flock — the store's deployment target (mirrors the module).
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import forge.api_checkpoint_channel as api_channel
 from forge.adaptive.artifact_store import ContentAddressedStore
@@ -1900,3 +1909,345 @@ class TestStorageHealthReport:
         assert body["works"][WORK_ID]["checkpoints"] == 1
         assert body["orphan_cas_entries"] == []
         assert body["disk_usage_bytes"] > 0
+
+
+# ----------------------------------------------------------------------
+# NEXT-05: the request ALLOCATION bound — before JSON, before base64
+# ----------------------------------------------------------------------
+
+#: A genuine OTHER PROCESS holding the per-work index flock — the
+#: declared multi-process topology proof (NEXT-06).
+HOLD_LOCK_SNIPPET = (
+    "import fcntl, os, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR)\n"
+    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    "print('held', flush=True)\n"
+    "time.sleep(30)\n"
+)
+
+
+class TestRequestAllocationBound:
+    """A declared cap on the decoded aggregate is not an allocation bound:
+    ``request.json()`` materializes the whole encoded body first. These
+    pin the network-boundary refusal — the Content-Length is judged
+    before one body byte is read, and a chunked or lying body is refused
+    while it streams, never after it materialized."""
+
+    def test_an_oversized_content_length_is_refused_before_the_body_is_read(
+        self, tmp_path: Path, server, monkeypatch
+    ):
+        monkeypatch.setenv(api_channel.MAX_REQUEST_BYTES_ENV, "1024")
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"x" * 8192}, 1)
+        payload = json.dumps(
+            {
+                "manifest": base64.b64encode(manifest).decode("ascii"),
+                "blobs": {
+                    digest: base64.b64encode(data).decode("ascii") for digest, data in blobs.items()
+                },
+                "sequence": 1,
+            }
+        ).encode()
+
+        response = server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            content=payload,
+            headers={"Authorization": _bearer(WORK_ID)},
+        )
+
+        assert response.status_code == 413
+        assert api_channel.MAX_REQUEST_BYTES_ENV in response.json()["detail"]
+        assert "1024" in response.json()["detail"]
+        # A refused upload leaves no metadata and no artifact references.
+        assert (
+            server.get(
+                f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+            ).status_code
+            == 404
+        )
+
+    async def test_a_chunked_body_over_the_cap_is_refused_mid_stream(self):
+        """No Content-Length at all (chunked encoding): the accumulator
+        itself refuses the moment the cap is passed."""
+        request = _raw_stream_request([b"x" * 4096, b"y" * 4096])
+        with pytest.raises(HTTPException) as excinfo:
+            await api_channel._read_bounded_body(request, 4096)
+        assert excinfo.value.status_code == 413
+        assert api_channel.MAX_REQUEST_BYTES_ENV in excinfo.value.detail
+
+    async def test_a_misleading_content_length_is_refused_by_the_stream_cap(self):
+        """The header says 16 bytes; the stream delivers more. The bound
+        that answers is the accumulator's, not the client's word."""
+        request = _raw_stream_request([b"x" * 4096, b"y" * 4096], content_length="16")
+        with pytest.raises(HTTPException) as excinfo:
+            await api_channel._read_bounded_body(request, 1024)
+        assert excinfo.value.status_code == 413
+        assert "did not bound it" in excinfo.value.detail
+
+    async def test_a_body_under_the_cap_passes_through_byte_identical(self):
+        request = _raw_stream_request([b"hello ", b"world"], content_length="11")
+        assert await api_channel._read_bounded_body(request, 1024) == b"hello world"
+
+    def test_a_valid_upload_under_a_small_cap_round_trips(self, tmp_path, server, monkeypatch):
+        monkeypatch.setenv(api_channel.MAX_REQUEST_BYTES_ENV, str(256 * 1024))
+        tree = _wip_tree(tmp_path / "runner-a")
+        store = ContentAddressedStore(tmp_path / "store-a", tenant=TENANT)
+        _capture(store, tree, sequence=7)
+
+        ref = _channel(server).upload_checkpoint(store, WORK_ID)
+
+        handle = _channel(server).download_checkpoint(
+            WORK_ID, ContentAddressedStore(tmp_path / "store-b", tenant=TENANT)
+        )
+        assert handle.artifact_id == ref.checkpoint_id
+        assert handle.verified is True
+
+    def test_the_health_report_carries_the_request_cap(self, server, monkeypatch):
+        monkeypatch.setenv(api_channel.MAX_REQUEST_BYTES_ENV, "4096")
+
+        health = server.get(
+            "/lane/checkpoints/health", headers={"Authorization": _bearer(LIST_SCOPE)}
+        )
+        report = api_channel.storage_health_report(
+            Path(os.environ[api_channel.CHECKPOINT_STORE_DIR_ENV])
+        )
+
+        assert health.json()["request_max_bytes"] == 4096
+        assert report["request_max_bytes"] == 4096
+
+
+def _raw_stream_request(chunks: list[bytes], *, content_length: str | None = None) -> Request:
+    """A starlette Request over a hand-rolled ASGI receive() — the precise
+    chunked/misleading-header shapes a cooperating client cannot produce."""
+    headers: list[tuple[bytes, bytes]] = []
+    if content_length is not None:
+        headers.append((b"content-length", content_length.encode()))
+    scope = {
+        "type": "http",
+        "method": "PUT",
+        "path": f"/lane/checkpoints/{WORK_ID}",
+        "headers": headers,
+        "query_string": b"",
+    }
+    messages = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive():
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    return Request(scope, receive)
+
+
+# ----------------------------------------------------------------------
+# NEXT-06: concurrent workers — bounded lock, holder identity, decisions
+# ----------------------------------------------------------------------
+
+
+class TestConcurrentWriters:
+    """Two stores over ONE directory (the multi-process deployment shape):
+    the lock serializes the index, the loser of a bounded retry is
+    superseded history, and the winner's state stands byte-identical."""
+
+    def _two_stores(self, tmp_path: Path):
+        root = tmp_path / "cas"
+        return (
+            api_channel.CheckpointStore(root),
+            api_channel.CheckpointStore(root),
+            root,
+        )
+
+    def test_a_late_lower_sequence_upload_lands_as_superseded_history(self, tmp_path):
+        store_a, store_b, _root = self._two_stores(tmp_path)
+
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"v3.txt": b"three\n"}, 3)
+        winner = store_a.put_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=3
+        )
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"v2.txt": b"two\n"}, 2)
+        late = store_b.put_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=2
+        )
+
+        assert winner["latest"] is True
+        assert late["latest"] is False  # superseded history, never a demotion
+        assert store_a.entry(WORK_ID)["sequence"] == 3
+        assert len(store_a.list_entries()) == 2  # both records preserved
+
+    def test_a_writer_that_cannot_take_the_lock_is_superseded_and_writes_nothing(self, tmp_path):
+        store_a, store_b, root = self._two_stores(tmp_path)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"first.txt": b"one\n"}, 1)
+        winner = store_a.put_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+        )
+        before = {item: item.stat().st_mtime for item in root.rglob("*") if item.is_file()}
+        assert winner["latest"] is True
+
+        # A second WRITER (its own flock descriptor, as another process
+        # would hold) keeps the critical section; the loser's wait budget
+        # is one retry tick.
+        lock_fd = os.open(root / "works" / f"{WORK_ID}.lock", os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            manifest, blobs = _tiny_checkpoint(WORK_ID, {"second.txt": b"two\n"}, 2)
+            verdict = store_b.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=2
+            )
+        finally:
+            os.close(lock_fd)
+
+        assert verdict["superseded"] is True
+        assert verdict["latest"] is False
+        assert "superseded_reason" in verdict and "index lock" in verdict["superseded_reason"]
+        after = {item: item.stat().st_mtime for item in root.rglob("*") if item.is_file()}
+        assert after == before  # nothing written: no blobs, no index change
+        assert store_b.entry(WORK_ID)["sequence"] == 1  # the winner's index stands
+
+    def test_the_lock_exhaustion_names_the_recorded_holder(self, tmp_path):
+        _store_a, store_b, root = self._two_stores(tmp_path)
+        lock_path = root / "works" / f"{WORK_ID}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("host-a|4242|2026-09-23T00:00:00+00:00", encoding="utf-8")
+
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            with pytest.raises(api_channel.IndexLockHeldError, match=r"host-a\|4242"):
+                with store_b._index_lock(WORK_ID, wait_seconds=0.01):
+                    pass  # pragma: no cover — never reached
+        finally:
+            os.close(lock_fd)
+
+    def test_the_bounded_wait_lets_a_short_critical_section_finish(self, tmp_path):
+        """A live holder keeps the lock only for its short
+        read-modify-write: the retry-with-jitter budget rides it out and
+        the second write LANDS (as history or active, by sequence)."""
+        store_a, store_b, _root = self._two_stores(tmp_path)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"v1.txt": b"one\n"}, 1)
+        store_a.put_checkpoint(work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1)
+
+        def hold_briefly() -> None:
+            with store_a._index_lock(WORK_ID):
+                time.sleep(0.2)
+
+        thread = threading.Thread(target=hold_briefly)
+        thread.start()
+        try:
+            manifest, blobs = _tiny_checkpoint(WORK_ID, {"v2.txt": b"two\n"}, 2)
+            verdict = store_b.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=2
+            )
+        finally:
+            thread.join()
+
+        assert verdict.get("superseded") is not True
+        assert verdict["latest"] is True
+        assert store_b.entry(WORK_ID)["sequence"] == 2
+
+    @pytest.mark.skipif(fcntl is None, reason="POSIX flock required")
+    def test_a_real_other_process_holding_the_lock_wins(self, tmp_path, monkeypatch):
+        """The declared topology proof: a genuine OS PROCESS holds the
+        exclusive flock; the store's bounded retry loses honestly."""
+        monkeypatch.setenv(api_channel.LOCK_WAIT_SECONDS_ENV, "0.05")
+        store_a, store_b, root = self._two_stores(tmp_path)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"first.txt": b"one\n"}, 1)
+        store_a.put_checkpoint(work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1)
+
+        lock_path = root / "works" / f"{WORK_ID}.lock"
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                HOLD_LOCK_SNIPPET,
+                str(lock_path),
+            ],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == b"held"
+            manifest, blobs = _tiny_checkpoint(WORK_ID, {"second.txt": b"two\n"}, 2)
+            verdict = store_b.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=2
+            )
+        finally:
+            holder.kill()
+            holder.wait()
+
+        assert verdict["superseded"] is True
+        assert store_b.entry(WORK_ID)["sequence"] == 1
+
+
+class TestRetentionDecisions:
+    """NEXT-06: the retention DECISION is durable — a re-run over the same
+    state re-deletes nothing, and a GC interrupted between the index
+    update and the unlink is completed by the next pass."""
+
+    def _store_with_history(self, tmp_path: Path, count: int = 3):
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        for sequence in range(1, count + 1):
+            manifest, blobs = _tiny_checkpoint(
+                WORK_ID, {f"v{sequence}.txt": f"content {sequence}\n".encode()}, sequence
+            )
+            store.put_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=sequence
+            )
+        return store
+
+    def _index_document(self, store, work_id: str = WORK_ID) -> dict:
+        return json.loads((store._root / "works" / f"{work_id}.json").read_text())
+
+    def test_the_decision_is_recorded_in_the_index(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+
+        removed = store.apply_retention(WORK_ID, keep_last=1)
+
+        assert removed == 2
+        decision = self._index_document(store)["retention"]
+        assert decision["keep"] == 1
+        assert decision["removed"] == 2
+        assert decision["pending_gc"] == []
+        assert (
+            decision["kept_tail"] == self._index_document(store)["checkpoints"][-1]["checkpoint_id"]
+        )
+        assert "|" in decision["holder"]  # hostname|pid
+
+    def test_a_rerun_over_the_same_state_re_deletes_nothing(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+        store.apply_retention(WORK_ID, keep_last=1)
+        retained_id = store.entry(WORK_ID)["checkpoint_id"]
+        blob_files = [item for item in (store._root / "works").parent.rglob("*") if item.is_file()]
+        index_file = store._root / "works" / f"{WORK_ID}.json"
+        snapshot = {item: item.stat().st_mtime for item in blob_files + [index_file]}
+
+        removed_again = store.apply_retention(WORK_ID, keep_last=1)
+
+        assert removed_again == 0
+        after = {item: item.stat().st_mtime for item in blob_files + [index_file]}
+        assert after == snapshot  # the recorded decision short-circuited the pass
+        assert store.entry(WORK_ID)["checkpoint_id"] == retained_id
+
+    def test_a_crashed_gc_is_completed_by_the_next_pass(self, tmp_path, monkeypatch):
+        store = self._store_with_history(tmp_path)
+        original_unlink = Path.unlink
+
+        def crashing_unlink(self: Path, missing_ok: bool = False) -> None:
+            raise OSError("crash between index update and blob cleanup")
+
+        monkeypatch.setattr(Path, "unlink", crashing_unlink)
+        with pytest.raises(OSError, match="crash between index update"):
+            store.apply_retention(WORK_ID, keep_last=1)
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+
+        # The crash left the decision recorded with a PENDING GC.
+        decision = self._index_document(store)["retention"]
+        assert decision["pending_gc"], "the interrupted pass recorded its pending GC"
+
+        removed = store.apply_retention(WORK_ID, keep_last=1)
+
+        assert removed == 0  # the entries were already dropped; only GC ran
+        assert self._index_document(store)["retention"]["pending_gc"] == []
+        listed = store.list_entries()
+        assert [entry["sequence"] for entry in listed] == [3]  # active survives
+        for digest in decision["pending_gc"]:
+            assert not (store._root / digest[:2] / digest).exists()  # GC completed

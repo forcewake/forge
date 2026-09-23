@@ -13,9 +13,12 @@
 #   nuget.lock.json      pins every transitive package — restore and
 #                         build run --locked-mode and FAIL when the lock
 #                         file no longer matches the project files
-#   TRX                  `dotnet test --logger trx` writes the VS test
-#                         report; the lane parses its Counters into the
-#                         candidate meta (the verifier's format — see
+#   TRX                  `dotnet test --logger trx;LogFilePrefix=forge_`
+#                         writes ONE report per project/target-framework
+#                         (unique names, nothing overwritten — NEXT-16);
+#                         the lane aggregates EVERY forge_*.trx into the
+#                         candidate meta's verification block (the
+#                         verifier's format — see
 #                         docs/harnesses/dotnet-lane.md)
 #
 # Included ONCE by a target project's .gitlab-ci.yml at onboarding (a
@@ -79,10 +82,12 @@ forge-agent-dotnet:
     # behavior between the plan gate and the run; the preamble echoes the
     # installed version so pin drift is visible, never silent.
     FORGE_CLAUDE_VERSION: "2.1.276"
-    # The reproducible-recipe knobs (R28-21): the build configuration and
-    # the TRX file name the verifier's parser keys on.
+    # The reproducible-recipe knobs (R28-21 + NEXT-16): the build
+    # configuration and the TRX LogFilePrefix — a UNIQUE per-run report
+    # name fragment so multi-project/multi-target test runs each write
+    # their own forge_*.trx (the aggregator keys on the prefix).
     FORGE_DOTNET_CONFIGURATION: "Release"
-    FORGE_DOTNET_TRX: "forge.trx"
+    FORGE_DOTNET_TRX_PREFIX: "forge_"
     DOTNET_CLI_TELEMETRY_OPTOUT: "1"
     DOTNET_NOLOGO: "1"
   before_script:
@@ -193,7 +198,7 @@ forge-agent-dotnet:
       dotnet restore --locked-mode || FORGE_RESTORE_EXIT=$?
       dotnet build --no-restore --locked-mode --configuration "$FORGE_DOTNET_CONFIGURATION" || FORGE_BUILD_EXIT=$?
       dotnet test --no-build --configuration "$FORGE_DOTNET_CONFIGURATION" \
-        --logger "trx;LogFileName=$FORGE_DOTNET_TRX" \
+        --logger "trx;LogFilePrefix=$FORGE_DOTNET_TRX_PREFIX" \
         --results-directory .forge/testresults || FORGE_TEST_EXIT=$?
       set -e
       export FORGE_RESTORE_EXIT FORGE_BUILD_EXIT FORGE_TEST_EXIT
@@ -203,39 +208,67 @@ forge-agent-dotnet:
     - git add -A
     - git diff --cached --binary --full-index "$FORGE_ATTEMPT_BASE" > .forge/candidate.diff
     # Meta JSON: attempt base, driver id, model, exit classification, usage
-    # receipt, and the R28-21 TRX verification block (counters parsed from
-    # the VS TRX report the verifier reads — docs/harnesses/dotnet-lane.md).
+    # receipt, and the R28-21/NEXT-16 TRX verification block — EVERY
+    # forge_*.trx report aggregated (multi-project/multi-target runs each
+    # write their own; a failing project can never disappear because
+    # another report sorted first).
     - |
       python3 - <<'PYEOF'
       import hashlib, json, os, xml.etree.ElementTree as ET
       trx_dir = ".forge/testresults"
-      trx_path = None
+      prefix = os.environ.get("FORGE_DOTNET_TRX_PREFIX", "forge_")
+      legacy_name = os.environ.get("FORGE_DOTNET_TRX", "forge.trx")
+      max_projects = 25
+      reports = []
+      parse_failures = []
+      legacy_reports = []
       if os.path.isdir(trx_dir):
-          for root, _dirs, names in os.walk(trx_dir):
-              if os.environ.get("FORGE_DOTNET_TRX", "forge.trx") in names:
-                  trx_path = os.path.join(root, os.environ["FORGE_DOTNET_TRX"])
-                  break
-      verification = {"kind": "dotnet-trx/1", "trx": None,
+          for root, _dirs, names in sorted(os.walk(trx_dir)):
+              for name in sorted(names):
+                  path = os.path.join(root, name)
+                  if name == legacy_name:
+                      # A leftover fixed-name report is stale by construction
+                      # (it may predate this attempt) — visible, never counted.
+                      legacy_reports.append(path)
+                      continue
+                  if not (name.startswith(prefix) and name.endswith(".trx")):
+                      continue
+                  try:
+                      raw = open(path, "rb").read()
+                      node = ET.fromstring(raw)
+                  except (OSError, ET.ParseError) as exc:
+                      parse_failures.append({"file": path, "error": str(exc)[:200]})
+                      continue
+                  ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+                  outcome = ""
+                  counters = {}
+                  summary = node.find(f"{ns}ResultSummary")
+                  if summary is not None:
+                      outcome = summary.get("outcome", "")
+                      counted = summary.find(f"{ns}Counters")
+                      if counted is not None:
+                          counters = {k: int(v) for k, v in counted.attrib.items()
+                                      if v is not None and v.isdigit()}
+                  reports.append({"file": path,
+                                  "sha256": hashlib.sha256(raw).hexdigest(),
+                                  "outcome": outcome,
+                                  "counters": counters})
+      verification = {"kind": "dotnet-trx/2",
+                      "test_projects": len(reports),
+                      "total_passed": sum(r["counters"].get("passed", 0) for r in reports),
+                      "total_failed": sum(r["counters"].get("failed", 0) for r in reports),
+                      "projects": [{"file": r["file"], "outcome": r["outcome"],
+                                    "passed": r["counters"].get("passed", 0),
+                                    "failed": r["counters"].get("failed", 0),
+                                    "sha256": r["sha256"]}
+                                   for r in reports[:max_projects]],
+                      "projects_dropped": max(0, len(reports) - max_projects),
+                      "parse_failures": parse_failures[:10],
+                      "legacy_reports": legacy_reports[:10],
+                      "reports_absent": not reports,
                       "restore_exit": int(os.environ.get("FORGE_RESTORE_EXIT", "0") or 0),
                       "build_exit": int(os.environ.get("FORGE_BUILD_EXIT", "0") or 0),
                       "test_exit": int(os.environ.get("FORGE_TEST_EXIT", "0") or 0)}
-      if trx_path is not None:
-          raw = open(trx_path, "rb").read()
-          counters = {}
-          outcome = ""
-          root_el = ET.fromstring(raw)
-          ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
-          summary = root_el.find(f"{ns}ResultSummary")
-          if summary is not None:
-              outcome = summary.get("outcome", "")
-              counted = summary.find(f"{ns}Counters")
-              if counted is not None:
-                  counters = {k: int(v) for k, v in counted.attrib.items()
-                              if v is not None and v.isdigit()}
-          verification["trx"] = {"file": trx_path,
-                                 "sha256": hashlib.sha256(raw).hexdigest(),
-                                 "outcome": outcome,
-                                 "counters": counters}
       usage = None
       try:
           usage = json.load(open(".forge/usage.json"))

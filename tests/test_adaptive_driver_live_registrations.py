@@ -26,9 +26,12 @@ import pytest
 
 from forge.adaptive.adapters import DriverMatrix
 from forge.adaptive.drivers.live_registrations import (
+    COPILOT_ACP_SDK,
     DRIVER_SDK_OF,
+    EVIDENCE_CLASSES,
     LIVE_OBSERVED_CAPABILITIES,
     LIVE_REGISTRATIONS,
+    OBSERVED_CAPABILITY_SDKS,
     OBSERVED_CAPABILITY_VALUES,
     LiveRegistration,
     ObservedCapabilities,
@@ -143,17 +146,37 @@ def test_seed_on_an_existing_matrix_accumulates(tmp_path, monkeypatch) -> None:
 
 
 class TestObservedCapabilities:
+    #: NEXT-13: the rows may exceed the registration sdks by exactly the
+    #: contract-tested set — an observation row may cite evidence the
+    #: registration matrix refuses to seed (weaker, honestly labelled).
+    CONTRACT_TESTED_SDKS = {"copilot-acp"}
+
     def test_the_live_rows_cover_each_sdk_exactly_once(self) -> None:
         sdks = [row.sdk for row in LIVE_OBSERVED_CAPABILITIES]
-        assert sorted(sdks) == sorted({entry.sdk for entry in LIVE_REGISTRATIONS})
-        assert len(sdks) == len(set(sdks))
+        assert len(sdks) == len(set(sdks)), "one observation row per sdk, no ambiguity"
+        assert set(sdks) == {entry.sdk for entry in LIVE_REGISTRATIONS} | self.CONTRACT_TESTED_SDKS
 
-    def test_every_row_binds_its_registrations_binary_version(self) -> None:
-        """The observation row and the registration cite the SAME binary:
-        the recorded ``verified_against[0]`` — the two halves of one
-        smoke cannot disagree."""
+    def test_every_live_row_binds_its_registrations_binary_version(self) -> None:
+        """Every registration-backed row cites the SAME binary as its
+        registration: the recorded ``verified_against[0]`` — the two halves
+        of one smoke cannot disagree. Contract-test rows (copilot-acp)
+        have NO registration to bind, which is the point."""
+        registered = {entry.sdk for entry in LIVE_REGISTRATIONS}
         for row in LIVE_OBSERVED_CAPABILITIES:
-            assert row.binary_version == sdk_version_of(row.sdk), row.sdk
+            if row.sdk in registered:
+                assert row.binary_version == sdk_version_of(row.sdk), row.sdk
+
+    def test_contract_test_rows_carry_no_live_evidence(self) -> None:
+        """NEXT-13's honesty bound: every row outside the registration set
+        declares the contract-tests evidence class — a live-smoke claim on
+        a binary no smoke ran against is refused at construction."""
+        registered = {entry.sdk for entry in LIVE_REGISTRATIONS}
+        for row in LIVE_OBSERVED_CAPABILITIES:
+            if row.sdk in registered:
+                assert row.evidence == "live-smoke", row.sdk
+            else:
+                assert row.sdk in self.CONTRACT_TESTED_SDKS, row.sdk
+                assert row.evidence == "contract-tests", row.sdk
 
     def test_every_install_pin_is_the_binary_versions_version_spec(self) -> None:
         for row in LIVE_OBSERVED_CAPABILITIES:
@@ -244,11 +267,95 @@ class TestObservedCapabilities:
                 observed=("turn",),
                 date="2026-09-21",
             )
+        with pytest.raises(ValueError, match="evidence class"):
+            ObservedCapabilities(
+                sdk="claude-sdk",
+                binary_version="b",
+                install_pin="1",
+                observed=("turn",),
+                date="2026-09-21",
+                evidence="vibes",
+            )
 
     def test_install_pin_of_reports_the_newest_rows_pin(self) -> None:
         for row in LIVE_OBSERVED_CAPABILITIES:
             assert install_pin_of(row.sdk) == row.install_pin
         assert install_pin_of("not-an-sdk") is None
+
+
+# ---------------------------------------------------------------------------
+# NEXT-13 — the tested Copilot ACP capability profile
+# ---------------------------------------------------------------------------
+
+
+class TestCopilotAcpCapabilityProfile:
+    """The profile reflects TESTED reality exactly: the three behaviors the
+    contract suite exercises, and NOTHING more — the honest-not-supported
+    half is the deliverable."""
+
+    def _row(self) -> ObservedCapabilities:
+        row = observed_capabilities(COPILOT_ACP_SDK, "Copilot 1.0.86 (protocol v1)")
+        assert row is not None, "the copilot-acp row must exist"
+        return row
+
+    def test_the_row_exists_with_exactly_the_tested_set_and_nothing_more(self) -> None:
+        row = self._row()
+        # ONLY what tests/test_adaptive_driver_copilot_acp.py exercises:
+        # the prompt flow, the cancel ledger, serial next-turn prompts.
+        assert row.observed == ("turn", "native_interrupt", "next_turn_input")
+        for capability in row.observed:
+            assert row.supports(capability) is True
+
+    def test_unobserved_names_the_untested_set_correctly(self) -> None:
+        row = self._row()
+        # mid_turn_steer is a PROTOCOL absence (ACP v1 §5); the interrupt
+        # OUTCOME needs a real binary's lying wire (#4561); neither
+        # checkpoint-portability behavior was even attempted.
+        assert row.unobserved() == (
+            "interrupt_outcome_observed",
+            "mid_turn_steer",
+            "wip_export",
+            "cross_runner_restore",
+        )
+        for capability in row.unobserved():
+            assert row.supports(capability) is False
+
+    def test_the_row_is_contract_test_evidence_never_a_live_claim(self) -> None:
+        row = self._row()
+        assert row.evidence == "contract-tests"
+        # No live registration backs it: seeding and provenance make NO
+        # present-tense claim about a copilot binary (the research doc's
+        # "once a smoke exists" gate).
+        assert COPILOT_ACP_SDK not in {entry.sdk for entry in LIVE_REGISTRATIONS}
+        assert "copilot-sdk-lane" not in DRIVER_SDK_OF
+        assert registration_verdict("copilot-sdk-lane", "Copilot 1.0.86 (protocol v1)") is None
+        assert OBSERVED_CAPABILITY_SDKS == (
+            "claude-sdk",
+            "codex-app",
+            "opencode-server",
+            COPILOT_ACP_SDK,
+        )
+        assert EVIDENCE_CLASSES == ("live-smoke", "contract-tests")
+
+    def test_the_install_pin_is_the_pin_the_copilot_lanes_install(self) -> None:
+        from forge.harnesses.script_render import DEFAULT_DRIVER_VERSIONS
+
+        row = self._row()
+        assert row.install_pin == DEFAULT_DRIVER_VERSIONS["copilot-sdk-lane"]
+        assert row.install_pin == DEFAULT_DRIVER_VERSIONS["copilot"]
+        assert install_pin_of(COPILOT_ACP_SDK) == row.install_pin
+
+    def test_an_unknown_or_upgraded_copilot_binary_answers_unknown(self) -> None:
+        assert observed_capabilities(COPILOT_ACP_SDK, "Copilot 1.0.88 (protocol v1)") is None
+        assert observed_capabilities(COPILOT_ACP_SDK, "") is None
+        with pytest.raises(ValueError, match="sdk must be one of"):
+            ObservedCapabilities(
+                sdk="copilot-cli",
+                binary_version="Copilot 1.0.86 (protocol v1)",
+                install_pin="1.0.86",
+                observed=("turn",),
+                date="2026-09-23",
+            )
 
 
 class TestSeedingVersionGate:

@@ -3008,3 +3008,201 @@ class TestAzureBoundedDiscovery:
         run = await get_run(db, run_id)
         assert run.evidence["harness"]["run_id"] == build["id"]
         assert run.evidence["harness"]["discovery_attempts"] == 0
+
+
+# ----------------------------------------------------------------------
+# #185: /go accepts the plan comment's short run-id prefix
+# ----------------------------------------------------------------------
+
+
+class TestGoShortPrefix:
+    """The plan comment advertises the 8-char prefix; /go must resolve it
+    scoped to this provider+project+work item — the GitHub/GitLab LIKE
+    pattern, with ambiguity refusing WITH the candidates."""
+
+    async def test_go_accepts_the_plan_comments_short_prefix(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        assert comments(fake)  # the plan note advertises the prefix
+        assert any(f"`{run_id[:8]}`" in body for body in comments(fake))
+
+        await go(service, run_id[:8])
+
+        row = await get_run(db, run_id)
+        assert row.status == FlowStatus.WAITING_CI.value  # dispatched, not ignored
+
+    async def test_go_prefix_ambiguity_refuses_with_the_candidates(self, db, fake):
+        service = make_service(db, fake)
+        prefix = "abcdef01"
+        first, second = prefix + "1" * 24, prefix + "2" * 24
+        async with db() as session:
+            for run_id, status in (
+                (first, FlowStatus.WAITING_APPROVAL.value),
+                (second, FlowStatus.BLOCKED.value),  # history: index-safe
+            ):
+                session.add(
+                    FlowRun(
+                        id=run_id,
+                        project_id=PROJECT_ID,
+                        issue_iid=WORK_ITEM,
+                        provider="azure_devops",
+                        github_issue_number=WORK_ITEM,
+                        github_repo_full_name=REPO_FULL,
+                        status=status,
+                    )
+                )
+            await session.commit()
+        clear_comments(fake)
+
+        await go(service, prefix)
+
+        bodies = "\n".join(comments(fake))
+        assert f"`{first}`" in bodies and f"`{second}`" in bodies  # the candidates
+        assert (await get_run(db, first)).status == FlowStatus.WAITING_APPROVAL.value
+        assert (await get_run(db, second)).status == FlowStatus.BLOCKED.value  # untouched
+
+    async def test_go_prefix_without_a_match_is_ignored(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        await go(service, "01234567")  # no run shares this prefix
+
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+        assert not any("01234567" in body for body in comments(fake))
+
+    async def test_go_prefix_stays_scoped_to_this_work_item(self, db, fake):
+        """A07: a same-prefix run of ANOTHER work item never resolves."""
+        service = make_service(db, fake)
+        run_id = await start(service)
+        clear_comments(fake)
+
+        await service.handle_go(
+            project_id=PROJECT_ID,
+            issue_number=WORK_ITEM + 1,  # posted on a different work item
+            note_text=f"/go {run_id[:8]}",
+            author_username="dev@fabrikam.example",
+        )
+
+        assert (await get_run(db, run_id)).status == FlowStatus.WAITING_APPROVAL.value
+
+
+# ----------------------------------------------------------------------
+# NEXT-11/NEXT-12: the execution lease at dispatch + the split accounting
+# ----------------------------------------------------------------------
+
+
+async def _start_on(
+    service: AzureRunService, fake: FakeAzureDevOps, work_item: int, title: str = "task"
+) -> str:
+    fake.seed_work_item(work_item, title, f"<p>{title}</p>")
+    return await service.start_run(
+        project_id=PROJECT_ID,
+        issue_number=work_item,
+        issue_title=title,
+        issue_description=f"<p>{title}</p>",
+        author_username="dev@fabrikam.example",
+    )
+
+
+async def _go_on(service: AzureRunService, work_item: int, run_id: str) -> None:
+    await service.handle_go(
+        project_id=PROJECT_ID,
+        issue_number=work_item,
+        note_text=f"/go {run_id}",
+        author_username="dev@fabrikam.example",
+    )
+
+
+class TestExecutionLeaseAtDispatch:
+    async def test_fourth_go_parks_execution_capacity_until_a_slot_frees(
+        self, db, fake, monkeypatch
+    ):
+        """The acceptance shape: under an active limit of two, three
+        approved tasks cannot all execute — the third parks
+        blocked(execution_capacity); a terminal release frees its slot
+        for the next dispatch."""
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "2")
+        service = make_service(db, fake)
+        items = [WORK_ITEM + 10, WORK_ITEM + 20, WORK_ITEM + 30, WORK_ITEM + 40]
+        runs = {item: await _start_on(service, fake, item) for item in items}
+
+        await _go_on(service, items[0], runs[items[0]])
+        await _go_on(service, items[1], runs[items[1]])
+        assert (await get_run(db, runs[items[0]])).status == FlowStatus.WAITING_CI.value
+
+        await _go_on(service, items[2], runs[items[2]])
+        parked = await get_run(db, runs[items[2]])
+        assert parked.status == FlowStatus.BLOCKED.value
+        assert "execution_capacity" in (parked.status_reason or "")
+        lease_evidence = dict(parked.evidence or {})["execution_lease"]
+        assert lease_evidence["acquired"] is False
+        assert lease_evidence["capacity"]["held"] == 2
+        assert any("execution slot" in body for body in fake.work_item_comments[items[2]])
+
+        # A terminal outcome releases the slot: cancel the first run, and
+        # the NEXT dispatch acquires what it freed.
+        await service.handle_cancel(
+            project_id=PROJECT_ID,
+            issue_number=items[0],
+            note_text="/cancel",
+            author_username="dev@fabrikam.example",
+        )
+        await _go_on(service, items[3], runs[items[3]])
+        assert (await get_run(db, runs[items[3]])).status == FlowStatus.WAITING_CI.value
+
+    async def test_the_run_evidence_records_which_admission_check_ran(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await start(service)
+
+        evidence = dict((await get_run(db, run_id)).evidence or {})
+        assert evidence["admission"]["check"] == "queue_admission"
+        assert evidence["admission"]["allowed"] is True
+
+        await go(service, run_id)
+        evidence = dict((await get_run(db, run_id)).evidence or {})
+        assert evidence["execution_lease"]["check"] == "execution_lease"
+        assert evidence["execution_lease"]["acquired"] is True
+        assert evidence["execution_lease"]["slot"] == 1
+        assert evidence["execution_lease"]["lease_id"]
+
+    async def test_a_parked_capacity_run_consumed_no_execution_attempt(self, db, fake, monkeypatch):
+        """NEXT-12: the parked-at-dispatch run never held a lease — the
+        refusal is visible as capacity, not as an executed attempt."""
+        from forge.adaptive.admission import AdmissionPolicy, lease_snapshot
+
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "1")
+        service = make_service(db, fake)
+        items = [WORK_ITEM + 50, WORK_ITEM + 60]
+        runs = {item: await _start_on(service, fake, item) for item in items}
+        await _go_on(service, items[0], runs[items[0]])
+        await _go_on(service, items[1], runs[items[1]])
+        parked = await get_run(db, runs[items[1]])
+        assert parked.status == FlowStatus.BLOCKED.value
+
+        snapshot = await lease_snapshot(
+            AdmissionPolicy.from_env(), PROJECT_ID, db, provider="azure_devops"
+        )
+        assert snapshot == {"held": 1, "completed": 0, "limit": 1, "available": 0}
+
+    async def test_queue_full_refusal_consumes_no_execution_attempt(self, db, fake, monkeypatch):
+        """NEXT-12 at the /implement boundary: a queue-full refusal parks
+        the run before any paid call AND before any lease."""
+        from forge.adaptive.admission import AdmissionPolicy, lease_snapshot
+
+        monkeypatch.setenv("FORGE_ADMISSION_MAX_QUEUED_RUNS", "1")
+        service = make_service(db, fake)
+        first = await _start_on(service, fake, WORK_ITEM + 70, "first")
+        assert (await get_run(db, first)).status == FlowStatus.WAITING_APPROVAL.value
+
+        second = await _start_on(service, fake, WORK_ITEM + 80, "second")
+
+        row = await get_run(db, second)
+        assert row.status == FlowStatus.BLOCKED.value
+        assert "fair_use_denied" in (row.status_reason or "")
+        assert "queue_full" in (row.status_reason or "")
+        assert any("fair use" in body for body in fake.work_item_comments[WORK_ITEM + 80])
+        snapshot = await lease_snapshot(
+            AdmissionPolicy.from_env(), PROJECT_ID, db, provider="azure_devops"
+        )
+        assert snapshot["held"] == 0  # a refused request executed nothing

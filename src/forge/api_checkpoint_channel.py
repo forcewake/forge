@@ -6,14 +6,21 @@ JOB's filesystem; this router is the durable counterpart a SECOND
 runner restores from. Three endpoints, one storage discipline:
 
 - ``PUT /lane/checkpoints/{work_id}`` — accept a checkpoint (JSON-base64
-  manifest + blobs), verify EVERY promise against the bytes (the
+  manifest + blobs), bound the ALLOCATION before any expansion
+  (NEXT-05): the ``Content-Length`` header is read FIRST and refused
+  with 413 over ``FORGE_CHECKPOINT_MAX_REQUEST_BYTES`` (default 512 MiB)
+  before one body byte is read, then the raw body itself is streamed in
+  chunks and refused mid-stream the moment the cap is exceeded — a
+  chunked request with a lying or absent header still never
+  materializes more than ``cap + chunk`` bytes — and only THEN is the
+  JSON parsed and every promise verified against the bytes (the
   manifest must hash to its own content address, belong to the path's
   work, every blob must reproduce its digest — a tampered upload is
-  refused with 400 naming the blob), enforce the per-blob size cap
+  refused with 400 naming the blob), the per-blob size cap
   (413, an honest refusal), the aggregate decoded-size and entry-count
-  caps, and require the blob set to be EXACTLY the manifest's
+  caps enforced, and the blob set required to be EXACTLY the manifest's
   referenced digests — extra path-shaped or otherwise malformed keys
-  are refused BEFORE any write (R28-01) — then land everything in a
+  are refused BEFORE any write (R28-01) — then everything lands in a
   content-addressed directory via atomic temp+rename so a crash
   mid-write never exposes a partial artifact.
 - ``GET /lane/checkpoints/{work_id}`` — serve the work's latest
@@ -42,13 +49,24 @@ Storage lives under ``FORGE_CHECKPOINT_STORE_DIR`` (default
 ``data/checkpoints``) in the same fan-out shape the local artifact
 store uses (``<first2>/<digest>``), plus a per-work index
 (``works/<work_id>.json``, also written atomically) that orders the
-work's checkpoints. Retention
+work's checkpoints. The index's read-modify-write runs under an
+exclusive per-work ``flock`` acquired NON-BLOCKING with a bounded,
+jittered retry (NEXT-06): the holder's identity
+(``hostname|pid|acquired_at``) is recorded INSIDE the lock file for
+post-mortem, and a writer that cannot take the lock within
+``FORGE_CHECKPOINT_LOCK_WAIT_SECONDS`` (default 5) loses honestly —
+its upload is reported as superseded history (the other writer owns
+the index) instead of blocking the API forever. Retention
 (:meth:`CheckpointStore.apply_retention`, driven by
 ``FORGE_CHECKPOINT_RETENTION`` — 0 keeps everything) drops the OLDEST
 checkpoints beyond the keep count and can be asked to keep nothing —
 and still NEVER deletes a work's LATEST checkpoint: the one a live
 pause stands on always resolves. Deleted checkpoints release only
-blobs no retained checkpoint of ANY work still references.
+blobs no retained checkpoint of ANY work still references. The
+retention DECISION is recorded in the index (keep count, holder,
+pending-GC digests) so a concurrent or post-crash re-run sees the last
+decision, does not re-delete, and can COMPLETE a garbage collection
+interrupted between the index update and the blob unlink.
 
 R28-14 folds every cap and cleanup rule into ONE
 :class:`StoragePolicy` — the per-blob cap, the per-upload manifest
@@ -73,8 +91,11 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
+import socket
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -102,17 +123,22 @@ __all__ = [
     "DEFAULT_CHECKPOINT_ROOT",
     "DEFAULT_MAX_BLOB_BYTES",
     "DEFAULT_MAX_BLOB_ENTRIES",
+    "DEFAULT_MAX_REQUEST_BYTES",
     "DEFAULT_MAX_TOTAL_BLOB_BYTES",
     "DEFAULT_MAX_WORK_TOTAL_BYTES",
     "DEFAULT_HISTORY_KEEP",
+    "DEFAULT_LOCK_WAIT_SECONDS",
     "HISTORY_KEEP_ENV",
     "LANE_CONTROL_SECRET_ENV",
+    "LOCK_WAIT_SECONDS_ENV",
     "MAX_BLOB_BYTES_ENV",
     "MAX_BLOB_ENTRIES_ENV",
+    "MAX_REQUEST_BYTES_ENV",
     "MAX_TOTAL_BLOB_BYTES_ENV",
     "MAX_WORK_TOTAL_BYTES_ENV",
     "CheckpointCorruptError",
     "CheckpointStore",
+    "IndexLockHeldError",
     "StoragePolicy",
     "StorageQuotaExceededError",
     "checkpoint_channel_router",
@@ -146,6 +172,25 @@ DEFAULT_MAX_TOTAL_BLOB_BYTES: Final = 256 * 1024 * 1024
 #: body is even decoded.
 MAX_BLOB_ENTRIES_ENV: Final = "FORGE_CHECKPOINT_MAX_BLOB_ENTRIES"
 DEFAULT_MAX_BLOB_ENTRIES: Final = 4096
+
+#: NEXT-05: the ENCODED request-size bound — the allocation ceiling at
+#: the network boundary, checked against ``Content-Length`` BEFORE the
+#: body is read and against the streamed body itself while it streams.
+#: A declared cap on the DECODED aggregate (below) is not an allocation
+#: bound: ``request.json()`` and ``base64.b64decode`` materialize the
+#: full payload first, so a hostile encoded body could exhaust API
+#: memory before any validation ran. This bound runs FIRST; it
+#: comfortably dominates the decoded aggregate cap (base64 decoding
+#: only shrinks: 4 wire characters become 3 bytes).
+MAX_REQUEST_BYTES_ENV: Final = "FORGE_CHECKPOINT_MAX_REQUEST_BYTES"
+DEFAULT_MAX_REQUEST_BYTES: Final = 512 * 1024 * 1024
+
+#: NEXT-06: how long a writer retries (with jitter) for the per-work
+#: index lock before declaring the other writer the winner and landing
+#: its upload as superseded history. 0 refuses after the first
+#: non-blocking attempt.
+LOCK_WAIT_SECONDS_ENV: Final = "FORGE_CHECKPOINT_LOCK_WAIT_SECONDS"
+DEFAULT_LOCK_WAIT_SECONDS: Final = 5.0
 
 #: How many checkpoints per work to keep beyond the latest (0 = all).
 #: The LATEST is exempt whatever this says — see apply_retention.
@@ -222,6 +267,28 @@ class StorageQuotaExceededError(ValueError):
         self.message = message
 
 
+class IndexLockHeldError(RuntimeError):
+    """Another writer held the per-work index lock past the wait budget.
+
+    NEXT-06: the exclusive ``flock`` is taken NON-BLOCKING with a
+    bounded, jittered retry (``FORGE_CHECKPOINT_LOCK_WAIT_SECONDS``);
+    exhaustion means the OTHER writer owns the index — this upload is
+    superseded history, never a corrupted append. The message names the
+    recorded holder identity (``hostname|pid|acquired_at``, written
+    into the lock file at acquisition) so an operator can see exactly
+    which worker won.
+    """
+
+    def __init__(self, work_id: str, holder: str) -> None:
+        super().__init__(
+            f"another writer holds the index lock for {work_id}"
+            f"{' (holder: ' + holder + ')' if holder else ''} — "
+            "this upload is superseded history; the other writer's index stands"
+        )
+        self.work_id = work_id
+        self.holder = holder
+
+
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     """Read an integer env knob, degrading to *default* (never below *minimum*)."""
     raw = os.environ.get(name, "").strip()
@@ -229,6 +296,20 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
         return max(minimum, int(raw)) if raw else default
     except ValueError:
         return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env knob, degrading to *default* (never negative)."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else default
+    except ValueError:
+        return default
+
+
+def _lock_wait_seconds() -> float:
+    """The per-work index lock's retry budget (NEXT-06), from the env."""
+    return _env_float(LOCK_WAIT_SECONDS_ENV, DEFAULT_LOCK_WAIT_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -407,30 +488,98 @@ class CheckpointStore:
     def _lock_path(self, work_id: str) -> Path:
         return self._root / "works" / f"{work_id}.lock"
 
+    @staticmethod
+    def _lock_holder(lock_path: Path) -> str:
+        """The recorded identity of the current lock holder, if any.
+
+        NEXT-06 writes ``hostname|pid|acquired_at`` into the lock file
+        at acquisition and clears it on release, so the loser of a
+        bounded retry (or an operator reading a stuck store) sees WHO
+        holds the critical section — a per-holder lock PATH cannot
+        exclude (two paths never conflict), so the identity rides the
+        ONE shared lock file's content instead.
+        """
+        try:
+            return lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
     @contextmanager
-    def _index_lock(self, work_id: str) -> Iterator[None]:
-        """Serialize the index read-modify-write across PROCESSES (R28-06).
+    def _index_lock(self, work_id: str, *, wait_seconds: float | None = None) -> Iterator[None]:
+        """Serialize the index read-modify-write across PROCESSES (R28-06/NEXT-06).
 
         ``_save_index``'s atomic rename prevents torn bytes, not lost
         updates: two writers can both read the same predecessor and the
         second rename silently drops the first's append. An exclusive
         ``flock`` on ``works/<work_id>.lock`` makes load-append-save one
-        critical section — the lock is released by closing the fd, so a
+        critical section; the lock is released by closing the fd, so a
         crashed writer never leaves it held. Holders open the lock file
         separately (never the index itself), so separate descriptors —
         including two threads of one process — exclude each other
-        exactly as two processes do. Non-POSIX platforms without
-        ``flock`` degrade to the rename-only discipline (documented,
-        never silent: the deployment target is POSIX).
+        exactly as two processes do.
+
+        NEXT-06: the acquire is ``LOCK_EX | LOCK_NB`` retried with
+        jitter until *wait_seconds* (default
+        ``FORGE_CHECKPOINT_LOCK_WAIT_SECONDS``) elapses — a live writer
+        holds the critical section only for its short read-modify-write,
+        so an ordinary concurrent upload waits it out and lands; a
+        writer that exhausts the budget gets
+        :class:`IndexLockHeldError` naming the recorded holder instead
+        of blocking the API process forever. On acquisition the holder
+        writes ``hostname|pid|acquired_at`` into the lock file (post-
+        mortem surface) and clears it on release. Non-POSIX platforms
+        without ``flock`` degrade to the rename-only discipline
+        (documented, never silent: the deployment target is POSIX).
         """
         if fcntl is None:  # pragma: no cover — guarded import above
             yield
             return
-        self._lock_path(work_id).parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self._lock_path(work_id), os.O_CREAT | os.O_RDWR, 0o644)
+        lock_path = self._lock_path(work_id)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        budget = _lock_wait_seconds() if wait_seconds is None else max(0.0, wait_seconds)
+        deadline = time.monotonic() + budget
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        contended = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    contended = True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise IndexLockHeldError(work_id, self._lock_holder(lock_path)) from None
+                    time.sleep(min(random.uniform(0.0005, 0.003), remaining))
+            # Record WHO holds the critical section — diagnostics for the
+            # loser of a bounded retry and for a post-mortem on a stuck
+            # store. Written ONLY when contention was observed: an
+            # uncontended acquire leaves the lock file untouched (the
+            # store stays byte-identical for a refused upload), and the
+            # identity has diagnostic value exactly when someone else
+            # was there. Best-effort: a failed write never fails the
+            # upload.
+            if contended:
+                try:
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(
+                        fd,
+                        f"{socket.gethostname()}|{os.getpid()}|{_now_iso()}".encode(
+                            "utf-8", "replace"
+                        ),
+                    )
+                except OSError:  # pragma: no cover — holder text is diagnostics only
+                    pass
+            try:
+                yield
+            finally:
+                if contended:
+                    try:
+                        os.ftruncate(fd, 0)  # the identity goes away with the lock
+                    except OSError:  # pragma: no cover — diagnostics only
+                        pass
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)  # releases the advisory lock, held or not
 
@@ -634,6 +783,15 @@ class CheckpointStore:
         and cleanup runs after a successful landing per the policy's
         trigger: retention bounded below by the DR history floor, never
         touching the active checkpoint.
+
+        NEXT-06: the critical section is entered through the bounded
+        non-blocking lock. A writer that cannot take it within
+        ``FORGE_CHECKPOINT_LOCK_WAIT_SECONDS`` LOSES honestly: nothing
+        is written (no blobs, no index change — the winner's index is
+        byte-identical) and the returned verdict says
+        ``superseded: true`` naming the holder — the other writer's
+        state is the work's truth, exactly as if this upload had landed
+        late with a lower sequence.
         """
         checkpoint_id = _sha256(manifest_bytes)
         referenced = self._entry_files(manifest_bytes)
@@ -654,42 +812,65 @@ class CheckpointStore:
             )
         self._refuse_policy_violations(work_id, manifest_bytes, blobs)
 
-        with self._index_lock(work_id):
-            document = self._load_index(work_id)
-            entries: list[dict[str, Any]] = [
-                entry for entry in document["checkpoints"] if isinstance(entry, dict)
-            ]
-            self._refuse_over_work_quota(work_id, entries, manifest_bytes, blobs)
-            for digest, data in blobs.items():
-                self._write_cas(digest, data)
-            self._write_cas(checkpoint_id, manifest_bytes)
-            own = next(
-                (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id),
-                None,
-            )
-            if own is None:
-                own = {
+        try:
+            with self._index_lock(work_id):
+                document = self._load_index(work_id)
+                entries: list[dict[str, Any]] = [
+                    entry for entry in document["checkpoints"] if isinstance(entry, dict)
+                ]
+                self._refuse_over_work_quota(work_id, entries, manifest_bytes, blobs)
+                for digest, data in blobs.items():
+                    self._write_cas(digest, data)
+                self._write_cas(checkpoint_id, manifest_bytes)
+                own = next(
+                    (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id),
+                    None,
+                )
+                if own is None:
+                    own = {
+                        "checkpoint_id": checkpoint_id,
+                        "sequence": sequence,
+                        "files": len(blobs),
+                        "uploaded_at": _now_iso(),
+                    }
+                    entries.append(own)
+                entries.sort(key=self._entry_order)
+                self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
+                latest = self._latest_entry(entries)
+                result = {
+                    "work_id": work_id,
                     "checkpoint_id": checkpoint_id,
                     "sequence": sequence,
                     "files": len(blobs),
-                    "uploaded_at": _now_iso(),
+                    "uploaded_at": str(own.get("uploaded_at") or ""),
+                    "latest": latest is not None and latest.get("checkpoint_id") == checkpoint_id,
                 }
-                entries.append(own)
-            entries.sort(key=self._entry_order)
-            self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
-            latest = self._latest_entry(entries)
-            result = {
+        except IndexLockHeldError as exc:
+            # NEXT-06: the other writer won. Nothing was written; the
+            # caller's upload is superseded history by verdict, not by
+            # index mutation — re-deliver it (the checkpoint is
+            # content-addressed and idempotent) or let the winner's
+            # state stand.
+            return {
                 "work_id": work_id,
                 "checkpoint_id": checkpoint_id,
                 "sequence": sequence,
                 "files": len(blobs),
-                "uploaded_at": str(own.get("uploaded_at") or ""),
-                "latest": latest is not None and latest.get("checkpoint_id") == checkpoint_id,
+                "uploaded_at": "",
+                "latest": False,
+                "superseded": True,
+                "superseded_reason": str(exc),
             }
         if self.policy.cleanup_trigger == "on_upload":
             keep = self.policy.retention_keep()
             if keep > 0:
-                self.apply_retention(work_id, keep)
+                try:
+                    self.apply_retention(work_id, keep)
+                except IndexLockHeldError:
+                    # The landing committed; retention is maintenance —
+                    # the next upload or operator pass re-runs it against
+                    # the recorded decision.
+                    pass
         return result
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
@@ -764,6 +945,39 @@ class CheckpointStore:
             listed.extend(entries)
         return listed
 
+    def _referenced_by_retained_works(self, exclude_ids: set[str]) -> set[str]:
+        """Every digest ANY retained checkpoint of ANY work still needs.
+
+        The set that decides whether a doomed digest may actually be
+        deleted: walks every work's index (THIS work's excluded entries
+        passed via *exclude_ids*), reading each retained manifest for
+        its file digests. This is the shared reachability oracle of the
+        retention pass and of the pending-GC completion pass.
+        """
+        referenced: set[str] = set()
+        works_dir = self._root / "works"
+        index_files = sorted(works_dir.glob("*.json")) if works_dir.is_dir() else []
+        for index_file in index_files:
+            try:
+                other = json.loads(index_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(other, dict):
+                continue
+            for entry in other.get("checkpoints", []):
+                if not isinstance(entry, dict):
+                    continue
+                checkpoint_id = entry.get("checkpoint_id")
+                if checkpoint_id in exclude_ids:
+                    continue  # this exact entry is being removed in THIS work
+                referenced.add(str(checkpoint_id))
+                try:
+                    manifest_bytes = self._read_verified(str(checkpoint_id))
+                except (FileNotFoundError, CheckpointCorruptError):
+                    continue
+                referenced.update(self._entry_files(manifest_bytes))
+        return referenced
+
     def apply_retention(self, work_id: str, keep_last: int) -> int:
         """Drop the OLDEST checkpoints beyond *keep_last* — never the latest.
 
@@ -778,6 +992,16 @@ class CheckpointStore:
         under the per-work OS lock (R28-06), so a concurrent
         :meth:`put_checkpoint` can never be dropped by this pass.
         Returns how many checkpoint entries were removed.
+
+        NEXT-06 records the DECISION in the index:
+        ``{"keep", "ran_at", "removed", "holder", "kept_tail",
+        "pending_gc"}``. A re-run that sees the same decision over the
+        same entry set does nothing (no re-walk, no re-delete), and the
+        blob unlink phase is recoverable: the index is saved FIRST with
+        the doomed digests recorded as ``pending_gc``, the unlink runs
+        second, the record clears third — a crash between the index
+        update and the GC is completed by the next pass (re-validating
+        reachability against the CURRENT indexes, never blindly).
         """
         with self._index_lock(work_id):
             document = self._load_index(work_id)
@@ -789,11 +1013,58 @@ class CheckpointStore:
                 ),
                 key=self._entry_order,
             )
+            decision = document.get("retention")
+            decision = decision if isinstance(decision, dict) else None
+
+            # 1. Crash recovery first: a previous pass saved the index
+            # (entries dropped, digests recorded) but died before/during
+            # the unlink. Complete it against CURRENT reachability.
+            pending = decision.get("pending_gc") if decision is not None else None
+            if isinstance(pending, list) and pending and decision is not None:
+                pending_digests = {
+                    str(digest) for digest in pending if _HEX64.fullmatch(str(digest))
+                }
+                still_referenced = self._referenced_by_retained_works(set())
+                for digest in sorted(pending_digests - still_referenced):
+                    self._cas_path(digest).unlink(missing_ok=True)
+                document["retention"] = {**decision, "pending_gc": []}
+                self._save_index(work_id, document)
+                decision = document["retention"]
+
             if not entries:
                 return 0
+
+            # 2. The recorded decision already covers this exact state —
+            # a concurrent re-run (or an idempotent retry) re-deletes
+            # nothing.
+            if (
+                decision is not None
+                and decision.get("keep") == keep_last
+                and str(decision.get("kept_tail") or "") == str(entries[-1]["checkpoint_id"])
+                and not decision.get("pending_gc")
+            ):
+                return 0
+
             keep_count = max(1, min(keep_last, len(entries))) if keep_last > 0 else 1
             retained, removed = entries[-keep_count:], entries[:-keep_count]
             if not removed:
+                # Nothing to drop — still record the decision so the next
+                # re-run over the same state short-circuits.
+                self._save_index(
+                    work_id,
+                    {
+                        **document,
+                        "checkpoints": entries,
+                        "retention": {
+                            "keep": keep_last,
+                            "ran_at": _now_iso(),
+                            "removed": 0,
+                            "holder": f"{socket.gethostname()}|{os.getpid()}",
+                            "kept_tail": str(entries[-1]["checkpoint_id"]),
+                            "pending_gc": [],
+                        },
+                    },
+                )
                 return 0
 
             # Everything the removed checkpoints own — manifest plus blobs. A
@@ -807,34 +1078,32 @@ class CheckpointStore:
                 except (FileNotFoundError, CheckpointCorruptError):
                     continue
 
-            # Everything ANY retained checkpoint of ANY work still needs — the
-            # set that decides whether a doomed digest may actually be deleted.
-            referenced: set[str] = set()
-            works_dir = self._root / "works"
-            index_files = sorted(works_dir.glob("*.json")) if works_dir.is_dir() else []
-            for index_file in index_files:
-                try:
-                    other = json.loads(index_file.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(other, dict):
-                    continue
-                for entry in other.get("checkpoints", []):
-                    if not isinstance(entry, dict):
-                        continue
-                    checkpoint_id = entry.get("checkpoint_id")
-                    if checkpoint_id in removed_ids:
-                        continue  # this exact entry is being removed in THIS work
-                    referenced.add(str(checkpoint_id))
-                    try:
-                        manifest_bytes = self._read_verified(str(checkpoint_id))
-                    except (FileNotFoundError, CheckpointCorruptError):
-                        continue
-                    referenced.update(self._entry_files(manifest_bytes))
+            referenced = self._referenced_by_retained_works(removed_ids)
+            unreferenced = sorted(doomed_digests - referenced)
 
-            for digest in sorted(doomed_digests - referenced):
+            # 3. Index first (with the GC recorded as pending), unlink
+            # second, clear third — the crash window is recoverable.
+            self._save_index(
+                work_id,
+                {
+                    **document,
+                    "checkpoints": retained,
+                    "retention": {
+                        "keep": keep_last,
+                        "ran_at": _now_iso(),
+                        "removed": len(removed),
+                        "holder": f"{socket.gethostname()}|{os.getpid()}",
+                        "kept_tail": str(retained[-1]["checkpoint_id"]),
+                        "pending_gc": unreferenced,
+                    },
+                },
+            )
+            for digest in unreferenced:
                 self._cas_path(digest).unlink(missing_ok=True)
-            self._save_index(work_id, {"work_id": work_id, "checkpoints": retained})
+            if unreferenced:
+                document = self._load_index(work_id)
+                document["retention"] = {**document.get("retention", {}), "pending_gc": []}
+                self._save_index(work_id, document)
             return len(removed)
 
     # -- the operator health surface (R28-14) ----------------------------------
@@ -969,6 +1238,15 @@ def _max_blob_entries() -> int:
         return DEFAULT_MAX_BLOB_ENTRIES
 
 
+def _max_request_bytes() -> int:
+    """The ENCODED request-size bound (NEXT-05), from the env."""
+    raw = os.environ.get(MAX_REQUEST_BYTES_ENV, "").strip()
+    try:
+        return int(raw) if raw else DEFAULT_MAX_REQUEST_BYTES
+    except ValueError:
+        return DEFAULT_MAX_REQUEST_BYTES
+
+
 def storage_health_report(
     root: Path | str | None = None, policy: StoragePolicy | None = None
 ) -> dict[str, Any]:
@@ -977,10 +1255,14 @@ def storage_health_report(
     Reads the root from ``FORGE_CHECKPOINT_STORE_DIR`` when not given
     and the policy from the environment, so ``forge doctor`` (or any
     operator tool) can call this single function without wiring. The
-    report shape is :meth:`CheckpointStore.storage_health_report`'s.
+    report shape is :meth:`CheckpointStore.storage_health_report`'s,
+    plus the transport-side request cap (NEXT-05: the configured
+    limits belong in the operator's evidence).
     """
     store = CheckpointStore(Path(root) if root is not None else _store_dir(), policy=policy)
-    return store.storage_health_report()
+    report = store.storage_health_report()
+    report["request_max_bytes"] = _max_request_bytes()
+    return report
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -1048,6 +1330,33 @@ def _validate_work_id(work_id: str) -> None:
                 f"at most 128 chars), got {work_id!r}"
             ),
         )
+
+
+async def _read_bounded_body(request: Request, cap: int) -> bytes:
+    """Stream the raw request body in bounded chunks (NEXT-05).
+
+    The allocation bound for requests whose header lied or was absent
+    (chunked transfer encoding has no ``Content-Length``): each chunk is
+    appended and the accumulator is checked against *cap* BEFORE the
+    next chunk is read, so the process never materializes more than
+    ``cap + one chunk`` bytes of a hostile body. ``request.json()`` is
+    deliberately NOT used — it materializes the full body first.
+    """
+    buffer = bytearray()
+    async for chunk in request.stream():
+        buffer.extend(chunk)
+        if len(buffer) > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"request body passed {cap} bytes while streaming (the declared "
+                    f"or absent Content-Length did not bound it) — this channel "
+                    f"accepts at most {cap} encoded bytes per request "
+                    f"({MAX_REQUEST_BYTES_ENV}); the upload is refused before "
+                    "anything is decoded or stored"
+                ),
+            )
+    return bytes(buffer)
 
 
 def _decode_payload(document: dict[str, Any], work_id: str) -> tuple[bytes, dict[str, bytes], int]:
@@ -1199,8 +1508,31 @@ async def put_checkpoint(
     secret = _require_enabled(request)
     _validate_work_id(work_id)
     await _authorize_work(request, secret, work_id, authorization)
+    # NEXT-05: bound the ALLOCATION before any expansion. The declared
+    # encoded length is refused first (nothing is read), the streamed
+    # body second (at most cap + one chunk is ever materialized), and
+    # only then does JSON parsing and blob validation begin.
+    cap = _max_request_bytes()
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_bytes = int(declared)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Content-Length is not an integer: {declared!r}"
+            ) from exc
+        if declared_bytes > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"request declares {declared_bytes} bytes; this channel accepts at "
+                    f"most {cap} encoded bytes per request ({MAX_REQUEST_BYTES_ENV}) — "
+                    "the body is refused before it is read"
+                ),
+            )
+    body = await _read_bounded_body(request, cap)
     try:
-        document = await request.json()
+        document = json.loads(body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid JSON body") from exc
     if not isinstance(document, dict):
@@ -1239,7 +1571,9 @@ async def checkpoint_storage_health(
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
     store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
-    return store.storage_health_report()
+    report = store.storage_health_report()
+    report["request_max_bytes"] = _max_request_bytes()
+    return report
 
 
 @checkpoint_channel_router.get("/lane/checkpoints/{work_id}")

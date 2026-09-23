@@ -7,6 +7,7 @@ templates so a regression (a reintroduced `git push`, a write token in the
 lane) fails CI instead of a live run.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -332,12 +333,17 @@ class TestDotnetLaneRecipe:
 
     def test_tests_emit_trx_the_verifier_reads(self):
         text = self._text()
-        assert '--logger "trx;LogFileName=$FORGE_DOTNET_TRX"' in text
+        # NEXT-16: LogFilePrefix (a UNIQUE report per project/framework —
+        # a fixed LogFileName let multi-target runs overwrite each other).
+        assert '--logger "trx;LogFilePrefix=$FORGE_DOTNET_TRX_PREFIX"' in text
+        assert self._doc()["variables"]["FORGE_DOTNET_TRX_PREFIX"] == "forge_"
+        assert "FORGE_DOTNET_TRX:" not in text  # the fixed-name knob is gone
         assert "--results-directory .forge/testresults" in text
-        # the TRX counters land in the candidate meta (the verifier's
-        # surface — docs/harnesses/dotnet-lane.md).
+        # the AGGREGATED TRX counters land in the candidate meta (the
+        # verifier's surface — docs/harnesses/dotnet-lane.md).
         assert '"verification"' in text
         assert "ResultSummary" in text and "Counters" in text
+        assert "test_projects" in text and "total_passed" in text and "total_failed" in text
 
     def test_pinned_inputs_fail_closed_before_the_paid_call(self):
         text = self._text()
@@ -383,6 +389,170 @@ class TestDotnetLaneRecipe:
 
         script = render_driver_script("dotnet-lane", "", ".forge/brief.md")
         assert ".forge/verify.json" in script
-        assert "dotnet-trx/1" in script
+        # NEXT-16: the aggregated report contract (format v2 — the
+        # single-report v1 shape is superseded).
+        assert "dotnet-trx/2" in script
+        assert "LogFilePrefix" in script
         # the mechanical deny rides this lane too (its agent is a CLI).
         assert '--disallowedTools "Bash(git commit:*)" "Bash(git push:*)"' in script
+
+
+class TestDotnetTrxAggregation:
+    """NEXT-16 — the collector aggregates EVERY ``forge_*.trx`` report.
+
+    The review's finding: "the TRX collector takes the first found
+    report; multi-project/multi-target tests overwrite." The lane now
+    tests with ``--logger trx;LogFilePrefix=forge_`` (unique report
+    names, nothing overwritten) and the collector aggregates the WHOLE
+    identified population. These tests EXECUTE the real embedded
+    collectors — the python3 heredoc inside the shipped GitLab template
+    AND the one inside the rendered driver script — against golden TRX
+    fixtures, so the aggregation behavior itself is pinned, not just its
+    presence in the text.
+    """
+
+    FIXTURES = Path(__file__).resolve().parent / "fixtures" / "dotnet-trx"
+    # The terminator may be indented (the YAML block scalar) or at column
+    # zero (the .sh heredoc) — both shapes carry the same collector.
+    _HEREDOC_RE = re.compile(r"python3 - <<'PYEOF'\n(.*?)\n[ ]*PYEOF\s*$", re.DOTALL | re.MULTILINE)
+
+    def _template_heredoc(self) -> str:
+        return self._extract(self._text_from_template())
+
+    def _text_from_template(self) -> str:
+        return (TEMPLATES_DIR / "dotnet-lane.gitlab-ci.yml").read_text()
+
+    def _script_heredoc(self) -> str:
+        from forge.harness_entry import render_driver_script
+
+        return self._extract(render_driver_script("dotnet-lane", "", ".forge/brief.md"))
+
+    def _extract(self, text: str) -> str:
+        match = self._HEREDOC_RE.search(text)
+        assert match is not None, "the dotnet lane must carry its python3 heredoc"
+        import textwrap
+
+        return textwrap.dedent(match.group(1))
+
+    def _stage(
+        self, tmp_path: Path, *fixture_names: str, legacy: str | None = None, junk: bool = False
+    ) -> Path:
+        import shutil
+
+        results = tmp_path / ".forge" / "testresults"
+        results.mkdir(parents=True)
+        for name in fixture_names:
+            shutil.copy(self.FIXTURES / name, results / name)
+        if legacy is not None:
+            (results / legacy).write_text(
+                '<?xml version="1.0"?><TestRun xmlns='
+                '"http://microsoft.com/schemas/VisualStudio/TeamTest/2010"/>'
+            )
+        if junk:
+            (results / "forge_corrupt.trx").write_text("this is not xml at all <<<")
+        return tmp_path
+
+    def _run_collector(self, code: str, cwd: Path) -> None:
+        import os
+        import subprocess
+        import sys
+
+        proc = subprocess.run(
+            [sys.executable, "-"],
+            input=code,
+            cwd=str(cwd),
+            env={**os.environ, "FORGE_DOTNET_TRX_PREFIX": "forge_"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def _collect(self, tmp_path: Path, *fixture_names: str, **kwargs) -> tuple[dict, dict]:
+        """Run BOTH collectors (template → candidate.meta.json, script →
+        verify.json) over the same staged results; return the two
+        verification blocks."""
+        outputs = []
+        for index, (code, output) in enumerate(
+            (
+                (self._template_heredoc(), ".forge/candidate.meta.json"),
+                (self._script_heredoc(), ".forge/verify.json"),
+            )
+        ):
+            staged = self._stage(tmp_path / f"run-{index}", *fixture_names, **kwargs)
+            self._run_collector(code, staged)
+            document = json.loads((staged / output).read_text())
+            outputs.append(document.get("verification", document))
+        return outputs[0], outputs[1]
+
+    def test_two_reports_are_both_parsed_counted_and_neither_dropped(self, tmp_path):
+        # A two-project run (one green, one with a failure): BOTH reports
+        # are attributed, counted and kept — the failing project cannot
+        # disappear because the other report sorted first.
+        template_block, script_block = self._collect(
+            tmp_path,
+            "forge_Api.Tests_net9.0.trx",
+            "forge_Domain.Tests_net8.0.trx",
+        )
+        for verification in (template_block, script_block):
+            assert verification["kind"] == "dotnet-trx/2"
+            assert verification["test_projects"] == 2
+            assert verification["total_passed"] == 19  # 12 + 7
+            assert verification["total_failed"] == 1  # 0 + 1
+            assert verification["reports_absent"] is False
+            per_file = {entry["file"]: entry for entry in verification["projects"]}
+            api = per_file[".forge/testresults/forge_Api.Tests_net9.0.trx"]
+            domain = per_file[".forge/testresults/forge_Domain.Tests_net8.0.trx"]
+            assert (api["passed"], api["failed"], api["outcome"]) == (12, 0, "Completed")
+            assert (domain["passed"], domain["failed"], domain["outcome"]) == (7, 1, "Failed")
+            assert api["sha256"] != domain["sha256"]  # per-report content pins
+            assert len({entry["sha256"] for entry in verification["projects"]}) == 2
+
+    def test_a_stale_fixed_name_report_is_visible_but_never_counted(self, tmp_path):
+        # The negative case verbatim: "Leave an old forge.trx in the
+        # results directory" — it is recorded as a stale legacy report and
+        # stays OUT of the aggregate (it may predate this attempt).
+        template_block, script_block = self._collect(
+            tmp_path,
+            "forge_Api.Tests_net9.0.trx",
+            "forge_Domain.Tests_net8.0.trx",
+            legacy="forge.trx",
+        )
+        for verification in (template_block, script_block):
+            assert verification["test_projects"] == 2  # the legacy one is not counted
+            assert verification["total_passed"] == 19
+            assert verification["legacy_reports"] == [".forge/testresults/forge.trx"]
+
+    def test_zero_reports_is_an_explicit_condition_never_success(self, tmp_path):
+        # The negative case verbatim: "a test process that exits zero but
+        # writes no required report" — absent reports are SAID, and the
+        # counters stay honestly zero rather than inherited from anything.
+        template_block, script_block = self._collect(tmp_path)
+        for verification in (template_block, script_block):
+            assert verification["test_projects"] == 0
+            assert verification["total_passed"] == 0
+            assert verification["total_failed"] == 0
+            assert verification["reports_absent"] is True
+
+    def test_an_unparseable_report_is_recorded_and_never_fatal(self, tmp_path):
+        # One corrupted report must not eat the healthy one's verdict.
+        template_block, script_block = self._collect(
+            tmp_path, "forge_Api.Tests_net9.0.trx", junk=True
+        )
+        for verification in (template_block, script_block):
+            assert verification["test_projects"] == 1
+            assert verification["total_passed"] == 12
+            assert [failure["file"] for failure in verification["parse_failures"]] == [
+                ".forge/testresults/forge_corrupt.trx"
+            ]
+
+    def test_a_failing_project_cannot_disappear_behind_a_passing_one(self, tmp_path):
+        # Sorted-first is the PASSING report: the old collector (first
+        # match wins) would have reported zero failures for this run.
+        template_block, script_block = self._collect(
+            tmp_path,
+            "forge_Api.Tests_net9.0.trx",
+            "forge_Domain.Tests_net8.0.trx",
+        )
+        for verification in (template_block, script_block):
+            assert verification["total_failed"] == 1

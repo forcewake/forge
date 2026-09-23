@@ -47,54 +47,87 @@ claude -p @@QUOTED_PROMPT@@@@MODEL_FLAG@@ \
   --mcp-config /tmp/forge-mcp.json --strict-mcp-config \
   --setting-sources '' --output-format stream-json --verbose 2>&1 | tee -a @@EVENTS@@ | $FORGE_FILTER_PIPE
 _agent_rc=$?
-# R28-21 steps 3-5: the reproducible verification tail — locked restore,
-# locked build, TRX tests. Each leg's exit code is RECORDED beside the
-# parsed TRX counters (environment failures separated from test
-# failures); only the AGENT's failure classifies the lane itself.
+# R28-21 steps 3-5 + NEXT-16: the reproducible verification tail — locked
+# restore, locked build, TRX tests with a UNIQUE LogFilePrefix per report
+# (multi-project/multi-target runs each write their own forge_*.trx;
+# nothing is overwritten, and the aggregator below counts EVERY report).
+# Each leg's exit code is RECORDED beside the aggregated TRX counters
+# (environment failures separated from test failures); only the AGENT's
+# failure classifies the lane itself.
 FORGE_RESTORE_EXIT=0 FORGE_BUILD_EXIT=0 FORGE_TEST_EXIT=0
 dotnet restore --locked-mode || FORGE_RESTORE_EXIT=$?
 dotnet build --no-restore --locked-mode || FORGE_BUILD_EXIT=$?
-dotnet test --no-build --logger "trx;LogFileName=${FORGE_DOTNET_TRX:-forge.trx}" --results-directory .forge/testresults || FORGE_TEST_EXIT=$?
+dotnet test --no-build --logger "trx;LogFilePrefix=${FORGE_DOTNET_TRX_PREFIX:-forge_}" --results-directory .forge/testresults || FORGE_TEST_EXIT=$?
 export FORGE_RESTORE_EXIT FORGE_BUILD_EXIT FORGE_TEST_EXIT
 python3 - <<'PYEOF'
 import hashlib, json, os, xml.etree.ElementTree as ET
 
-trx_name = os.environ.get("FORGE_DOTNET_TRX", "forge.trx")
-trx_path = None
-if os.path.isdir(".forge/testresults"):
-    for root, _dirs, names in os.walk(".forge/testresults"):
-        if trx_name in names:
-            trx_path = os.path.join(root, trx_name)
-            break
+trx_dir = ".forge/testresults"
+prefix = os.environ.get("FORGE_DOTNET_TRX_PREFIX", "forge_")
+legacy_name = os.environ.get("FORGE_DOTNET_TRX", "forge.trx")
+max_projects = 25
+reports = []
+parse_failures = []
+legacy_reports = []
+if os.path.isdir(trx_dir):
+    for root, _dirs, names in sorted(os.walk(trx_dir)):
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            if name == legacy_name:
+                # A leftover fixed-name report is stale by construction (it
+                # may predate this attempt) — visible, never counted.
+                legacy_reports.append(path)
+                continue
+            if not (name.startswith(prefix) and name.endswith(".trx")):
+                continue
+            try:
+                raw = open(path, "rb").read()
+                node = ET.fromstring(raw)
+            except (OSError, ET.ParseError) as exc:
+                parse_failures.append({"file": path, "error": str(exc)[:200]})
+                continue
+            ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+            outcome = ""
+            counters = {}
+            summary = node.find(f"{ns}ResultSummary")
+            if summary is not None:
+                outcome = summary.get("outcome", "")
+                counted = summary.find(f"{ns}Counters")
+                if counted is not None:
+                    counters = {
+                        key: int(value)
+                        for key, value in counted.attrib.items()
+                        if value is not None and value.isdigit()
+                    }
+            reports.append({
+                "file": path,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "outcome": outcome,
+                "counters": counters,
+            })
 verify = {
-    "kind": "dotnet-trx/1",
-    "trx": None,
+    "kind": "dotnet-trx/2",
+    "test_projects": len(reports),
+    "total_passed": sum(r["counters"].get("passed", 0) for r in reports),
+    "total_failed": sum(r["counters"].get("failed", 0) for r in reports),
+    "projects": [
+        {
+            "file": r["file"],
+            "outcome": r["outcome"],
+            "passed": r["counters"].get("passed", 0),
+            "failed": r["counters"].get("failed", 0),
+            "sha256": r["sha256"],
+        }
+        for r in reports[:max_projects]
+    ],
+    "projects_dropped": max(0, len(reports) - max_projects),
+    "parse_failures": parse_failures[:10],
+    "legacy_reports": legacy_reports[:10],
+    "reports_absent": not reports,
     "restore_exit": int(os.environ.get("FORGE_RESTORE_EXIT", "0") or 0),
     "build_exit": int(os.environ.get("FORGE_BUILD_EXIT", "0") or 0),
     "test_exit": int(os.environ.get("FORGE_TEST_EXIT", "0") or 0),
 }
-if trx_path is not None:
-    raw = open(trx_path, "rb").read()
-    counters = {}
-    outcome = ""
-    node = ET.fromstring(raw)
-    ns = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
-    summary = node.find(f"{ns}ResultSummary")
-    if summary is not None:
-        outcome = summary.get("outcome", "")
-        counted = summary.find(f"{ns}Counters")
-        if counted is not None:
-            counters = {
-                key: int(value)
-                for key, value in counted.attrib.items()
-                if value is not None and value.isdigit()
-            }
-    verify["trx"] = {
-        "file": trx_path,
-        "sha256": hashlib.sha256(raw).hexdigest(),
-        "outcome": outcome,
-        "counters": counters,
-    }
 with open(".forge/verify.json", "w") as fh:
     json.dump(verify, fh, indent=2, sort_keys=True)
 PYEOF

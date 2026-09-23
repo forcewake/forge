@@ -1371,3 +1371,187 @@ class TestApproveRevisionIngress:
         )
         assert result["status"] == "refused"
         assert any("ignored" in body for body in posted)
+
+
+class TestRevisionJourneyToDispatch:
+    """NEXT-20 — from human decision to changed execution.
+
+    /approve-revision activates the revised plan in one durable
+    transaction; the NEXT /go then dispatches under the NEW active plan
+    read from ``read_active_plan()`` (never the old plan comment): the
+    brief envelope binds the revised plan's bytes, and a stale /go still
+    carrying the superseded digest refuses. The revised plan comment
+    notes "revised from <old-digest> to <new-digest>", rendered from the
+    durable pointer the same transaction wrote."""
+
+    async def _world_with_old_plan(self, tmp_path):
+        """A durable world whose ACTIVE plan is revision 1 with a digest."""
+        world = _DurableWorld(_current())
+        await world.start()
+        old_plan = _revision(_base_steps(), revision=1)
+        async with world.factory() as session:
+            from forge.adaptive.revisions import ACTIVE_PLAN_KEY
+            from forge.durable import FlowRun
+
+            run = await session.get(FlowRun, world.run_id)
+            merged = dict(run.evidence or {})
+            merged[ACTIVE_PLAN_KEY] = {
+                **merged[ACTIVE_PLAN_KEY],
+                "plan_digest": plan_digest(old_plan),
+            }
+            run.evidence = merged
+            await session.commit()
+        return world, old_plan
+
+    async def test_approve_revision_then_the_next_go_dispatches_the_new_plan(self, tmp_path):
+        from forge.adaptive.revisions import (
+            activate_pending_revision,
+            dispatch_plan_binding,
+            stage_pending_revision,
+        )
+
+        world, old_plan = await self._world_with_old_plan(tmp_path)
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
+        outcome = await activate_pending_revision(
+            world.factory, world.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+
+        # The NEXT /go: the dispatch reads the durable ACTIVE plan —
+        # not the old plan comment — and binds to the revised digest.
+        binding = await dispatch_plan_binding(world.factory, world.run_id)
+        assert binding.dispatchable is True
+        assert binding.plan_digest == plan_digest(proposed)
+        assert binding.revised_from_digest == plan_digest(old_plan)
+        assert binding.active_revision == 2
+
+        # The brief envelope is built over the REVISED plan's bytes and
+        # verifies; its identity is the digest the binding named.
+        from forge.harnesses.brief_envelope import (
+            build_brief_envelope,
+            verify_brief_envelope,
+        )
+
+        envelope = build_brief_envelope(
+            run_id=world.run_id,
+            task_title="Add order reservation expiry",
+            task_description="Idempotent expiry per AC-1.",
+            plan_text=proposed.model_dump_json(),
+            spec_digest="7" * 64,
+        )
+        verify_brief_envelope(  # does not raise: the envelope IS the new plan
+            envelope["envelope_digest"],
+            run_id=world.run_id,
+            task_title="Add order reservation expiry",
+            task_description="Idempotent expiry per AC-1.",
+            plan_text=proposed.model_dump_json(),
+            spec_digest="7" * 64,
+        )
+        # A late callback minted against the OLD plan cannot advance.
+        assert stale_callback_guard(plan_digest(old_plan), binding.plan_digest) is False
+        assert stale_callback_guard(binding.plan_digest, binding.plan_digest) is True
+
+    async def test_the_revised_plan_comment_notes_old_to_new_digests(self, tmp_path):
+        from forge.adaptive.revisions import (
+            REVISION_NOTE_MARKER,
+            activate_pending_revision,
+            dispatch_plan_binding,
+            plan_comment_revision_note,
+            read_active_plan,
+            stage_pending_revision,
+        )
+
+        world, old_plan = await self._world_with_old_plan(tmp_path)
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
+        await activate_pending_revision(
+            world.factory, world.run_id, decision.decision_id, decided_by="alice"
+        )
+
+        # The comment footer renders from the durable pointer the
+        # activation transaction wrote — it cannot drift from the record.
+        document = await read_active_plan(world.factory, world.run_id)
+        note = plan_comment_revision_note(
+            document["revised_from_digest"],
+            document["plan_digest"],
+            decided_by="alice",
+            decision_id=decision.decision_id,
+        )
+        old_digest, new_digest = plan_digest(old_plan), plan_digest(proposed)
+        assert note == (
+            f"{REVISION_NOTE_MARKER}\n"
+            f"revised from {old_digest} to {new_digest}\n"
+            f"approved by alice ({decision.decision_id})"
+        )
+        assert f"revised from {old_digest} to {new_digest}" in note
+
+        # The digest pair the note names is exactly the dispatch binding.
+        binding = await dispatch_plan_binding(world.factory, world.run_id)
+        assert (binding.revised_from_digest, binding.plan_digest) == (old_digest, new_digest)
+
+    async def test_a_stale_go_with_the_old_digest_is_refused(self, tmp_path):
+        from forge.adaptive.revisions import (
+            activate_pending_revision,
+            dispatch_plan_binding,
+            stage_pending_revision,
+        )
+
+        world, old_plan = await self._world_with_old_plan(tmp_path)
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
+        await activate_pending_revision(
+            world.factory, world.run_id, decision.decision_id, decided_by="alice"
+        )
+
+        # The /go that still carries the SUPERSESED plan's digest (read
+        # off the old plan comment) refuses — nothing dispatches.
+        stale = await dispatch_plan_binding(
+            world.factory, world.run_id, claimed_plan_digest=plan_digest(old_plan)
+        )
+        assert stale.dispatchable is False
+        assert stale.code == "stale_plan_digest"
+        assert plan_digest(old_plan) in stale.reason
+        assert plan_digest(proposed) in stale.reason
+
+        # The corrected /go — claiming the digest the record names —
+        # dispatches; and an unknown digest refuses as a mismatch.
+        ok = await dispatch_plan_binding(
+            world.factory, world.run_id, claimed_plan_digest=plan_digest(proposed)
+        )
+        assert ok.dispatchable is True
+        unknown = await dispatch_plan_binding(
+            world.factory, world.run_id, claimed_plan_digest="0" * 64
+        )
+        assert unknown.dispatchable is False
+        assert unknown.code == "plan_digest_mismatch"
+
+    async def test_a_run_without_an_active_plan_refuses_the_dispatch(self, tmp_path):
+        from forge.adaptive.revisions import dispatch_plan_binding
+
+        world = _DurableWorld(_current())
+        await world.start()  # evidence active_plan exists here — so use a stranger
+        stranger = "b" * 32
+        async with world.factory() as session:
+            from forge.durable import FlowRun
+
+            session.add(FlowRun(id=stranger, project_id=1, status="planning"))
+            await session.commit()
+
+        binding = await dispatch_plan_binding(world.factory, stranger)
+
+        assert binding.dispatchable is False
+        assert binding.code == "no_active_plan"
+
+    def test_the_note_marker_is_machine_extractable(self):
+        from forge.adaptive.revisions import (
+            REVISION_NOTE_MARKER,
+            plan_comment_revision_note,
+        )
+
+        note = plan_comment_revision_note("a" * 64, "b" * 64)
+        assert note.startswith(REVISION_NOTE_MARKER)
+        assert f"revised from {'a' * 64} to {'b' * 64}" in note

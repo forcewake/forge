@@ -60,7 +60,31 @@ deliberately NOT checked: capabilities are not observable from an
 unprivileged process, so an unverifiable claim is not made. A lane that
 declares v2 without runner-side mounts/egress enforcement therefore never
 starts — the declared contract and the deployed control cannot drift
-apart silently in either direction.
+apart silently in either direction. NEXT-18 sharpens the network axis one
+step further: :func:`verify_network_egress` goes BEYOND the declaration
+check and dials a destination the declared allowlist denies — a
+successful connection proves enforcement ABSENT (``not_enforced``); a
+refused one is only CONSISTENT with enforcement (``verified``, with the
+epistemic bound stated), because from inside a process we can prove the
+absence of a control, never its presence.
+
+NEXT-15 — the driver identity is DECOMPOSED into two axes. A lane is a
+(RECIPE, HARNESS) tuple: :class:`RuntimeRecipe` is the language/toolchain
+the lane runs ON (the SDK image, the version/restore/build/test
+commands, the repo files whose absence fails the gate — ``dotnet-9`` /
+``python-3-13`` / ``node-22``), :class:`HarnessProfile` is the agent
+driver that runs IN it (``claude-code`` / ``codex`` / ``copilot`` — its
+sdk and its credential names). ``dotnet-lane`` stops being a fused
+driver identity and becomes a COMPATIBILITY ALIAS
+(:data:`DRIVER_PROFILE_ALIASES`) for ``("dotnet-9", "claude-code")``:
+the existing driver id still resolves, but the decomposition is the
+authority — :func:`compile_driver_profile` validates the pair against
+:data:`COMPILED_COMBINATIONS` (an unsupported combination is refused
+before any model call), and :func:`RuntimeRecipe.gate` checks the
+TOOLCHAIN prerequisites against the target repo independently of which
+harness was selected (the .NET recipe's global.json pin gates a codex
+lane exactly as it gates the claude lane — one runtime recipe, no
+per-harness copies).
 """
 
 from __future__ import annotations
@@ -80,10 +104,16 @@ __all__ = [
     "BOOTSTRAP_STATUS_FAILED",
     "BOOTSTRAP_STATUS_OK",
     "BOOTSTRAP_STATUS_VALUES",
+    "COMPILED_COMBINATIONS",
+    "DENIED_PROBE_HOST",
+    "DENIED_PROBE_PORT",
+    "DENIED_PROBE_TIMEOUT_S",
+    "DRIVER_PROFILE_ALIASES",
     "FORGE_BOOTSTRAP_FAILED_MARKER",
     "FORGE_EGRESS_ALLOWLIST_ENV",
     "FORGE_LANE_PROFILE_ENV",
     "FORGE_LANE_STAGE_ENV",
+    "HARNESS_PROFILES",
     "LANE_CREDENTIAL_CAPABILITIES",
     "LANE_MCP_POLICY",
     "LANE_NETWORK_POLICY",
@@ -93,25 +123,40 @@ __all__ = [
     "LANE_PYTHON_VERSION",
     "LANE_STAGES",
     "LANE_TEST_COMMANDS",
+    "NETWORK_EGRESS_DECLARED_ONLY",
+    "NETWORK_EGRESS_NOT_ENFORCED",
+    "NETWORK_EGRESS_STATUS_VALUES",
+    "NETWORK_EGRESS_VERIFIED",
+    "NetworkProbeResult",
     "PROC_MOUNTS_PATH",
     "PROFILE_LOCK_FILE",
     "PROFILE_PYPROJECT_FILE",
+    "RUNTIME_RECIPES",
     "TOOLCHAIN_PACKAGE_NAMES",
     "ExecutionProfile",
     "FileRead",
+    "HarnessProfile",
+    "LaneDriverProfile",
     "LaneExecutionProfile",
     "LocalRepoSource",
     "MaterializedFiles",
     "ProfileSource",
+    "RecipeViolation",
+    "RuntimeRecipe",
     "RuntimeViolation",
     "bootstrap_failed",
     "classify_bootstrap_failure",
+    "compile_driver_profile",
     "credentials_at",
     "derive_from_reader",
     "derive_from_repo",
+    "harness_profile",
     "lane_profile",
+    "resolve_driver_profile",
+    "runtime_recipe",
     "validate_lane_profile_declaration",
     "validate_runtime",
+    "verify_network_egress",
 ]
 
 #: Schema version of the profile record covered by the digest. A changed
@@ -650,6 +695,177 @@ def validate_runtime(
     return tuple(violations)
 
 
+# -- the network-egress probe (NEXT-18) ---------------------------------------
+#
+# The review's demand: "having an env-var allowlist doesn't prove network
+# restriction." ``validate_runtime`` checks the DECLARATION (the hook rides
+# the stage env); the probe below adds the measurable slice beyond it: an
+# actual connection attempt to a destination the declared policy DENIES.
+# The epistemics are asymmetric and the probe says so: a SUCCESSFUL
+# connection to a denied destination proves enforcement ABSENT
+# (``not_enforced`` — declared but not enforced); a refused/timed-out
+# connection is CONSISTENT WITH enforcement but cannot prove it (a down
+# network, a dead DNS resolver or a firewall hiccup look identical from
+# inside) — that answer is ``verified`` with its honesty bound in the
+# detail, never a claim that the filter's completeness was tested. We can
+# prove absence of enforcement, not presence.
+
+#: The probe destination: a real, harmless public host the declared
+#: allowlist never grants (model/package endpoints live elsewhere). The
+#: probe connects (or fails to) and immediately closes — no bytes of
+#: payload are sent either way.
+DENIED_PROBE_HOST = "example.com"
+DENIED_PROBE_PORT = 443
+#: Short by design: the probe must never stall a lane entry.
+DENIED_PROBE_TIMEOUT_S = 2.0
+
+#: The probe's three honest answers.
+NETWORK_EGRESS_VERIFIED = "verified"
+NETWORK_EGRESS_DECLARED_ONLY = "declared_only"
+NETWORK_EGRESS_NOT_ENFORCED = "not_enforced"
+NETWORK_EGRESS_STATUS_VALUES = (
+    NETWORK_EGRESS_VERIFIED,
+    NETWORK_EGRESS_DECLARED_ONLY,
+    NETWORK_EGRESS_NOT_ENFORCED,
+)
+
+
+@dataclass(frozen=True)
+class NetworkProbeResult:
+    """What one :func:`verify_network_egress` probe established (NEXT-18).
+
+    ``status`` is the honest verdict: ``verified`` (the denied
+    destination was unreachable — consistent with enforcement, an
+    absence-of-violation answer, never proof of the filter itself),
+    ``declared_only`` (the control exists as declaration only: the hook
+    never reached the env, or the probe destination is allowlisted so
+    the probe cannot falsify anything), or ``not_enforced`` (the denied
+    destination ANSWERED — the allowlist is declared but nothing
+    enforces it). ``connection_outcome`` carries the raw observation
+    (``unreachable`` | ``connected`` | ``not_probed``) beside it.
+    """
+
+    status: str
+    detail: str
+    probed: str = ""
+    connection_outcome: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in NETWORK_EGRESS_STATUS_VALUES:
+            raise ValueError(
+                f"unknown network probe status {self.status!r}; vocabulary is"
+                f" {NETWORK_EGRESS_STATUS_VALUES}"
+            )
+
+    def __str__(self) -> str:  # pragma: no cover — trivial rendering
+        return f"[{self.status}] {self.detail}"
+
+
+def _socket_connector(host: str, port: int, timeout_s: float) -> None:
+    """The default probe leg: one TCP connect, closed immediately.
+
+    Returns when the connection was ESTABLISHED (the caller reads that
+    as enforcement absent); raises :class:`OSError` (refused, timeout,
+    DNS failure, unreachable network) when it was not — every failure
+    spelling is the same honest "could not get out" observation.
+    """
+    import socket
+
+    with socket.create_connection((host, port), timeout=timeout_s):
+        pass  # connected — nothing sent, immediately closed
+
+
+def verify_network_egress(
+    allowlist: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    denied_host: str = DENIED_PROBE_HOST,
+    denied_port: int = DENIED_PROBE_PORT,
+    timeout_s: float = DENIED_PROBE_TIMEOUT_S,
+    connector: Any = None,
+) -> NetworkProbeResult:
+    """Probe whether the declared egress allowlist is actually enforced.
+
+    *allowlist* is the declared policy (the patterns the dispatch/lane
+    profile declared — typically parsed from
+    :data:`FORGE_EGRESS_ALLOWLIST_ENV`). The probe's two legs, in order:
+
+    1. **Declaration** — the env hook must be present in the stage env
+       (*env*, default ``os.environ``): absent means the control never
+       reached the runtime, so nothing downstream can be tested →
+       ``declared_only``.
+    2. **Falsification** — the probe destination must be DENIED by the
+       declared policy (an allowlisted destination is permitted, so
+       reaching it proves nothing → ``declared_only``, probe skipped).
+       A denied destination is then actually dialed (short timeout):
+       connected → ``not_enforced`` (the declared policy is not being
+       enforced — this is the one thing the probe can PROVE); refused
+       or timed out → ``verified`` with the honesty bound said plainly
+       in the detail: a denied probe proves the control may exist, it
+       cannot prove that it does.
+
+    *connector* overrides the dial (``(host, port, timeout_s) -> None``,
+    raising OSError when unreachable) so tests prove the three outcomes
+    without a network.
+    """
+    from fnmatch import fnmatchcase
+
+    source = os.environ if env is None else env
+    raw = source.get(FORGE_EGRESS_ALLOWLIST_ENV)
+    if raw is None:
+        return NetworkProbeResult(
+            status=NETWORK_EGRESS_DECLARED_ONLY,
+            detail=(
+                f"{FORGE_EGRESS_ALLOWLIST_ENV} is not present in the stage env —"
+                " the allowlist is declared but the enforcement hook never"
+                " reached the runtime; there is nothing to probe"
+            ),
+            probed=f"{denied_host}:{denied_port}",
+            connection_outcome="not_probed",
+        )
+
+    patterns = [str(pattern).strip() for pattern in allowlist if str(pattern).strip()]
+    destination = f"{denied_host}:{denied_port}"
+    if any(fnmatchcase(denied_host, pattern) for pattern in patterns):
+        return NetworkProbeResult(
+            status=NETWORK_EGRESS_DECLARED_ONLY,
+            detail=(
+                f"the probe destination {destination} matches the declared"
+                f" allowlist ({patterns}) — a permitted destination cannot"
+                " falsify enforcement; the control remains declared_only"
+            ),
+            probed=destination,
+            connection_outcome="not_probed",
+        )
+
+    dial = connector if connector is not None else _socket_connector
+    try:
+        dial(denied_host, denied_port, timeout_s)
+    except OSError as exc:
+        return NetworkProbeResult(
+            status=NETWORK_EGRESS_VERIFIED,
+            detail=(
+                f"connection to the denied destination {destination} was"
+                f" refused ({exc.__class__.__name__}) — consistent with"
+                " deny-by-default enforcement. HONESTY BOUND: a denied probe"
+                " can prove enforcement ABSENT (see not_enforced), never"
+                " prove it present; this answer says the control may exist"
+            ),
+            probed=destination,
+            connection_outcome="unreachable",
+        )
+    return NetworkProbeResult(
+        status=NETWORK_EGRESS_NOT_ENFORCED,
+        detail=(
+            f"a connection to the denied destination {destination} SUCCEEDED"
+            f" — the allowlist is declared ({patterns or 'deny-all'}) but"
+            " nothing enforces it: declared, not enforced"
+        ),
+        probed=destination,
+        connection_outcome="connected",
+    )
+
+
 # -- reads -----------------------------------------------------------------
 
 
@@ -1101,3 +1317,342 @@ async def derive_from_reader(reader: Any, *, project_id: int, ref: str) -> Execu
         if read.status == "found":
             workflows.append(read.content)
     return derive_from_repo(MaterializedFiles(files=files, workflows=tuple(workflows)))
+
+
+# -- the recipe/harness decomposition (NEXT-15) --------------------------------
+#
+# The review's finding: "dotnet-lane conflates the .NET runtime recipe
+# with the claude-code agent driver." Everything the .NET lane pins that
+# is NOT about the agent — the SDK image digest, the global.json version
+# resolution, the locked restore/build/test commands, the TRX report
+# convention — is a RUNTIME RECIPE, reusable by any compatible harness;
+# everything about the agent — which sdk drives it, which credentials it
+# consumes — is a HARNESS PROFILE. The two axes compile into the
+# (recipe, harness) pair the dispatch approves, with the legacy fused
+# driver ids preserved as versioned aliases during migration.
+
+
+@dataclass(frozen=True)
+class RuntimeRecipe:
+    """The language/toolchain axis (NEXT-15): what the lane runs ON.
+
+    ``image_pin`` is the deterministic runtime surface — a
+    digest-pinned container image (``dotnet-9``) or a pinned interpreter
+    /runtime major (``python-3-13``, ``node-22``). ``version_check`` is
+    the command that resolves the pinned version THROUGH the target's
+    own pin file (``dotnet --version`` resolves global.json and fails
+    loudly on a mismatch). ``build_commands`` are the argvs the recipe's
+    verification tail runs (restore/build/test, locked where the
+    toolchain supports it). ``required_files`` are the repo files whose
+    ABSENCE fails :meth:`gate` before the agent burns a token.
+    ``report_prefix`` is the test-report naming convention the recipe's
+    aggregator keys on (the .NET TRX ``LogFilePrefix``; ``""`` when the
+    recipe has no report convention).
+    """
+
+    recipe_id: str
+    image_pin: str
+    version_check: tuple[str, ...]
+    build_commands: tuple[tuple[str, ...], ...]
+    required_files: tuple[str, ...]
+    report_prefix: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.recipe_id or not self.image_pin:
+            raise ValueError("a recipe carries a non-empty id and image pin")
+        if not self.version_check or not self.build_commands:
+            raise ValueError(
+                "a recipe carries its version check and its build commands — "
+                "an empty recipe is an unexecutable one"
+            )
+
+    def gate(self, source: ProfileSource) -> tuple[RecipeViolation, ...]:
+        """Check the TOOLCHAIN prerequisites against one repo view.
+
+        The recipe axis's own gate, INDEPENDENT of the selected harness
+        (NEXT-15): every :attr:`required_files` entry must be FOUND in
+        the target — an absent pin file is a violation naming the
+        remedy, an unreadable one is a violation too (unverifiable IS
+        non-compliant here, the same doctrine :func:`validate_runtime`
+        applies to the v2 rootfs). What is deliberately NOT checked: the
+        file's CONTENT (global.json's version resolution is the
+        ``version_check`` command's job at run time, in the runner — a
+        control-plane read never executes target build scripts).
+        """
+        violations: list[RecipeViolation] = []
+        for path in self.required_files:
+            read = source.read_file(path)
+            if read.status == "absent":
+                violations.append(
+                    RecipeViolation(
+                        recipe_id=self.recipe_id,
+                        check="required_file",
+                        path=path,
+                        detail=(
+                            f"{path} is required by the {self.recipe_id} recipe "
+                            f"({self.image_pin}) — commit it so the pinned "
+                            "toolchain can resolve, before the agent runs"
+                        ),
+                    )
+                )
+            elif read.status == "unknown":
+                violations.append(
+                    RecipeViolation(
+                        recipe_id=self.recipe_id,
+                        check="required_file_unreadable",
+                        path=path,
+                        detail=(
+                            f"{path} could not be read — the {self.recipe_id} "
+                            "recipe's toolchain gate is unverifiable, and an "
+                            "unverifiable prerequisite is treated as unmet"
+                        ),
+                    )
+                )
+        return tuple(violations)
+
+    def to_document(self) -> dict:
+        """The audit shape (recipe axis only — the harness rides beside it)."""
+        return {
+            "recipe_id": self.recipe_id,
+            "image_pin": self.image_pin,
+            "version_check": list(self.version_check),
+            "build_commands": [list(argv) for argv in self.build_commands],
+            "required_files": list(self.required_files),
+            "report_prefix": self.report_prefix,
+        }
+
+
+@dataclass(frozen=True)
+class RecipeViolation:
+    """One toolchain prerequisite the recipe's :meth:`RuntimeRecipe.gate`
+    found unmet (NEXT-15). ``check`` names the axis
+    (``required_file`` / ``required_file_unreadable``); ``detail`` is the
+    actionable sentence — what is missing and what to do about it."""
+
+    recipe_id: str
+    check: str
+    path: str
+    detail: str
+
+    def __str__(self) -> str:  # pragma: no cover — trivial rendering
+        return f"[{self.recipe_id}/{self.check}] {self.detail}"
+
+
+@dataclass(frozen=True)
+class HarnessProfile:
+    """The agent-driver axis (NEXT-15): what runs IN the lane.
+
+    ``harness_id`` is the agent identity (claude-code / codex / copilot —
+    NOT a lane driver id); ``sdk`` is the adaptive driver sdk that drives
+    it; ``credential_names`` are the env names the harness consumes (the
+    recipe stages them per its own profile — the NAMES, never values).
+    """
+
+    harness_id: str
+    sdk: str
+    credential_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.harness_id or not self.sdk:
+            raise ValueError("a harness profile carries a non-empty id and sdk")
+
+    def to_document(self) -> dict:
+        return {
+            "harness_id": self.harness_id,
+            "sdk": self.sdk,
+            "credential_names": list(self.credential_names),
+        }
+
+
+#: The shipped runtime recipes (NEXT-15). The .NET recipe IS the
+#: dotnet-lane's own runtime half — image digest verified against MCR
+#: 2026-09-23 (the template's pin), global.json version resolution, the
+#: locked restore/build/test tail, and the NEXT-16 TRX ``LogFilePrefix``
+#: convention. The python recipe is the interpreter the SDK lanes and the
+#: Actions lane pin; the node recipe is the npm runtime the scripted
+#: claude-code lanes install their CLI into.
+RUNTIME_RECIPES: Mapping[str, RuntimeRecipe] = {
+    "dotnet-9": RuntimeRecipe(
+        recipe_id="dotnet-9",
+        image_pin=(
+            "mcr.microsoft.com/dotnet/sdk:9.0"
+            "@sha256:01fabc4758d1d74e39eda700c8463dae6241a61481f973683692ddcb59a5eeb7"
+        ),
+        version_check=("dotnet", "--version"),  # resolves THROUGH global.json
+        build_commands=(
+            ("dotnet", "restore", "--locked-mode"),
+            ("dotnet", "build", "--no-restore", "--locked-mode"),
+            ("dotnet", "test", "--no-build"),
+        ),
+        required_files=("global.json",),
+        report_prefix="forge_",  # NEXT-16: unique TRX prefixes, aggregate all
+    ),
+    "python-3-13": RuntimeRecipe(
+        recipe_id="python-3-13",
+        image_pin=LANE_PYTHON_VERSION,  # the interpreter pin (setup-python)
+        version_check=("python3", "--version"),
+        build_commands=(("uv", "sync", "--frozen"),),
+        required_files=(),  # lock-less repos take the documented pip fallback
+    ),
+    "node-22": RuntimeRecipe(
+        recipe_id="node-22",
+        image_pin="22",  # the node runtime major the npm-distributed CLIs pin
+        version_check=("node", "--version"),
+        build_commands=(("npm", "ci"),),
+        required_files=("package-lock.json",),
+    ),
+}
+
+
+#: The shipped harness profiles (NEXT-15) — the agent half of every
+#: compiled combination. ``claude-code`` is the scripted CLI agent (the
+#: ANTHROPIC gateway recipe); ``codex`` and ``copilot`` name the vendor
+#: agents their sdk lanes drive.
+HARNESS_PROFILES: Mapping[str, HarnessProfile] = {
+    "claude-code": HarnessProfile(
+        harness_id="claude-code",
+        sdk="claude-sdk",
+        credential_names=("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
+    ),
+    "codex": HarnessProfile(
+        harness_id="codex",
+        sdk="codex-app",
+        credential_names=("OPENAI_API_KEY", "CODEX_API_KEY"),
+    ),
+    "copilot": HarnessProfile(
+        harness_id="copilot",
+        sdk="copilot-acp",
+        credential_names=("COPILOT_GITHUB_TOKEN",),
+    ),
+}
+
+
+#: The APPROVED (recipe, harness) combinations (NEXT-15): compiled at
+#: onboarding; anything else is refused BEFORE any model call. The .NET
+#: runtime is deliberately approved for every shipped harness — another
+#: compatible agent reuses the recipe without a second .NET command
+#: implementation (the review's acceptance criterion), while the node
+#: runtime (a thin npm-install surface) is approved for the claude-code
+#: agent only.
+COMPILED_COMBINATIONS: tuple[tuple[str, str], ...] = (
+    ("dotnet-9", "claude-code"),  # the shipped dotnet-lane (the alias below)
+    ("dotnet-9", "codex"),  # the runtime reused, no second .NET recipe
+    ("dotnet-9", "copilot"),
+    ("python-3-13", "claude-code"),
+    ("python-3-13", "codex"),
+    ("python-3-13", "copilot"),
+    ("node-22", "claude-code"),
+)
+
+
+#: The versioned compatibility aliases (NEXT-15): legacy fused driver ids
+#: → their (recipe, harness) decomposition. The existing driver id still
+#: resolves (migration does not change active runs), but the
+#: decomposition is the authority: :func:`resolve_driver_profile` answers
+#: the pair, never a fused identity.
+DRIVER_PROFILE_ALIASES: Mapping[str, tuple[str, str]] = {
+    "dotnet-lane": ("dotnet-9", "claude-code"),
+}
+
+
+@dataclass(frozen=True)
+class LaneDriverProfile:
+    """One compiled (recipe, harness) lane (NEXT-15) — the decomposition
+    a dispatch approves. ``alias`` names the legacy fused driver id this
+    profile decomposes (``""`` for a freshly composed pair)."""
+
+    recipe: RuntimeRecipe
+    harness: HarnessProfile
+    alias: str = ""
+
+    @property
+    def driver_id(self) -> str:
+        """The dispatch id: the legacy alias when one exists, else the
+        composed ``<recipe>+<harness>`` spelling."""
+        return self.alias or f"{self.recipe.recipe_id}+{self.harness.harness_id}"
+
+    def to_document(self) -> dict:
+        """The audit shape — both axes stated, the alias beside them."""
+        return {
+            "driver_id": self.driver_id,
+            "recipe": self.recipe.to_document(),
+            "harness": self.harness.to_document(),
+            "alias": self.alias,
+        }
+
+
+def runtime_recipe(recipe_id: str) -> RuntimeRecipe:
+    """The shipped recipe for *recipe_id*; unknown ids raise (fail closed).
+
+    Denial is observable — there is no silent fallback to a default
+    runtime, never to an unpinned one.
+    """
+    try:
+        return RUNTIME_RECIPES[str(recipe_id or "").strip()]
+    except KeyError:
+        raise ValueError(
+            f"unknown runtime recipe {recipe_id!r}; vocabulary is {tuple(sorted(RUNTIME_RECIPES))}"
+        ) from None
+
+
+def harness_profile(harness_id: str) -> HarnessProfile:
+    """The shipped harness profile for *harness_id*; unknown ids raise."""
+    try:
+        return HARNESS_PROFILES[str(harness_id or "").strip()]
+    except KeyError:
+        raise ValueError(
+            f"unknown harness profile {harness_id!r}; vocabulary is "
+            f"{tuple(sorted(HARNESS_PROFILES))}"
+        ) from None
+
+
+def compile_driver_profile(
+    recipe_id: str,
+    harness_id: str,
+    *,
+    alias: str = "",
+) -> LaneDriverProfile:
+    """Compile ONE (recipe, harness) lane against the compatibility matrix.
+
+    Both axes must be in their shipped vocabularies AND the pair in
+    :data:`COMPILED_COMBINATIONS` — an unsupported combination is
+    refused here, BEFORE any model call (a ``ValueError`` at compile
+    time, not a surprise in a paid turn). *alias* records the legacy
+    driver id a migrated configuration resolved from.
+    """
+    recipe = runtime_recipe(recipe_id)
+    harness = harness_profile(harness_id)
+    pair = (recipe.recipe_id, harness.harness_id)
+    if pair not in COMPILED_COMBINATIONS:
+        raise ValueError(
+            f"the (recipe, harness) combination {pair!r} is not in the compiled "
+            f"compatibility matrix {COMPILED_COMBINATIONS} — refused before any "
+            "model call; onboard the combination explicitly instead of assuming it"
+        )
+    return LaneDriverProfile(recipe=recipe, harness=harness, alias=str(alias or ""))
+
+
+def resolve_driver_profile(driver_id: str) -> LaneDriverProfile:
+    """Resolve a dispatch driver id to its decomposed profile (NEXT-15).
+
+    Two spellings resolve: a legacy ALIAS id (:data:`DRIVER_PROFILE_ALIASES`
+    — ``dotnet-lane`` → ``("dotnet-9", "claude-code")``, the profile
+    carrying the alias for the audit trail) and the composed
+    ``<recipe>+<harness>`` spelling (``dotnet-9+codex`` — the
+    decomposition IS the id). Anything else raises: a fused id with no
+    alias entry has no authority to assume a recipe or a harness.
+    """
+    raw = str(driver_id or "").strip()
+    if not raw:
+        raise ValueError("driver_id must be non-empty")
+    if raw in DRIVER_PROFILE_ALIASES:
+        recipe_id, harness_id = DRIVER_PROFILE_ALIASES[raw]
+        return compile_driver_profile(recipe_id, harness_id, alias=raw)
+    if "+" in raw:
+        recipe_id, _, harness_id = raw.partition("+")
+        return compile_driver_profile(recipe_id, harness_id)
+    raise ValueError(
+        f"unknown driver id {raw!r} — the (recipe, harness) decomposition is the "
+        f"authority; aliases: {tuple(sorted(DRIVER_PROFILE_ALIASES))}, composed "
+        "spelling: <recipe>+<harness> (e.g. dotnet-9+claude-code)"
+    )

@@ -25,6 +25,16 @@ back to the human?
   switches the active revision, and bumps the publication fence in ONE
   conditional transaction — any mismatch is a typed refusal that
   consumes nothing.
+- NEXT-20 — the journey does not end at activation:
+  :func:`dispatch_plan_binding` is the /go dispatch leg's source of
+  truth, reading the NEW active plan from :func:`read_active_plan`
+  (never the old plan comment) so the next dispatch briefs the lane
+  under the REVISED plan's digest; a stale /go still carrying the
+  superseded digest refuses ``stale_plan_digest``. The switched
+  durable pointer records the digest it replaced
+  (``revised_from_digest``), and :func:`plan_comment_revision_note`
+  renders the revised plan comment's "revised from <old-digest> to
+  <new-digest>" footer from that pair.
 - PLN-06 — :class:`Question` makes blocker questions durable planning
   state (answered only by an actor with the required scope, never
   defaulted), and :func:`route_question` sends them to the PARENT
@@ -57,11 +67,13 @@ __all__ = [
     "ActivationRefused",
     "ActivationSession",
     "ActivePlanState",
+    "DispatchPlanBinding",
     "DurableActivationOutcome",
     "PENDING_PROPOSAL_KEY",
     "PENDING_PROPOSAL_SCHEMA",
     "Question",
     "REVISION_ACTIVATIONS_KEY",
+    "REVISION_NOTE_MARKER",
     "RevisionDecision",
     "TacticalPolicy",
     "activate_pending_revision",
@@ -71,9 +83,11 @@ __all__ = [
     "change_log",
     "classify_revision",
     "decision_record",
+    "dispatch_plan_binding",
     "fresh_session_brief",
     "invalidation_set",
     "parse_tactical_policy",
+    "plan_comment_revision_note",
     "plan_digest",
     "proposed_revision_identity",
     "read_active_plan",
@@ -970,13 +984,26 @@ def _record_document(record: ActivationRecord) -> dict[str, Any]:
     }
 
 
-def active_plan_document_of(current: ActivePlanState, record: ActivationRecord) -> dict[str, Any]:
+def active_plan_document_of(
+    current: ActivePlanState,
+    record: ActivationRecord,
+    *,
+    revised_from_digest: str = "",
+) -> dict[str, Any]:
     """The durable ACTIVE-plan pointer the dispatch leg reads.
 
     The document carries the switched revision, its canonical digest
     (what :func:`stale_callback_guard` compares late native callbacks
     against), and the NEW publication epoch — one durable answer to
     "which revision is active", replacing the in-memory function call.
+
+    NEXT-20: ``revised_from_digest`` records the digest of the plan this
+    one REPLACED (the prior active document's own digest; empty for a
+    first activation, or when the prior pointer carried no digest). The
+    dispatch leg uses it to refuse a stale ``/go`` that still carries
+    the SUPERSEDED plan's digest, and the revised plan comment renders
+    its "revised from <old> to <new>" note from this pair — the journey
+    from human decision to changed execution is one durable document.
     """
     return {
         "schema": ACTIVE_PLAN_SCHEMA,
@@ -984,6 +1011,7 @@ def active_plan_document_of(current: ActivePlanState, record: ActivationRecord) 
         "plan_id": record.plan_id,
         "active_revision": record.activated_revision,
         "plan_digest": record.activated_plan_digest,
+        "revised_from_digest": revised_from_digest,
         "work_contract_digest": record.work_contract_digest,
         "authorization_epoch": record.authorization_epoch,
         "publication_epoch": record.publication_epoch,
@@ -1217,7 +1245,14 @@ async def activate_pending_revision(
             **journal_raw,
             record.decision_id: _record_document(record),
         }
-        merged[ACTIVE_PLAN_KEY] = active_plan_document_of(current, record)
+        # NEXT-20: the switched pointer remembers the digest it replaced,
+        # so the next dispatch can refuse a /go still carrying the OLD
+        # plan and the revised plan comment can say what it revised.
+        merged[ACTIVE_PLAN_KEY] = active_plan_document_of(
+            current,
+            record,
+            revised_from_digest=str(active_raw.get("plan_digest") or ""),
+        )
         merged.pop(PENDING_PROPOSAL_KEY, None)  # the decision is consumed
         run.evidence = merged
         session.add(
@@ -1238,3 +1273,146 @@ async def activate_pending_revision(
         return DurableActivationOutcome(
             status="activated", record=record, revision=activated, reason="recorded"
         )
+
+
+# ---------------------------------------------------------------------------
+# NEXT-20 — the dispatch leg: from human decision to changed execution
+# ---------------------------------------------------------------------------
+#
+# The review's finding: "/approve-revision exists, but the journey from
+# decision to changed plan isn't complete." Activation switches the
+# durable pointer; the DISPATCH side must then read THAT pointer — never
+# the old plan comment — so the next /go briefs the lane under the
+# REVISED plan. Three pieces close the journey:
+#
+# - :func:`dispatch_plan_binding` — the /go seam: which plan the next
+#   dispatch runs under, read from ``read_active_plan()`` (the durable
+#   record). The binding's ``plan_digest`` is what the brief envelope is
+#   built from, and a /go whose claimed digest is the SUPERSESED plan's
+#   refuses ``stale_plan_digest`` (carrying the old comment's digest is
+#   exactly the drift the fence exists for);
+# - :func:`plan_comment_revision_note` — the revised plan comment's
+#   footer: "revised from <old-digest> to <new-digest>", rendered from
+#   the durable document's ``revised_from_digest``/``plan_digest`` pair;
+# - the ``revised_from_digest`` field itself (see
+#   :func:`active_plan_document_of` above), written by the same
+#   activation transaction that switched the pointer.
+
+#: The plan-comment marker line the revision note rides under (same
+#: HTML-comment convention as the brief-envelope markers: invisible when
+#: rendered, byte-stable in the raw body).
+REVISION_NOTE_MARKER = "<!-- forge:plan:revision -->"
+
+
+def plan_comment_revision_note(
+    old_digest: str,
+    new_digest: str,
+    *,
+    decided_by: str = "",
+    decision_id: str = "",
+) -> str:
+    """The revised plan comment's footer (NEXT-20).
+
+    The exact sentence the review demanded — ``revised from <old-digest>
+    to <new-digest>`` — under a machine-extractable marker, with the
+    human decision's provenance when the caller has it. The digests come
+    from the durable active-plan document (``revised_from_digest`` and
+    ``plan_digest``), so the note cannot drift from the record it
+    describes.
+    """
+    lines = [REVISION_NOTE_MARKER, f"revised from {old_digest} to {new_digest}"]
+    if decided_by or decision_id:
+        lines.append(f"approved by {decided_by or 'unknown'} ({decision_id or 'unknown'})")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class DispatchPlanBinding:
+    """Which plan the next dispatch runs under (NEXT-20).
+
+    ``status`` is ``ok`` (the binding names the ACTIVE plan — its
+    ``plan_digest`` is the digest the brief envelope must be built from)
+    or ``refused`` with a stable ``code``: ``no_active_plan`` (nothing
+    durable to dispatch under), ``stale_plan_digest`` (the /go carries
+    the SUPERSEDED plan's digest — the revision replaced it) or
+    ``plan_digest_mismatch`` (a digest that is neither the active nor
+    the superseded one — an unknown claim refuses like any other).
+    """
+
+    status: str
+    run_id: str
+    plan_id: str = ""
+    active_revision: int = 0
+    plan_digest: str = ""
+    revised_from_digest: str = ""
+    code: str = ""
+    reason: str = ""
+
+    @property
+    def dispatchable(self) -> bool:
+        return self.status == "ok"
+
+
+def _dispatch_refused(run_id: str, code: str, reason: str) -> DispatchPlanBinding:
+    return DispatchPlanBinding(status="refused", run_id=run_id, code=code, reason=reason)
+
+
+async def dispatch_plan_binding(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    *,
+    claimed_plan_digest: str = "",
+) -> DispatchPlanBinding:
+    """Bind the next /go dispatch to the ACTIVE plan — not the old comment.
+
+    Reads the durable active-plan record via :func:`read_active_plan`
+    (never the plan comment the approval thread may still show), and:
+
+    - with no claim, returns the binding the caller briefs the lane
+      under: the active revision, its canonical digest (the brief
+      envelope's plan identity), and the digest it replaced;
+    - with a claimed digest (a /go echoing the plan it was told about),
+      the claim must equal the ACTIVE digest. A claim equal to
+      ``revised_from_digest`` — the plan an approved revision just
+      superseded — refuses ``stale_plan_digest``, naming both digests:
+      the dispatch must re-read the revised plan, not run the stale
+      one. Any other mismatch refuses ``plan_digest_mismatch``.
+
+    Refusals consume nothing and change nothing — the caller re-issues
+    the /go without a claim (or with the digest the durable record
+    names).
+    """
+    active = await read_active_plan(session_factory, run_id)
+    if active is None:
+        return _dispatch_refused(
+            run_id,
+            "no_active_plan",
+            f"run {run_id!r} has no durable active plan — nothing to dispatch under",
+        )
+    digest = str(active.get("plan_digest") or "")
+    revised_from = str(active.get("revised_from_digest") or "")
+    binding = DispatchPlanBinding(
+        status="ok",
+        run_id=run_id,
+        plan_id=str(active.get("plan_id") or ""),
+        active_revision=int(active.get("active_revision") or 0),
+        plan_digest=digest,
+        revised_from_digest=revised_from,
+    )
+    claimed = str(claimed_plan_digest or "").strip()
+    if not claimed or claimed == digest:
+        return binding
+    if revised_from and claimed == revised_from:
+        return _dispatch_refused(
+            run_id,
+            "stale_plan_digest",
+            f"the /go carries plan digest {claimed}, which the approved revision"
+            f" already replaced (active: {digest}) — dispatch must read the"
+            " revised plan, not the superseded comment",
+        )
+    return _dispatch_refused(
+        run_id,
+        "plan_digest_mismatch",
+        f"the /go claims plan digest {claimed} but the active plan is {digest}"
+        " — an unknown claim refuses like any other",
+    )

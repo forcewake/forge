@@ -129,6 +129,18 @@ starts (brief_missing, sdk_missing, driver_setup_error ...) carry no
 ``episode`` key — there was no episode to time. This measures the full
 interactive episode the budget doctrine describes: startup cannot hide
 inside the turn, teardown cannot hide after the verdict.
+
+NEXT-14 — the drive cycle is SUPERVISED. ``drive_lane`` /
+``drive_codex_lane`` / ``run_opencode_lane`` submit their turn (and,
+when steering is attached, the steering drain) to ONE
+:class:`forge.adaptive.lane_supervisor.LaneSupervisor` which owns the
+race: turn completion cancels the drain (bounded, its final pass still
+consumes late commands), an applied interrupt-class control suspends
+the turn (classified ``operator_pause`` — never misread as a vendor
+completion), and the terminal outcome is written exactly once by the
+supervisor's classifier. Additive by construction: with no steering
+attached the composed path is the old one turn-for-turn — only the
+task bookkeeping moved.
 """
 
 from __future__ import annotations
@@ -167,7 +179,12 @@ from forge.adaptive.drivers.copilot_acp import (
 from forge.adaptive.drivers.opencode import opencode_client_from_env
 from forge.adaptive.drivers.opencode_serve import opencode_server_from_env
 from forge.adaptive.lane_channel import LaneControlChannel, lane_channel_from_env
-from forge.adaptive.lane_control import LaneSteeringSession
+from forge.adaptive.lane_control import INTERRUPT_KINDS, LaneSteeringSession
+from forge.adaptive.lane_supervisor import (
+    TERMINAL_SUSPENDED,
+    LaneSupervisor,
+    TerminalEvent,
+)
 from forge.adaptive.wiring import OperatorControlService
 
 __all__ = [
@@ -585,22 +602,79 @@ def _bind_steering(steering: LaneSteeringSession | None, vendor_id: str) -> None
         mailbox.bind_vendor_session(vendor_id)
 
 
-@contextlib.asynccontextmanager
-async def _steering_scope(steering: LaneSteeringSession | None, poll_s: float):
-    """Enter the steering attach — and the remote channel's fetch loop.
+def _supervised_drain(
+    steering: LaneSteeringSession,
+    supervisor: LaneSupervisor[Any],
+    poll_s: float,
+) -> Any:
+    """The steering drain task the supervisor owns (NEXT-14).
 
-    The channel's poller is bounded by the driven turn's own lifetime:
-    entered beside the attach, torn down with it. The lane-local path
-    (no channel behind the service) enters the attach exactly as before.
+    The session's bounded mailbox poll (its async context — the remote
+    channel's fetch loop entered inside it, torn down with it) PLUS the
+    URGENT WATCH: the moment an interrupt-class command APPLIES, the
+    drain asks the supervisor to suspend the turn — synchronously, in
+    the same scheduling slice as the applied interrupt — so there is ONE
+    owner of when the lane is finished instead of the drain's vendor
+    interrupt silently racing the turn's own poll loop. Guidance that
+    arrives while the turn runs keeps flowing through the session's
+    ordinary drain cycles; nothing here replays the ladder.
+
+    Teardown QUIESCES (``LaneSteeringSession.quiesce``) instead of
+    hard-cancelling: an in-flight command's outcome is persisted on the
+    ladder before the consumer is released — the turn completing must
+    never tear a mid-cycle steer into ``delivery_unknown``.
     """
-    if steering is None:
-        yield
-        return
-    mailbox = getattr(steering.service, "mailbox", None)
-    channel_cm = mailbox if isinstance(mailbox, LaneControlChannel) else contextlib.nullcontext()
-    async with channel_cm:
-        async with steering.attach(poll_interval=poll_s):
-            yield
+
+    async def _drain() -> None:
+        seen: set[str] = set()
+        mailbox = getattr(steering.service, "mailbox", None)
+        channel_cm = (
+            mailbox if isinstance(mailbox, LaneControlChannel) else contextlib.nullcontext()
+        )
+        async with channel_cm:
+            async with steering.attach(poll_interval=poll_s):
+                try:
+                    while True:
+                        for action in steering.journal:
+                            if action.command_id in seen:
+                                continue
+                            seen.add(action.command_id)
+                            if action.outcome == "applied" and action.kind in INTERRUPT_KINDS:
+                                supervisor.request_urgent(
+                                    action.kind,
+                                    f"operator {action.kind} applied mid-turn — the "
+                                    "supervisor suspends the driven turn",
+                                )
+                        await asyncio.sleep(poll_s)
+                finally:
+                    await steering.quiesce()
+
+    return _drain()
+
+
+def _operator_suspension(event: TerminalEvent) -> LaneOutcome:
+    """The suspended-turn outcome (NEXT-14): an operator's urgent control
+    ended the turn BEFORE its own verdict. ``failed`` — the turn produced
+    no verdict — with the operator kind as the reason, never a vendor
+    completion and never a silent budget expiry."""
+    urgent = event.urgent
+    kind = urgent.kind if urgent is not None else "interrupt"
+    return LaneOutcome(
+        exit_status="failed",
+        terminal_reason=f"operator_{kind}",
+        error=event.reason,
+    )
+
+
+def _driver_error_outcome(event: TerminalEvent) -> LaneOutcome:
+    """The failed-turn outcome: the turn coroutine raised decisively, and
+    the supervisor classified it instead of letting it escape the cycle
+    unclassified (the same class ``main``'s catch-all writes)."""
+    return LaneOutcome(
+        exit_status="failed",
+        terminal_reason="driver_error",
+        error=event.reason,
+    )
 
 
 @dataclass(frozen=True)
@@ -1009,6 +1083,12 @@ async def drive_lane(
     answers, its bounded mailbox drain running CONCURRENTLY with the
     turn (the async-context seam), its journal returned on the outcome.
 
+    NEXT-14: the turn and the drain are SUBMITTED to one
+    :class:`~forge.adaptive.lane_supervisor.LaneSupervisor` which owns
+    the race and writes the terminal outcome exactly once — turn
+    completion cancels the drain; an applied interrupt-class control
+    suspends the turn and classifies ``operator_pause``.
+
     NXT-28: the outcome carries the ``episode`` breakdown — startup
     (``start_session``), the drained turn, the interrupt+grace window
     (only when the budget expired it into one) and teardown (``close``).
@@ -1052,9 +1132,27 @@ async def drive_lane(
             interrupt_grace_s,
         )
 
+    def _classify(
+        event: TerminalEvent,
+    ) -> tuple[LaneOutcome, float, float | None]:
+        # NEXT-14: the supervisor is the ONLY writer of the terminal
+        # outcome. Completion rides the turn's own tuple through; a
+        # suspension (an operator's urgent control) and a decisive turn
+        # failure classify HERE, never as a vendor completion.
+        if event.kind == TERMINAL_SUSPENDED:
+            return _operator_suspension(event), event.elapsed_s, None
+        if event.result is None:  # a turn that failed without a verdict
+            return _driver_error_outcome(event), event.elapsed_s, None
+        return event.result
+
+    supervisor: LaneSupervisor[tuple[LaneOutcome, float, float | None]] = LaneSupervisor(
+        classify=_classify, name=LANE_DRIVER_ID
+    )
     try:
-        async with _steering_scope(steering, poll_s):
-            outcome, turn_s, interrupt_grace_s = await _turn()
+        supervisor.submit_turn(_turn())
+        if steering is not None:
+            supervisor.submit_drain(_supervised_drain(steering, supervisor, poll_s))
+        outcome, turn_s, interrupt_grace_s = await supervisor.run()
     finally:
         teardown_started = loop.time()
         await client.close(session_id)
@@ -1239,6 +1337,11 @@ async def drive_codex_lane(
     non-consuming re-read, so the bridge's vendor calls never compete
     with the lane's own drain for the event stream.
 
+    NEXT-14: the turn and the drain are SUBMITTED to one
+    :class:`~forge.adaptive.lane_supervisor.LaneSupervisor` — the same
+    composed lifecycle the claude lane runs (turn completion cancels the
+    drain; an applied interrupt-class control suspends the turn).
+
     NXT-28: the outcome carries the ``episode`` breakdown — startup
     (``start_thread`` to acceptance), the polled turn, the
     interrupt+grace window (only when the budget expired it into one)
@@ -1292,9 +1395,26 @@ async def drive_codex_lane(
             interrupt_grace_s,
         )
 
+    def _classify(
+        event: TerminalEvent,
+    ) -> tuple[LaneOutcome, float, float | None]:
+        # NEXT-14: the supervisor owns the terminal outcome — completion
+        # rides the turn's own tuple; suspension and decisive failure
+        # classify here.
+        if event.kind == TERMINAL_SUSPENDED:
+            return _operator_suspension(event), event.elapsed_s, None
+        if event.result is None:  # a turn that failed without a verdict
+            return _driver_error_outcome(event), event.elapsed_s, None
+        return event.result
+
+    supervisor: LaneSupervisor[tuple[LaneOutcome, float, float | None]] = LaneSupervisor(
+        classify=_classify, name=CODEX_LANE_DRIVER_ID
+    )
     try:
-        async with _steering_scope(steering, poll_s):
-            outcome, turn_s, interrupt_grace_s = await _turn()
+        supervisor.submit_turn(_turn())
+        if steering is not None:
+            supervisor.submit_drain(_supervised_drain(steering, supervisor, poll_s))
+        outcome, turn_s, interrupt_grace_s = await supervisor.run()
     finally:
         teardown_started = loop.time()
         await client.close()
@@ -1504,15 +1624,37 @@ async def run_opencode_lane(
                             return events
                         await asyncio.sleep(poll_s)
 
-                async with _steering_scope(steering, poll_s):
-                    events = await _poll_events()
-                turn_s = loop.time() - turn_started
-                exit_status, reason = classify_opencode_events(events, session_id)
-                outcome = LaneOutcome(
-                    exit_status=exit_status,
-                    terminal_reason=reason,
-                    usage=opencode_usage_receipt(events),
+                def _classify(
+                    event: TerminalEvent,
+                ) -> tuple[LaneOutcome | None, list[dict[str, Any]]]:
+                    # NEXT-14: the supervisor owns the terminal outcome.
+                    # Completion returns the events for the lane's own
+                    # vendor classification below; a suspension or a
+                    # decisive poll failure classifies here (the events
+                    # are already beside it in the meta's evidence).
+                    if event.kind == TERMINAL_SUSPENDED:
+                        return _operator_suspension(event), []
+                    if event.result is None:  # the poll failed without events
+                        return _driver_error_outcome(event), []
+                    return None, event.result
+
+                supervisor: LaneSupervisor[tuple[LaneOutcome | None, list[dict[str, Any]]]] = (
+                    LaneSupervisor(classify=_classify, name=OPENCODE_LANE_DRIVER_ID)
                 )
+                supervisor.submit_turn(_poll_events())
+                if steering is not None:
+                    supervisor.submit_drain(_supervised_drain(steering, supervisor, poll_s))
+                verdict, events = await supervisor.run()
+                turn_s = loop.time() - turn_started
+                if verdict is not None:
+                    outcome = verdict
+                else:
+                    exit_status, reason = classify_opencode_events(events, session_id)
+                    outcome = LaneOutcome(
+                        exit_status=exit_status,
+                        terminal_reason=reason,
+                        usage=opencode_usage_receipt(events),
+                    )
         finally:
             teardown_started = loop.time()
             await client.aclose()

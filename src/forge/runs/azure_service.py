@@ -140,6 +140,16 @@ from forge.integrations.azure import (
 )
 from forge.orchestrator.project_config import ConfigReadResult, read_project_config
 from forge.repository import Change, ChangeSet, Operation
+from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
+from forge.adaptive.admission import QUEUED_STATUSES
+from forge.adaptive.admission import (
+    check_admission as check_fair_use,
+)
+from forge.adaptive.admission import (
+    lease_snapshot,
+    release_run_leases,
+    try_acquire_lease,
+)
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.backends import HARNESS_NAME, is_harness_backend
 from forge.runs.candidate import attempt_base_for
@@ -661,6 +671,13 @@ class AzureRunService:
             return active.id
 
         run_id = uuid4().hex
+        # R28-23/NEXT-12: the fair-use counts are gathered BEFORE the row
+        # exists — they describe the world without this candidate run —
+        # and the queue-admission decision is journaled into the run's
+        # evidence naming WHICH check ran (queue_admission, the
+        # /implement-time half; the execution lease at /go is the other).
+        fair_counts = await self._fair_use_counts(project_id, issue_number, author_username)
+        fair_use = check_fair_use(FairUsePolicy.from_env(), **fair_counts)
         try:
             async with self._session_factory() as session:
                 controller = Controller(session)
@@ -677,6 +694,10 @@ class AzureRunService:
                         # subject block below.
                         github_issue_number=issue_number,
                         github_repo_full_name=self._repo_full_name,
+                        evidence={
+                            "requested_by": author_username,
+                            "admission": {"check": "queue_admission", **fair_use.as_document()},
+                        },
                     )
                 )
                 await controller.transition(run_id, FlowStatus.PREFLIGHT)
@@ -724,6 +745,33 @@ class AzureRunService:
                 run_id[:8],
                 author_username,
                 admission.reason,
+            )
+            return run_id
+
+        # NEXT-11 parity: the SAME fair-use policy the GitLab path applies
+        # at /implement (the capacity half — per-issue attempt cap,
+        # per-user hourly rate, per-project WIP bound, queue depth), over
+        # THIS provider's project aggregate. A refusal parks the run
+        # before the first paid call; a queue-full refusal consumes no
+        # execution attempt (NEXT-12) — the lease is only ever taken at
+        # dispatch.
+        if not fair_use.allowed:
+            await self._to_terminal(
+                run_id, FlowStatus.BLOCKED, f"fair_use_denied: {fair_use.reason}"
+            )
+            await self._post_journaled_comment(
+                project_id,
+                issue_number,
+                _fair_use_denied_comment(run_id, author_username, fair_use.reason),
+                run_id,
+                "admission_denied",
+            )
+            logger.warning(
+                "Azure DevOps run %s refused for fair use (@%s): %s — counts %s",
+                run_id[:8],
+                author_username,
+                fair_use.reason,
+                fair_use.counts,
             )
             return run_id
 
@@ -1008,6 +1056,49 @@ class AzureRunService:
         now = now or datetime.now(timezone.utc)
 
         async with self._session_factory() as session:
+            if len(run_id) < 32:
+                # #185 (LIVE-found, run 611eb3f4): the plan comment shows
+                # the 8-char prefix, but _get_run demands the full 32-hex
+                # id. Resolve short ids by prefix among this provider+
+                # project+work item's runs — the same scoped LIKE the
+                # GitHub/GitLab paths learned. Ambiguity refuses WITH the
+                # candidates (the operator can see both); anything else
+                # reads as unknown.
+                found = (
+                    (
+                        await session.execute(
+                            select(FlowRun)
+                            .where(
+                                FlowRun.provider == "azure_devops",
+                                FlowRun.project_id == project_id,
+                                FlowRun.issue_iid == issue_number,
+                                FlowRun.id.like(f"{run_id}%"),
+                            )
+                            .order_by(FlowRun.created_at.desc())
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if len(found) != 1:
+                    if len(found) > 1:
+                        candidates = ", ".join(f"`{run.id}`" for run in found)
+                        await self._post_journaled_comment(
+                            project_id,
+                            issue_number,
+                            f"Run prefix `{run_id}` matches {len(found)} runs on this work "
+                            f"item — be explicit:\n\n{candidates}\n\n"
+                            "*This is an automated message.*",
+                            None,
+                            "go_prefix_ambiguous",
+                        )
+                    logger.info(
+                        "Azure DevOps /go prefix %s matched %d runs — ignoring",
+                        run_id[:8],
+                        len(found),
+                    )
+                    return
+                run_id = found[0].id
             run = await self._get_run(session, run_id)
             if (
                 # A07: the full subject — provider AND project, like every
@@ -1097,6 +1188,73 @@ class AzureRunService:
             author_username,
         )
         await self._advance_publish(run_id, project_id=project_id, issue_number=issue_number)
+
+    async def _reserve_execution_capacity(
+        self, run_id: str, *, project_id: int, issue_number: int
+    ) -> bool:
+        """NEXT-11: take the execution lease at DISPATCH — or park honestly.
+
+        The single choke point every dispatch leg crosses (``/go``, the
+        ``/retry`` revival, the lane reconciler's re-drive): a durable
+        CAS insert reserves one of the project's execution slots,
+        idempotent per run, held until the terminal transition releases
+        it. Queue admission counted ACTIVE runs at ``/implement`` time —
+        four approved tasks could otherwise all activate together. A
+        dispatch that cannot reserve parks the run
+        ``blocked(execution_capacity)`` with the capacity snapshot in
+        its evidence — a queued state with a reason, never work an
+        observer must later stop. Returns whether the dispatch may run.
+        """
+        policy = FairUsePolicy.from_env()
+        lease = await try_acquire_lease(
+            policy, project_id, self._session_factory, run_id=run_id, provider="azure_devops"
+        )
+        if lease is not None:
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "execution_lease": {
+                        "check": "execution_lease",
+                        "acquired": True,
+                        "lease_id": lease.lease_id,
+                        "slot": lease.slot,
+                    }
+                },
+            )
+            return True
+        snapshot = await lease_snapshot(
+            policy, project_id, self._session_factory, provider="azure_devops"
+        )
+        await self._merge_run_evidence(
+            run_id,
+            {
+                "execution_lease": {
+                    "check": "execution_lease",
+                    "acquired": False,
+                    "capacity": snapshot,
+                }
+            },
+        )
+        await self._to_terminal(
+            run_id,
+            FlowStatus.BLOCKED,
+            "execution_capacity: no execution slot free in this project — "
+            "retry once the running work drains",
+        )
+        await self._post_journaled_comment(
+            project_id,
+            issue_number,
+            _execution_capacity_comment(run_id, snapshot),
+            run_id,
+            "execution_capacity",
+        )
+        logger.warning(
+            "Azure DevOps run %s parked blocked(execution_capacity) — %s of %s slots held",
+            run_id[:8],
+            snapshot.get("held"),
+            snapshot.get("limit"),
+        )
+        return False
 
     async def handle_cancel(
         self,
@@ -2385,7 +2543,16 @@ class AzureRunService:
         from live settings or a live work-item re-read. A missing, tampered
         or legacy (v2) spec parks the run (``spec_invalid`` /
         ``spec_legacy``), never a silent fallback.
+
+        NEXT-11: this is the dispatch boundary — the execution lease is
+        reserved here (idempotently per run), so no path that reaches
+        execution (``/go``, ``/retry``, the reconciler's re-drive) can
+        bypass the project's slot limit.
         """
+        if not await self._reserve_execution_capacity(
+            run_id, project_id=project_id, issue_number=issue_number
+        ):
+            return
         spec = await self._spec_or_block(run_id)
         if spec is None:
             return
@@ -2629,6 +2796,14 @@ class AzureRunService:
         ``spec_legacy: re-approval required``. *driver* overrides the frozen
         selection for a fallback advance.
         """
+        # NEXT-11: the lane dispatch is a dispatch boundary too — the
+        # ``/retry`` revival reaches this leg directly, so the execution
+        # lease is (idempotently) reserved here as well; a retry cannot
+        # bypass the slot limit.
+        if not await self._reserve_execution_capacity(
+            run_id, project_id=project_id, issue_number=issue_number
+        ):
+            return
         # R13: dispatch-time budget gate (partial enforcement — episode
         # count and wall clock are the axes this lane can honestly enforce).
         block = await self._budget_episode_block(run_id)
@@ -3168,6 +3343,10 @@ class AzureRunService:
             controller = Controller(session)
             await controller.transition(run_id, FlowStatus.READY_FOR_HUMAN, reason=reason)
             await session.commit()
+        # NEXT-11: ready_for_human is terminal — the run's execution slot
+        # returns to the project here (idempotent; the lazy reclaim at the
+        # next acquire is the backstop for anything that slips past).
+        await self._release_execution_lease(run_id, "terminal:ready_for_human")
         logger.info("Azure DevOps run %s is ready_for_human at %s", run_id[:8], candidate_sha[:8])
 
     async def _observed_candidate_head(
@@ -3987,6 +4166,58 @@ class AzureRunService:
             session.expunge(run)
             return run
 
+    async def _fair_use_counts(
+        self, project_id: int, issue_number: int, author_username: str
+    ) -> dict[str, int]:
+        """The four live counts the fair-use check judges (R28-23), over
+        THIS provider's project aggregate — the Azure mirror of the
+        GitLab path's gatherer, gathered before the candidate run exists:
+
+        - ``active_count`` — non-terminal runs past their gate;
+        - ``queued_count`` — non-terminal runs still waiting to execute;
+        - ``issue_run_count`` — every run ever for this work item;
+        - ``user_recent_count`` — runs this actor requested in the
+          trailing hour (the ``requested_by`` evidence key).
+        """
+        terminal = {status.value for status in TERMINAL_STATUSES}
+        queued = set(QUEUED_STATUSES)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        FlowRun.status,
+                        FlowRun.issue_iid,
+                        FlowRun.created_at,
+                        FlowRun.evidence,
+                    ).where(
+                        FlowRun.provider == "azure_devops",
+                        FlowRun.project_id == project_id,
+                    )
+                )
+            ).all()
+        active_count = queued_count = issue_run_count = user_recent_count = 0
+        for status, row_issue_iid, created_at, evidence in rows:
+            if status not in terminal:
+                if status in queued:
+                    queued_count += 1
+                else:
+                    active_count += 1
+            if row_issue_iid == issue_number:
+                issue_run_count += 1
+            if author_username and created_at is not None:
+                created = (
+                    created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+                )
+                if created >= cutoff and (evidence or {}).get("requested_by") == author_username:
+                    user_recent_count += 1
+        return {
+            "active_count": active_count,
+            "queued_count": queued_count,
+            "issue_run_count": issue_run_count,
+            "user_recent_count": user_recent_count,
+        }
+
     async def _get_run(self, session: AsyncSession, run_id: str) -> FlowRun:
         """Fetch a run row this service minted earlier, or fail loudly.
 
@@ -4564,10 +4795,31 @@ class AzureRunService:
     async def _transition_in_session(
         self, session: AsyncSession, run_id: str, status: FlowStatus, reason: str | None = None
     ) -> None:
-        """One transition inside the caller's open session (committed here)."""
+        """One transition inside the caller's open session (committed here).
+
+        NEXT-11: a TERMINAL transition frees the run's execution lease in
+        the same breath — the slot is held from dispatch until terminal
+        status, and the terminal landing is the single moment it must
+        return. (A worker that dies before any terminal transition leaks
+        only until the next dispatch in the project reclaims the lease
+        of a terminal run.)
+        """
         controller = Controller(session)
         await controller.transition(run_id, status, reason=reason)
         await session.commit()
+        if status in TERMINAL_STATUSES:
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
+
+    async def _release_execution_lease(self, run_id: str, reason: str) -> None:
+        """Free the run's execution slot (idempotent; no lease = no-op)."""
+        released = await release_run_leases(self._session_factory, run_id, reason=reason)
+        if released:
+            logger.info(
+                "Azure DevOps run %s released %d execution lease(s): %s",
+                run_id[:8],
+                released,
+                reason,
+            )
 
     async def _transition(self, run_id: str, status: FlowStatus, reason: str | None = None) -> None:
         async with self._session_factory() as session:
@@ -4579,8 +4831,11 @@ class AzureRunService:
         Mirrors the GitLab service: a ``failed`` terminalization is classified
         first (Tier-1 revival) — transient causes schedule a bounded
         auto-revive, fatal ones park ``blocked`` with the precise reason.
+        The execution lease frees either way (NEXT-11): directly here, or
+        through the terminal state the revival machinery parks the run in.
         """
         if status is FlowStatus.FAILED:
+            await self._release_execution_lease(run_id, f"terminal:{status.value}")
             await terminalize_failure(
                 self._session_factory, self._settings, run_id, reason=reason, log=logger
             )
@@ -4976,6 +5231,32 @@ def _admission_denied_comment(run_id: str, actor: str) -> str:
         "## Forge — run not started\n\n"
         f"Run `{run_id[:8]}` was **not started**: admission denied — "
         f"`{actor}` is not in the Azure DevOps approver list (`FORGE_AZDO_APPROVERS`).\n\n"
+        "*This is an automated message.*"
+    )
+
+
+def _fair_use_denied_comment(run_id: str, actor: str, reason: str) -> str:
+    """The R28-23 capacity refusal note (the GitLab path's wording)."""
+    return (
+        "## Forge — run not started\n\n"
+        f"Run `{run_id[:8]}` was **not started** for fair use (requested by `{actor}`): "
+        f"{reason}.\n\n"
+        "A refused request consumes no execution attempt — the work never entered.\n\n"
+        "*This is an automated message.*"
+    )
+
+
+def _execution_capacity_comment(run_id: str, snapshot: dict) -> str:
+    """The NEXT-11 parked-at-dispatch note: capacity, not refusal."""
+    held = snapshot.get("held")
+    limit = snapshot.get("limit")
+    capacity = f"{held} of {limit} slots held" if limit is not None else f"{held} slots held"
+    return (
+        "## Forge — run parked at dispatch\n\n"
+        f"Run `{run_id[:8]}` was approved but is **parked**: no execution slot is free "
+        f"in this project ({capacity}). Nothing is executing for it.\n\n"
+        f"- Retry when the running work drains: `/retry {run_id}`\n"
+        "- An operator can raise the bound via `FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT`\n\n"
         "*This is an automated message.*"
     )
 

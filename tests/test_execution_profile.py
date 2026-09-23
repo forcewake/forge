@@ -23,7 +23,10 @@ from forge.gitlab.blob_reads import BlobReadResult
 from forge.runs.backends import _HARNESS_INFRASTRUCTURE_PATTERNS
 from forge.runs.execution_profile import (
     BOOTSTRAP_STATUS_FAILED,
+    COMPILED_COMBINATIONS,
+    DRIVER_PROFILE_ALIASES,
     FORGE_BOOTSTRAP_FAILED_MARKER,
+    HARNESS_PROFILES,
     INSTALL_PIP_MINIMAL,
     INSTALL_UV_FROZEN,
     LANE_CREDENTIAL_CAPABILITIES,
@@ -34,20 +37,27 @@ from forge.runs.execution_profile import (
     LOCK_ABSENT,
     LOCK_LOCKED,
     LOCK_UNKNOWN,
+    RUNTIME_RECIPES,
     ExecutionProfile,
     FileRead,
     LocalRepoSource,
     MaterializedFiles,
+    RuntimeRecipe,
     bootstrap_failed,
     classify_bootstrap_failure,
+    compile_driver_profile,
     credentials_at,
     derive_from_reader,
     derive_from_repo,
     lane_profile,
+    resolve_driver_profile,
+    runtime_recipe,
     validate_lane_profile_declaration,
     validate_runtime,
 )
 from forge.runs.spec import ExecutableRunSpec, SpecInvalid
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Fixture repos
@@ -987,3 +997,140 @@ class TestLaneEntryEnforcesTheProfile:
         assert rc == 1
         assert exit_status.strip() == "failed"
         assert "unknown lane profile" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# NEXT-15 — the recipe/harness decomposition
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeRecipeHarnessDecomposition:
+    """A lane is a (recipe, harness) tuple; ``dotnet-lane`` is an alias for
+    ("dotnet-9", "claude-code") — the decomposition is the authority."""
+
+    def test_the_dotnet_lane_alias_resolves_to_its_decomposition(self):
+        profile = resolve_driver_profile("dotnet-lane")
+        assert profile.recipe.recipe_id == "dotnet-9"
+        assert profile.harness.harness_id == "claude-code"
+        assert profile.alias == "dotnet-lane"  # the legacy id rides the audit
+        assert profile.driver_id == "dotnet-lane"  # dispatch spelling unchanged
+
+    def test_a_new_recipe_harness_combination_validates(self):
+        # the runtime is REUSED by a compatible harness — no second .NET
+        # command implementation anywhere in the recipe axis
+        profile = compile_driver_profile("dotnet-9", "copilot")
+        assert profile.recipe.recipe_id == "dotnet-9"
+        assert profile.harness.sdk == "copilot-acp"
+        assert profile.alias == ""
+        assert profile.driver_id == "dotnet-9+copilot"  # the composed spelling
+        # and the composed spelling resolves back through the same authority
+        resolved = resolve_driver_profile("dotnet-9+copilot")
+        assert resolved.recipe.recipe_id == profile.recipe.recipe_id
+        assert resolved.harness.harness_id == profile.harness.harness_id
+
+    def test_an_unsupported_combination_is_refused_before_model_calls(self):
+        with pytest.raises(ValueError, match="not in the compiled compatibility matrix"):
+            compile_driver_profile("node-22", "codex")
+
+    def test_unknown_axes_and_ids_fail_closed(self):
+        with pytest.raises(ValueError, match="unknown runtime recipe"):
+            compile_driver_profile("go-1-24", "claude-code")
+        with pytest.raises(ValueError, match="unknown harness profile"):
+            compile_driver_profile("dotnet-9", "grok")
+        with pytest.raises(ValueError, match="unknown driver id"):
+            resolve_driver_profile("grok-build")  # a fused id with no alias entry
+        with pytest.raises(ValueError, match="non-empty"):
+            resolve_driver_profile("")
+
+    def test_the_dotnet_recipe_pins_the_template_image_digest(self):
+        # the recipe's image pin IS the shipped lane's image — one pin,
+        # both files (the template test pins the YAML side of the pair).
+        import yaml
+
+        template = yaml.safe_load(
+            (REPO_ROOT / "ci" / "templates" / "dotnet-lane.gitlab-ci.yml").read_text()
+        )
+        assert template["forge-agent-dotnet"]["image"] == RUNTIME_RECIPES["dotnet-9"].image_pin
+
+    def test_the_dotnet_recipe_carries_the_locked_tail_and_trx_prefix(self):
+        recipe = RUNTIME_RECIPES["dotnet-9"]
+        assert recipe.version_check == ("dotnet", "--version")
+        assert ("dotnet", "restore", "--locked-mode") in recipe.build_commands
+        assert ("dotnet", "build", "--no-restore", "--locked-mode") in recipe.build_commands
+        assert recipe.report_prefix == "forge_"  # NEXT-16: aggregate ALL reports
+
+    def test_the_compiled_matrix_and_aliases_are_consistent(self):
+        for alias, pair in DRIVER_PROFILE_ALIASES.items():
+            assert pair in COMPILED_COMBINATIONS, alias  # an alias is always compiled
+        for recipe_id, harness_id in COMPILED_COMBINATIONS:
+            assert recipe_id in RUNTIME_RECIPES
+            assert harness_id in HARNESS_PROFILES
+
+    def test_the_profile_document_states_both_axes(self):
+        document = resolve_driver_profile("dotnet-lane").to_document()
+        assert document["driver_id"] == "dotnet-lane"
+        assert document["alias"] == "dotnet-lane"
+        assert document["recipe"]["recipe_id"] == "dotnet-9"
+        assert document["harness"]["harness_id"] == "claude-code"
+        assert document["harness"]["credential_names"] == [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+        ]
+
+
+class TestRecipeGatesTheToolchain:
+    """The recipe axis gates the toolchain checks INDEPENDENTLY of the
+    harness — the acceptance criterion verbatim."""
+
+    def test_a_missing_global_json_is_a_violation_naming_the_remedy(self):
+        recipe = runtime_recipe("dotnet-9")
+        (violation,) = recipe.gate(MaterializedFiles(files={}))
+        assert violation.check == "required_file"
+        assert violation.path == "global.json"
+        assert "commit it" in violation.detail
+
+    def test_a_present_global_json_gates_clean(self):
+        recipe = runtime_recipe("dotnet-9")
+        source = MaterializedFiles(
+            files={"global.json": FileRead.found('{ "sdk": { "version": "9.0.100" } }')}
+        )
+        assert recipe.gate(source) == ()
+
+    def test_an_unreadable_pin_file_is_a_violation_not_a_pass(self):
+        recipe = runtime_recipe("dotnet-9")
+        (violation,) = recipe.gate(MaterializedFiles(files={"global.json": FileRead.unknown()}))
+        assert violation.check == "required_file_unreadable"
+        assert "unverifiable" in violation.detail
+
+    def test_the_gate_is_harness_independent(self):
+        # the SAME recipe object, the SAME gate, for every compiled
+        # harness over the .NET runtime — one gate, no per-agent copies
+        recipe = runtime_recipe("dotnet-9")
+        empty = MaterializedFiles(files={})
+        for harness_id in ("claude-code", "codex", "copilot"):
+            profile = compile_driver_profile("dotnet-9", harness_id)
+            assert profile.recipe is recipe
+            (violation,) = recipe.gate(empty)
+            assert violation.path == "global.json"
+
+    def test_the_python_recipe_gates_no_files(self):
+        # lock-less repos take the documented pip fallback — the python
+        # recipe's toolchain gate is deliberately empty
+        assert RUNTIME_RECIPES["python-3-13"].required_files == ()
+        assert runtime_recipe("python-3-13").gate(MaterializedFiles(files={})) == ()
+
+    def test_the_node_recipe_requires_its_lockfile(self):
+        recipe = runtime_recipe("node-22")
+        assert recipe.required_files == ("package-lock.json",)
+        (violation,) = recipe.gate(MaterializedFiles(files={}))
+        assert violation.path == "package-lock.json"
+
+    def test_an_empty_recipe_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="unexecutable"):
+            RuntimeRecipe(
+                recipe_id="x",
+                image_pin="x:1",
+                version_check=(),
+                build_commands=(),
+                required_files=(),
+            )

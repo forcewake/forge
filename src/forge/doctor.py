@@ -11,6 +11,7 @@ Usage::
     uv run python -m forge.doctor --project 68    # + target-project checks
     uv run python -m forge.doctor --capabilities  # the capability matrix (NXT-02)
     uv run python -m forge.doctor --capabilities --strict  # + the promotion gate (R28-27)
+    uv run python -m forge.doctor --support-matrix         # per (driver, provider, recipe) support (NEXT-26)
 
 Exit codes: 0 = all checks passed, 1 = at least one failed, 2 = usage error.
 Warnings do not affect the exit code. ``--capabilities`` is offline: it prints
@@ -18,7 +19,11 @@ the reachability-based capability manifest (no environment contacts) and exits
 nonzero if the manifest fails its own honesty validation. ``--strict`` adds the
 promotion gate: a row claiming a tier whose required evidence class is missing
 (an unexecuted cross-runner test cannot produce a cross-runner support badge)
-exits 1 as well.
+exits 1 as well. ``--capabilities --json`` additionally carries the
+``support_matrix`` field (NEXT-26: per (driver, provider, recipe) support from
+executed profile evidence); ``--support-matrix`` prints it standalone and exits
+1 when the matrix reports evidence problems (a registration citing an artifact
+the checkout cannot show).
 """
 
 from __future__ import annotations
@@ -401,9 +406,16 @@ def _capabilities_mode(as_json: bool, strict: bool = False) -> int:
     tier requires (``classify_evidence`` over its pointers), and an
     over-claim fails the run — a capability cannot claim a tier its
     evidence class cannot support.
+
+    NEXT-26: the JSON form additionally carries the ``support_matrix``
+    field (per (driver, provider, recipe) support folded from the
+    manifest, the live registrations and the provenance reports). Its
+    problems do not change THIS mode's exit code — the standalone
+    ``--support-matrix`` owns that verdict.
     """
     import json as _json
 
+    from forge.adaptive.support_matrix import support_matrix
     from forge.capability_manifest import (
         TIER_LEGEND,
         capabilities,
@@ -424,6 +436,7 @@ def _capabilities_mode(as_json: bool, strict: bool = False) -> int:
                     "capabilities": [row.to_json() for row in rows],
                     "problems": problems,
                     "gate_problems": gate_problems,
+                    "support_matrix": support_matrix().to_json(),
                 },
                 indent=2,
             )
@@ -437,6 +450,27 @@ def _capabilities_mode(as_json: bool, strict: bool = False) -> int:
         for problem in gate_problems:
             print(f"  GATE: {problem}")
     return 1 if problems or gate_problems else 0
+
+
+def _support_matrix_mode(as_json: bool) -> int:
+    """``--support-matrix``: the per-(driver, provider, recipe) matrix (NEXT-26).
+
+    Offline: folds the capability manifest, the live registrations and
+    the provenance reports into one evidence-graded matrix. Exits 1 when
+    the matrix reports problems — a registration citing an evidence
+    artifact the checkout cannot show is exactly the over-claim this
+    mode exists to refuse.
+    """
+    import json as _json
+
+    from forge.adaptive.support_matrix import format_support_matrix, support_matrix
+
+    matrix = support_matrix()
+    if as_json:
+        print(_json.dumps(matrix.to_json(), indent=2))
+    else:
+        print(format_support_matrix(matrix))
+    return 1 if matrix.problems else 0
 
 
 async def run_checks(settings: Settings, project_id: int | None = None) -> list[CheckResult]:
@@ -492,11 +526,23 @@ def main(argv: list[str] | None = None) -> int:
             " claiming a tier without the matching evidence class fails the run"
         ),
     )
+    parser.add_argument(
+        "--support-matrix",
+        action="store_true",
+        help=(
+            "print the per-(driver, provider, recipe) support matrix from"
+            " executed profile evidence (NEXT-26) and exit; offline"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.capabilities:
         # Offline mode: no environment contacts, no Settings needed.
         return _capabilities_mode(args.json, strict=args.strict)
+
+    if args.support_matrix:
+        # Offline mode: the support matrix owns its own exit verdict.
+        return _support_matrix_mode(args.json)
 
     settings = Settings()  # type: ignore[call-arg]
     results = asyncio.run(run_checks(settings, args.project))

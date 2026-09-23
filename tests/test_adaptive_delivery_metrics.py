@@ -18,6 +18,12 @@ The review's two demands, pinned as tests:
   the recorded MERGED acceptance — a driver's ``completed`` exit is
   never human acceptance.
 
+NEXT-23 adds the identity-matched layer: every metric keys to the
+ATTEMPT ID, not just the run — ``per_attempt`` receipt rows beside the
+totals, and two evidence sources claiming different values for the same
+attempt surface as ``conflicting_receipts`` (with the sources named),
+degrading the value to unknown — never averaged, never quietly resolved.
+
 The durable-loader tests run against real SQLite sessions: the evidence
 ``attempts`` list, the acceptance record, the consumed gate approvals
 with the next control command after them, and the publication-intent
@@ -35,6 +41,8 @@ from sqlalchemy.pool import StaticPool
 
 from forge.adaptive.delivery_metrics import (
     ATTEMPT_EVIDENCE_KEY,
+    AttemptReceipt,
+    ConflictingReceipt,
     DeliveryMetrics,
     delivery_metrics_for_run,
     reconcile_delivery,
@@ -122,6 +130,22 @@ class TestReconciliation:
             ci_queue_seconds=pytest.approx(135.0),
             human_wait_seconds=pytest.approx(600.0),
             notes=(),
+            per_attempt=(
+                AttemptReceipt(
+                    attempt_id="run:1",
+                    sources=("attempts",),
+                    spend_usd=0.40,
+                    model_time_s=65.0,
+                    tool_call_count=12,
+                ),
+                AttemptReceipt(
+                    attempt_id="run:2",
+                    sources=("attempts",),
+                    spend_usd=1.10,
+                    model_time_s=140.0,
+                    tool_call_count=30,
+                ),
+            ),
         )
 
     def test_a_replayed_cumulative_receipt_collapses_never_double_counts(self):
@@ -255,10 +279,164 @@ class TestReconciliation:
             "ci_queue_seconds",
             "human_wait_seconds",
             "notes",
+            "per_attempt",
+            "conflicting_receipts",
         }
         assert field["attempts_count"] == 1
         assert field["total_spend_usd"] == 0.5
         assert isinstance(field["notes"], list)
+        assert field["per_attempt"] == [
+            {
+                "attempt_id": "run:1",
+                "source": "attempts",
+                "spend_usd": 0.5,
+                "model_time_s": 60.0,
+                "tool_call_count": 5,
+            }
+        ]
+        assert field["conflicting_receipts"] == []
+
+
+# ----------------------------------------------------------------------
+# NEXT-23 — identity-matched receipts
+# ----------------------------------------------------------------------
+
+
+class TestIdentityMatchedReceipts:
+    """Every metric keys to the attempt ID: per-attempt rows beside the
+    totals, and cross-source disagreement is a REPORTED conflict — never
+    an average, never a silent pick."""
+
+    def test_two_attempts_with_distinct_receipts_key_to_their_attempt_ids(self):
+        metrics = reconcile_delivery(
+            attempts=[
+                _attempt("lane-a-1", cost_usd=0.40, turn_s=65.0, tools=12),
+                _attempt("lane-a-2", cost_usd=1.10, turn_s=140.0, tools=30),
+            ],
+            run_id="run-1",
+        )
+
+        assert [row.attempt_id for row in metrics.per_attempt] == ["lane-a-1", "lane-a-2"]
+        assert [row.spend_usd for row in metrics.per_attempt] == [0.40, 1.10]
+        assert [row.model_time_s for row in metrics.per_attempt] == [65.0, 140.0]
+        assert [row.tool_call_count for row in metrics.per_attempt] == [12, 30]
+        # The totals are exactly the fold of the rows.
+        assert metrics.total_spend_usd == pytest.approx(
+            sum(row.spend_usd for row in metrics.per_attempt)
+        )
+        assert metrics.conflicting_receipts == ()
+
+    def test_anonymous_attempts_get_index_labels_not_blank_ids(self):
+        metrics = reconcile_delivery(attempts=[{"tool_call_count": 1}, {"tool_call_count": 2}])
+
+        assert [row.attempt_id for row in metrics.per_attempt] == ["#1", "#2"]
+        assert metrics.tool_call_count == 3
+
+    def test_a_same_source_replay_still_collapses_latest_wins(self):
+        """The R28-22 rule survives identity-matching: a source's own
+        cumulative receipt replay replaces its earlier claim — ONE
+        attempt, no conflict, no double count."""
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", cost_usd=0.25), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.60), "source": "lane_meta"},
+                _attempt("run:2", cost_usd=1.00),
+            ]
+        )
+
+        assert metrics.attempts_count == 2
+        assert metrics.total_spend_usd == pytest.approx(1.60)  # the latest claim wins
+        assert metrics.conflicting_receipts == ()
+        assert [row.spend_usd for row in metrics.per_attempt] == [0.60, 1.00]
+
+    def test_agreeing_sources_collapse_without_a_conflict(self):
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", cost_usd=0.40), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.40), "source": "provider_api"},
+            ]
+        )
+
+        assert metrics.attempts_count == 1
+        assert metrics.total_spend_usd == pytest.approx(0.40)  # agreed, not added
+        assert metrics.conflicting_receipts == ()
+        assert metrics.per_attempt[0].sources == ("lane_meta", "provider_api")
+
+    def test_a_conflicting_receipt_surfaces_as_a_conflict_never_an_average(self):
+        """The NEXT-23 demand: two sources claiming different spend for
+        ONE attempt is a conflict row naming both sources — the value is
+        unknown, and 0.475 (the average) or 0.55 (latest-wins across
+        sources) appears nowhere."""
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", cost_usd=0.40), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.55), "source": "provider_api"},
+                _attempt("run:2", cost_usd=1.00),
+            ]
+        )
+
+        assert metrics.attempts_count == 2
+        assert metrics.conflicting_receipts == (
+            ConflictingReceipt(
+                attempt_id="run:1",
+                source_a="lane_meta",
+                source_b="provider_api",
+                fields=("spend_usd",),
+            ),
+        )
+        # The conflicted attempt's spend is unknown, so the TOTAL is
+        # unknown — never the average, never one side's claim. The
+        # agreeing attempt's receipt stays visible in its own row.
+        assert metrics.per_attempt[0].spend_usd is None
+        assert metrics.per_attempt[1].spend_usd == 1.00
+        assert metrics.total_spend_usd is None
+        # The OTHER metrics of the conflicted attempt still answer.
+        assert metrics.per_attempt[0].model_time_s == 60.0
+
+    def test_conflicting_turn_and_tool_receipts_conflict_on_their_own_fields(self):
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", turn_s=30.0, tools=4), "source": "lane_meta"},
+                {**_attempt("run:1", turn_s=45.0, tools=4), "source": "provider_api"},
+            ]
+        )
+
+        conflicts = {c.fields for c in metrics.conflicting_receipts}
+        assert conflicts == {("model_time_s",)}
+        assert metrics.per_attempt[0].model_time_s is None
+        assert metrics.model_time_seconds is None
+        # The AGREEING tool counter survives the turn conflict untouched.
+        assert metrics.per_attempt[0].tool_call_count == 4
+        assert metrics.tool_call_count == 4
+
+    def test_a_replay_then_a_corroborating_source_is_not_a_conflict(self):
+        """The replay (0.25 → 0.60 within lane_meta) is superseded BEFORE
+        cross-source comparison: provider_api corroborating the LATEST
+        0.60 agrees, and the stale 0.25 fabricates no conflict."""
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", cost_usd=0.25), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.60), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.60), "source": "provider_api"},
+            ]
+        )
+
+        assert metrics.attempts_count == 1
+        assert metrics.conflicting_receipts == ()
+        assert metrics.total_spend_usd == pytest.approx(0.60)
+
+    def test_the_conflict_names_the_attempt_and_both_sources_in_the_notes(self):
+        metrics = reconcile_delivery(
+            attempts=[
+                {**_attempt("run:1", cost_usd=0.40), "source": "lane_meta"},
+                {**_attempt("run:1", cost_usd=0.55), "source": "provider_api"},
+            ]
+        )
+
+        assert any(
+            "run:1" in note and "conflicting receipts" in note and "never averaged" in note
+            for note in metrics.notes
+        )
 
 
 # ----------------------------------------------------------------------
