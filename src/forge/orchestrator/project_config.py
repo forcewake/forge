@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -140,6 +140,17 @@ class ProjectConfig(BaseModel):
     mcp_servers: dict[str, list[str]] | None = Field(
         default=None,
         description="Per-agent MCP server overrides. Keys are agent names, values are lists of server names.",
+    )
+    neighbors: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "The authorized read-only neighbor repositories (NEXT-21 / R32-10, "
+            "the `neighbors:` key) — the RAW entries. Shape-validated here "
+            "(a non-list section or non-mapping entry is an INVALID config, "
+            "never a dropped authorization); the loud semantic parse — "
+            "provider vocabulary, unknown fields, duplicates — lives in "
+            "forge.adaptive.system_context.from_project_config."
+        ),
     )
 
 
@@ -298,6 +309,28 @@ def _parse_project_config(content: str) -> ProjectConfig:
                     )
             implement_paths = [p.strip() for p in raw_paths]
 
+    # NEXT-21 / R32-10: the authorized read-only NEIGHBORS — carried RAW
+    # (the loud semantic parse is system_context's). Only the SHAPE is
+    # validated here, the same D02 doctrine `implement.paths` applies: a
+    # malformed authorization section is INVALID, never silently dropped
+    # into "no neighbors" (a dropped authorization would claim a narrower
+    # read set than the project declared... and a silently EMPTY one
+    # claims the run never had neighbors at all).
+    neighbors_raw = forge_data.get("neighbors")
+    neighbors: list[dict[str, Any]] | None = None
+    if neighbors_raw is not None:
+        if not isinstance(neighbors_raw, list):
+            raise ValueError(
+                "'neighbors' must be a list of neighbor repository entries, got "
+                f"{type(neighbors_raw).__name__}"
+            )
+        for entry in neighbors_raw:
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"'neighbors' entries must be mappings, got {type(entry).__name__}"
+                )
+        neighbors = list(neighbors_raw)
+
     return ProjectConfig(
         enabled_agents=forge_data.get("enabled_agents"),
         disabled_agents=forge_data.get("disabled_agents", []),
@@ -305,6 +338,7 @@ def _parse_project_config(content: str) -> ProjectConfig:
         skip_paths=forge_data.get("skip_paths", []),
         implement_paths=implement_paths,
         mcp_servers=mcp_servers,
+        neighbors=neighbors,
     )
 
 

@@ -41,6 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     from forge.adaptive.discovery_stage import DiscoveryRunContext
     from forge.adaptive.research_planner import ResearchHarness
     from forge.config import ForgeConfig
+    from forge.orchestrator.project_config import ProjectConfig
 
 __all__ = [
     "NEIGHBOR_PROVIDER_VALUES",
@@ -72,12 +73,17 @@ class WritableTarget:
     ``provider`` + ``repository_id`` identify it; ``ref`` is the ref the
     own repo's discovery snapshot freezes (the writable ref itself is
     the publisher's business — this record feeds discovery, not
-    publication).
+    publication). ``allowed_globs`` are the own repo's READ-path
+    constraints (R32-10: the v0.7 ``implement.paths`` monorepo scope) —
+    they bound what discovery may read of the own repository exactly the
+    way a neighbor's globs bound it, and carry no write authority at
+    all (the write scope is the publisher's spec, never this field).
     """
 
     provider: str
     repository_id: str
     ref: str = "HEAD"
+    allowed_globs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.provider not in NEIGHBOR_PROVIDER_VALUES:
@@ -88,6 +94,9 @@ class WritableTarget:
             raise ValueError("repository_id must be a non-empty repository identity")
         if not str(self.ref or "").strip():
             raise ValueError("ref must be non-empty")
+        for pattern in self.allowed_globs:
+            if not str(pattern or "").strip():
+                raise ValueError("allowed_globs entries must be non-empty patterns")
 
     @property
     def key(self) -> str:
@@ -271,6 +280,12 @@ class SystemContextProfile:
         repository_ids: dict[str, str] = {OWN_REPO_KEY: self.writable.repository_id}
         refs: dict[str, str] = {OWN_REPO_KEY: self.writable.ref}
         allowed_globs: dict[str, list[str]] = {}
+        if self.writable.allowed_globs:
+            # R32-10: the own repository's read-path constraints (the
+            # monorepo path scope) survive composition — the multi-reader
+            # map keeps them on the own entry exactly as the single-repo
+            # ``from_reader`` path carried them.
+            allowed_globs[OWN_REPO_KEY] = list(self.writable.allowed_globs)
         for neighbor in self.neighbors:
             readers[neighbor.key] = neighbor_readers[neighbor.key]
             repository_ids[neighbor.key] = neighbor.repository_id
@@ -290,7 +305,9 @@ class SystemContextProfile:
         )
 
 
-def from_project_config(config: ForgeConfig, own_repo: WritableTarget) -> SystemContextProfile:
+def from_project_config(
+    config: ForgeConfig | ProjectConfig, own_repo: WritableTarget
+) -> SystemContextProfile:
     """Derive the profile from the project's ``forge.yml`` (NEXT-21).
 
     The ``neighbors:`` section is EXPLICIT AUTHORIZATION — every entry
@@ -302,8 +319,18 @@ def from_project_config(config: ForgeConfig, own_repo: WritableTarget) -> System
     single-repo context (no neighbors — valid, not an error). No
     catalog, manifest or discovery output contributes authorization:
     imported metadata may hint, but only this section authorizes.
+
+    *config* is the PROJECT configuration — either the server-side
+    :class:`~forge.config.ForgeConfig` view of a ``forge.yml`` (its
+    ``get("neighbors")``) or the typed
+    :class:`~forge.orchestrator.project_config.ProjectConfig` the run
+    start paths read from the repo's ``.forge.yml`` (its ``neighbors``
+    field, carried raw for exactly this parse).
     """
-    raw = config.get("neighbors")
+    if hasattr(config, "get"):
+        raw = config.get("neighbors")
+    else:
+        raw = getattr(config, "neighbors", None)
     if raw is None:
         return SystemContextProfile(writable=own_repo)
     if not isinstance(raw, list):

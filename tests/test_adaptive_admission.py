@@ -35,6 +35,8 @@ from forge.adaptive.admission import (
     admission_report,
     check_admission,
     lease_snapshot,
+    reconcile_draining,
+    record_native_handle,
     release_lease,
     release_run_leases,
     try_acquire_lease,
@@ -493,8 +495,8 @@ class TestExecutionLeases:
 
         gitlab_view = await lease_snapshot(policy, PROJECT_ID, db, provider="gitlab")
         azure_view = await lease_snapshot(policy, PROJECT_ID, db, provider="azure_devops")
-        assert gitlab_view == {"held": 1, "completed": 0, "limit": 1, "available": 0}
-        assert azure_view == {"held": 1, "completed": 0, "limit": 1, "available": 0}
+        assert gitlab_view == {"held": 1, "draining": 0, "completed": 0, "limit": 1, "available": 0}
+        assert azure_view == {"held": 1, "draining": 0, "completed": 0, "limit": 1, "available": 0}
 
 
 # ----------------------------------------------------------------------
@@ -948,5 +950,276 @@ class TestMigration024:
                     ix["name"] for ix in inspect(conn).get_indexes("execution_leases")
                 }
                 assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 4
+        finally:
+            engine.dispose()
+
+
+class TestLeaseDraining:
+    """R32-07: the reservation's lifetime split from the run's LOCAL
+    status — a terminal FlowRun does not mean the dispatched native job
+    stopped occupying capacity, so the lease DRAINS (slot still held)
+    until the reconciler observes the native job terminal."""
+
+    async def _drain_one(self, db, *, native_handle: str = "pipe-7") -> ExecutionLease:
+        policy = AdmissionPolicy(max_active_per_project=1)
+        lease = await try_acquire_lease(
+            policy, PROJECT_ID, db, run_id=uuid4().hex, native_handle=native_handle
+        )
+        assert lease is not None
+        assert lease.native_handle == native_handle
+        assert await release_lease(
+            lease.lease_id, db, reason="terminal:ready_for_human", native_completed=False
+        )
+        return await self._row(db, lease.lease_id)
+
+    @staticmethod
+    async def _row(db, lease_id: str) -> ExecutionLease:
+        async with db() as session:
+            return await session.get(ExecutionLease, lease_id)
+
+    async def test_terminal_local_with_running_native_stays_draining(self, db):
+        """The acceptance: the lease may NOT be released while the CI job
+        still runs — the slot stays held and the next dispatch refuses."""
+        policy = AdmissionPolicy(max_active_per_project=1)
+        row = await self._drain_one(db)
+
+        assert row.released_at is None  # NOT released...
+        assert row.draining_at is not None  # ...but parked draining
+        assert row.release_reason == "terminal:ready_for_human"
+        snapshot = await lease_snapshot(policy, PROJECT_ID, db)
+        assert snapshot["held"] == 1  # the slot is genuinely occupied
+        assert snapshot["draining"] == 1  # and the operator sees WHY
+        assert snapshot["completed"] == 0
+        assert await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex) is None
+
+    async def test_native_observed_complete_releases_the_lease(self, db):
+        policy = AdmissionPolicy(max_active_per_project=1)
+        row = await self._drain_one(db, native_handle="pipe-done")
+
+        released = await reconcile_draining(db, lambda handle: handle == "pipe-done")
+
+        assert released == 1
+        fresh = await self._row(db, row.id)
+        assert fresh.released_at is not None
+        assert fresh.release_reason == "reconciled: native job terminal"
+        snapshot = await lease_snapshot(policy, PROJECT_ID, db)
+        assert snapshot["held"] == 0 and snapshot["draining"] == 0
+        freed = await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex)
+        assert freed is not None
+
+    async def test_a_still_running_native_job_keeps_the_slot_held(self, db):
+        policy = AdmissionPolicy(max_active_per_project=1)
+        row = await self._drain_one(db)
+
+        assert await reconcile_draining(db, lambda handle: False) == 0
+
+        fresh = await self._row(db, row.id)
+        assert fresh.released_at is None and fresh.draining_at is not None
+        assert await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex) is None
+
+    async def test_a_provider_outage_keeps_the_lease_draining(self, db):
+        """Absence and unknown stay distinct: a probe that cannot answer
+        holds the capacity (uncertain occupancy), never frees it."""
+        row = await self._drain_one(db)
+
+        def outage(handle: str) -> bool:
+            raise RuntimeError("provider unreachable")
+
+        assert await reconcile_draining(db, outage) == 0
+        fresh = await self._row(db, row.id)
+        assert fresh.released_at is None and fresh.draining_at is not None
+
+    async def test_an_async_provider_probe_is_awaited(self, db):
+        row = await self._drain_one(db, native_handle="pipe-async")
+
+        async def probe(handle: str) -> bool:
+            return handle == "pipe-async"
+
+        assert await reconcile_draining(db, probe) == 1
+        assert (await self._row(db, row.id)).released_at is not None
+
+    async def test_no_native_handle_released_on_terminal_backcompat(self, db):
+        """The pre-R32-07 shape: a lease with no native correlation
+        releases at the local terminal verdict — the columns stay NULL."""
+        policy = AdmissionPolicy(max_active_per_project=1)
+        lease = await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex)
+        assert lease is not None and lease.native_handle == ""
+
+        assert await release_lease(lease.lease_id, db, reason="terminal:ready_for_human")
+
+        row = await self._row(db, lease.lease_id)
+        assert row.released_at is not None and row.draining_at is None
+        freed = await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex)
+        assert freed is not None and freed.slot == lease.slot
+
+    async def test_the_terminal_run_reclaim_refuses_to_free_a_draining_lease(self, db):
+        """The R32-07 trap, head-on: the crash backstop that reclaims
+        OPEN leases of TERMINAL runs must not swallow a draining lease —
+        draining is exactly 'run terminal, native running'."""
+        policy = AdmissionPolicy(max_active_per_project=1)
+        run_id = uuid4().hex
+        await _seed_run(db, status=FlowStatus.WAITING_CI, run_id=run_id)
+        lease = await try_acquire_lease(
+            policy, PROJECT_ID, db, run_id=run_id, provider="gitlab", native_handle="pipe-1"
+        )
+        assert lease is not None
+        await release_lease(lease.lease_id, db, reason="terminal:ready", native_completed=False)
+
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.CANCELLED.value
+            await session.commit()
+
+        # The next acquirer sees a terminal run BUT a draining lease — no slot.
+        assert await try_acquire_lease(policy, PROJECT_ID, db, provider="gitlab") is None
+        # The reconciler is the only path that frees it.
+        assert await reconcile_draining(db, lambda handle: True) == 1
+        reclaimed = await try_acquire_lease(policy, PROJECT_ID, db, provider="gitlab")
+        assert reclaimed is not None
+
+    async def test_the_native_handle_lands_after_dispatch_answers(self, db):
+        """Dispatch takes the slot BEFORE the pipeline id exists; the
+        correlation arrives with :func:`record_native_handle`."""
+        lease = await try_acquire_lease(policy := AdmissionPolicy(), PROJECT_ID, db)
+        assert lease is not None and lease.native_handle == ""
+
+        assert await record_native_handle(lease.lease_id, "azure://run/1234", db)
+        again = await try_acquire_lease(policy, PROJECT_ID, db, run_id="")
+        assert again is not None
+        # an unknown lease answers False, changes nothing
+        assert await record_native_handle(uuid4().hex, "x", db) is False
+
+    async def test_release_run_leases_can_drain_the_whole_run(self, db):
+        policy = AdmissionPolicy(max_active_per_project=2)
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+        assert lease is not None
+
+        assert await release_run_leases(
+            db, run_id, reason="terminal:paused", native_completed=False
+        )
+
+        row = await self._row(db, lease.lease_id)
+        assert row.released_at is None and row.draining_at is not None
+        snapshot = await lease_snapshot(policy, PROJECT_ID, db)
+        assert snapshot == {"held": 1, "draining": 1, "completed": 0, "limit": 2, "available": 1}
+        # and the reconciler still finishes the story
+        assert await reconcile_draining(db, lambda handle: True) == 1
+        assert (await self._row(db, lease.lease_id)).released_at is not None
+
+    async def test_a_draining_release_is_idempotent_and_still_releasable(self, db):
+        row = await self._drain_one(db)
+
+        assert await release_lease(
+            row.id, db, reason="terminal:ready_for_human", native_completed=False
+        )  # a second drain request holds the same state
+
+        assert await release_lease(row.id, db, reason="operator: forced release")
+        fresh = await self._row(db, row.id)
+        assert fresh.released_at is not None
+        assert fresh.release_reason == "operator: forced release"
+
+
+class TestMigration025:
+    """The R32-07 migration: native correlation + draining columns on the
+    lease, with a partial index for the reconciler's worklist; downgrade
+    refuses while draining leases still hold their slots (the 023
+    precedent — a draining lease is a live reservation whose probe key
+    lives in these columns)."""
+
+    @staticmethod
+    def _load_migration():
+        import importlib.util
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "alembic"
+            / "versions"
+            / "025_lease_native_handle_and_draining.py"
+        )
+        spec = importlib.util.spec_from_file_location("migration_025", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _create_024_surface(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE execution_leases (
+                    id VARCHAR(32) PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    provider VARCHAR(32) NOT NULL DEFAULT '',
+                    run_id VARCHAR(32),
+                    slot INTEGER NOT NULL,
+                    acquired_at DATETIME NOT NULL,
+                    released_at DATETIME,
+                    release_reason VARCHAR(100),
+                    CONSTRAINT ck_execution_leases_slot CHECK (slot >= 1)
+                )
+                """
+            )
+        )
+
+    def test_upgrade_adds_the_columns_and_the_reconciler_index(self):
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine, inspect
+
+        module = self._load_migration()
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.connect() as conn:
+                self._create_024_surface(conn)
+                conn.execute(
+                    text(
+                        "INSERT INTO execution_leases (id, project_id, run_id, slot, acquired_at)"
+                        " VALUES (:a, 7, :r, 1, :t)"
+                    ),
+                    {"a": uuid4().hex, "r": uuid4().hex, "t": "2026-01-01T00:00:00+00:00"},
+                )
+                conn.commit()
+
+                ctx = MigrationContext.configure(conn)
+                with Operations.context(ctx):
+                    module.upgrade()
+
+                columns = {col["name"] for col in inspect(conn).get_columns("execution_leases")}
+                assert {"native_handle", "draining_at"} <= columns
+                indexes = {ix["name"] for ix in inspect(conn).get_indexes("execution_leases")}
+                assert "ix_execution_leases_draining" in indexes
+                # Pre-existing rows keep the back-compat shape: both columns NULL.
+                row = conn.execute(
+                    text("SELECT native_handle, draining_at FROM execution_leases")
+                ).one()
+                assert row == (None, None)
+
+                # The new columns carry the draining state end to end.
+                conn.execute(
+                    text(
+                        "UPDATE execution_leases SET native_handle = 'pipe-1',"
+                        " draining_at = '2026-09-23T00:00:00+00:00'"
+                    )
+                )
+                conn.commit()
+                with Operations.context(ctx):
+                    try:
+                        module.downgrade()
+                    except RuntimeError as exc:
+                        assert "draining" in str(exc)
+                    else:
+                        raise AssertionError("downgrade must refuse while leases drain")
+                # Released history downgrades cleanly.
+                conn.execute(
+                    text("UPDATE execution_leases SET released_at = '2026-09-23T01:00:00+00:00'")
+                )
+                conn.commit()
+                with Operations.context(ctx):
+                    module.downgrade()
+                columns = {col["name"] for col in inspect(conn).get_columns("execution_leases")}
+                assert "native_handle" not in columns and "draining_at" not in columns
+                assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 1
         finally:
             engine.dispose()

@@ -38,6 +38,21 @@ supervisor in the same scheduling slice, so nothing the turn does between
 the vendor interrupt and the suspension can race the bookkeeping — the
 same no-await doctrine the copilot client's cancel ledger uses.
 
+R32-09 (review 0fca1b7) adds the control-consumer HEALTH policy: a
+successful turn does not prove the operator could steer — the drain may
+have failed silently and the old cycle only noticed at teardown, after
+the verdict was already written. :meth:`run` now races the turn against
+the DRAIN's death too: a drain that RAISES while the turn is still
+running is observed live, recorded as ``control_degraded: <reason>`` on
+the :class:`TerminalEvent` (whatever verdict the turn then reaches — the
+degradation is visible in the classified outcome and the notes, never
+swallowed), and — under the STRICT contract
+(:data:`STRICT_CONTROL_ENV`, the interactive profile's guarantee) —
+treated as urgent: the supervisor suspends the turn through the same
+one-verdict machinery an operator pause uses (``control_lost``), because
+a turn the operator can no longer interrupt is not a turn the profile
+may let finish on its own.
+
 What is deliberately NOT here: the supervisor never touches the vendor
 itself (the drain's adapter calls remain the only vendor surface,
 ``LANE_CONTROL_SURFACE`` unchanged), never restarts a turn (resume is the
@@ -49,12 +64,14 @@ supervisor is not a signal handler).
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 __all__ = [
     "DRAIN_CANCEL_WAIT_S",
+    "STRICT_CONTROL_ENV",
     "TERMINAL_COMPLETED",
     "TERMINAL_FAILED",
     "TERMINAL_KINDS",
@@ -62,13 +79,15 @@ __all__ = [
     "LaneSupervisor",
     "TerminalEvent",
     "UrgentRequest",
+    "strict_control_from_env",
 ]
 
 #: The turn reached its own terminal verdict (result returned).
 TERMINAL_COMPLETED = "turn_completed"
 #: The turn raised decisively — classified, never escaped unclassified.
 TERMINAL_FAILED = "turn_failed"
-#: An urgent control suspended the turn before its own verdict arrived.
+#: An urgent control suspended the turn before its own verdict arrived —
+#: an operator's pause, or (strict mode) the control consumer's death.
 TERMINAL_SUSPENDED = "turn_suspended"
 
 #: The closed terminal-event vocabulary (one of these ends every cycle).
@@ -81,15 +100,42 @@ TERMINAL_KINDS: tuple[str, ...] = (TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL
 #: cancelled and the supervisor records the note — the verdict stands.
 DRAIN_CANCEL_WAIT_S = 10.0
 
+#: R32-09: the STRICT control contract's env — truthy means a drain death
+#: while the turn still runs SUSPENDS the turn (``control_lost``) instead
+#: of letting it finish unsupervised. This is the interactive profile's
+#: guarantee: a required-interactivity lane refuses to keep executing a
+#: turn the operator can no longer interrupt.
+STRICT_CONTROL_ENV = "FORGE_LANE_STRICT_CONTROL"
+
+
+def strict_control_from_env(environ: dict[str, str] | None = None) -> bool:
+    """Whether :data:`STRICT_CONTROL_ENV` is truthy (default: off).
+
+    The same truthiness spelling the lane gate uses
+    (``FORGE_STEERING_ENABLED``): any non-empty value other than a
+    falsy word (``0``, ``false``, ``no``, ``off`` — case-insensitive)
+    arms the strict contract.
+    """
+    source = os.environ if environ is None else environ
+    return str(source.get(STRICT_CONTROL_ENV, "")).strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
 
 @dataclass(frozen=True)
 class UrgentRequest:
     """One urgent control's request to suspend the running turn.
 
     ``kind`` is the command kind that applied (the interrupt-class
-    vocabulary the drain recognizes — today ``pause``); ``reason`` is the
-    human-readable sentence the terminal classification carries, so the
-    meta says WHY the turn was suspended, not merely that it was.
+    vocabulary the drain recognizes — today ``pause``) or ``control_lost``
+    (the STRICT contract's internal kind: the control consumer itself
+    died, R32-09); ``reason`` is the human-readable sentence the terminal
+    classification carries, so the meta says WHY the turn was suspended,
+    not merely that it was.
     """
 
     kind: str
@@ -106,7 +152,12 @@ class TerminalEvent:
     the turn (``turn_suspended``); ``elapsed_s`` the wall-clock span the
     supervisor measured from submission to terminal — the suspension
     fallback timing when the turn coroutine was cancelled before it could
-    record its own.
+    record its own. ``control_degraded`` (R32-09) is non-empty when the
+    steering drain FAILED while the turn was still running: the turn may
+    still have reached its own verdict, but the operator's ability to
+    steer it did not survive the cycle — the composing lane carries the
+    sentence into its meta so a successful turn is never misread as a
+    controllable one.
     """
 
     kind: str
@@ -114,6 +165,7 @@ class TerminalEvent:
     reason: str = ""
     urgent: UrgentRequest | None = None
     elapsed_s: float = 0.0
+    control_degraded: str = ""
 
 
 T = TypeVar("T")
@@ -144,18 +196,25 @@ class LaneSupervisor(Generic[T]):
         classify: Callable[[TerminalEvent], T],
         name: str = "lane",
         drain_cancel_wait_s: float = DRAIN_CANCEL_WAIT_S,
+        strict_control: bool | None = None,
     ) -> None:
         if drain_cancel_wait_s <= 0:
             raise ValueError("drain_cancel_wait_s must be positive")
         self._classify = classify
         self._name = name
         self._drain_cancel_wait_s = drain_cancel_wait_s
+        # R32-09: None defers to the env (the interactive profile's knob);
+        # an explicit bool pins the contract for a cycle or a test.
+        self._strict_control = (
+            strict_control_from_env() if strict_control is None else strict_control
+        )
         self._turn: asyncio.Task[Any] | None = None
         self._drain: asyncio.Task[None] | None = None
         self._urgent: UrgentRequest | None = None
         self._started_at: float | None = None
         self._terminal: T | None = None
         self._classifications = 0
+        self._control_degraded: str = ""
         self.notes: list[str] = []
 
     # -- submission (ownership is taken exactly once each) -------------------
@@ -207,6 +266,23 @@ class LaneSupervisor(Generic[T]):
         return self._urgent
 
     @property
+    def control_degraded(self) -> str:
+        """WHY the control consumer was lost mid-turn ("" when it was not).
+
+        R32-09's observable: non-empty when the steering drain RAISED
+        while the turn was still running. The turn's verdict stands (a
+        completed turn classifies completed), but the degradation rides
+        the :class:`TerminalEvent` and :attr:`notes` — a successful turn
+        is never misread as a controllable one.
+        """
+        return self._control_degraded
+
+    @property
+    def strict_control(self) -> bool:
+        """Whether the strict control contract is armed for this cycle."""
+        return self._strict_control
+
+    @property
     def terminal(self) -> T | None:
         """The written terminal outcome (None until the cycle classified)."""
         return self._terminal
@@ -227,6 +303,11 @@ class LaneSupervisor(Generic[T]):
         - an urgent request suspends the turn: the cancellation is caught
           HERE (the turn's CancelledError never escapes the cycle) and the
           classifier receives ``turn_suspended`` with the request;
+        - R32-09: the turn also races the DRAIN's death — a drain that
+          raises while the turn still runs is observed live, recorded as
+          ``control_degraded`` on the terminal event (whatever verdict the
+          turn then reaches), and under the strict contract escalated to
+          an urgent ``control_lost`` suspension;
         - an OUTSIDE cancellation (lane teardown) is not a verdict: it
           propagates after the drain teardown ran;
         - the turn raising decisively classifies ``turn_failed`` — the
@@ -243,7 +324,7 @@ class LaneSupervisor(Generic[T]):
         started = self._started_at if self._started_at is not None else 0.0
         event: TerminalEvent
         try:
-            result = await turn
+            result = await self._await_turn_verdict(turn)
         except asyncio.CancelledError:
             urgent = self._urgent
             if urgent is None:
@@ -256,21 +337,72 @@ class LaneSupervisor(Generic[T]):
                 reason=urgent.reason,
                 urgent=urgent,
                 elapsed_s=self._elapsed_since(started),
+                control_degraded=self._control_degraded,
             )
         except Exception as exc:  # noqa: BLE001 — classified, never unclassified
             event = TerminalEvent(
                 kind=TERMINAL_FAILED,
                 reason=str(exc),
                 elapsed_s=self._elapsed_since(started),
+                control_degraded=self._control_degraded,
             )
         else:
             event = TerminalEvent(
                 kind=TERMINAL_COMPLETED,
                 result=result,
                 elapsed_s=self._elapsed_since(started),
+                control_degraded=self._control_degraded,
             )
         await self._teardown_drain()
         return self._write_terminal(event)
+
+    async def _await_turn_verdict(self, turn: asyncio.Task[Any]) -> Any:
+        """Await the turn's verdict — watching the drain's HEALTH (R32-09).
+
+        With no drain attached this is a plain await (the composed path is
+        byte-for-byte the old one). With one, the turn and the drain race
+        under ``FIRST_COMPLETED``: the moment the drain ENDS, its outcome
+        is inspected — a drain that RAISED while the turn still runs is
+        recorded as :attr:`control_degraded` (observed live, never only
+        at teardown), and under the strict contract escalated through the
+        SAME urgent seam an operator pause uses (``control_lost``) — the
+        interactive profile's guarantee that a turn the operator can no
+        longer interrupt does not keep executing unsupervised.
+        """
+        drain = self._drain
+        if drain is None:
+            return await turn
+        done, _pending = await asyncio.wait({turn, drain}, return_when=asyncio.FIRST_COMPLETED)
+        self._observe_drain_end(drain)
+        if turn in done:
+            return turn.result()
+        if self._control_degraded and self._strict_control:
+            # The strict contract: treat the lost control consumer as
+            # urgent — suspend the turn through the one-verdict machinery.
+            self.request_urgent("control_lost", self._control_degraded)
+        return await turn
+
+    def _observe_drain_end(self, drain: asyncio.Task[None]) -> None:
+        """Consume an ENDED drain, recording a mid-turn failure (R32-09).
+
+        Called the instant the wait reports the drain finished — BEFORE
+        the turn's own verdict is awaited — so a failed control consumer
+        is observed while the turn is STILL RUNNING. A clean return is
+        not a failure (a bounded drain may simply finish); a cancellation
+        is teardown-shaped, not a health signal; only a RAISE degrades
+        control. The ended task is detached from ``self._drain`` so
+        :meth:`_teardown_drain` never re-awaits (or re-reports) it.
+        """
+        if self._drain is not drain or not drain.done():
+            return
+        self._drain = None
+        if drain.cancelled():
+            return
+        exc = drain.exception()
+        if exc is None:
+            return
+        self._control_degraded = f"the steering drain failed while the turn ran: {exc}"
+        self.notes.append(f"{self._name}: control_degraded: {self._control_degraded}")
 
     def _write_terminal(self, event: TerminalEvent) -> T:
         """The ONLY write of the terminal outcome — exactly once."""

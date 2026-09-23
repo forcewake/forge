@@ -1229,6 +1229,88 @@ class TestDurableActivation:
             )
 
 
+class TestActivationMovesTheDurablePlanIdentity:
+    """R32-11 — the activation transaction also moves the surfaces the
+    production dispatch reads: the run row's ``plan_digest`` (the claim
+    the /go gate validates and the dispatch boundary compares) and, when
+    the run carries a human gate, a FRESH approval generation bound to
+    the revised digest — the /approve-revision WAS the human approval of
+    the new content, so the next /go consumes a decision bound to the
+    plan it will actually run."""
+
+    async def test_activation_switches_the_run_rows_plan_digest(self, durable):
+        from forge.adaptive.revisions import activate_pending_revision, stage_pending_revision
+        from forge.durable import FlowRun
+
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(
+            durable.factory, durable.run_id, decision, proposed, _current()
+        )
+        async with durable.factory() as session:
+            run = await session.get(FlowRun, durable.run_id)
+            run.plan_digest = "a" * 64  # the published plan the gate bound
+            await session.commit()
+
+        outcome = await activate_pending_revision(
+            durable.factory, durable.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+        async with durable.factory() as session:
+            run = await session.get(FlowRun, durable.run_id)
+            assert run.plan_digest == plan_digest(proposed)  # the ACTIVE plan
+
+    async def test_activation_rebinds_the_human_gate_to_the_revised_digest(self, tmp_path):
+        from forge.adaptive.revisions import activate_pending_revision, stage_pending_revision
+
+        world = _DurableWorld(_current())
+        await world.start()
+        proposed = _revision(_base_steps(), revision=2, parent_revision=1)
+        decision = _decision(proposed)
+        await stage_pending_revision(world.factory, world.run_id, decision, proposed, _current())
+        # The run carries a published plan's gate (generation 0, the old
+        # digest, an open window and its policy/spec bindings).
+        from datetime import datetime, timedelta, timezone
+
+        from forge.durable import GateApproval
+
+        async with world.factory() as session:
+            session.add(
+                GateApproval(
+                    flow_run_id=world.run_id,
+                    generation=0,
+                    plan_digest="a" * 64,
+                    base_sha="1" * 40,
+                    policy_digest="2" * 64,
+                    approver_user_id=0,
+                    source_event_id="plan_publication",
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                )
+            )
+            await session.commit()
+
+        outcome = await activate_pending_revision(
+            world.factory, world.run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+        from sqlalchemy import select
+
+        async with world.factory() as session:
+            gates = (
+                (await session.execute(select(GateApproval).order_by(GateApproval.id)))
+                .scalars()
+                .all()
+            )
+        assert [gate.generation for gate in gates] == [0, 1]
+        rebound = gates[1]
+        assert rebound.plan_digest == plan_digest(proposed)
+        assert rebound.consumed_at is None  # awaiting the /go that consumes it
+        assert rebound.base_sha == "1" * 40  # the window/policy bindings survive
+        assert rebound.policy_digest == "2" * 64
+        assert rebound.source_event_id.startswith("approve-revision:")
+        assert decision.decision_id in rebound.source_event_id
+
+
 class TestApproveRevisionIngress:
     """/approve-revision through the REAL command router → the durable
     transaction → one journaled operator reply (R28-18)."""

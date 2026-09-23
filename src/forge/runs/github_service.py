@@ -120,12 +120,19 @@ from forge.adaptive.research_planner import (
     completion_from_llm_client,
     discovery_mode,
 )
+from forge.adaptive.revisions import ACTIVE_PLAN_KEY, dispatch_plan_binding
+from forge.adaptive.system_context import (
+    NeighborRepository,
+    SystemContextProfile,
+    WritableTarget,
+    from_project_config,
+)
 from forge.factory.planner import PLAN_SUMMARY_CHARS, PLANNER_TIER
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import execution_capacity_comment
 from forge.adaptive.admission import lease_snapshot, release_run_leases, try_acquire_lease
 from forge.harnesses.brief_envelope import build_brief_envelope, render_approved_sections
-from forge.integrations.github import GitHubAPIError
+from forge.integrations.github import GitHubAPIError, GitHubRepositoryReader
 from forge.integrations.github_flow import (
     GitHubAgents,
     GitHubPublishOutcome,
@@ -368,6 +375,7 @@ class GitHubRunService:
         stack: GitHubAgents,
         repo_full_name: str,
         control: Any | None = None,
+        neighbor_reader_factory: Callable[[NeighborRepository], Any] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
@@ -380,6 +388,13 @@ class GitHubRunService:
         # into); injectable so tests and alternate deployments can bind
         # their own.
         self._control_override = control
+        # R32-10: the neighbor-reader seam of the system context — how an
+        # authorized neighbor repository gets its reader. The default
+        # builds a GitHubRepositoryReader per github neighbor off the
+        # connection's own client (an operator-approved repository read
+        # over the same credential); a deployment with a cross-provider
+        # connection catalog injects its own resolution here.
+        self._neighbor_reader_factory = neighbor_reader_factory
 
     def _control_service(self) -> Any:
         """The operator control mailbox the /answer commands landed in."""
@@ -590,6 +605,29 @@ class GitHubRunService:
             )
             return
         path_scope = list(config_read.config.implement_paths) if config_read.config else []
+        # R32-10: resolve the SYSTEM CONTEXT — the read-many/write-one
+        # authorization the project's ``neighbors:`` section declares —
+        # BEFORE the planning try, so a malformed authorization parks the
+        # run blocked(config_invalid: …) with zero paid calls (the same
+        # A13 doctrine the config read itself applies: an authorization
+        # field that cannot be parsed honestly is never silently
+        # narrowed to "no neighbors").
+        try:
+            system_profile = self._system_context_profile(
+                config_read, frozen_ref=frozen_ref, path_scope=path_scope
+            )
+            neighbor_readers = self._neighbor_readers(system_profile)
+        except ValueError as exc:
+            await self._park_config_blocked(
+                run_id,
+                project_id=project_id,
+                issue_number=issue_number,
+                config_read=ConfigReadResult.invalid(ref=frozen_ref, detail=f"neighbors: {exc}"),
+                issue_title=issue_title,
+                issue_description=issue_description,
+                author_username=author_username,
+            )
+            return
         # F22/R13 (A02 parity): the run's numeric budget is resolved and
         # opened BEFORE the first paid call — the class comes from the
         # harness decision compiled at plan time (ADR-0023 §2) and the class
@@ -628,15 +666,12 @@ class GitHubRunService:
             # mode actually exercises the bounded research loop through
             # this entry point.
             issue_description = await maybe_run_discovery(
-                DiscoveryRunContext.from_reader(
+                self._discovery_context(
                     run_id=run_id,
                     project_id=project_id,
-                    session_factory=self._session_factory,
-                    reader=self._stack.reader,
-                    ref=frozen_ref,
-                    repository_id=self._repo_full_name,
-                    allowed_globs=path_scope or None,
-                    research=self._research_harness(run_id),
+                    frozen_ref=frozen_ref,
+                    profile=system_profile,
+                    neighbor_readers=neighbor_readers,
                 ),
                 issue_description,
             )
@@ -747,6 +782,15 @@ class GitHubRunService:
             run = await self._get_run(session, run_id)
             run.plan_digest = digest
             run.base_sha = base_sha
+            # R32-11: a fresh frozen plan supersedes any activated
+            # revision lineage — the new plan's digest IS the dispatch
+            # identity from here on, and a leftover ``active_plan``
+            # pointer from the replaced plan would false-refuse the next
+            # /go as a digest mismatch.
+            if ACTIVE_PLAN_KEY in (run.evidence or {}):
+                superseded = dict(run.evidence)
+                superseded.pop(ACTIVE_PLAN_KEY, None)
+                run.evidence = superseded
             # The backend string flips to ci_harness at dispatch (ADR-0020);
             # the frozen harness selection rides beside it (ADR-0023).
             run.evidence = _merge_evidence(
@@ -3188,6 +3232,41 @@ class GitHubRunService:
             envelope = envelope_document if isinstance(envelope_document, dict) else {}
             envelope_digest = str(envelope.get("envelope_digest") or "")
             spec_digest = str(run.spec_digest or "")
+            claimed_plan_digest = str(run.plan_digest or "")
+        # R32-11 (NEXT-20): the dispatch consumes the durable ACTIVE plan
+        # revision — the plan this lane runs under is read from the
+        # run's ``active_plan`` pointer, never assumed from the comment
+        # the approval thread still shows. A run that never activated a
+        # revision (``no_active_plan``) keeps the legacy envelope
+        # untouched — byte-identical dispatch. A /go whose claimed digest
+        # is the one an approved revision SUPERSEDED refuses
+        # ``stale_plan_digest`` BEFORE any provider I/O below: the
+        # operator approved the old plan, the durable record says a new
+        # one is active, and dispatching the stale bytes anyway is
+        # exactly the drift this fence exists for.
+        plan_binding = await dispatch_plan_binding(
+            self._session_factory, run_id, claimed_plan_digest=claimed_plan_digest
+        )
+        if plan_binding.code in ("stale_plan_digest", "plan_digest_mismatch"):
+            note = self._stale_plan_comment(run_id, plan_binding)
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"{plan_binding.code}: {plan_binding.reason[:200]}",
+            )
+            await self._post_journaled_note(
+                project_id, issue_number, note, run_id, plan_binding.code
+            )
+            logger.info(
+                "GitHub run %s dispatch refused [%s] — the claimed plan digest is not"
+                " the active one",
+                run_id[:8],
+                plan_binding.code,
+            )
+            return
+        plan_binding_document = (
+            plan_binding.as_document() if plan_binding.revised_from_digest else None
+        )
         if driver is None:
             driver = spec.harness_driver
         branch = github_factory_branch(issue_number, run_id)
@@ -3250,6 +3329,18 @@ class GitHubRunService:
                     # legacy replay → the lane's loud unenforced fallback.
                     "envelope_digest": envelope_digest,
                     "spec_digest": spec_digest,
+                    # R32-11: when an approved revision is active, the
+                    # dispatch carries the ACTIVE plan's digest beside
+                    # the envelope — the plan identity this lane runs
+                    # under, read from the durable pointer (the shipped
+                    # template maps it onto FORGE_PLAN_DIGEST for the
+                    # lane's brief binding; a template without the
+                    # declared input drops it, harmlessly).
+                    **(
+                        {"plan_digest": plan_binding.plan_digest}
+                        if plan_binding_document is not None
+                        else {}
+                    ),
                     # R32-04: the WIP-continuity contract THIS dispatch
                     # selected (fresh | required | restart) — the shipped
                     # workflow template maps it onto the driver step's
@@ -3312,6 +3403,14 @@ class GitHubRunService:
                         "driver": correlated.driver,
                         "started_at": correlated.started_at,
                     },
+                    # R32-11: the dispatched lane's plan binding — which
+                    # revision/digest it runs under, frozen beside the
+                    # handle the reconciler restarts from.
+                    **(
+                        {"plan_binding": plan_binding_document}
+                        if plan_binding_document is not None
+                        else {}
+                    ),
                 },
             )
             await session.commit()
@@ -3369,6 +3468,23 @@ class GitHubRunService:
                 ack_note_id=ack_note_id, ack_url_pending=True, ack_body=ack_body
             )
             await self._merge_run_evidence(run_id, {"harness": harness_fragment})
+
+    @staticmethod
+    def _stale_plan_comment(run_id: str, binding: Any) -> str:
+        """The actionable refusal for a /go against a superseded plan (R32-11)."""
+        stale = binding.revised_from_digest or "unknown"
+        active = binding.plan_digest or "unknown"
+        return (
+            f"Run `{run_id[:8]}` was **blocked**: {binding.code}.\n\n"
+            f"The `/go` approves plan digest `{stale[:12]}…`, but an approved "
+            f"revision replaced it — the active plan is revision "
+            f"{binding.active_revision} (digest `{active[:12]}…`). Nothing was "
+            "dispatched.\n\n"
+            "Re-issue the command against the revised plan (the plan comment's "
+            "`revised from … to …` footer names the active digest), or restart "
+            f"from a fresh plan: `/cancel {run_id}` then `/implement`.\n\n"
+            "*This is an automated message.*"
+        )
 
     async def _journaled_plan_note_id(self, run_id: str) -> int | None:
         """The approved plan comment's note id, journaled at post time (R05).
@@ -5118,6 +5234,115 @@ class GitHubRunService:
             client = getattr(agent, "_llm", None)
             if client is not None and hasattr(client, "set_budget"):
                 client.set_budget(guard)
+
+    # ------------------------------------------------------------------
+    # R32-10: the system-context connection — read-many/write-one
+    # discovery over the project's authorized neighbor repositories
+    # ------------------------------------------------------------------
+
+    def _system_context_profile(
+        self,
+        config_read: ConfigReadResult,
+        *,
+        frozen_ref: str,
+        path_scope: list[str],
+    ) -> SystemContextProfile:
+        """The run's system context: the own repo + the authorized neighbors.
+
+        The writable target is the run's OWN repository (provider github,
+        the frozen ref, and the monorepo ``implement.paths`` read-scope
+        preserved as its ``allowed_globs``); the neighbors come from the
+        project's ``.forge.yml`` ``neighbors:`` section via
+        :func:`~forge.adaptive.system_context.from_project_config` —
+        explicit authorization only, parsed loudly. A config read that
+        proved absence (or carried no config) is the single-repo
+        context, exactly as before.
+        """
+        own_repo = WritableTarget(
+            provider="github",
+            repository_id=self._repo_full_name,
+            ref=frozen_ref,
+            allowed_globs=tuple(path_scope or ()),
+        )
+        if config_read.config is None:
+            return SystemContextProfile(writable=own_repo)
+        return from_project_config(config_read.config, own_repo)
+
+    def _neighbor_readers(self, profile: SystemContextProfile) -> dict[str, Any]:
+        """One reader per authorized neighbor — exactly the declared set.
+
+        Default resolution: a github neighbor gets a
+        :class:`~forge.integrations.github.GitHubRepositoryReader` built
+        from the connection's own client (the operator-approved
+        repository read over the same credential). A neighbor on another
+        provider refuses loudly — the GitHub connection cannot honestly
+        read a gitlab/azure repository, and an authorized neighbor
+        nothing can read is a half-built context, never a silently
+        narrower one. An injected ``neighbor_reader_factory`` (a
+        deployment's connection catalog) resolves them its own way.
+        """
+        if not profile.neighbors:
+            return {}
+        if self._neighbor_reader_factory is not None:
+            return {
+                neighbor.key: self._neighbor_reader_factory(neighbor)
+                for neighbor in profile.neighbors
+            }
+        readers: dict[str, Any] = {}
+        for neighbor in profile.neighbors:
+            if neighbor.provider != "github":
+                raise ValueError(
+                    f"neighbor {neighbor.key}: the github connection reads github "
+                    f"repositories only — provider {neighbor.provider!r} needs its own "
+                    "connection catalog entry (neighbor_reader_factory)"
+                )
+            owner, sep, repo = neighbor.repository_id.partition("/")
+            if not sep or not owner.strip() or not repo.strip():
+                raise ValueError(
+                    f"neighbor {neighbor.key}: a github repository_id is 'owner/repository'"
+                )
+            readers[neighbor.key] = GitHubRepositoryReader(self._stack.client, owner, repo)
+        return readers
+
+    def _discovery_context(
+        self,
+        *,
+        run_id: str,
+        project_id: int,
+        frozen_ref: str,
+        profile: SystemContextProfile,
+        neighbor_readers: dict[str, Any],
+    ) -> DiscoveryRunContext:
+        """The discovery context the planning leg splices in (R32-10).
+
+        With NO authorized neighbors this is the single-repo
+        ``from_reader`` construction, byte for byte — the classic
+        workflow is unchanged. With neighbors, the profile builds ONE
+        multi-reader context (the own repo first — its path scope
+        preserved on its entry — every neighbor under its composite
+        ``provider:repository_id`` namespace, each with its own reader,
+        ref and allowed_globs), and the reader set must cover EXACTLY
+        the authorized neighbors.
+        """
+        if not profile.neighbors:
+            return DiscoveryRunContext.from_reader(
+                run_id=run_id,
+                project_id=project_id,
+                session_factory=self._session_factory,
+                reader=self._stack.reader,
+                ref=frozen_ref,
+                repository_id=self._repo_full_name,
+                allowed_globs=list(profile.writable.allowed_globs) or None,
+                research=self._research_harness(run_id),
+            )
+        return profile.build_discovery_context(
+            run_id=run_id,
+            project_id=project_id,
+            session_factory=self._session_factory,
+            neighbor_readers=neighbor_readers,
+            own_reader=self._stack.reader,
+            research=self._research_harness(run_id),
+        )
 
     def _research_harness(self, run_id: str) -> ResearchHarness | None:
         """NEXT-07: compose the research harness when the mode demands it.

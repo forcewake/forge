@@ -44,6 +44,7 @@ from forge.adaptive.delivery_metrics import (
     AttemptReceipt,
     ConflictingReceipt,
     DeliveryMetrics,
+    LatencyBreakdown,
     delivery_metrics_for_run,
     reconcile_delivery,
 )
@@ -88,6 +89,28 @@ def _attempt(
 
 def _ci(dispatched: datetime, started: datetime) -> dict:
     return {"dispatched_at": _iso(dispatched), "started_at": _iso(started)}
+
+
+def _timed_attempt(
+    attempt_id: str,
+    *,
+    dispatched: datetime,
+    started: datetime,
+    finished: datetime,
+    reviewed: datetime,
+    cost_usd: float = 0.5,
+    turn_s: float = 60.0,
+    tools: int = 5,
+) -> dict:
+    """One attempt's facts with the FULL causal timestamp chain (R32-20):
+    dispatch → start → finish → review, each latency window derivable."""
+    return {
+        **_attempt(attempt_id, cost_usd=cost_usd, turn_s=turn_s, tools=tools),
+        "dispatched_at": _iso(dispatched),
+        "started_at": _iso(started),
+        "finished_at": _iso(finished),
+        "reviewed_at": _iso(reviewed),
+    }
 
 
 def _gate(approved: datetime, next_command: datetime | None) -> dict:
@@ -292,6 +315,11 @@ class TestReconciliation:
                 "spend_usd": 0.5,
                 "model_time_s": 60.0,
                 "tool_call_count": 5,
+                "latency_breakdown": {
+                    "dispatch_to_start_s": None,
+                    "start_to_finish_s": None,
+                    "finish_to_review_s": None,
+                },
             }
         ]
         assert field["conflicting_receipts"] == []
@@ -440,6 +468,209 @@ class TestIdentityMatchedReceipts:
 
 
 # ----------------------------------------------------------------------
+# R32-20 — identity-matched latency records
+# ----------------------------------------------------------------------
+
+
+class TestIdentityMatchedLatency:
+    """Every latency window keys to the attempt IDENTITY: distinct
+    attempts carry distinct breakdowns, a missing attempt degrades to
+    sticky-unknown, and a cross-source disagreement about WHEN an attempt
+    ran conflicts exactly like one about what it cost."""
+
+    def test_two_attempts_with_distinct_latencies_key_to_their_ids(self):
+        """The flagship: the fast attempt (short queue, long turn) and
+        the slow one (long queue, short turn) keep their OWN windows —
+        neither inherits the other's, and the totals remain exactly the
+        fold of the per-attempt rows."""
+        fast = _timed_attempt(
+            "lane-a-1",
+            dispatched=T0,
+            started=T0 + timedelta(seconds=10),
+            finished=T0 + timedelta(seconds=70),
+            reviewed=T0 + timedelta(seconds=130),
+            cost_usd=0.40,
+            turn_s=65.0,
+            tools=12,
+        )
+        slow = _timed_attempt(
+            "lane-a-2",
+            dispatched=T0 + timedelta(hours=1),
+            started=T0 + timedelta(hours=1, minutes=5),
+            finished=T0 + timedelta(hours=1, minutes=7),
+            reviewed=T0 + timedelta(hours=1, minutes=12),
+            cost_usd=1.10,
+            turn_s=140.0,
+            tools=30,
+        )
+
+        metrics = reconcile_delivery(attempts=[fast, slow], run_id="run-1")
+
+        assert [row.attempt_id for row in metrics.per_attempt] == ["lane-a-1", "lane-a-2"]
+        assert [row.latency_breakdown for row in metrics.per_attempt] == [
+            LatencyBreakdown(
+                dispatch_to_start_s=10.0, start_to_finish_s=60.0, finish_to_review_s=60.0
+            ),
+            LatencyBreakdown(
+                dispatch_to_start_s=300.0, start_to_finish_s=120.0, finish_to_review_s=300.0
+            ),
+        ]
+        # The totals are exactly the fold of the per-attempt rows.
+        assert metrics.total_spend_usd == pytest.approx(
+            sum(row.spend_usd for row in metrics.per_attempt)
+        )
+        assert metrics.model_time_seconds == pytest.approx(
+            sum(row.model_time_s for row in metrics.per_attempt)
+        )
+        assert metrics.tool_call_count == sum(row.tool_call_count for row in metrics.per_attempt)
+
+    def test_the_ci_fragment_timestamps_derive_the_dispatch_window(self):
+        """The same timestamps may ride the attempt's ``ci`` sub-dict (the
+        shape the loader's CI observations read) — the breakdown reads
+        either spelling."""
+        attempt = {
+            **_attempt("run:1"),
+            "ci": _ci(T0, T0 + timedelta(seconds=45)),
+        }
+
+        metrics = reconcile_delivery(attempts=[attempt])
+
+        assert metrics.per_attempt[0].latency_breakdown.dispatch_to_start_s == pytest.approx(45.0)
+
+    def test_a_missing_attempt_degrades_to_unknown_never_zero(self):
+        """The sticky-unknown rule: the durable state knows a THIRD
+        attempt existed (a failed sibling that left no receipt); its
+        placeholder row carries None everywhere — and the folds it joins
+        (spend, model time, tools) degrade to unknown rather than
+        excluding it or zeroing it. The honest never-drove zero is NOT
+        available to an attempt whose driving is unknown."""
+        recorded = [
+            _timed_attempt(
+                "lane-a-1",
+                dispatched=T0,
+                started=T0 + timedelta(seconds=10),
+                finished=T0 + timedelta(seconds=70),
+                reviewed=T0 + timedelta(seconds=130),
+            ),
+            _timed_attempt(
+                "lane-a-2",
+                dispatched=T0 + timedelta(hours=1),
+                started=T0 + timedelta(hours=1, minutes=5),
+                finished=T0 + timedelta(hours=1, minutes=7),
+                reviewed=T0 + timedelta(hours=1, minutes=12),
+            ),
+        ]
+
+        metrics = reconcile_delivery(attempts=recorded, expected_attempt_count=3)
+
+        assert metrics.attempts_count == 3
+        missing = metrics.per_attempt[2]
+        assert missing.attempt_id == "missing:1"
+        assert missing.spend_usd is None  # never free
+        assert missing.model_time_s is None  # never the never-drove zero
+        assert missing.tool_call_count is None
+        assert missing.latency_breakdown == LatencyBreakdown()
+        assert metrics.total_spend_usd is None
+        assert metrics.model_time_seconds is None
+        assert metrics.tool_call_count is None
+        assert any(
+            "no receipt in the evidence" in note and "never zero" in note for note in metrics.notes
+        )
+        # The RECORDED attempts' rows stay fully known beside the gap.
+        assert metrics.per_attempt[0].latency_breakdown.dispatch_to_start_s == 10.0
+        assert metrics.per_attempt[1].latency_breakdown.dispatch_to_start_s == 300.0
+
+    def test_a_partial_timestamp_chain_names_its_missing_windows(self):
+        """An attempt that recorded dispatch and start but neither finish
+        nor review: the first window answers, the later ones are NAMED
+        gaps (unknown, never zero), and the note says which stamp is
+        absent."""
+        attempt = {
+            **_attempt("run:1"),
+            "dispatched_at": _iso(T0),
+            "started_at": _iso(T0 + timedelta(seconds=20)),
+        }
+
+        metrics = reconcile_delivery(attempts=[attempt])
+
+        breakdown = metrics.per_attempt[0].latency_breakdown
+        assert breakdown.dispatch_to_start_s == pytest.approx(20.0)
+        assert breakdown.start_to_finish_s is None
+        assert breakdown.finish_to_review_s is None
+        assert any("started_at but not finished_at" in note for note in metrics.notes)
+
+    def test_conflicting_latency_windows_conflict_never_average(self):
+        """Two sources claiming different start times for ONE attempt is
+        a conflict row naming both sources — the window is unknown, not
+        averaged and not latest-won across sources."""
+        lane_meta = _timed_attempt(
+            "run:1",
+            dispatched=T0,
+            started=T0 + timedelta(seconds=30),
+            finished=T0 + timedelta(seconds=90),
+            reviewed=T0 + timedelta(seconds=150),
+        )
+        provider_api = _timed_attempt(
+            "run:1",
+            dispatched=T0,
+            started=T0 + timedelta(seconds=60),  # the provider clock disagrees
+            finished=T0 + timedelta(seconds=90),
+            reviewed=T0 + timedelta(seconds=150),
+        )
+
+        metrics = reconcile_delivery(
+            attempts=[
+                {**lane_meta, "source": "lane_meta"},
+                {**provider_api, "source": "provider_api"},
+            ]
+        )
+
+        # The start stamp feeds TWO windows — both disagree, both conflict.
+        conflicts = {c.fields for c in metrics.conflicting_receipts}
+        assert conflicts == {("dispatch_to_start_s",), ("start_to_finish_s",)}
+        breakdown = metrics.per_attempt[0].latency_breakdown
+        assert breakdown.dispatch_to_start_s is None
+        assert breakdown.start_to_finish_s is None
+        # The AGREEING window (finish → review) survives the conflicts.
+        assert breakdown.finish_to_review_s == 60.0
+        assert any("conflicting receipts for dispatch_to_start_s" in note for note in metrics.notes)
+        assert any("never averaged" in note for note in metrics.notes)
+
+    def test_a_replayed_receipt_keeps_its_latest_windows_without_a_conflict(self):
+        """The replay rule extends to latency: a source's own cumulative
+        receipt (a later record with a corrected started_at) replaces its
+        earlier window — ONE attempt, no conflict, no double count."""
+        metrics = reconcile_delivery(
+            attempts=[
+                {
+                    **_timed_attempt(
+                        "run:1",
+                        dispatched=T0,
+                        started=T0 + timedelta(seconds=30),
+                        finished=T0 + timedelta(seconds=90),
+                        reviewed=T0 + timedelta(seconds=150),
+                    ),
+                    "source": "lane_meta",
+                },
+                {
+                    **_timed_attempt(
+                        "run:1",
+                        dispatched=T0,
+                        started=T0 + timedelta(seconds=45),
+                        finished=T0 + timedelta(seconds=90),
+                        reviewed=T0 + timedelta(seconds=150),
+                    ),
+                    "source": "lane_meta",
+                },
+            ]
+        )
+
+        assert metrics.attempts_count == 1
+        assert metrics.conflicting_receipts == ()
+        assert metrics.per_attempt[0].latency_breakdown.dispatch_to_start_s == 45.0
+
+
+# ----------------------------------------------------------------------
 # The durable loader
 # ----------------------------------------------------------------------
 
@@ -570,7 +801,21 @@ class TestDurableLoader:
         assert metrics.tool_call_count == 42
         assert metrics.ci_queue_seconds == pytest.approx(45.0)
         assert metrics.human_wait_seconds == pytest.approx(420.0)
-        assert metrics.notes == ()
+        # The CI fragments carry dispatched_at + started_at (no finish or
+        # review stamps yet): each attempt's dispatch_to_start window IS
+        # derivable, and the un-derivable ones are NAMED gaps (R32-20) —
+        # one note per attempt, never silence.
+        assert metrics.notes == (
+            "attempt run:1 records started_at but not finished_at"
+            " — the start_to_finish_s window is unknown",
+            "attempt run:2 records started_at but not finished_at"
+            " — the start_to_finish_s window is unknown",
+        )
+        windows = [row.latency_breakdown for row in metrics.per_attempt]
+        assert windows == [
+            LatencyBreakdown(dispatch_to_start_s=30.0),
+            LatencyBreakdown(dispatch_to_start_s=15.0),
+        ]
 
     async def test_a_missing_run_is_a_typed_empty_answer(self, session_factory):
         metrics = await delivery_metrics_for_run("run-absent", session_factory)
@@ -657,3 +902,43 @@ class TestDurableLoader:
         metrics = await delivery_metrics_for_run("run-1", session_factory)
 
         assert metrics.human_wait_seconds == pytest.approx(180.0)  # 3 minutes
+
+    async def test_a_failed_sibling_attempt_without_a_receipt_degrades_the_totals(
+        self, session_factory
+    ):
+        """R32-20's loader leg: two recorded attempts but THREE candidate
+        shas (a failed sibling that left no receipt) — the missing attempt
+        joins as a placeholder row with every metric None, and the totals
+        it joins degrade to unknown instead of silently dropping it."""
+        await _seed_run(
+            session_factory,
+            attempts=[
+                _timed_attempt(
+                    "run:1",
+                    dispatched=T0,
+                    started=T0 + timedelta(seconds=10),
+                    finished=T0 + timedelta(seconds=70),
+                    reviewed=T0 + timedelta(seconds=130),
+                ),
+                _timed_attempt(
+                    "run:2",
+                    dispatched=T0 + timedelta(hours=1),
+                    started=T0 + timedelta(hours=1, minutes=5),
+                    finished=T0 + timedelta(hours=1, minutes=7),
+                    reviewed=T0 + timedelta(hours=1, minutes=12),
+                ),
+            ],
+            candidate_shas=["b" * 40, "c" * 40, "d" * 40],  # three attempts existed
+        )
+
+        metrics = await delivery_metrics_for_run("run-1", session_factory)
+
+        assert metrics.attempts_count == 3
+        assert [row.attempt_id for row in metrics.per_attempt] == [
+            "run:1",
+            "run:2",
+            "missing:1",
+        ]
+        assert metrics.total_spend_usd is None  # the sibling is not free
+        assert metrics.model_time_seconds is None
+        assert any("no receipt in the evidence" in note for note in metrics.notes)

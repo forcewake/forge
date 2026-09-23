@@ -288,6 +288,54 @@ class TestDiscoveryConnection:
         assert by_key["gitlab:partner/org/neighbor"].allowed_globs == ["src/**", "README.md"]
         assert by_key["github:other/team/repo"].allowed_globs is None
 
+    def test_the_own_repositorys_path_scope_survives_composition(self):
+        """R32-10: the monorepo ``implement.paths`` globs ride the OWN
+        entry of the multi-reader map — composing neighbors never widens
+        (or drops) the own repository's read-path constraints."""
+        own, partner, second = self._readers()
+        profile = SystemContextProfile(
+            writable=WritableTarget(
+                provider="github",
+                repository_id="example/repo",
+                ref="f" * 40,
+                allowed_globs=("src/**", "tests/**"),
+            ),
+            neighbors=self._profile().neighbors,
+        )
+        ctx = profile.build_discovery_context(
+            run_id="run-1",
+            project_id=1,
+            session_factory=object(),
+            neighbor_readers={
+                "gitlab:partner/org/neighbor": partner,
+                "github:other/team/repo": second,
+            },
+            own_reader=own,
+        )
+
+        by_key = {spec.repo_key: spec for spec in ctx.repo_specs}
+        assert by_key["own"].allowed_globs == ["src/**", "tests/**"]
+        # the neighbors' own globs stay theirs, untouched
+        assert by_key["gitlab:partner/org/neighbor"].allowed_globs == ["src/**", "README.md"]
+
+    def test_an_own_glob_entry_may_not_be_blank(self):
+        with pytest.raises(ValueError, match="non-empty patterns"):
+            WritableTarget(provider="github", repository_id="example/repo", allowed_globs=("  ",))
+
+    def test_from_project_config_accepts_the_typed_project_config(self, tmp_path):
+        """R32-10: the production planning path holds a typed
+        ``ProjectConfig`` (the run start's ``.forge.yml`` read), not a
+        server ``ForgeConfig`` — the neighbor section parses from it."""
+        from forge.orchestrator.project_config import _parse_project_config
+
+        config = _parse_project_config(
+            "forge:\n  neighbors:\n    - provider: github\n      repository_id: acme/partner\n"
+        )
+        profile = from_project_config(config, OWN)
+
+        assert [neighbor.key for neighbor in profile.neighbors] == ["github:acme/partner"]
+        assert profile.writable == OWN
+
     def test_a_missing_neighbor_reader_refuses(self):
         own, partner, _second = self._readers()
         with pytest.raises(ValueError, match="no reader for authorized neighbor"):

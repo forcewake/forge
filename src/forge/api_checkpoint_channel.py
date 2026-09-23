@@ -82,6 +82,22 @@ work's previous checkpoint byte-identical. The operator surface is
 :func:`storage_health_report` for doctor): disk usage, per-work
 checkpoint counts and bytes, works over quota, and ORPHAN CAS entries
 — content present on disk that no work's index references.
+
+R32-16 (review 0fca1b7) names the deployment-specific DURABILITY
+contract the pilot was missing: retention and active selection living
+in filesystem JSON is fine for ONE shared-volume API process, but a
+second replica — or blobs moving to object storage — makes that index
+a single-writer fiction. :class:`DurabilityContract` (selected by
+``FORGE_CHECKPOINT_DURABILITY``) makes the choice explicit:
+``best_effort`` (the default, the filesystem index above) or
+``postgres`` — the checkpoint INDEX moves to the
+``checkpoint_metadata`` table (transactional puts under a
+``SELECT ... FOR UPDATE`` on the work's rows, derived active
+selection, retention inside the same transaction) while the BLOBS stay
+content-addressed filesystem bytes whose writes need no lock (same
+address, same bytes — idempotent by construction). The health report
+names the active mode so an operator never mistakes one contract for
+the other.
 """
 
 from __future__ import annotations
@@ -104,6 +120,9 @@ from pathlib import Path
 from typing import Any, Final
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from sqlalchemy import Integer, String, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Mapped, mapped_column
 
 try:  # POSIX process-level advisory locking (Linux CI, macOS dev boxes).
     import fcntl
@@ -116,6 +135,7 @@ from forge.adaptive.checkpoint_channel import (
     work_scoped_token,
 )
 from forge.adaptive.checkpointing import MANIFEST_SCHEMA
+from forge.models.base import Base
 
 __all__ = [
     "CHECKPOINT_RETENTION_ENV",
@@ -128,6 +148,10 @@ __all__ = [
     "DEFAULT_MAX_WORK_TOTAL_BYTES",
     "DEFAULT_HISTORY_KEEP",
     "DEFAULT_LOCK_WAIT_SECONDS",
+    "DURABILITY_BEST_EFFORT",
+    "DURABILITY_ENV",
+    "DURABILITY_MODES",
+    "DURABILITY_POSTGRES",
     "HISTORY_KEEP_ENV",
     "LANE_CONTROL_SECRET_ENV",
     "LOCK_WAIT_SECONDS_ENV",
@@ -137,7 +161,9 @@ __all__ = [
     "MAX_TOTAL_BLOB_BYTES_ENV",
     "MAX_WORK_TOTAL_BYTES_ENV",
     "CheckpointCorruptError",
+    "CheckpointMetadataRow",
     "CheckpointStore",
+    "DurabilityContract",
     "IndexLockHeldError",
     "StoragePolicy",
     "StorageQuotaExceededError",
@@ -211,6 +237,17 @@ DEFAULT_MAX_WORK_TOTAL_BYTES: Final = 0
 #: drop, so a bad resume can still be rolled back to recorded history.
 HISTORY_KEEP_ENV: Final = "FORGE_CHECKPOINT_HISTORY_KEEP"
 DEFAULT_HISTORY_KEEP: Final = 0
+
+#: R32-16: the durability contract's env — which store backs the
+#: checkpoint INDEX (retention decisions and active selection).
+#: ``best_effort`` (the default) is the per-work filesystem JSON index
+#: under ``flock``; ``postgres`` moves the index to the
+#: ``checkpoint_metadata`` table (transactional, multi-replica) while
+#: the blobs stay content-addressed filesystem bytes.
+DURABILITY_ENV: Final = "FORGE_CHECKPOINT_DURABILITY"
+DURABILITY_BEST_EFFORT: Final = "best_effort"
+DURABILITY_POSTGRES: Final = "postgres"
+DURABILITY_MODES: frozenset[str] = frozenset({DURABILITY_BEST_EFFORT, DURABILITY_POSTGRES})
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX2 = re.compile(r"^[0-9a-f]{2}$")
@@ -385,6 +422,113 @@ class StoragePolicy:
         }
 
 
+@dataclass(frozen=True)
+class DurabilityContract:
+    """R32-16: which durability guarantee the checkpoint INDEX carries.
+
+    Retention decisions and active selection are AUTHORITATIVE state —
+    losing them strands blobs no resume can find. The contract names
+    where that state lives:
+
+    - ``best_effort`` (default) — the per-work filesystem JSON index
+      under an exclusive ``flock``: correct for ONE API process on a
+      shared volume, no guarantee across replicas or after an
+      unattended index loss;
+    - ``postgres`` — the index is rows in the ``checkpoint_metadata``
+      table: every put/get/list runs in a transaction, concurrent puts
+      serialize on ``SELECT ... FOR UPDATE`` over the work's rows, and
+      a crash mid-metadata-commit rolls back atomically. The BLOBS stay
+      content-addressed filesystem bytes in both modes — their writes
+      need no lock (same address, same bytes, idempotent).
+
+    :meth:`from_env` builds the contract from
+    :data:`DURABILITY_ENV` and FAILS CLOSED on junk or on a ``postgres``
+    selection without the session factory that reaches the metadata
+    database: a typo must never silently downgrade the durability the
+    operator believes she has (the same posture as
+    :meth:`AdmissionPolicy.from_env`).
+    """
+
+    mode: str = DURABILITY_BEST_EFFORT
+    session_factory: async_sessionmaker[AsyncSession] | None = None
+
+    @classmethod
+    def mode_from_env(cls, environ: dict[str, str] | None = None) -> str:
+        """The validated mode name :data:`DURABILITY_ENV` selects.
+
+        Empty selects the default; an unknown value raises ``ValueError``
+        naming the variable — never a silent fallback.
+        """
+        source = os.environ if environ is None else environ
+        mode = str(source.get(DURABILITY_ENV, "")).strip().lower() or DURABILITY_BEST_EFFORT
+        if mode not in DURABILITY_MODES:
+            raise ValueError(
+                f"{DURABILITY_ENV} must be one of {sorted(DURABILITY_MODES)}, "
+                f"got {mode!r} — the durability contract fails closed, never "
+                "silently downgrades"
+            )
+        return mode
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: dict[str, str] | None = None,
+        *,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> DurabilityContract:
+        """The operator's contract: the mode from the env, the DB from wiring."""
+        mode = cls.mode_from_env(environ)
+        if mode == DURABILITY_POSTGRES and session_factory is None:
+            raise ValueError(
+                f"{DURABILITY_ENV}=postgres needs a session factory wired to the "
+                "database holding checkpoint_metadata — refusing to degrade the "
+                "index back to the filesystem"
+            )
+        return cls(mode=mode, session_factory=session_factory)
+
+
+class CheckpointMetadataRow(Base):
+    """One checkpoint index row — the ``postgres`` durability's metadata.
+
+    R32-16: the durable counterpart of the filesystem index's entry
+    list. The composite primary key ``(work_id, checkpoint_id)`` makes a
+    re-put idempotent at the database layer (the same content address
+    is the same checkpoint — the INSERT simply loses to the existing
+    row), and the work_id prefix keeps the per-work scans point
+    lookups. ACTIVE selection stays DERIVED — the highest
+    ``(sequence, checkpoint_id)``, the same deterministic rule
+    :meth:`CheckpointStore._entry_order` pins for the filesystem index
+    — so no pointer column can drift from the entries it summarizes.
+    """
+
+    __tablename__ = "checkpoint_metadata"
+
+    work_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    checkpoint_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    uploaded_at: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+
+    def as_entry(self) -> dict[str, Any]:
+        """The index-entry dict shape every reader of the store consumes.
+
+        Identical to a filesystem index entry — :meth:`CheckpointStore.
+        read_checkpoint` and the endpoints consume both without knowing
+        which durability mode produced them.
+        """
+        return {
+            "checkpoint_id": self.checkpoint_id,
+            "sequence": int(self.sequence),
+            "files": int(self.files),
+            "uploaded_at": str(self.uploaded_at or ""),
+        }
+
+
+def _row_order(row: CheckpointMetadataRow) -> tuple[int, str]:
+    """The DB spelling of the deterministic selection key."""
+    return (int(row.sequence), str(row.checkpoint_id))
+
+
 class CheckpointStore:
     """The control plane's content-addressed checkpoint directory.
 
@@ -407,6 +551,7 @@ class CheckpointStore:
         *,
         max_blob_bytes: int | None = None,
         policy: StoragePolicy | None = None,
+        durability: DurabilityContract | None = None,
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
@@ -418,6 +563,10 @@ class CheckpointStore:
             self.policy = replace(StoragePolicy.from_env(), max_blob_bytes=max_blob_bytes)
         else:
             self.policy = StoragePolicy.from_env()
+        # R32-16: which index backs the store. The default contract is
+        # best_effort (the filesystem index); the async ``a*`` methods are
+        # the postgres surface and refuse to run without its factory.
+        self.durability = durability if durability is not None else DurabilityContract()
 
     # -- content-addressed files --------------------------------------------
 
@@ -745,6 +894,38 @@ class CheckpointStore:
 
     # -- the operations ---------------------------------------------------------
 
+    def _verify_upload(self, work_id: str, manifest_bytes: bytes, blobs: dict[str, bytes]) -> str:
+        """The shared refusal prelude of BOTH durability modes (R32-16).
+
+        Everything the upload promises is checked BEFORE the first write,
+        whichever index will record it: every supplied key AND every
+        digest the manifest references must be a 64-hex content address,
+        the blob set must be EXACTLY the manifest's referenced digests
+        (extra entries refused, missing entries refused), and the
+        :class:`StoragePolicy` caps hold (per-blob, manifest entries).
+        Returns the checkpoint's content address (the manifest's own
+        SHA-256).
+        """
+        checkpoint_id = _sha256(manifest_bytes)
+        referenced = self._entry_files(manifest_bytes)
+        supplied = set(blobs)
+        malformed = sorted(
+            digest for digest in referenced | supplied if not _HEX64.fullmatch(digest)
+        )
+        if malformed:
+            raise ValueError(
+                f"checkpoint for {work_id} carries non-address blob keys "
+                f"(e.g. {malformed[0]!r}) — refusing before any write"
+            )
+        if supplied != referenced:
+            raise ValueError(
+                f"checkpoint for {work_id} must carry EXACTLY the manifest's referenced "
+                f"blobs — missing {sorted(referenced - supplied)[:3]}, "
+                f"extra {sorted(supplied - referenced)[:3]}; refusing before any write"
+            )
+        self._refuse_policy_violations(work_id, manifest_bytes, blobs)
+        return checkpoint_id
+
     def put_checkpoint(
         self,
         *,
@@ -792,25 +973,13 @@ class CheckpointStore:
         ``superseded: true`` naming the holder — the other writer's
         state is the work's truth, exactly as if this upload had landed
         late with a lower sequence.
+
+        R32-16: this is the BEST-EFFORT durability's write path (the
+        filesystem index). The ``postgres`` contract's is
+        :meth:`aput_checkpoint` — same refusal prelude, transactional
+        index, no lock needed for the content-addressed blobs.
         """
-        checkpoint_id = _sha256(manifest_bytes)
-        referenced = self._entry_files(manifest_bytes)
-        supplied = set(blobs)
-        malformed = sorted(
-            digest for digest in referenced | supplied if not _HEX64.fullmatch(digest)
-        )
-        if malformed:
-            raise ValueError(
-                f"checkpoint for {work_id} carries non-address blob keys "
-                f"(e.g. {malformed[0]!r}) — refusing before any write"
-            )
-        if supplied != referenced:
-            raise ValueError(
-                f"checkpoint for {work_id} must carry EXACTLY the manifest's referenced "
-                f"blobs — missing {sorted(referenced - supplied)[:3]}, "
-                f"extra {sorted(supplied - referenced)[:3]}; refusing before any write"
-            )
-        self._refuse_policy_violations(work_id, manifest_bytes, blobs)
+        checkpoint_id = self._verify_upload(work_id, manifest_bytes, blobs)
 
         try:
             with self._index_lock(work_id):
@@ -872,6 +1041,308 @@ class CheckpointStore:
                     # the recorded decision.
                     pass
         return result
+
+    # -- the postgres durability's index operations (R32-16) ------------------
+    #
+    # The async ``a*`` spellings run against the ``checkpoint_metadata``
+    # table: put/get/list in real transactions, the work's rows locked
+    # with ``SELECT ... FOR UPDATE`` for the read-modify-write parts
+    # (quota, retention), active selection derived — never a pointer to
+    # drift. The BLOBS never move: they stay content-addressed
+    # filesystem bytes whose writes need no lock (an idempotent re-put
+    # cannot lose to a race — same address, same bytes). The SQLite
+    # dialect ignores FOR UPDATE (transactions still serialize the
+    # writes); PostgreSQL enforces it — the CAS the deployment actually
+    # runs on when it asked for this contract.
+
+    def _require_metadata_session(self) -> async_sessionmaker[AsyncSession]:
+        """The contract's DB wiring — postgres mode without it is a bug."""
+        factory = self.durability.session_factory
+        if factory is None:
+            raise RuntimeError(
+                "postgres durability requires a session factory on the "
+                "DurabilityContract — the checkpoint index has nowhere to live"
+            )
+        return factory
+
+    async def aput_checkpoint(
+        self,
+        *,
+        work_id: str,
+        manifest_bytes: bytes,
+        blobs: dict[str, bytes],
+        sequence: int,
+    ) -> dict[str, Any]:
+        """The postgres contract's landing: one transaction for the index.
+
+        Same refusal prelude as :meth:`put_checkpoint` (verified before
+        the first write — a refused upload changes nothing in EITHER
+        store). Then ONE transaction: the work's rows are selected
+        ``FOR UPDATE`` (the CAS lock — two concurrent puts serialize
+        here, so the quota reads a consistent index and neither append
+        is lost), the quota is judged, the checkpoint's row is inserted
+        (idempotent: the composite PK refuses a duplicate content
+        address, and the existing row IS the answer), and the policy's
+        on-upload retention drops old rows in the SAME transaction. The
+        blobs land under their addresses before the commit —
+        content-addressed writes are idempotent and need no lock, and a
+        crash between blob write and commit leaves collectable CAS
+        content, never an index row whose bytes are missing. Unlinking
+        retention-doomed blobs happens only AFTER the commit (rows
+        first, blobs second — the same crash discipline the filesystem
+        pass pins).
+        """
+        checkpoint_id = self._verify_upload(work_id, manifest_bytes, blobs)
+        factory = self._require_metadata_session()
+        doomed_digests: list[str] = []
+        async with factory() as session:
+            async with session.begin():
+                rows = list(
+                    (
+                        (
+                            await session.execute(
+                                select(CheckpointMetadataRow)
+                                .where(CheckpointMetadataRow.work_id == work_id)
+                                .order_by(
+                                    CheckpointMetadataRow.sequence,
+                                    CheckpointMetadataRow.checkpoint_id,
+                                )
+                                .with_for_update()
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                )
+                self._refuse_over_work_quota(
+                    work_id, [row.as_entry() for row in rows], manifest_bytes, blobs
+                )
+                own = next((row for row in rows if row.checkpoint_id == checkpoint_id), None)
+                uploaded_at = _now_iso()
+                if own is None:
+                    session.add(
+                        CheckpointMetadataRow(
+                            work_id=work_id,
+                            checkpoint_id=checkpoint_id,
+                            sequence=sequence,
+                            files=len(blobs),
+                            uploaded_at=uploaded_at,
+                        )
+                    )
+                else:
+                    uploaded_at = str(own.uploaded_at or uploaded_at)
+                for digest, data in blobs.items():
+                    self._write_cas(digest, data)  # idempotent, lock-free
+                self._write_cas(checkpoint_id, manifest_bytes)
+                if self.policy.cleanup_trigger == "on_upload":
+                    keep = self.policy.retention_keep()
+                    if keep > 0:
+                        doomed_digests = await self._aretention(session, work_id, keep)
+        for digest in doomed_digests:  # post-commit: rows first, blobs second
+            self._cas_path(digest).unlink(missing_ok=True)
+        active = self._adb_active(rows, own is None, checkpoint_id, sequence)
+        return {
+            "work_id": work_id,
+            "checkpoint_id": checkpoint_id,
+            "sequence": sequence,
+            "files": len(blobs),
+            "uploaded_at": uploaded_at,
+            "latest": active == checkpoint_id,
+        }
+
+    @staticmethod
+    def _adb_active(
+        rows: list[CheckpointMetadataRow], inserted: bool, checkpoint_id: str, sequence: int
+    ) -> str:
+        """The DERIVED active checkpoint over the post-insert row set.
+
+        The same ``(sequence, checkpoint_id)`` rule the filesystem index
+        pins (R28-06): highest sequence wins, content address breaks
+        ties, arrival order is never authority. The freshly inserted row
+        participates through its own ``(sequence, checkpoint_id)``.
+        """
+        key = max(
+            (
+                *(_row_order(row) for row in rows),
+                (sequence, checkpoint_id) if inserted else (-1, ""),
+            )
+        )
+        return key[1]
+
+    async def _aretention(self, session: AsyncSession, work_id: str, keep_last: int) -> list[str]:
+        """Retention inside the caller's transaction; doomed digests back.
+
+        The same rule :meth:`apply_retention` pins for the filesystem
+        index: even ``keep_last=0`` keeps the work's ACTIVE checkpoint;
+        older rows beyond the keep count are deleted HERE, and their
+        blobs (manifest plus files) become collectable only when no
+        retained checkpoint of ANY work still references them — the
+        cross-work reachability check runs over the metadata table
+        inside the same transaction. The digests are RETURNED, not
+        unlinked: the caller deletes rows + commits first, then unlinks
+        — a rolled-back transaction must never have deleted blobs its
+        rows still reference.
+        """
+        rows = list(
+            (
+                (
+                    await session.execute(
+                        select(CheckpointMetadataRow)
+                        .where(CheckpointMetadataRow.work_id == work_id)
+                        .order_by(
+                            CheckpointMetadataRow.sequence, CheckpointMetadataRow.checkpoint_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        )
+        if not rows:
+            return []
+        keep_count = max(1, min(keep_last, len(rows))) if keep_last > 0 else 1
+        removed = rows[:-keep_count]
+        if not removed:
+            return []
+        removed_ids = {row.checkpoint_id for row in removed}
+        doomed: set[str] = set(removed_ids)
+        for checkpoint_id in sorted(removed_ids):
+            try:
+                doomed.update(self._entry_files(self._read_verified(checkpoint_id)))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                continue  # unreadable manifests keep their own address only
+        referenced: set[str] = set()
+        others = (
+            (
+                await session.execute(
+                    select(CheckpointMetadataRow.checkpoint_id).where(
+                        CheckpointMetadataRow.checkpoint_id.not_in(removed_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for checkpoint_id in others:
+            referenced.add(str(checkpoint_id))
+            try:
+                referenced.update(self._entry_files(self._read_verified(str(checkpoint_id))))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                continue
+        for row in removed:
+            await session.delete(row)
+        return sorted(doomed - referenced)
+
+    async def aentry(self, work_id: str, checkpoint_id: str | None = None) -> dict | None:
+        """The work's ACTIVE entry (highest sequence), or the named one.
+
+        The postgres contract's read: one point lookup over the work's
+        rows, the same derived-active rule as every other mode — the
+        entry dict's shape is identical to the filesystem index's, so
+        :meth:`read_checkpoint` consumes both unchanged.
+        """
+        factory = self._require_metadata_session()
+        async with factory() as session:
+            rows = list(
+                (
+                    (
+                        await session.execute(
+                            select(CheckpointMetadataRow)
+                            .where(CheckpointMetadataRow.work_id == work_id)
+                            .order_by(
+                                CheckpointMetadataRow.sequence,
+                                CheckpointMetadataRow.checkpoint_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+        if not rows:
+            return None
+        if checkpoint_id is None:
+            return max(rows, key=_row_order).as_entry()
+        own = next((row for row in rows if row.checkpoint_id == checkpoint_id), None)
+        return own.as_entry() if own is not None else None
+
+    async def alist_entries(self) -> list[dict[str, Any]]:
+        """Every held checkpoint entry, sequence order per work, latest-flagged.
+
+        The postgres contract's operator listing — same shape and same
+        ordering discipline as :meth:`list_entries` (the ``latest`` flag
+        names each work's derived-active entry).
+        """
+        factory = self._require_metadata_session()
+        async with factory() as session:
+            rows = list(
+                (
+                    (
+                        await session.execute(
+                            select(CheckpointMetadataRow).order_by(
+                                CheckpointMetadataRow.work_id,
+                                CheckpointMetadataRow.sequence,
+                                CheckpointMetadataRow.checkpoint_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+        listed: list[dict[str, Any]] = []
+        by_work: dict[str, list[CheckpointMetadataRow]] = {}
+        for row in rows:
+            by_work.setdefault(row.work_id, []).append(row)
+        for work_id in sorted(by_work):
+            work_rows = by_work[work_id]
+            active = max(work_rows, key=_row_order)
+            for row in work_rows:
+                entry = row.as_entry()
+                entry["work_id"] = work_id
+                entry["latest"] = row is active
+                listed.append(entry)
+        return listed
+
+    async def aapply_retention(self, work_id: str, keep_last: int) -> int:
+        """The operator's retention pass over the metadata table.
+
+        Same contract as :meth:`apply_retention` (never the active
+        checkpoint, shared content survives its sharers), executed as
+        one transaction: rows deleted and committed first, the doomed
+        blobs unlinked after — the recoverable crash window is the gap
+        between them, and an interrupted pass leaves collectable orphans
+        the health report names, never missing bytes.
+        """
+        factory = self._require_metadata_session()
+        removed = 0
+        doomed_digests: list[str] = []
+        async with factory() as session:
+            async with session.begin():
+                existing = list(
+                    (
+                        (
+                            await session.execute(
+                                select(CheckpointMetadataRow)
+                                .where(CheckpointMetadataRow.work_id == work_id)
+                                .order_by(
+                                    CheckpointMetadataRow.sequence,
+                                    CheckpointMetadataRow.checkpoint_id,
+                                )
+                                .with_for_update()
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                )
+                keep_count = max(1, min(keep_last, len(existing))) if keep_last > 0 else 1
+                removed = max(0, len(existing) - keep_count)
+                if removed:
+                    doomed_digests = await self._aretention(session, work_id, keep_last)
+        for digest in doomed_digests:
+            self._cas_path(digest).unlink(missing_ok=True)
+        return removed
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
         """The work's ACTIVE entry (highest sequence), or the named one.
@@ -1108,6 +1579,94 @@ class CheckpointStore:
 
     # -- the operator health surface (R28-14) ----------------------------------
 
+    def _work_report(
+        self, entries: list[dict[str, Any]], policy: StoragePolicy
+    ) -> tuple[dict[str, Any], set[str]]:
+        """(per-work info, referenced digests) — the half BOTH modes report.
+
+        The digests walk (each entry's manifest plus its referenced
+        blobs, missing ones named, usage from the CAS) is index-agnostic:
+        it consumes the entry-dict shape the filesystem index and the
+        metadata table both produce.
+        """
+        digests: set[str] = set()
+        for entry in entries:
+            checkpoint_id = str(entry["checkpoint_id"])
+            digests.add(checkpoint_id)
+            try:
+                files = self._entry_files(self._read_verified(checkpoint_id))
+            except (FileNotFoundError, CheckpointCorruptError, ValueError):
+                files = set()
+            digests.update(files)
+        missing = {digest for digest in digests if not self._cas_path(digest).exists()}
+        usage = sum(self._size_on_disk(digest) for digest in digests)
+        over_bytes = policy.max_total_bytes_per_work > 0 and usage > (
+            policy.max_total_bytes_per_work
+        )
+        over_count = policy.max_checkpoints_per_work > 0 and len(entries) > (
+            policy.max_checkpoints_per_work
+        )
+        info: dict[str, Any] = {
+            "checkpoints": len(entries),
+            "referenced_digests": len(digests),
+            "missing_digests": sorted(missing),
+            "bytes": usage,
+            "over_quota": over_bytes or over_count,
+            "over_quota_reasons": [
+                *(["bytes"] if over_bytes else []),
+                *(["checkpoints"] if over_count else []),
+            ],
+        }
+        return info, digests
+
+    def _cas_inventory(self) -> tuple[dict[str, int], list[str], int]:
+        """(CAS entries by digest, temp files, disk usage) — the disk half."""
+        cas_entries: dict[str, int] = {}
+        temp_files: list[str] = []
+        disk_usage = 0
+        for shard in sorted(self._root.iterdir()) if self._root.is_dir() else []:
+            if not shard.is_dir() or len(shard.name) != 2 or not _HEX2.fullmatch(shard.name):
+                continue  # the works/ directory and stray dirs are not CAS shards
+            for item in sorted(shard.iterdir()):
+                if not item.is_file():
+                    continue
+                size = item.stat().st_size
+                disk_usage += size
+                if _HEX64.fullmatch(item.name):
+                    cas_entries[item.name] = size
+                else:
+                    temp_files.append(str(item.relative_to(self._root)))
+        return cas_entries, temp_files, disk_usage
+
+    def _finish_report(
+        self,
+        policy: StoragePolicy,
+        works: dict[str, dict[str, Any]],
+        referenced_anywhere: set[str],
+        cas_entries: dict[str, int],
+        temp_files: list[str],
+        disk_usage: int,
+    ) -> dict[str, Any]:
+        """The assembled report — including the ACTIVE durability mode (R32-16).
+
+        ``durability`` names which contract produced the works half, so
+        an operator reading the report never mistakes a filesystem index
+        for the transactional one.
+        """
+        orphans = sorted(set(cas_entries) - referenced_anywhere)
+        return {
+            "root": str(self._root),
+            "durability": self.durability.mode,
+            "policy": policy.as_dict(),
+            "disk_usage_bytes": disk_usage,
+            "cas_entry_count": len(cas_entries),
+            "works": works,
+            "over_quota_works": sorted(work for work, info in works.items() if info["over_quota"]),
+            "orphan_cas_entries": orphans,
+            "orphan_bytes": sum(cas_entries[digest] for digest in orphans),
+            "temp_files": sorted(temp_files),
+        }
+
     def storage_health_report(self, policy: StoragePolicy | None = None) -> dict[str, Any]:
         """The operator's view of the store: usage, quotas, orphans.
 
@@ -1140,63 +1699,51 @@ class CheckpointStore:
                     for entry in document.get("checkpoints", [])
                     if isinstance(entry, dict) and isinstance(entry.get("checkpoint_id"), str)
                 ]
-                digests: set[str] = set()
-                for entry in entries:
-                    checkpoint_id = str(entry["checkpoint_id"])
-                    digests.add(checkpoint_id)
-                    try:
-                        files = self._entry_files(self._read_verified(checkpoint_id))
-                    except (FileNotFoundError, CheckpointCorruptError, ValueError):
-                        files = set()
-                    digests.update(files)
-                missing = {digest for digest in digests if not self._cas_path(digest).exists()}
+                works[work_id], digests = self._work_report(entries, policy)
                 referenced_anywhere.update(digests)
-                usage = sum(self._size_on_disk(digest) for digest in digests)
-                over_bytes = policy.max_total_bytes_per_work > 0 and usage > (
-                    policy.max_total_bytes_per_work
-                )
-                over_count = policy.max_checkpoints_per_work > 0 and len(entries) > (
-                    policy.max_checkpoints_per_work
-                )
-                works[work_id] = {
-                    "checkpoints": len(entries),
-                    "referenced_digests": len(digests),
-                    "missing_digests": sorted(missing),
-                    "bytes": usage,
-                    "over_quota": over_bytes or over_count,
-                    "over_quota_reasons": [
-                        *(["bytes"] if over_bytes else []),
-                        *(["checkpoints"] if over_count else []),
-                    ],
-                }
+        cas_entries, temp_files, disk_usage = self._cas_inventory()
+        return self._finish_report(
+            policy, works, referenced_anywhere, cas_entries, temp_files, disk_usage
+        )
 
-        cas_entries: dict[str, int] = {}
-        temp_files: list[str] = []
-        disk_usage = 0
-        for shard in sorted(self._root.iterdir()) if self._root.is_dir() else []:
-            if not shard.is_dir() or len(shard.name) != 2 or not _HEX2.fullmatch(shard.name):
-                continue  # the works/ directory and stray dirs are not CAS shards
-            for item in sorted(shard.iterdir()):
-                if not item.is_file():
-                    continue
-                size = item.stat().st_size
-                disk_usage += size
-                if _HEX64.fullmatch(item.name):
-                    cas_entries[item.name] = size
-                else:
-                    temp_files.append(str(item.relative_to(self._root)))
-        orphans = sorted(set(cas_entries) - referenced_anywhere)
-        return {
-            "root": str(self._root),
-            "policy": policy.as_dict(),
-            "disk_usage_bytes": disk_usage,
-            "cas_entry_count": len(cas_entries),
-            "works": works,
-            "over_quota_works": sorted(work for work, info in works.items() if info["over_quota"]),
-            "orphan_cas_entries": orphans,
-            "orphan_bytes": sum(cas_entries[digest] for digest in orphans),
-            "temp_files": sorted(temp_files),
-        }
+    async def astorage_health_report(self, policy: StoragePolicy | None = None) -> dict[str, Any]:
+        """The same report under the postgres contract: works from the DB.
+
+        The works half walks the ``checkpoint_metadata`` table (the
+        authoritative index under this contract), the disk half walks
+        the CAS exactly as the best-effort report does — the shape is
+        identical, and ``durability`` says ``postgres``.
+        """
+        policy = policy or self.policy
+        factory = self._require_metadata_session()
+        async with factory() as session:
+            rows = list(
+                (
+                    (
+                        await session.execute(
+                            select(CheckpointMetadataRow).order_by(
+                                CheckpointMetadataRow.work_id,
+                                CheckpointMetadataRow.sequence,
+                                CheckpointMetadataRow.checkpoint_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+        by_work: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_work.setdefault(row.work_id, []).append(row.as_entry())
+        works: dict[str, dict[str, Any]] = {}
+        referenced_anywhere: set[str] = set()
+        for work_id in sorted(by_work):
+            works[work_id], digests = self._work_report(by_work[work_id], policy)
+            referenced_anywhere.update(digests)
+        cas_entries, temp_files, disk_usage = self._cas_inventory()
+        return self._finish_report(
+            policy, works, referenced_anywhere, cas_entries, temp_files, disk_usage
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1212,6 +1759,25 @@ def _secret() -> str:
 
 def _store_dir() -> Path:
     return Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "") or DEFAULT_CHECKPOINT_ROOT)
+
+
+def _durability(request: Request) -> DurabilityContract:
+    """The request's durability contract (R32-16) — fail closed on junk.
+
+    The DB wiring comes from the app (``app.state.session_factory``, the
+    same authority the lane-control generation ladder uses). A
+    misconfiguration — an unknown mode, or ``postgres`` selected without
+    any session factory — is a 503 refusal naming the problem, never a
+    silent downgrade to the filesystem index the operator believes is
+    transactional.
+    """
+    session_factory = getattr(request.app.state, "session_factory", None)
+    try:
+        return DurabilityContract.from_env(session_factory=session_factory)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"checkpoint durability is misconfigured: {exc}"
+        ) from exc
 
 
 def _max_blob_bytes() -> int:
@@ -1257,9 +1823,16 @@ def storage_health_report(
     operator tool) can call this single function without wiring. The
     report shape is :meth:`CheckpointStore.storage_health_report`'s,
     plus the transport-side request cap (NEXT-05: the configured
-    limits belong in the operator's evidence).
+    limits belong in the operator's evidence) and the ACTIVE durability
+    mode (R32-16) — the doctor has no DB wiring, so under the postgres
+    contract the works half of this CAS-only view is best-effort (the
+    HTTP health endpoint walks the metadata table instead).
     """
-    store = CheckpointStore(Path(root) if root is not None else _store_dir(), policy=policy)
+    store = CheckpointStore(
+        Path(root) if root is not None else _store_dir(),
+        policy=policy,
+        durability=DurabilityContract(mode=DurabilityContract.mode_from_env()),
+    )
     report = store.storage_health_report()
     report["request_max_bytes"] = _max_request_bytes()
     return report
@@ -1540,14 +2113,23 @@ async def put_checkpoint(
 
     manifest_bytes, blobs, sequence = _decode_payload(document, work_id)
 
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
+    durability = _durability(request)
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
     try:
-        result = store.put_checkpoint(
-            work_id=work_id,
-            manifest_bytes=manifest_bytes,
-            blobs=blobs,
-            sequence=sequence,
-        )
+        if durability.mode == DURABILITY_POSTGRES:
+            result = await store.aput_checkpoint(
+                work_id=work_id,
+                manifest_bytes=manifest_bytes,
+                blobs=blobs,
+                sequence=sequence,
+            )
+        else:
+            result = store.put_checkpoint(
+                work_id=work_id,
+                manifest_bytes=manifest_bytes,
+                blobs=blobs,
+                sequence=sequence,
+            )
     except StorageQuotaExceededError as exc:  # R28-14: an honest 413, store intact
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:  # the store's own defense-in-depth refusal
@@ -1565,13 +2147,19 @@ async def checkpoint_storage_health(
     """The operator's storage health report: usage, quotas, orphans (R28-14).
 
     Registered BEFORE the ``{work_id}`` route so the literal path wins;
-    guarded by the same operator token as the listing. Read-only.
+    guarded by the same operator token as the listing. Read-only. Under
+    the postgres contract the works half walks the metadata table (the
+    transactional index) and the report names the mode (R32-16).
     """
     secret = _require_enabled(request)
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
-    report = store.storage_health_report()
+    durability = _durability(request)
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
+    if durability.mode == DURABILITY_POSTGRES:
+        report = await store.astorage_health_report()
+    else:
+        report = store.storage_health_report()
     report["request_max_bytes"] = _max_request_bytes()
     return report
 
@@ -1590,15 +2178,23 @@ async def get_checkpoint(
     if checkpoint_id is not None and not _HEX64.fullmatch(checkpoint_id):
         raise HTTPException(status_code=400, detail="checkpoint_id must be a 64-hex digest")
 
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
-    entry = store.entry(work_id, checkpoint_id)
+    durability = _durability(request)
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
+    if durability.mode == DURABILITY_POSTGRES:
+        entry = await store.aentry(work_id, checkpoint_id)
+    else:
+        entry = store.entry(work_id, checkpoint_id)
     if entry is None:
         scope = f" with id {checkpoint_id}" if checkpoint_id else ""
         raise HTTPException(
             status_code=404,
             detail=f"no checkpoint held for this work{scope}",
         )
-    latest_entry = store.entry(work_id)
+    latest_entry = (
+        await store.aentry(work_id)
+        if durability.mode == DURABILITY_POSTGRES
+        else store.entry(work_id)
+    )
     try:
         manifest_bytes, blobs = store.read_checkpoint(entry)
     except CheckpointCorruptError as exc:
@@ -1629,5 +2225,10 @@ async def list_checkpoints(
     secret = _require_enabled(request)
     if not _authorized(secret, CHECKPOINT_LIST_SCOPE, authorization):
         raise HTTPException(status_code=401, detail="invalid operator token")
-    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env())
-    return {"checkpoints": store.list_entries()}
+    durability = _durability(request)
+    store = CheckpointStore(_store_dir(), policy=StoragePolicy.from_env(), durability=durability)
+    if durability.mode == DURABILITY_POSTGRES:
+        entries = await store.alist_entries()
+    else:
+        entries = store.list_entries()
+    return {"checkpoints": entries}

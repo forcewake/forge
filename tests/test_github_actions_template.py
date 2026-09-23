@@ -55,6 +55,10 @@ class TestWorkflowTemplateContract:
             # (empty on a legacy replay = live task bytes, unenforced).
             "envelope_digest",
             "spec_digest",
+            # R32-11: the ACTIVE plan revision's digest — present only when
+            # an approved revision was activated; maps onto the brief step's
+            # FORGE_PLAN_DIGEST env (empty default = the classic path).
+            "plan_digest",
             # NXT-10: the per-work lane-control HMAC (empty default).
             "lane_control_token",
             # R32-04: the WIP-continuity contract the dispatch selected
@@ -72,6 +76,8 @@ class TestWorkflowTemplateContract:
         assert inputs["envelope_digest"]["default"] == ""
         assert inputs["spec_digest"]["required"] is False
         assert inputs["spec_digest"]["default"] == ""
+        assert inputs["plan_digest"]["required"] is False
+        assert inputs["plan_digest"]["default"] == ""
 
     def test_brief_is_rendered_from_the_issue_before_the_driver_runs(self):
         """The approved plan lives as the forge plan comment on the issue —

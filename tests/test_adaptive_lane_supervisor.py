@@ -394,3 +394,156 @@ class TestDriveLaneDelegation:
         assert outcome.episode is not None and outcome.episode["turn_s"] > 0.0
         journal = outcome.steering_journal or []
         assert any(entry["kind"] == "pause" and entry["outcome"] == "applied" for entry in journal)
+
+
+# ---------------------------------------------------------------------------
+# R32-09 (review 0fca1b7): control-consumer health as execution policy
+# ---------------------------------------------------------------------------
+
+
+class TestControlConsumerHealth:
+    """A drain that dies while the turn still runs is observed LIVE — the
+    verdict the turn then reaches carries ``control_degraded`` (a
+    successful turn never masquerades as a controllable one), and under
+    the strict contract the loss suspends the turn through the same
+    one-verdict machinery an operator pause uses."""
+
+    async def test_a_drain_that_dies_mid_turn_degrades_control_not_the_verdict(self) -> None:
+        events: list[TerminalEvent] = []
+        supervisor: LaneSupervisor[str] = LaneSupervisor(classify=_classifier(events))
+
+        async def turn() -> str:
+            await asyncio.sleep(0.05)
+            return "verdict"
+
+        async def broken_drain() -> None:
+            await asyncio.sleep(0.01)
+            raise RuntimeError("control plane exploded")
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(broken_drain())
+        outcome = await supervisor.run()
+
+        assert outcome == "completed:verdict"  # the turn still reached its verdict
+        assert events[0].kind == TERMINAL_COMPLETED
+        # ... but the degradation rides the terminal event, never swallowed
+        assert "exploded" in events[0].control_degraded
+        assert "exploded" in supervisor.control_degraded
+        assert any("control_degraded" in note for note in supervisor.notes)
+        assert supervisor.classifications == 1
+
+    async def test_the_degradation_is_observed_while_the_turn_still_runs(self) -> None:
+        """The acceptance shape: the RUNNING turn itself can see the loss —
+        the observation happened before its own verdict, not at teardown."""
+        supervisor: LaneSupervisor[str] = LaneSupervisor(classify=lambda event: "done")
+        observed_mid_turn: list[bool] = []
+
+        async def turn() -> str:
+            await asyncio.sleep(0.05)
+            observed_mid_turn.append(bool(supervisor.control_degraded))
+            return "verdict"
+
+        async def drain() -> None:
+            await asyncio.sleep(0.01)
+            raise RuntimeError("steering died early")
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(drain())
+        assert await supervisor.run() == "done"
+
+        assert observed_mid_turn == [True]  # recorded BEFORE the turn ended
+
+    async def test_a_clean_drain_return_is_not_degradation(self) -> None:
+        events: list[TerminalEvent] = []
+        supervisor: LaneSupervisor[str] = LaneSupervisor(classify=_classifier(events))
+
+        async def turn() -> str:
+            await asyncio.sleep(0.02)
+            return "done"
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(_noop_drain())  # returns cleanly, early
+        assert await supervisor.run() == "completed:done"
+        assert supervisor.control_degraded == ""
+        assert events[0].control_degraded == ""
+        assert not any("control_degraded" in note for note in supervisor.notes)
+
+    async def test_strict_mode_suspends_the_turn_when_the_drain_dies(self) -> None:
+        events: list[TerminalEvent] = []
+        supervisor: LaneSupervisor[str] = LaneSupervisor(
+            classify=_classifier(events), strict_control=True
+        )
+        turn_reached_its_end: list[bool] = []
+
+        async def turn() -> str:
+            await asyncio.sleep(10)  # a long vendor wait the suspension must cut
+            turn_reached_its_end.append(True)
+            return "never-reached"
+
+        async def drain() -> None:
+            await asyncio.sleep(0.01)
+            raise RuntimeError("steering lost")
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(drain())
+        outcome = await supervisor.run()
+
+        assert outcome == "suspended:control_lost"
+        assert events[0].kind == TERMINAL_SUSPENDED
+        assert supervisor.urgent is not None
+        assert supervisor.urgent.kind == "control_lost"
+        assert "steering lost" in events[0].reason
+        assert "steering lost" in events[0].control_degraded
+        assert turn_reached_its_end == []  # the turn never ran to its own end
+        assert supervisor.classifications == 1
+
+    async def test_strict_mode_does_not_escalate_a_clean_drain_return(self) -> None:
+        events: list[TerminalEvent] = []
+        supervisor: LaneSupervisor[str] = LaneSupervisor(
+            classify=_classifier(events), strict_control=True
+        )
+
+        async def turn() -> str:
+            await asyncio.sleep(0.02)
+            return "done"
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(_noop_drain())
+        assert await supervisor.run() == "completed:done"  # only a FAILURE suspends
+        assert supervisor.urgent is None
+
+    async def test_the_strict_contract_reads_the_env_and_the_pin_wins(self, monkeypatch):
+        from forge.adaptive.lane_supervisor import STRICT_CONTROL_ENV, strict_control_from_env
+
+        monkeypatch.delenv(STRICT_CONTROL_ENV, raising=False)
+        assert strict_control_from_env() is False
+        assert strict_control_from_env({}) is False
+        assert strict_control_from_env({STRICT_CONTROL_ENV: "1"}) is True
+        assert strict_control_from_env({STRICT_CONTROL_ENV: "off"}) is False
+
+        monkeypatch.setenv(STRICT_CONTROL_ENV, "1")
+        assert LaneSupervisor(classify=_classifier([])).strict_control is True
+        # an explicit pin overrides the env (a cycle may opt out deliberately)
+        pinned = LaneSupervisor(classify=_classifier([]), strict_control=False)
+        assert pinned.strict_control is False
+
+    async def test_a_drain_failure_after_the_turn_is_teardown_noise_not_degradation(
+        self,
+    ) -> None:
+        """The drain outliving the turn fails during TEARDOWN — recorded as
+        a teardown note, never as mid-turn control degradation."""
+        events: list[TerminalEvent] = []
+        supervisor: LaneSupervisor[str] = LaneSupervisor(classify=_classifier(events))
+
+        async def turn() -> str:
+            return "already-done"  # the verdict exists before the drain dies
+
+        async def dying_drain() -> None:
+            await asyncio.sleep(0.01)
+            raise RuntimeError("died at teardown")
+
+        supervisor.submit_turn(turn())
+        supervisor.submit_drain(dying_drain())
+        assert await supervisor.run() == "completed:already-done"
+        assert events[0].control_degraded == ""  # control was intact WHILE it ran
+        assert supervisor.classifications == 1

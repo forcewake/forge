@@ -1125,6 +1125,58 @@ def _refused(code: str, reason: str) -> DurableActivationOutcome:
     return DurableActivationOutcome(status="refused", code=code, reason=reason)
 
 
+async def _rebind_gate_to_revision(session: Any, run_id: str, record: ActivationRecord) -> None:
+    """Re-bind the run's human gate to the activated plan (R32-11).
+
+    The /approve-revision IS a human approval of the revised content, so
+    the gate the next ``/go`` consumes must bind the NEW plan digest — a
+    fresh approval generation copying the superseded round's window,
+    base, policy and spec bindings (only the plan digest and the source
+    identity move). Runs without a gate (a revision world that never
+    opened one) rebind nothing: there is no approval surface to move,
+    and the dispatch's ``stale_plan_digest`` fence still guards the
+    boundary. Called INSIDE the activation transaction — the rebind
+    commits with the switch or not at all.
+    """
+    from sqlalchemy import func, select
+
+    from forge.durable.models import GateApproval
+
+    latest = (
+        (
+            await session.execute(
+                select(GateApproval)
+                .where(GateApproval.flow_run_id == run_id)
+                .order_by(GateApproval.id.desc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if latest is None:
+        return
+    generation = (
+        await session.execute(
+            select(func.max(GateApproval.generation)).where(GateApproval.flow_run_id == run_id)
+        )
+    ).scalar_one()
+    session.add(
+        GateApproval(
+            flow_run_id=run_id,
+            generation=(generation + 1) if generation is not None else 0,
+            plan_digest=record.activated_plan_digest,
+            base_sha=latest.base_sha,
+            policy_digest=latest.policy_digest,
+            approver_user_id=latest.approver_user_id,
+            source_event_id=f"approve-revision:{record.decision_id}"[:64],
+            expires_at=latest.expires_at,
+            spec_digest=latest.spec_digest,
+            task_digest=latest.task_digest,
+        )
+    )
+
+
 async def activate_pending_revision(
     session_factory: _RevisionSessionFactory,
     run_id: str,
@@ -1255,6 +1307,17 @@ async def activate_pending_revision(
         )
         merged.pop(PENDING_PROPOSAL_KEY, None)  # the decision is consumed
         run.evidence = merged
+        # R32-11: the durable row follows the switch — the plan digest the
+        # gate validates and the dispatch claims is the ACTIVE plan's from
+        # here on, never the superseded comment's. The same transaction
+        # also re-binds the human gate to the revised digest (a fresh
+        # generation copying the superseded round's window/policy): the
+        # /approve-revision WAS the human approval of the new content, so
+        # the next /go consumes a decision bound to the plan it will run,
+        # while a /go still carrying the OLD digest refuses at the
+        # dispatch boundary (``stale_plan_digest``).
+        run.plan_digest = record.activated_plan_digest
+        await _rebind_gate_to_revision(session, run_id, record)
         session.add(
             Outbox(
                 flow_run_id=run_id,
@@ -1352,9 +1415,36 @@ class DispatchPlanBinding:
     def dispatchable(self) -> bool:
         return self.status == "ok"
 
+    def as_document(self) -> dict[str, Any]:
+        """The audit shape the dispatch boundary freezes into the run's
+        evidence (R32-11): which plan the dispatched lane runs under,
+        which digest it replaced, and — on refusal — the stable code."""
+        return {
+            "status": self.status,
+            "plan_id": self.plan_id,
+            "active_revision": self.active_revision,
+            "plan_digest": self.plan_digest,
+            "revised_from_digest": self.revised_from_digest,
+            **({"code": self.code, "reason": self.reason[:200]} if self.code else {}),
+        }
 
-def _dispatch_refused(run_id: str, code: str, reason: str) -> DispatchPlanBinding:
-    return DispatchPlanBinding(status="refused", run_id=run_id, code=code, reason=reason)
+
+def _dispatch_refused(
+    run_id: str,
+    code: str,
+    reason: str,
+    *,
+    active: str = "",
+    revised_from: str = "",
+) -> DispatchPlanBinding:
+    return DispatchPlanBinding(
+        status="refused",
+        run_id=run_id,
+        code=code,
+        reason=reason,
+        plan_digest=active,
+        revised_from_digest=revised_from,
+    )
 
 
 async def dispatch_plan_binding(
@@ -1409,10 +1499,14 @@ async def dispatch_plan_binding(
             f"the /go carries plan digest {claimed}, which the approved revision"
             f" already replaced (active: {digest}) — dispatch must read the"
             " revised plan, not the superseded comment",
+            active=digest,
+            revised_from=revised_from,
         )
     return _dispatch_refused(
         run_id,
         "plan_digest_mismatch",
         f"the /go claims plan digest {claimed} but the active plan is {digest}"
         " — an unknown claim refuses like any other",
+        active=digest,
+        revised_from=revised_from,
     )

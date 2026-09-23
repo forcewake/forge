@@ -3183,7 +3183,13 @@ class TestExecutionLeaseAtDispatch:
         snapshot = await lease_snapshot(
             AdmissionPolicy.from_env(), PROJECT_ID, db, provider="azure_devops"
         )
-        assert snapshot == {"held": 1, "completed": 0, "limit": 1, "available": 0}
+        assert snapshot == {
+            "held": 1,
+            "draining": 0,  # R32-07: the uncertain-occupancy view
+            "completed": 0,
+            "limit": 1,
+            "available": 0,
+        }
 
     async def test_queue_full_refusal_consumes_no_execution_attempt(self, db, fake, monkeypatch):
         """NEXT-12 at the /implement boundary: a queue-full refusal parks

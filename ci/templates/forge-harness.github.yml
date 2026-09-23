@@ -9,12 +9,16 @@
 #
 # Dispatched by forge via workflow_dispatch with inputs:
 #   run_id, attempt_base_oid, driver, model, issue_number, plan_note_id,
-#   envelope_digest, spec_digest, lane_resume_mode, repair_context
+#   envelope_digest, spec_digest, plan_digest, lane_resume_mode,
+#   repair_context
 #   (see forge.execution.github_actions; the approved plan/task bytes are
 #   fetched by the lane from the plan comment addressed by plan_note_id and
 #   re-verified against envelope_digest + spec_digest — A03: fail-closed on
 #   any post-approval byte change; no input size limits; empty
-#   envelope_digest = legacy replay, unenforced)
+#   envelope_digest = legacy replay, unenforced; plan_digest carries the
+#   ACTIVE plan revision's digest when an approved revision was activated —
+#   R32-11: the lane's brief binds to the durable active plan, never the
+#   superseded comment)
 #
 # The driver step is rendered by forge's HarnessDriver.build_script()
 # (Stage D) — the template only provisions the lane.
@@ -74,6 +78,14 @@ on:
         type: string
       spec_digest:
         description: "digest of the frozen executable RunSpec the envelope binds (A03)"
+        required: false
+        default: ""
+        type: string
+      plan_digest:
+        description: >-
+          digest of the ACTIVE plan revision (R32-11): present only when an
+          approved revision was activated — the lane's brief binds to this
+          durable digest, never the superseded plan comment's.
         required: false
         default: ""
         type: string
@@ -165,6 +177,11 @@ jobs:
           # the task text LIVE, loudly unenforced.
           FORGE_ENVELOPE_DIGEST: ${{ inputs.envelope_digest }}
           FORGE_SPEC_DIGEST: ${{ inputs.spec_digest }}
+          # R32-11: the ACTIVE plan revision's digest when an approved
+          # revision was activated — the durable plan identity this lane's
+          # brief runs under (empty on the classic path: the envelope
+          # binding above is the whole contract).
+          FORGE_PLAN_DIGEST: ${{ inputs.plan_digest }}
           # The run id the plan comment must mention (tamper guard: another
           # run's plan can never ride this lane's brief).
           FORGE_RUN_ID: ${{ inputs.run_id }}

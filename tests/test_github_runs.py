@@ -49,7 +49,12 @@ from forge.integrations.github_flow import (
     github_factory_branch,
 )
 from forge.models.base import Base
-from forge.orchestrator.project_config import clear_cache
+from forge.adaptive.discovery_stage import DiscoveryRunContext
+from forge.orchestrator.project_config import (
+    ConfigReadResult,
+    clear_cache,
+    read_project_config,
+)
 from forge.repository import Change, ChangeSet, Operation
 from forge.runs.admission import approvers_for, check_admission
 from forge.runs.github_service import GitHubRunService, execute_github_run_command
@@ -3990,3 +3995,448 @@ class TestExecutionLeaseAtDispatch:
         )
         assert snapshot["held"] == 1
         assert snapshot["completed"] == 0  # the parked run never executed
+
+
+# ----------------------------------------------------------------------
+# R32-10: the system-context connection — neighbor-aware discovery on
+# the normal /implement path (NEXT-21 wired into the planning leg)
+# ----------------------------------------------------------------------
+
+
+class _CountingReader:
+    """A duck-typed NEIGHBOR reader that records what discovery read."""
+
+    def __init__(self, files: dict[str, str]) -> None:
+        from types import SimpleNamespace
+
+        self._entry = SimpleNamespace
+        self._files = files
+        self.text_reads: list[str] = []
+
+    async def get_tree(
+        self, project_id: int, path: str = "", ref: str = "HEAD", recursive: bool = False
+    ) -> list:
+        return [self._entry(path=p, type="blob") for p in sorted(self._files)]
+
+    async def read_text(self, file_path: str, ref: str = "HEAD") -> str:
+        self.text_reads.append(file_path)
+        return self._files[file_path]
+
+
+class TestSystemContextDiscovery:
+    """R32-10: a ``neighbors:`` section in the project's ``.forge.yml``
+    turns the planning leg's discovery into the read-many/write-one
+    system context — the own repo plus every AUTHORIZED neighbor, each
+    through its own reader — while a project without neighbors keeps the
+    single-repo path exactly as it was."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_config_cache(self):
+        # The typed config read caches by authority identity; the fake's
+        # legacy key contains its repr, and CPython reuses freed
+        # addresses — the same guard the A13 config tests apply.
+        clear_cache()
+        yield
+        clear_cache()
+
+    @staticmethod
+    def _seed_with_neighbors(fake: FakeGitHub, forge_yml: str) -> None:
+        fake.seed_repo(REPO, {"src/app.py": "print('hi')\n", ".forge.yml": forge_yml})
+
+    async def test_two_authorized_neighbors_discover_across_three_repositories(
+        self, db, fake, monkeypatch
+    ):
+        from forge.adaptive.research_planner import FORGE_DISCOVERY_MODE_ENV
+
+        monkeypatch.setenv(FORGE_DISCOVERY_MODE_ENV, "lexical")
+        self._seed_with_neighbors(
+            fake,
+            "forge:\n"
+            "  neighbors:\n"
+            "    - provider: github\n"
+            "      repository_id: acme/partner\n"
+            "      ref: 1111111111111111111111111111111111111111\n"
+            "    - provider: github\n"
+            "      repository_id: acme/second\n"
+            "      allowed_globs: ['pkg/**']\n",
+        )
+        partner = _CountingReader({"src/planner.py": "class LLMPlanner:\n    pass\n"})
+        second = _CountingReader({"pkg/api.md": "# the shared contract\n"})
+        readers = {"github:acme/partner": partner, "github:acme/second": second}
+        service = GitHubRunService(
+            db,
+            make_settings(),
+            ForgeConfig(),
+            stack=make_stack(fake),
+            repo_full_name=REPO,
+            neighbor_reader_factory=lambda neighbor: readers[neighbor.key],
+        )
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_APPROVAL.value  # planned normally
+        record = dict((run.evidence or {}).get("discovery") or {})
+        assert record.get("status") == "complete"
+        # ONE discovery over the whole authorized set: the own repo plus
+        # both neighbors, each under its composite namespace.
+        assert set(record["dispatch"]["repositories"]) == {
+            "own",
+            "github:acme/partner",
+            "github:acme/second",
+        }
+        # all THREE repositories were actually read (the own repo through
+        # the stack reader, each neighbor through its own).
+        assert fake.calls_of("get_tree"), "the own repo was read"
+        assert partner.text_reads, "neighbor 1 was read"
+        assert second.text_reads == ["pkg/api.md"]  # its globs bounded the read
+
+    async def test_without_neighbors_the_single_repo_path_stays_byte_identical(self, db, fake):
+        service = make_service(db, fake)  # no factory, no neighbors section
+        profile = service._system_context_profile(
+            ConfigReadResult.confirmed_absent(ref="main"), frozen_ref="main", path_scope=[]
+        )
+        assert profile.neighbors == ()
+
+        ctx = service._discovery_context(
+            run_id="a" * 32,
+            project_id=1,
+            frozen_ref="main",
+            profile=profile,
+            neighbor_readers={},
+        )
+        expected = DiscoveryRunContext.from_reader(
+            run_id="a" * 32,
+            project_id=1,
+            session_factory=db,
+            reader=fake,
+            ref="main",
+            repository_id=REPO,
+            allowed_globs=None,
+            research=None,
+        )
+        # the legacy single-repo shapes, byte for byte (the lazy loader is
+        # a closure — everything DURABLE about the two contexts compares
+        # equal: identity, ref, scope and the one own-repo spec).
+        assert (ctx.run_id, ctx.project_id, ctx.repository_id, ctx.source_oid) == (
+            expected.run_id,
+            expected.project_id,
+            expected.repository_id,
+            expected.source_oid,
+        )
+        assert ctx.allowed_globs == expected.allowed_globs is None
+        assert ctx.repo_specs == expected.repo_specs
+
+    async def test_the_own_path_scope_and_neighbor_pins_ride_their_entries(self, db, fake):
+        self._seed_with_neighbors(
+            fake,
+            "forge:\n"
+            "  implement:\n"
+            "    paths: ['src/**']\n"
+            "  neighbors:\n"
+            "    - provider: github\n"
+            "      repository_id: acme/partner\n"
+            "      ref: 1111111111111111111111111111111111111111\n"
+            "    - provider: github\n"
+            "      repository_id: acme/second\n"
+            "      allowed_globs: ['pkg/**']\n",
+        )
+        config_read = await read_project_config(fake, PROJECT_ID, ref=BASE_HEAD)
+        assert config_read.status == "valid"
+        service = make_service(db, fake)
+        profile = service._system_context_profile(
+            config_read,
+            frozen_ref=BASE_HEAD,
+            path_scope=list(config_read.config.implement_paths),
+        )
+        readers = {
+            "github:acme/partner": _CountingReader({"src/planner.py": "x\n"}),
+            "github:acme/second": _CountingReader({"pkg/api.md": "y\n"}),
+        }
+        ctx = service._discovery_context(
+            run_id="b" * 32,
+            project_id=PROJECT_ID,
+            frozen_ref=BASE_HEAD,
+            profile=profile,
+            neighbor_readers=readers,
+        )
+        assert [(s.repo_key, s.repository_id, s.ref, s.allowed_globs) for s in ctx.repo_specs] == [
+            ("own", REPO, BASE_HEAD, ["src/**"]),  # the monorepo scope survives
+            ("github:acme/partner", "acme/partner", "1" * 40, None),
+            ("github:acme/second", "acme/second", "HEAD", ["pkg/**"]),
+        ]
+
+    async def test_a_misdeclared_neighbor_parks_the_run_before_any_paid_call(self, db, fake):
+        self._seed_with_neighbors(
+            fake,
+            "forge:\n  neighbors:\n    - provider: gitea\n      repository_id: partner/neighbor\n",
+        )
+        service = make_service(db, fake, stack=make_stack(fake, planner=BoomPlanner()))
+
+        run_id = await start(service)  # BoomPlanner proves no model call happened
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "config_invalid" in (run.status_reason or "")
+        assert "neighbors" in (run.status_reason or "")
+
+    async def test_a_foreign_provider_neighbor_needs_its_own_connection(self, db, fake):
+        self._seed_with_neighbors(
+            fake,
+            "forge:\n  neighbors:\n    - provider: gitlab\n      repository_id: partner/neighbor\n",
+        )
+        service = make_service(db, fake)
+
+        run_id = await start(service)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert "config_invalid" in (run.status_reason or "")
+        assert "github connection" in (run.status_reason or "")
+
+
+# ----------------------------------------------------------------------
+# R32-11: the dispatch boundary consumes the ACTIVE plan revision
+# (NEXT-20 wired into the GitHub /go → harness dispatch leg)
+# ----------------------------------------------------------------------
+
+R32_CONTRACT_DIGEST = "1" * 64
+R32_SNAPSHOT_DIGEST = "2" * 64
+
+
+def _gh_revision(revision: int, parent: int | None):
+    from forge.adaptive.models import PlanRevision
+
+    return PlanRevision.model_validate(
+        {
+            "plan_id": "plan-gh-1",
+            "work_id": "wp-gh-1",
+            "revision": revision,
+            "parent_revision": parent,
+            "work_contract_digest": R32_CONTRACT_DIGEST,
+            "snapshot_set_digest": R32_SNAPSHOT_DIGEST,
+            "summary": "Two steps inside the approved scope.",
+            "steps": [
+                {
+                    "step_id": "S1",
+                    "objective": "Inspect existing behavior.",
+                    "acceptance_refs": ["AC-1"],
+                    "impact": ["internal"],
+                },
+                {
+                    "step_id": "S2",
+                    "objective": "Implement the authorized change.",
+                    "depends_on": ["S1"],
+                    "acceptance_refs": ["AC-1"],
+                    "impact": ["internal"],
+                },
+            ],
+        }
+    )
+
+
+class TestRevisionDispatchBoundary:
+    """R32-11: /approve-revision activates the revised plan in one durable
+    transaction (the run row and the human gate move with it), and the
+    NEXT /go dispatches under the ACTIVE plan's digest — read from the
+    durable pointer, never the superseded comment. A /go still claiming
+    the OLD digest refuses before any dispatch I/O."""
+
+    def _service(self, db, fake) -> GitHubRunService:
+        return make_service(
+            db,
+            fake,
+            settings=make_settings(
+                FORGE_GITHUB_HARNESS_WORKFLOW=HARNESS_WORKFLOW,
+                FORGE_HARNESS_MODEL=HARNESS_MODEL,
+            ),
+        )
+
+    async def _activate_revision(self, db, run_id: str):
+        """Seed revision 1 as the durable active plan, then stage + approve
+        revision 2 through the REAL activation transaction."""
+        from forge.adaptive.revisions import (
+            ACTIVE_PLAN_KEY,
+            RevisionDecision,
+            activate_pending_revision,
+            plan_digest,
+            proposed_revision_identity,
+            stage_pending_revision,
+        )
+
+        first = _gh_revision(1, None)
+        second = _gh_revision(2, 1)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            merged = dict(run.evidence or {})
+            merged[ACTIVE_PLAN_KEY] = {
+                "schema": "forge.revision.active-plan/1",
+                "work_id": "wp-gh-1",
+                "plan_id": "plan-gh-1",
+                "active_revision": 1,
+                "plan_digest": plan_digest(first),
+                "revised_from_digest": "",
+                "work_contract_digest": R32_CONTRACT_DIGEST,
+                "authorization_epoch": 3,
+                "publication_epoch": 1,
+                "activated_by_decision": "",
+            }
+            run.evidence = merged
+            await session.commit()
+
+        decision = RevisionDecision(
+            decision_id="rd-gh-1",
+            work_id="wp-gh-1",
+            parent_revision=1,
+            proposed_revision_id=proposed_revision_identity(second),
+            proposed_digest=plan_digest(second),
+            work_contract_digest=R32_CONTRACT_DIGEST,
+            authorization_epoch=3,
+        )
+        from forge.adaptive.revisions import ActivePlanState
+
+        await stage_pending_revision(
+            db,
+            run_id,
+            decision,
+            second,
+            ActivePlanState(
+                work_id="wp-gh-1",
+                plan_id="plan-gh-1",
+                active_revision=1,
+                work_contract_digest=R32_CONTRACT_DIGEST,
+                authorization_epoch=3,
+                publication_epoch=1,
+            ),
+        )
+        outcome = await activate_pending_revision(
+            db, run_id, decision.decision_id, decided_by="alice"
+        )
+        assert outcome.status == "activated"
+        return plan_digest(first), plan_digest(second)
+
+    async def test_approve_revision_then_go_dispatches_the_new_plan_digest(self, db, fake):
+        service = self._service(db, fake)
+        run_id = await start(service)
+        old_digest, new_digest = await self._activate_revision(db, run_id)
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value  # dispatched
+        # the dispatch envelope carries the ACTIVE (new) plan digest —
+        # not the original comment's — and the evidence freezes the same
+        # binding beside the handle the reconciler restarts from.
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["plan_digest"] == new_digest
+        assert dispatch["inputs"]["plan_digest"] != old_digest
+        binding = dict((run.evidence or {}).get("plan_binding") or {})
+        assert binding["plan_digest"] == new_digest
+        assert binding["revised_from_digest"] == old_digest
+        assert binding["active_revision"] == 2
+        # the run row follows the switch (the gate and every later leg
+        # name the ACTIVE plan), and the consumed gate is the REBOUND
+        # generation bound to the revised digest.
+        assert run.plan_digest == new_digest
+        async with db() as session:
+            gates = (
+                (
+                    await session.execute(
+                        select(GateApproval)
+                        .where(GateApproval.flow_run_id == run_id)
+                        .order_by(GateApproval.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [g.generation for g in gates] == [0, 1]
+        assert gates[0].plan_digest != new_digest and gates[0].consumed_at is None
+        assert gates[1].plan_digest == new_digest and gates[1].consumed_at is not None
+
+    async def test_a_stale_go_with_the_old_digest_is_refused_before_dispatch(self, db, fake):
+        service = self._service(db, fake)
+        run_id = await start(service)
+        old_digest, new_digest = await self._activate_revision(db, run_id)
+        clear_comments(fake)
+        # The operator approved the OLD plan: the gate they consumed and
+        # the run row still carry the superseded digest (a pre-revision
+        # approval round — the world the dispatch fence exists for).
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.plan_digest = old_digest
+            gate = (
+                (
+                    await session.execute(
+                        select(GateApproval)
+                        .where(GateApproval.flow_run_id == run_id)
+                        .order_by(GateApproval.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            gate.plan_digest = old_digest
+            await session.commit()
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.BLOCKED.value
+        assert (run.status_reason or "").startswith("stale_plan_digest")
+        assert not fake.calls_of("dispatch_workflow")  # nothing was dispatched
+        [note] = [body for body in comments(fake) if "stale_plan_digest" in body]
+        assert old_digest[:12] in note  # names both sides of the drift…
+        assert new_digest[:12] in note
+        assert "/go" in note and "/implement" in note  # …and the way out
+
+    async def test_a_run_without_an_active_revision_dispatches_unchanged(self, db, fake):
+        """The legacy /go (no revision ever activated) keeps the dispatch
+        inputs byte-identical — no plan_digest input appears at all."""
+        service = self._service(db, fake)
+        run_id = await start(service)
+
+        await go(service, run_id)
+
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value
+        (dispatch,) = fake.dispatch_inputs
+        assert "plan_digest" not in dispatch["inputs"]
+        assert "plan_binding" not in (run.evidence or {})
+
+    async def test_a_replanned_run_supersedes_the_revision_lineage(self, db, fake):
+        """A fresh frozen plan drops any leftover ``active_plan`` pointer
+        from a replaced plan — the new plan's digest is the dispatch
+        identity, and a stale pointer would false-refuse the next /go."""
+        from forge.adaptive.revisions import ACTIVE_PLAN_KEY
+
+        service = self._service(db, fake)
+        run_id = await start(service)
+        old_digest, _new_digest = await self._activate_revision(db, run_id)
+        assert ACTIVE_PLAN_KEY in (await get_run(db, run_id)).evidence
+
+        # The replan (the config-block recovery pass re-enters this same
+        # leg through the fenced plan-restart edge — the run is back at
+        # preflight when planning restarts).
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.PREFLIGHT.value
+            await session.commit()
+        await service._plan_and_publish(
+            run_id,
+            project_id=PROJECT_ID,
+            issue_number=ISSUE,
+            issue_title=ISSUE_TITLE,
+            issue_description=ISSUE_DESC,
+            author_username="alice",
+        )
+
+        run = await get_run(db, run_id)
+        assert ACTIVE_PLAN_KEY not in (run.evidence or {})
+        assert run.plan_digest != old_digest  # the fresh plan's own digest
+        await go(service, run_id)
+        run = await get_run(db, run_id)
+        assert run.status == FlowStatus.WAITING_HARNESS.value  # dispatched clean
+        (dispatch,) = fake.dispatch_inputs
+        assert "plan_digest" not in dispatch["inputs"]

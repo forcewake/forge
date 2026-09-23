@@ -27,7 +27,13 @@ Two layers:
   attempt surface as ``conflicting_receipts`` (``{attempt_id, source_a,
   source_b}`` with the disagreeing fields) and degrade the value to
   unknown — never silently averaged, never quietly latest-winned across
-  sources.
+  sources. R32-20 adds the per-attempt ``latency_breakdown`` — the
+  ``dispatch_to_start_s`` / ``start_to_finish_s`` / ``finish_to_review_s``
+  windows from the attempt's own causal timestamps, identity-matched and
+  conflict-aware like every receipt field — and the sticky-unknown
+  placeholder rows for attempts the durable state knows about but the
+  evidence carries no receipt for: a missing attempt is never free and
+  never zero, and the totals it joins degrade with it.
 - :func:`delivery_metrics_for_run` — the durable loader: reads the
   ``FlowRun`` evidence (the additive ``attempts`` list, the harness
   fragment, the acceptance record), corroborates the attempt count with
@@ -63,6 +69,7 @@ __all__ = [
     "AttemptReceipt",
     "ConflictingReceipt",
     "DeliveryMetrics",
+    "LatencyBreakdown",
     "delivery_metrics_for_run",
     "reconcile_delivery",
 ]
@@ -81,8 +88,33 @@ ATTEMPT_EVIDENCE_KEY = "attempts"
 #: from DIFFERENT sources must agree or they conflict.
 DEFAULT_RECEIPT_SOURCE = "attempts"
 
-#: The receipt fields identity-matching compares, in canonical order.
-RECEIPT_FIELDS = ("spend_usd", "model_time_s", "tool_call_count")
+#: The receipt fields identity-matching compares, in canonical order —
+#: R32-20 adds the three per-attempt LATENCY windows so a disagreement
+#: about WHEN an attempt ran is as loud as one about what it cost.
+RECEIPT_FIELDS = (
+    "spend_usd",
+    "model_time_s",
+    "tool_call_count",
+    "dispatch_to_start_s",
+    "start_to_finish_s",
+    "finish_to_review_s",
+)
+
+#: The latency timestamps an attempt record may carry, in causal order
+#: (top-level spelling first, the ``ci`` sub-dict as fallback — the same
+#: fragments the CI-queue observation loader reads).
+_LATENCY_TIMESTAMPS: tuple[str, ...] = ("dispatched_at", "started_at", "finished_at", "reviewed_at")
+
+#: The three causal latency windows (R32-20): receipt-field name and the
+#: pair of timestamps that derives it.
+_LATENCY_WINDOW_PAIRS: tuple[tuple[str, str, str], ...] = (
+    ("dispatch_to_start_s", "dispatched_at", "started_at"),
+    ("start_to_finish_s", "started_at", "finished_at"),
+    ("finish_to_review_s", "finished_at", "reviewed_at"),
+)
+_LATENCY_WINDOW_FIELDS: tuple[str, ...] = tuple(
+    field for field, _began, _end in _LATENCY_WINDOW_PAIRS
+)
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -143,11 +175,47 @@ def _claimed_tools(record: Mapping[str, Any]) -> float | None:
     return _as_nonnegative_number(record.get("tool_call_count"))
 
 
+def _timestamps_of(record: Mapping[str, Any]) -> dict[str, datetime]:
+    """The latency timestamps the record claims, top-level first with the
+    ``ci`` sub-dict as fallback. Unparseable values are absent — an
+    unjudgeable timestamp never becomes epoch zero."""
+    claimed: dict[str, datetime] = {}
+    ci = record.get("ci") if isinstance(record.get("ci"), Mapping) else {}
+    for name in _LATENCY_TIMESTAMPS:
+        if name in record:
+            parsed = _as_datetime(record.get(name))
+        elif name in ci:
+            parsed = _as_datetime(ci.get(name))
+        else:
+            continue
+        if parsed is not None:
+            claimed[name] = parsed
+    return claimed
+
+
+def _claimed_windows(record: Mapping[str, Any]) -> dict[str, float]:
+    """The record's explicit LATENCY-window claims (R32-20).
+
+    Each window is the clamped second count between its two causal
+    timestamps; a window whose pair is not both present claims nothing
+    (``None`` — unknown, never zero).
+    """
+    stamps = _timestamps_of(record)
+    windows: dict[str, float] = {}
+    for field, began_name, ended_name in _LATENCY_WINDOW_PAIRS:
+        if began_name in stamps and ended_name in stamps:
+            windows[field] = max(0.0, (stamps[ended_name] - stamps[began_name]).total_seconds())
+    return windows
+
+
 #: One merged attempt: the identity-matched fold of every record sharing
 #: one attempt id (NEXT-23). ``latest_by_source`` keeps each source's own
 #: LATEST claim per receipt field (the cumulative-replay collapse);
 #: cross-source comparison happens over those, so a superseded replay
 #: never fabricates a conflict against a corroborating second source.
+#: R32-20's ``stamp_names`` names the latency timestamps the attempt
+#: claimed — a window that cannot be derived for it is a NAMED gap, not
+#: silence.
 @dataclass
 class _MergedAttempt:
     attempt_id: str
@@ -155,6 +223,7 @@ class _MergedAttempt:
     latest_by_source: dict[str, dict[str, float]]
     usage_seen: bool
     episode_seen: bool
+    stamp_names: frozenset[str]
 
 
 def _merge_attempts(
@@ -188,6 +257,7 @@ def _merge_attempts(
         latest: dict[str, dict[str, float]] = {}
         usage_seen = False
         episode_seen = False
+        stamp_names: set[str] = set()
         for record in records:
             source = _source_of(record)
             if source not in latest:
@@ -203,9 +273,14 @@ def _merge_attempts(
             tools = _claimed_tools(record)
             if tools is not None:
                 claims["tool_call_count"] = tools
+            for window, seconds in _claimed_windows(record).items():
+                claims[window] = seconds
             usage_seen = usage_seen or isinstance(record.get("usage"), Mapping)
             episode_seen = episode_seen or isinstance(record.get("episode"), Mapping)
-        return _MergedAttempt(attempt_id, sources, latest, usage_seen, episode_seen)
+            stamp_names |= _timestamps_of(record).keys()
+        return _MergedAttempt(
+            attempt_id, sources, latest, usage_seen, episode_seen, frozenset(stamp_names)
+        )
 
     merged = [_fold(records, attempt_id) for attempt_id, records in groups.items()]
     merged.extend(_fold([record], "") for record in anonymous)
@@ -242,6 +317,31 @@ def _seconds_between(start: Any, end: Any) -> float | None:
 
 
 @dataclass(frozen=True)
+class LatencyBreakdown:
+    """One attempt's causal latency windows (R32-20).
+
+    Three windows, each known only when BOTH of its timestamps are —
+    ``None`` is the sticky-unknown rule the whole module shares: a
+    window without its pair is unmeasured, never zero. The timestamps
+    come from the attempt record itself (top-level or its ``ci``
+    fragment), identity-matched per attempt like every other receipt
+    field: two sources claiming different windows for one attempt
+    surface as :class:`ConflictingReceipt` rows and degrade to unknown.
+    """
+
+    dispatch_to_start_s: float | None = None
+    start_to_finish_s: float | None = None
+    finish_to_review_s: float | None = None
+
+    def to_json(self) -> dict[str, float | None]:
+        return {
+            "dispatch_to_start_s": self.dispatch_to_start_s,
+            "start_to_finish_s": self.start_to_finish_s,
+            "finish_to_review_s": self.finish_to_review_s,
+        }
+
+
+@dataclass(frozen=True)
 class AttemptReceipt:
     """One attempt's reconciled receipt, keyed to its attempt id (NEXT-23).
 
@@ -251,7 +351,9 @@ class AttemptReceipt:
     for THIS attempt (no receipt, a token-only receipt, a timing gap, or
     a conflict between sources), never a zero. ``model_time_s`` of 0.0 on
     an attempt that never drove (no episode, no usage) is the honest
-    zero, matching the total's rule.
+    zero, matching the total's rule. R32-20 adds the attempt's
+    :attr:`latency_breakdown` — the dispatch → start → finish → review
+    windows from its own timestamps, sticky-unknown per window.
     """
 
     attempt_id: str
@@ -259,6 +361,7 @@ class AttemptReceipt:
     spend_usd: float | None = None
     model_time_s: float | None = None
     tool_call_count: int | None = None
+    latency_breakdown: LatencyBreakdown = LatencyBreakdown()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -267,6 +370,7 @@ class AttemptReceipt:
             "spend_usd": self.spend_usd,
             "model_time_s": self.model_time_s,
             "tool_call_count": self.tool_call_count,
+            "latency_breakdown": self.latency_breakdown.to_json(),
         }
 
 
@@ -348,6 +452,7 @@ def reconcile_delivery(
     gate_waits: Sequence[Mapping[str, Any]] = (),
     accepted: bool = False,
     run_id: str = "",
+    expected_attempt_count: int | None = None,
 ) -> DeliveryMetrics:
     """Fold the recorded facts into one :class:`DeliveryMetrics`.
 
@@ -374,6 +479,17 @@ def reconcile_delivery(
     - ``tool_call_count`` — the fold of every attempt's counter; known
       only when every attempt records one (a driver that does not count
       tools says so by its absence).
+    - ``per_attempt[*].latency_breakdown`` (R32-20) — the attempt's own
+      ``dispatch_to_start_s`` / ``start_to_finish_s`` /
+      ``finish_to_review_s`` windows from its recorded timestamps
+      (top-level or its ``ci`` fragment), identity-matched and
+      conflict-aware like every other receipt field; a window without
+      both of its timestamps stays ``None`` — unmeasured, never zero.
+    - *expected_attempt_count* (R32-20) — when the durable state knows
+      the run had MORE attempts than the evidence carries receipts for,
+      the missing ones appear as placeholder rows (``missing:#N``) whose
+      every metric is ``None`` — sticky-unknown, never zero — and the
+      folds they join degrade with a note naming the gap.
     - ``ci_queue_seconds`` — the sum of ``dispatched_at`` →
       ``started_at`` over every CI observation; an incomplete
       observation (one side missing) leaves the total unknown.
@@ -386,6 +502,21 @@ def reconcile_delivery(
     if not merged:
         notes.append("no attempt history recorded — usage and time cannot be reconciled")
 
+    # R32-20: attempts the durable state knows about but the evidence
+    # carries no receipt for — placeholder rows, every metric None.
+    placeholders: list[_MergedAttempt] = []
+    if expected_attempt_count is not None and expected_attempt_count > len(merged):
+        missing = expected_attempt_count - len(merged)
+        placeholders = [
+            _MergedAttempt(f"missing:{n}", [], {}, False, False, frozenset())
+            for n in range(1, missing + 1)
+        ]
+        notes.append(
+            f"{missing} attempt(s) the run records have no receipt in the"
+            " evidence — their spend, time and latency are unknown, never zero"
+        )
+    merged = [*merged, *placeholders]
+
     conflicting_receipts: list[ConflictingReceipt] = []
     per_attempt: list[AttemptReceipt] = []
     spend: float | None = 0.0
@@ -395,11 +526,13 @@ def reconcile_delivery(
         label = _attempt_label(attempt.attempt_id, index)
         conflicts = conflict_map.get(label, [])
         conflicted_fields = {field for field, _a, _b in conflicts}
+        is_placeholder = not attempt.sources
 
         # The per-attempt receipt, each field honest on its own.
         attempt_spend: float | None = None
         attempt_turn: float | None = None
         attempt_tools: float | None = None
+        attempt_windows: dict[str, float] = {}
         for source in attempt.sources:
             claims = attempt.latest_by_source[source]
             if "spend_usd" in claims and "spend_usd" not in conflicted_fields:
@@ -408,10 +541,13 @@ def reconcile_delivery(
                 attempt_turn = claims["model_time_s"]
             if "tool_call_count" in claims and "tool_call_count" not in conflicted_fields:
                 attempt_tools = claims["tool_call_count"]
+            for window in _LATENCY_WINDOW_FIELDS:
+                if window in claims and window not in conflicted_fields:
+                    attempt_windows[window] = claims[window]
 
         # Spend: a receipt without a parsable cost figure is a gap, with
         # the note naming WHICH shape of gap (token-only vs none at all).
-        if attempt_spend is None and "spend_usd" not in conflicted_fields:
+        if attempt_spend is None and "spend_usd" not in conflicted_fields and not is_placeholder:
             if attempt.usage_seen:
                 notes.append(
                     f"attempt {label} records no total_cost_usd (tokens only or no"
@@ -422,8 +558,12 @@ def reconcile_delivery(
 
         # Model time: a drove-but-untimed attempt is a gap; an attempt
         # with NEITHER episode nor usage never drove (the honest zero).
+        # A PLACEHOLDER (a missing attempt) never earns that zero: whether
+        # it drove is unknown, so sticky-unknown it stays (R32-20).
         if attempt_turn is None and "model_time_s" not in conflicted_fields:
-            if attempt.episode_seen:
+            if is_placeholder:
+                attempt_turn = None
+            elif attempt.episode_seen:
                 notes.append(f"attempt {label} records an episode without turn time")
             elif attempt.usage_seen:
                 notes.append(f"attempt {label} records usage but no episode — model time unknown")
@@ -432,6 +572,23 @@ def reconcile_delivery(
 
         if attempt_tools is None and "tool_call_count" not in conflicted_fields:
             notes.append(f"attempt {label} records no tool_call_count — tool use unknown")
+
+        # The latency windows (R32-20): a window the attempt cannot derive
+        # from its own timestamps is a NAMED gap when the attempt claimed
+        # any latency timestamp at all.
+        for window, began_name, ended_name in _LATENCY_WINDOW_PAIRS:
+            if window in attempt_windows or not attempt.stamp_names:
+                continue
+            if began_name in attempt.stamp_names and ended_name not in attempt.stamp_names:
+                notes.append(
+                    f"attempt {label} records {began_name} but not {ended_name}"
+                    f" — the {window} window is unknown"
+                )
+            elif ended_name in attempt.stamp_names and began_name not in attempt.stamp_names:
+                notes.append(
+                    f"attempt {label} records {ended_name} but not {began_name}"
+                    f" — the {window} window is unknown"
+                )
 
         # The conflict rows: named, never averaged, degrading the field.
         for field, source_a, source_b in conflicts:
@@ -455,6 +612,11 @@ def reconcile_delivery(
                 spend_usd=attempt_spend,
                 model_time_s=attempt_turn,
                 tool_call_count=int(attempt_tools) if attempt_tools is not None else None,
+                latency_breakdown=LatencyBreakdown(
+                    dispatch_to_start_s=attempt_windows.get("dispatch_to_start_s"),
+                    start_to_finish_s=attempt_windows.get("start_to_finish_s"),
+                    finish_to_review_s=attempt_windows.get("finish_to_review_s"),
+                ),
             )
         )
         spend = None if (spend is None or attempt_spend is None) else spend + attempt_spend
@@ -654,22 +816,28 @@ async def delivery_metrics_for_run(
             .all()
         )
 
+    # R32-20: the durable corroboration of HOW MANY attempts the run had
+    # (commit cycles, recorded candidates, distinct publication scopes).
+    # When it exceeds the recorded receipts, the MISSING attempts join
+    # the reconciliation as placeholder rows — every metric None, the
+    # folds they join degrade to unknown. A missing attempt is never
+    # free and never zero.
+    candidate_count = len(run.candidate_shas or [])
+    scope_count = len(set(intents))
+    corroborated = max(int(run.commit_cycle or 1), candidate_count, scope_count)
+
     metrics = reconcile_delivery(
         attempts=attempt_records,
         ci_observations=_ci_observations_from_evidence(evidence),
         gate_waits=gates,
         accepted=acceptance_state(evidence) == "merged",
         run_id=run_id,
+        expected_attempt_count=corroborated if corroborated > len(attempt_records) else None,
     )
 
     if not attempt_records:
-        # No per-attempt facts on the evidence: corroborate the COUNT from
-        # the durable state (commit cycles, recorded candidates, distinct
-        # publication scopes) — the count is knowable even when the spend
-        # is not, and a wrong count is the worse lie.
-        candidate_count = len(run.candidate_shas or [])
-        scope_count = len(set(intents))
-        corroborated = max(int(run.commit_cycle or 1), candidate_count, scope_count)
+        # No per-attempt facts on the evidence: the count is knowable even
+        # when the spend is not, and a wrong count is the worse lie.
         metrics = replace(
             metrics,
             attempts_count=corroborated,

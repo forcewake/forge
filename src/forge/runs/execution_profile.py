@@ -112,6 +112,7 @@ __all__ = [
     "FORGE_BOOTSTRAP_FAILED_MARKER",
     "FORGE_EGRESS_ALLOWLIST_ENV",
     "FORGE_LANE_PROFILE_ENV",
+    "FORGE_LANE_RECIPE_ENV",
     "FORGE_LANE_STAGE_ENV",
     "HARNESS_PROFILES",
     "LANE_CREDENTIAL_CAPABILITIES",
@@ -140,6 +141,7 @@ __all__ = [
     "LaneExecutionProfile",
     "LocalRepoSource",
     "MaterializedFiles",
+    "ProfileIncoherence",
     "ProfileSource",
     "RecipeViolation",
     "RuntimeRecipe",
@@ -155,6 +157,7 @@ __all__ = [
     "resolve_driver_profile",
     "runtime_recipe",
     "validate_lane_profile_declaration",
+    "validate_profile_coherence",
     "validate_runtime",
     "verify_network_egress",
 ]
@@ -283,6 +286,13 @@ def bootstrap_failed(meta: dict) -> bool:
 #: ``v1`` stays an OPT-IN: the dispatch leg (or a project variable) is
 #: what selects ``v2``.
 FORGE_LANE_PROFILE_ENV = "FORGE_LANE_PROFILE"
+
+#: The env var a lane/dispatch declares the RUNTIME RECIPE axis through
+#: (R32-15): when set, the lane entry validates the whole enabled
+#: capability profile as ONE coherent set at startup — the declared
+#: (profile, recipe, harness) tuple — and fails closed on incoherence.
+#: Unset keeps the legacy startup checks exactly as they were.
+FORGE_LANE_RECIPE_ENV = "FORGE_LANE_RECIPE"
 
 #: The env-carried egress allowlist hook (v2): comma-separated host
 #: patterns the LANE/coding step may reach (``api.z.ai,...``). Empty or
@@ -1356,6 +1366,15 @@ class RuntimeRecipe:
     build_commands: tuple[tuple[str, ...], ...]
     required_files: tuple[str, ...]
     report_prefix: str = ""
+    #: R32-15 — the TOOLCHAIN VERSION env names the runtime must carry
+    #: for the pinned version to be observable at startup (the .NET SDK
+    #: image's ``DOTNET_VERSION``). Empty = the recipe's pin lives in the
+    #: image/interpreter itself and no env axis is claimed.
+    version_env: tuple[str, ...] = ()
+    #: R32-15 — the package-registry hosts the recipe's build tail
+    #: (restore/ci fetches) REQUIRES egress to; the coherence check
+    #: compares them against the lane's network/egress policy.
+    package_registry_hosts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.recipe_id or not self.image_pin:
@@ -1365,6 +1384,12 @@ class RuntimeRecipe:
                 "a recipe carries its version check and its build commands — "
                 "an empty recipe is an unexecutable one"
             )
+        for name in self.version_env:
+            if not name.strip():
+                raise ValueError("version_env entries must be non-empty env names")
+        for host in self.package_registry_hosts:
+            if not host.strip():
+                raise ValueError("package_registry_hosts entries must be non-empty hosts")
 
     def gate(self, source: ProfileSource) -> tuple[RecipeViolation, ...]:
         """Check the TOOLCHAIN prerequisites against one repo view.
@@ -1419,6 +1444,8 @@ class RuntimeRecipe:
             "build_commands": [list(argv) for argv in self.build_commands],
             "required_files": list(self.required_files),
             "report_prefix": self.report_prefix,
+            "version_env": list(self.version_env),
+            "package_registry_hosts": list(self.package_registry_hosts),
         }
 
 
@@ -1486,6 +1513,10 @@ RUNTIME_RECIPES: Mapping[str, RuntimeRecipe] = {
         ),
         required_files=("global.json",),
         report_prefix="forge_",  # NEXT-16: unique TRX prefixes, aggregate all
+        # R32-15: the SDK image's pinned .NET major the lane asserts at
+        # startup, and the registry the locked restore fetches from.
+        version_env=("DOTNET_VERSION",),
+        package_registry_hosts=("nuget.org",),
     ),
     "python-3-13": RuntimeRecipe(
         recipe_id="python-3-13",
@@ -1493,6 +1524,7 @@ RUNTIME_RECIPES: Mapping[str, RuntimeRecipe] = {
         version_check=("python3", "--version"),
         build_commands=(("uv", "sync", "--frozen"),),
         required_files=(),  # lock-less repos take the documented pip fallback
+        package_registry_hosts=("pypi.org", "files.pythonhosted.org"),
     ),
     "node-22": RuntimeRecipe(
         recipe_id="node-22",
@@ -1500,6 +1532,7 @@ RUNTIME_RECIPES: Mapping[str, RuntimeRecipe] = {
         version_check=("node", "--version"),
         build_commands=(("npm", "ci"),),
         required_files=("package-lock.json",),
+        package_registry_hosts=("registry.npmjs.org",),
     ),
 }
 
@@ -1656,3 +1689,154 @@ def resolve_driver_profile(driver_id: str) -> LaneDriverProfile:
         f"authority; aliases: {tuple(sorted(DRIVER_PROFILE_ALIASES))}, composed "
         "spelling: <recipe>+<harness> (e.g. dotnet-9+claude-code)"
     )
+
+
+# -- the whole-profile coherence check (R32-15) --------------------------------
+#
+# The review's finding: "the profile is declared but not validated as a
+# coherent set at runtime." Each axis ships its own validator — the
+# recipe gates its files, the lane profile validates its declaration,
+# the runtime validates its measurable surface — but NOTHING checked the
+# (profile, recipe, harness) TUPLE as one contract: a .NET recipe can be
+# declared beside a harness whose credentials the profile never stages,
+# a network posture the recipe's restore cannot live under, or a runtime
+# missing the toolchain version env the recipe's pin claims.
+# :func:`validate_profile_coherence` is that one contract — three
+# composition edges, each answering "can this lane actually run WHAT IT
+# DECLARED": the recipe's toolchain checks pass for the harness's lane,
+# the harness's credential names are present in the profile's allowed
+# env, and the egress/network policy is compatible with the recipe's
+# requirements. The lane entry calls it at startup; an incoherent
+# profile fails CLOSED — onboarding fails early with the exact missing
+# prerequisites, instead of after an agent has spent tokens.
+
+
+@dataclass(frozen=True)
+class ProfileIncoherence:
+    """One composition edge :func:`validate_profile_coherence` found broken.
+
+    ``check`` names the axis — ``recipe_toolchain`` (a required pin file
+    missing/unreadable in the target), ``recipe_version_env`` (the
+    toolchain version env the recipe declares is absent at startup),
+    ``harness_credentials`` (the harness consumes a credential name the
+    profile's coding-stage allowance never stages) or ``network_policy``
+    (the egress posture cannot carry the recipe's registry
+    requirements). ``detail`` is the actionable sentence.
+    """
+
+    check: str
+    detail: str
+
+    def __str__(self) -> str:  # pragma: no cover — trivial rendering
+        return f"[{self.check}] {self.detail}"
+
+
+def _policy_grants_bootstrap_registries(profile: LaneExecutionProfile) -> bool:
+    """Whether the profile's egress policy text grants the BOOTSTRAP stage
+    its pinned package registries (the v2 posture's documented allowance)."""
+    text = profile.egress_policy.lower()
+    return "bootstrap" in text and "registr" in text
+
+
+def validate_profile_coherence(
+    profile: LaneExecutionProfile,
+    recipe: RuntimeRecipe,
+    harness: HarnessProfile,
+    *,
+    source: ProfileSource | None = None,
+    env: Mapping[str, str] | None = None,
+    egress_allowlist: Sequence[str] | None = None,
+) -> list[ProfileIncoherence]:
+    """Validate the whole enabled capability profile as ONE set (R32-15).
+
+    Three composition edges between the declared (profile, recipe,
+    harness) tuple, each failing closed with an actionable
+    :class:`ProfileIncoherence`:
+
+    1. **recipe_toolchain** — the recipe's :meth:`RuntimeRecipe.gate`
+       over *source* (the lane's view of the target checkout): every
+       required pin file must be found. The gate is harness-INDEPENDENT
+       (NEXT-15) but it must PASS for the harness's lane to be coherent
+       — a claude lane on a repo without ``global.json`` is exactly as
+       broken as a codex one. Skipped when *source* is not supplied
+       (a caller with no repo view checks the other edges only).
+    2. **recipe_version_env** — every env name the recipe declares
+       (:attr:`RuntimeRecipe.version_env`) must carry a non-empty value
+       in *env* (default ``os.environ``): the .NET recipe's
+       ``DOTNET_VERSION`` pin must actually reach the lane.
+    3. **harness_credentials** — every credential name the harness
+       consumes must be within the profile's CODING-stage allowance
+       (:func:`credentials_at`): a harness whose key the profile never
+       stages is a lane that cannot start, declared as if it could.
+    4. **network_policy** — the recipe's build tail needs egress to its
+       :attr:`RuntimeRecipe.package_registry_hosts`; the profile must
+       grant it. v1's open egress is compatible by declaration; a
+       deny-by-default profile (v2 and friends) is compatible when its
+       policy grants the bootstrap stage its registries OR the explicit
+       *egress_allowlist* (the runtime-declared hook value) covers them
+       (fnmatch patterns). An egress posture that grants neither cannot
+       run the recipe's restore — declared but unexecutable.
+
+    Returns the incoherences; EMPTY means the declared set is coherent.
+    """
+    issues: list[ProfileIncoherence] = []
+
+    if source is not None:
+        for violation in recipe.gate(source):
+            issues.append(ProfileIncoherence(check="recipe_toolchain", detail=violation.detail))
+
+    version_source = os.environ if env is None else env
+    for name in recipe.version_env:
+        if not str(version_source.get(name) or "").strip():
+            issues.append(
+                ProfileIncoherence(
+                    check="recipe_version_env",
+                    detail=(
+                        f"{name} is not set in the lane env — the {recipe.recipe_id} "
+                        f"recipe ({recipe.image_pin}) declares it as its pinned "
+                        "toolchain version; export it in the lane template so the "
+                        "declared pin and the runtime cannot drift apart"
+                    ),
+                )
+            )
+
+    allowed_here = set(credentials_at(profile, "coding"))
+    missing = sorted(name for name in harness.credential_names if name not in allowed_here)
+    if missing:
+        issues.append(
+            ProfileIncoherence(
+                check="harness_credentials",
+                detail=(
+                    f"the {harness.harness_id} harness consumes credential(s) "
+                    f"{missing} the {profile.profile_id} profile's coding stage "
+                    f"never stages (allowed: {sorted(allowed_here)}) — stage the "
+                    "names or select a profile that mounts them; a lane that "
+                    "cannot authenticate is declared, not runnable"
+                ),
+            )
+        )
+
+    if recipe.package_registry_hosts and profile.profile_id != LANE_PROFILE_V1.profile_id:
+        from fnmatch import fnmatchcase
+
+        patterns = [str(p).strip() for p in (egress_allowlist or []) if str(p).strip()]
+        uncovered = sorted(
+            host
+            for host in recipe.package_registry_hosts
+            if not any(fnmatchcase(host, pattern) for pattern in patterns)
+        )
+        if uncovered and not _policy_grants_bootstrap_registries(profile):
+            issues.append(
+                ProfileIncoherence(
+                    check="network_policy",
+                    detail=(
+                        f"the {profile.profile_id} egress policy grants the "
+                        f"{recipe.recipe_id} recipe's package registries neither by "
+                        f"policy nor by allowlist — {uncovered} must be reachable "
+                        "for the recipe's build tail ("
+                        f"{[list(argv) for argv in recipe.build_commands]}); a "
+                        "recipe that cannot restore is declared, not executable"
+                    ),
+                )
+            )
+    return issues

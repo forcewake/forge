@@ -55,11 +55,30 @@ invariant, and :func:`try_acquire_lease` answers the run conflict by
 reading the existing winner back (idempotent success), while an
 UNRELATED :class:`IntegrityError` is refused loudly instead of being
 read as "try the next slot forever".
+
+R32-07 (review 0fca1b7, same review) separates the RESERVATION's
+lifetime from the run's LOCAL status: a FlowRun reaching terminal says
+the CONTROL PLANE is done with the work, not that the dispatched native
+job (the CI pipeline, the runner) stopped burning capacity — releasing
+the slot at the local transition could overbook the fleet while the
+native job still runs. The lease therefore carries a ``native_handle``
+(the dispatched job's id, recorded at dispatch via
+:func:`record_native_handle`) and a DRAINING state:
+:func:`release_lease` with ``native_completed=False`` parks the lease
+draining — ``draining_at`` set, ``released_at`` still NULL, so the
+partial open indexes keep holding the slot — and
+:func:`reconcile_draining` (the reconciler's periodic call) probes the
+native job through an INJECTED provider callable and releases only
+leases whose native jobs are observed terminal. Absence and unknown
+stay distinct: a probe that raises (provider outage) leaves the lease
+draining — uncertain occupancy holds capacity, never silently frees it.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -91,6 +110,8 @@ __all__ = [
     "execution_capacity_comment",
     "lease_conflict_kind",
     "lease_snapshot",
+    "reconcile_draining",
+    "record_native_handle",
     "release_lease",
     "release_run_leases",
     "try_acquire_lease",
@@ -380,6 +401,18 @@ class ExecutionLease(Base):
     acquired_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    #: R32-07: the dispatched native job's correlation (pipeline/run id).
+    #: NULL until the provider answers dispatch with an id
+    #: (:func:`record_native_handle`); the reconciler's probe key.
+    native_handle: Mapped[str | None] = mapped_column(String(256), nullable=True, default=None)
+    #: R32-07: set when the RUN reached its local terminal verdict but the
+    #: NATIVE job was still running (``release_lease(...,
+    #: native_completed=False)``). A draining lease still HOLDS its slot
+    #: (``released_at`` stays NULL, the open indexes keep firing) until
+    #: :func:`reconcile_draining` observes the native job terminal.
+    draining_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     released_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
@@ -420,6 +453,9 @@ class Lease:
     Carries the identity needed to release the slot later
     (:func:`release_lease`) and the evidence a run journals when its
     admission check ran at dispatch (:meth:`as_document`).
+    ``native_handle`` (R32-07) is the dispatched native job's id once
+    the provider answered — empty until :func:`record_native_handle`
+    lands it (dispatch takes the slot BEFORE the pipeline exists).
     """
 
     lease_id: str
@@ -428,6 +464,7 @@ class Lease:
     run_id: str
     provider: str
     acquired_at: datetime
+    native_handle: str = ""
 
     def as_document(self) -> dict:
         """The JSON-shape record for run evidence and refusal snippets."""
@@ -438,6 +475,7 @@ class Lease:
             "run_id": self.run_id,
             "provider": self.provider,
             "acquired_at": self.acquired_at.isoformat(),
+            "native_handle": self.native_handle or None,
         }
 
 
@@ -470,6 +508,7 @@ def _lease_of(row: ExecutionLease) -> Lease:
         run_id=str(row.run_id or ""),
         provider=str(row.provider or ""),
         acquired_at=row.acquired_at,
+        native_handle=str(row.native_handle or ""),
     )
 
 
@@ -504,6 +543,12 @@ async def _reclaim_terminal_run_leases(
     for row in rows:
         if provider and row.provider and row.provider != provider:
             continue  # a different connection's lease: not ours to judge
+        if row.draining_at is not None:
+            # R32-07: a DRAINING lease already knows its run is terminal —
+            # it is waiting on the NATIVE job, and only the reconciler's
+            # probe may release it. The terminal-run reclaim is for leases
+            # whose release never ran at all, never a way around draining.
+            continue
         if not row.run_id:
             continue
         run = await session.get(FlowRun, row.run_id)
@@ -524,6 +569,7 @@ async def try_acquire_lease(
     *,
     run_id: str = "",
     provider: str = "",
+    native_handle: str = "",
     now: datetime | None = None,
 ) -> Lease | None:
     """Reserve ONE execution slot for *project_id* — or lose honestly.
@@ -580,6 +626,7 @@ async def try_acquire_lease(
                 run_id=run_id or None,
                 slot=slot,
                 acquired_at=moment,
+                native_handle=native_handle or None,
             )
             session.add(row)
             try:
@@ -624,12 +671,37 @@ async def try_acquire_lease(
         return None
 
 
+async def record_native_handle(
+    lease_id: str,
+    native_handle: str,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> bool:
+    """Attach the dispatched native job's id to its lease (R32-07).
+
+    Dispatch takes the slot BEFORE the provider answers with a pipeline
+    or run id, so the correlation lands in a second write the moment it
+    exists. Idempotent-shaped like every lease write: an unknown or
+    already-released lease answers ``False`` and changes nothing (the
+    reconciler has nothing to probe for a released lease anyway).
+    """
+    if not native_handle:
+        raise ValueError("native_handle must be non-empty")
+    async with session_factory() as session:
+        row = await session.get(ExecutionLease, lease_id)
+        if row is None or row.released_at is not None:
+            return False
+        row.native_handle = native_handle
+        await session.commit()
+        return True
+
+
 async def release_lease(
     lease_id: str,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     *,
     session: AsyncSession | None = None,
     reason: str = "released",
+    native_completed: bool = True,
 ) -> bool:
     """Release one lease — frees its slot for the next dispatch.
 
@@ -638,19 +710,40 @@ async def release_lease(
     transaction) or an open *session* (the caller's transaction — used
     when the release rides a terminal transition committed by the
     service, so the slot frees exactly when the status lands).
+
+    R32-07: ``native_completed=False`` is the SPLIT release — the run
+    reached its local terminal verdict but the dispatched native job is
+    still running. The lease enters the DRAINING state instead of
+    freeing the slot: ``draining_at`` is set, ``released_at`` stays
+    NULL (the partial open indexes keep holding the slot), and the
+    reconciler's :func:`reconcile_draining` releases it once the native
+    job is observed terminal. The local status never again pretends the
+    fleet's capacity came back before the fleet's job ended.
     """
     if session is not None:
-        return await _release_in_session(session, lease_id, reason)
+        return await _release_in_session(
+            session, lease_id, reason, native_completed=native_completed
+        )
     if session_factory is None:
         raise ValueError("release_lease needs a session or a session_factory")
     async with session_factory() as own:
-        return await _release_in_session(own, lease_id, reason)
+        return await _release_in_session(own, lease_id, reason, native_completed=native_completed)
 
 
-async def _release_in_session(session: AsyncSession, lease_id: str, reason: str) -> bool:
+async def _release_in_session(
+    session: AsyncSession, lease_id: str, reason: str, *, native_completed: bool = True
+) -> bool:
     row = await session.get(ExecutionLease, lease_id)
     if row is None or row.released_at is not None:
         return False
+    if not native_completed:
+        # R32-07: drain, don't free. The slot stays held; the reason
+        # documents WHY the lease is parked (the full release overwrites
+        # it with its own reason when the reconciler lands it).
+        row.draining_at = _utcnow()
+        row.release_reason = reason[:100]
+        await session.commit()
+        return True
     row.released_at = _utcnow()
     row.release_reason = reason[:100]
     await session.commit()
@@ -662,9 +755,15 @@ async def release_run_leases(
     run_id: str,
     *,
     reason: str = "released",
+    native_completed: bool = True,
 ) -> int:
     """Release every OPEN lease naming *run_id* (the terminal-transition
-    spelling — a run reached a terminal status, its slot(s) free now)."""
+    spelling — a run reached a terminal status, its slot(s) free now).
+
+    ``native_completed=False`` parks every OPEN lease of the run
+    DRAINING instead (R32-07) — the same split :func:`release_lease`
+    gives one lease, at the run's terminal transition.
+    """
     released = 0
     async with session_factory() as session:
         rows = (
@@ -679,10 +778,76 @@ async def release_run_leases(
             .scalars()
             .all()
         )
+        now = _utcnow()
         for row in rows:
-            row.released_at = _utcnow()
+            if native_completed:
+                row.released_at = now
+            else:
+                row.draining_at = now
             row.release_reason = reason[:100]
             released += 1
+        if released:
+            await session.commit()
+    return released
+
+
+async def reconcile_draining(
+    session_factory: async_sessionmaker[AsyncSession],
+    native_status: Callable[[str], bool | Awaitable[bool]],
+) -> int:
+    """Release DRAINING leases whose native jobs are observed terminal (R32-07).
+
+    The reconciler's periodic call. Every lease parked draining
+    (``released_at IS NULL AND draining_at IS NOT NULL``) is probed
+    through *native_status* — the INJECTED provider callable (sync or
+    async) that maps the lease's ``native_handle`` to whether the native
+    job reached a terminal state:
+
+    - observed terminal → the lease is released (``reconciled: native
+      job terminal``) and its slot returns to the pool;
+    - still running → the lease keeps holding the slot (honest: the
+      capacity is genuinely occupied);
+    - the probe RAISES (provider outage, unknown) → the lease also keeps
+      holding the slot: absence and unknown stay distinct from terminal,
+      and uncertain occupancy never silently frees capacity;
+    - no ``native_handle`` on the row → released immediately: there is
+      nothing observable to wait for, so the local terminal verdict
+      (the back-compat shape) is the only truth there is.
+
+    Returns how many leases were released.
+    """
+    released = 0
+    now = _utcnow()
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(
+                        ExecutionLease.released_at.is_(None),
+                        ExecutionLease.draining_at.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            handle = str(row.native_handle or "")
+            if not handle:
+                row.released_at = now
+                row.release_reason = "reconciled: no native handle to observe"
+                released += 1
+                continue
+            try:
+                observed = native_status(handle)
+                if inspect.isawaitable(observed):
+                    observed = await observed
+            except Exception:  # noqa: BLE001 — outage/unknown: keep holding
+                continue
+            if observed:
+                row.released_at = now
+                row.release_reason = "reconciled: native job terminal"
+                released += 1
         if released:
             await session.commit()
     return released
@@ -695,7 +860,13 @@ async def lease_snapshot(
     *,
     provider: str = "",
 ) -> dict[str, int | None]:
-    """The project's execution-capacity snapshot (NEXT-12 evidence)."""
+    """The project's execution-capacity snapshot (NEXT-12 evidence).
+
+    ``draining`` (R32-07) is the operator's uncertain-occupancy view:
+    slots held by leases whose runs are locally terminal but whose
+    native jobs are still running — counted INSIDE ``held`` (the slot is
+    genuinely occupied), never inside ``completed``.
+    """
     async with session_factory() as session:
         rows = (
             (
@@ -709,9 +880,11 @@ async def lease_snapshot(
     if provider:
         rows = [row for row in rows if not row.provider or row.provider == provider]
     held = sum(1 for row in rows if row.released_at is None)
+    draining = sum(1 for row in rows if row.released_at is None and row.draining_at is not None)
     limit = policy.max_active_per_project
     return {
         "held": held,
+        "draining": draining,
         "completed": len(rows) - held,
         "limit": limit if limit > 0 else None,
         "available": max(0, limit - held) if limit > 0 else None,

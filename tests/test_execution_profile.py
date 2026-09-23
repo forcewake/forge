@@ -31,6 +31,7 @@ from forge.runs.execution_profile import (
     INSTALL_UV_FROZEN,
     LANE_CREDENTIAL_CAPABILITIES,
     LANE_PROFILE_VALUES,
+    LANE_PROFILE_V1,
     LANE_PROFILE_V2,
     LANE_PYTHON_VERSION,
     LANE_TEST_COMMANDS,
@@ -49,10 +50,12 @@ from forge.runs.execution_profile import (
     credentials_at,
     derive_from_reader,
     derive_from_repo,
+    harness_profile,
     lane_profile,
     resolve_driver_profile,
     runtime_recipe,
     validate_lane_profile_declaration,
+    validate_profile_coherence,
     validate_runtime,
 )
 from forge.runs.spec import ExecutableRunSpec, SpecInvalid
@@ -1134,3 +1137,212 @@ class TestRecipeGatesTheToolchain:
                 build_commands=(),
                 required_files=(),
             )
+
+
+# ---------------------------------------------------------------------------
+# R32-15 — the whole-profile coherence check: the (profile, recipe,
+# harness) tuple validated as ONE contract at startup and dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestProfileCoherence:
+    """validate_profile_coherence checks the COMPOSITION edges no
+    per-axis validator covers: the recipe's toolchain gate passing for
+    the harness's lane, the harness's credential names staged by the
+    profile, and the egress posture carrying the recipe's registry
+    needs. An incoherent set fails closed with the exact prerequisite
+    that is missing."""
+
+    def test_a_coherent_profile_passes_clean(self):
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V1,
+            runtime_recipe("python-3-13"),
+            harness_profile("claude-code"),
+            env={},
+        )
+        assert issues == []
+
+    def test_a_coherent_dotnet_lane_passes_under_v2(self, tmp_path):
+        (tmp_path / "global.json").write_text('{"sdk": {"version": "9.0.100"}}\n')
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V2,
+            runtime_recipe("dotnet-9"),
+            harness_profile("claude-code"),
+            source=LocalRepoSource(tmp_path),
+            env={"DOTNET_VERSION": "9.0"},
+        )
+        assert issues == []
+
+    def test_a_dotnet_recipe_missing_dotnet_version_fails(self, tmp_path):
+        (tmp_path / "global.json").write_text('{"sdk": {"version": "9.0.100"}}\n')
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V1,
+            runtime_recipe("dotnet-9"),
+            harness_profile("claude-code"),
+            source=LocalRepoSource(tmp_path),
+            env={},  # DOTNET_VERSION never reached the lane env
+        )
+        (issue,) = issues
+        assert issue.check == "recipe_version_env"
+        assert "DOTNET_VERSION" in issue.detail
+        assert "dotnet-9" in issue.detail  # names the recipe whose pin is absent
+
+    def test_a_missing_pin_file_is_an_incoherent_recipe_for_every_harness(self):
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V1,
+            runtime_recipe("dotnet-9"),
+            harness_profile("claude-code"),
+            source=MaterializedFiles(files={}),  # no global.json anywhere
+            env={"DOTNET_VERSION": "9.0"},
+        )
+        (issue,) = issues
+        assert issue.check == "recipe_toolchain"
+        assert "global.json" in issue.detail
+
+    def test_an_unstaged_harness_credential_fails(self):
+        """The documented gap the check surfaces: v2's coding stage stages
+        the provider keys but never COPILOT_GITHUB_TOKEN — a copilot lane
+        under v2 is declared, not runnable."""
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V2,
+            runtime_recipe("python-3-13"),
+            harness_profile("copilot"),
+            env={},
+        )
+        (issue,) = issues
+        assert issue.check == "harness_credentials"
+        assert "COPILOT_GITHUB_TOKEN" in issue.detail
+
+    def test_an_incompatible_network_policy_fails(self):
+        from forge.runs.execution_profile import LaneExecutionProfile
+
+        deny_all = LaneExecutionProfile(
+            profile_id="v2",
+            credential_staging=(("coding", ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")),),
+            writable_roots=("/workspace",),
+            read_only_roots=("/",),
+            tmpfs_roots=("/tmp",),
+            cap_drop_all=True,
+            cap_add=(),
+            egress_policy="deny all egress for every stage, no exceptions",
+            egress_allowlist_env="FORGE_EGRESS_ALLOWLIST",
+        )
+        issues = validate_profile_coherence(
+            deny_all,
+            runtime_recipe("dotnet-9"),  # restore MUST reach nuget.org
+            harness_profile("claude-code"),
+            env={"DOTNET_VERSION": "9.0"},
+            egress_allowlist=[],
+        )
+        (issue,) = issues
+        assert issue.check == "network_policy"
+        assert "nuget.org" in issue.detail
+
+    def test_the_network_policy_passes_when_the_allowlist_covers_the_registries(self):
+        from forge.runs.execution_profile import LaneExecutionProfile
+
+        narrow = LaneExecutionProfile(
+            profile_id="v2",
+            credential_staging=(("coding", ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")),),
+            writable_roots=("/workspace",),
+            read_only_roots=("/",),
+            tmpfs_roots=("/tmp",),
+            cap_drop_all=True,
+            cap_add=(),
+            egress_policy="deny by default; no bootstrap registry allowance",
+            egress_allowlist_env="FORGE_EGRESS_ALLOWLIST",
+        )
+        issues = validate_profile_coherence(
+            narrow,
+            runtime_recipe("dotnet-9"),
+            harness_profile("claude-code"),
+            env={"DOTNET_VERSION": "9.0"},
+            egress_allowlist=["api.example.com", "nuget.org", "*.nuget.org"],
+        )
+        assert issues == []
+
+    def test_v2s_documented_bootstrap_allowance_carries_the_registries(self):
+        """The SHIPPED v2 policy grants bootstrap its pinned registries by
+        declaration — a dotnet restore under v2 is coherent without the
+        agent allowlist naming nuget.org."""
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V2,
+            runtime_recipe("dotnet-9"),
+            harness_profile("claude-code"),
+            env={"DOTNET_VERSION": "9.0"},
+        )
+        assert all(issue.check != "network_policy" for issue in issues)
+
+    def test_every_issue_renders_with_its_check_and_an_actionable_detail(self):
+        issues = validate_profile_coherence(
+            LANE_PROFILE_V2,
+            runtime_recipe("dotnet-9"),
+            harness_profile("copilot"),
+            source=MaterializedFiles(files={}),
+            env={},
+        )
+        assert {issue.check for issue in issues} == {
+            "recipe_toolchain",
+            "recipe_version_env",
+            "harness_credentials",
+        }
+        for issue in issues:
+            assert str(issue).startswith(f"[{issue.check}]")
+            assert len(issue.detail) > 20
+
+
+class TestLaneEntryValidatesProfileCoherence:
+    """R32-15: the lane entry calls the coherence check at startup — an
+    incoherent (FORGE_LANE_RECIPE, driver, profile) set fails the lane
+    CLOSED before any model call; an unset recipe keeps the legacy
+    startup behavior exactly."""
+
+    def _run_main(self, tmp_path, monkeypatch, env: dict) -> tuple[int, str]:
+        from forge import harness_entry
+
+        for name in (
+            "FORGE_LANE_PROFILE",
+            "FORGE_LANE_STAGE",
+            "FORGE_EGRESS_ALLOWLIST",
+            "FORGE_LANE_RECIPE",
+            "DOTNET_VERSION",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("FORGE_EXIT_FILE", str(tmp_path / "exit"))
+        monkeypatch.chdir(tmp_path)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        rc = harness_entry.main(["--driver", "claude-code"])
+        return rc, (tmp_path / "exit").read_text()
+
+    def test_a_dotnet_recipe_without_dotnet_version_fails_closed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        (tmp_path / "global.json").write_text('{"sdk": {"version": "9.0.100"}}\n')
+        rc, exit_status = self._run_main(tmp_path, monkeypatch, {"FORGE_LANE_RECIPE": "dotnet-9"})
+        assert rc == 1
+        assert exit_status.strip() == "failed"
+        message = capsys.readouterr().err
+        assert "INCOHERENT" in message
+        assert "DOTNET_VERSION" in message  # the exact missing prerequisite
+
+    def test_a_coherent_recipe_proceeds_past_the_check(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "global.json").write_text('{"sdk": {"version": "9.0.100"}}\n')
+        rc, exit_status = self._run_main(
+            tmp_path,
+            monkeypatch,
+            {"FORGE_LANE_RECIPE": "dotnet-9", "DOTNET_VERSION": "9.0"},
+        )
+        assert exit_status.strip() in ("failed", "completed")  # not the coherence refusal
+        message = capsys.readouterr().err
+        assert "INCOHERENT" not in message
+
+    def test_an_unknown_recipe_id_fails_closed(self, tmp_path, monkeypatch, capsys):
+        rc, exit_status = self._run_main(tmp_path, monkeypatch, {"FORGE_LANE_RECIPE": "dotnet-10"})
+        assert rc == 1
+        assert "unknown runtime recipe" in capsys.readouterr().err
+
+    def test_an_unset_recipe_keeps_the_legacy_startup_checks(self, tmp_path, monkeypatch, capsys):
+        rc, _ = self._run_main(tmp_path, monkeypatch, {})
+        assert rc == 1
+        assert "INCOHERENT" not in capsys.readouterr().err

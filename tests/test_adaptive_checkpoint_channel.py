@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 try:  # POSIX flock — the store's deployment target (mirrors the module).
@@ -2289,3 +2290,393 @@ class TestRetentionDecisions:
         assert [entry["sequence"] for entry in listed] == [3]  # active survives
         for digest in decision["pending_gc"]:
             assert not (store._root / digest[:2] / digest).exists()  # GC completed
+
+
+# ----------------------------------------------------------------------
+# R32-16: the deployment-specific durability contract — the checkpoint
+# index either stays filesystem JSON (best_effort, the default) or moves
+# to the checkpoint_metadata table (postgres) while the blobs stay
+# content-addressed filesystem bytes. Fail closed on a contract the
+# wiring cannot honor.
+# ----------------------------------------------------------------------
+
+
+class TestDurabilityContract:
+    def test_the_default_contract_is_best_effort(self, monkeypatch):
+        monkeypatch.delenv(api_channel.DURABILITY_ENV, raising=False)
+        contract = api_channel.DurabilityContract.from_env()
+        assert contract.mode == "best_effort"
+        assert contract.session_factory is None
+
+    def test_postgres_is_selected_from_the_env_with_its_wiring(self):
+        sentinel = object()
+        contract = api_channel.DurabilityContract.from_env(
+            {api_channel.DURABILITY_ENV: "postgres"}, session_factory=sentinel
+        )
+        assert contract.mode == "postgres"
+        assert contract.session_factory is sentinel
+
+    def test_junk_fails_closed_naming_the_variable(self):
+        with pytest.raises(ValueError, match=api_channel.DURABILITY_ENV):
+            api_channel.DurabilityContract.from_env({api_channel.DURABILITY_ENV: "wal"})
+        with pytest.raises(ValueError, match="never"):
+            api_channel.DurabilityContract.from_env({api_channel.DURABILITY_ENV: "durable"})
+
+    def test_postgres_without_a_session_factory_refuses_to_degrade(self):
+        with pytest.raises(ValueError, match="session factory"):
+            api_channel.DurabilityContract.from_env({api_channel.DURABILITY_ENV: "postgres"})
+
+    def test_mode_from_env_normalizes_and_defaults(self):
+        assert api_channel.DurabilityContract.mode_from_env({}) == "best_effort"
+        assert (
+            api_channel.DurabilityContract.mode_from_env({api_channel.DURABILITY_ENV: " POSTGRES "})
+            == "postgres"
+        )
+
+
+@pytest.fixture()
+async def meta_db():
+    """An async session factory over an in-memory DB with every table."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from forge.models.base import Base
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+def _pg_store(root: Path, factory, policy: api_channel.StoragePolicy | None = None):
+    return api_channel.CheckpointStore(
+        root,
+        policy=policy,
+        durability=api_channel.DurabilityContract(mode="postgres", session_factory=factory),
+    )
+
+
+class TestPostgresDurability:
+    """The postgres contract's index operations: the metadata table is the
+    authority (no filesystem index is written), active selection stays
+    derived, concurrent puts are transactional, and the blobs remain
+    content-addressed filesystem bytes."""
+
+    async def _rows(self, factory) -> list:
+        from sqlalchemy import select
+
+        async with factory() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(api_channel.CheckpointMetadataRow).order_by(
+                            api_channel.CheckpointMetadataRow.sequence
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    async def test_the_index_lives_in_the_db_not_the_filesystem(self, tmp_path, meta_db):
+        store = _pg_store(tmp_path / "cas", meta_db)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"one\n"}, 1)
+
+        result = await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+        )
+
+        assert result["latest"] is True
+        rows = await self._rows(meta_db)
+        assert [row.checkpoint_id for row in rows] == [_digest(manifest)]
+        assert rows[0].work_id == WORK_ID and rows[0].sequence == 1
+        # NO filesystem index was written for the work...
+        works_dir = tmp_path / "cas" / "works"
+        assert not (works_dir.is_dir() and list(works_dir.glob("*.json")))
+        # ...while the blobs stay content-addressed filesystem bytes.
+        assert _cas_file(tmp_path / "cas", _digest(b"one\n")).is_file()
+        assert _cas_file(tmp_path / "cas", _digest(manifest)).is_file()
+        # And the read path serves the DB-indexed entry, digest-verified.
+        entry = await store.aentry(WORK_ID)
+        assert entry is not None
+        served_manifest, served_blobs = store.read_checkpoint(entry)
+        assert served_manifest == manifest and served_blobs == blobs
+
+    async def test_active_selection_is_derived_not_arrival_order(self, tmp_path, meta_db):
+        store = _pg_store(tmp_path / "cas", meta_db)
+        late_manifest, late_blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"late\n"}, 5)
+        early_manifest, early_blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"early\n"}, 2)
+        await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=late_manifest, blobs=late_blobs, sequence=5
+        )
+        second = await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=early_manifest, blobs=early_blobs, sequence=2
+        )
+
+        assert second["latest"] is False  # the lower sequence never demotes
+        active = await store.aentry(WORK_ID)
+        assert active is not None and active["checkpoint_id"] == _digest(late_manifest)
+        named = await store.aentry(WORK_ID, _digest(early_manifest))
+        assert named is not None and named["sequence"] == 2
+        assert await store.aentry(WORK_ID, "f" * 64) is None
+        listed = await store.alist_entries()
+        assert [entry["sequence"] for entry in listed] == [2, 5]
+        assert [entry["latest"] for entry in listed] == [False, True]
+
+    async def test_concurrent_puts_are_transactional(self, tmp_path, meta_db):
+        """Two puts for one work race in two transactions. The verdict each
+        response reports may be computed against a rowset the other
+        transaction had not committed yet (SQLite ignores FOR UPDATE —
+        PostgreSQL serializes the read-modify-write there), so the
+        TRANSACTIONAL contract is pinned on the durable outcome: neither
+        append is lost, no row duplicates, and exactly one ACTIVE
+        checkpoint exists over the final table state — deterministically
+        the higher sequence."""
+        import asyncio
+
+        store = _pg_store(tmp_path / "cas", meta_db)
+        first_manifest, first_blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"first\n"}, 1)
+        second_manifest, second_blobs = _tiny_checkpoint(WORK_ID, {"b.txt": b"second\n"}, 2)
+
+        results = await asyncio.gather(
+            store.aput_checkpoint(
+                work_id=WORK_ID, manifest_bytes=first_manifest, blobs=first_blobs, sequence=1
+            ),
+            store.aput_checkpoint(
+                work_id=WORK_ID, manifest_bytes=second_manifest, blobs=second_blobs, sequence=2
+            ),
+        )
+
+        assert sorted(result["checkpoint_id"] for result in results) == sorted(
+            [_digest(first_manifest), _digest(second_manifest)]
+        )
+        rows = await self._rows(meta_db)
+        assert len(rows) == 2  # no lost append, no duplicate row
+        active = await store.aentry(WORK_ID)
+        assert active is not None and active["checkpoint_id"] == _digest(second_manifest)
+        for digest, data in (
+            (_digest(b"first\n"), b"first\n"),
+            (_digest(b"second\n"), b"second\n"),
+        ):
+            assert _cas_file(tmp_path / "cas", digest).read_bytes() == data
+
+    async def test_a_reput_is_idempotent_by_primary_key(self, tmp_path, meta_db):
+        store = _pg_store(tmp_path / "cas", meta_db)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"same\n"}, 3)
+        first = await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=3
+        )
+        second = await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=3
+        )
+
+        assert second["checkpoint_id"] == first["checkpoint_id"]
+        assert second["uploaded_at"] == first["uploaded_at"]  # the existing row stands
+        assert len(await self._rows(meta_db)) == 1
+
+    async def test_on_upload_retention_runs_inside_the_transaction(self, tmp_path, meta_db):
+        policy = api_channel.StoragePolicy(max_checkpoints_per_work=1)
+        store = _pg_store(tmp_path / "cas", meta_db, policy=policy)
+        for sequence, body in ((1, b"v1\n"), (2, b"v2\n")):
+            manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": body}, sequence)
+            await store.aput_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=sequence
+            )
+
+        rows = await self._rows(meta_db)
+        assert [row.sequence for row in rows] == [2]  # only the active survives
+        old_digest = _digest(b"v1\n")
+        assert not _cas_file(tmp_path / "cas", old_digest).exists()  # GC'd — unreferenced
+        assert _cas_file(tmp_path / "cas", _digest(b"v2\n")).is_file()
+
+    async def test_shared_content_survives_retention_across_works(self, tmp_path, meta_db):
+        policy = api_channel.StoragePolicy(max_checkpoints_per_work=1)
+        store = _pg_store(tmp_path / "cas", meta_db, policy=policy)
+        shared = b"shared blob\n"
+        for work, sequence in ((WORK_ID, 1), ("wp-other", 1)):
+            manifest, blobs = _tiny_checkpoint(work, {"shared.txt": shared}, sequence)
+            await store.aput_checkpoint(
+                work_id=work, manifest_bytes=manifest, blobs=blobs, sequence=sequence
+            )
+        superseding, superseding_blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"new\n"}, 2)
+        await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=superseding, blobs=superseding_blobs, sequence=2
+        )
+
+        shared_digest = _digest(shared)
+        # wp-other still references it — the blob survives the other work's GC.
+        assert _cas_file(tmp_path / "cas", shared_digest).is_file()
+
+    async def test_the_quota_refusal_leaves_the_rows_untouched(self, tmp_path, meta_db):
+        policy = api_channel.StoragePolicy(max_total_bytes_per_work=1)
+        store = _pg_store(tmp_path / "cas", meta_db, policy=policy)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"way over quota\n"}, 1)
+
+        with pytest.raises(api_channel.StorageQuotaExceededError, match="untouched"):
+            await store.aput_checkpoint(
+                work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+            )
+
+        assert await self._rows(meta_db) == []
+        assert await store.aentry(WORK_ID) is None
+
+    async def test_the_async_health_report_names_the_mode_and_walks_the_db(self, tmp_path, meta_db):
+        store = _pg_store(tmp_path / "cas", meta_db)
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"one\n"}, 1)
+        await store.aput_checkpoint(
+            work_id=WORK_ID, manifest_bytes=manifest, blobs=blobs, sequence=1
+        )
+
+        report = await store.astorage_health_report()
+
+        assert report["durability"] == "postgres"
+        assert report["works"][WORK_ID]["checkpoints"] == 1
+        assert report["works"][WORK_ID]["missing_digests"] == []
+        assert report["orphan_cas_entries"] == []
+        assert report["disk_usage_bytes"] > 0
+
+    async def test_postgres_methods_refuse_without_the_wiring(self, tmp_path):
+        store = api_channel.CheckpointStore(tmp_path / "cas")  # default contract
+        with pytest.raises(RuntimeError, match="session factory"):
+            await store.aentry(WORK_ID)
+
+
+class TestDurabilityOverHttp:
+    """The router honors the contract: postgres mode routes put/get/list/
+    health through the metadata table (the app's session factory), the
+    best-effort default is untouched, and a contract the wiring cannot
+    honor answers 503 — fail closed, never silently degraded."""
+
+    @pytest.fixture()
+    def pg_server(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+        """The router WITH the metadata authority: an app lifespan that
+        owns the engine (aiosqlite owns one loop) and puts the session
+        factory on app.state, plus FORGE_CHECKPOINT_DURABILITY=postgres."""
+        from contextlib import asynccontextmanager
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import StaticPool
+
+        from forge.models.base import Base
+
+        monkeypatch.setenv(api_channel.LANE_CONTROL_SECRET_ENV, SECRET)
+        monkeypatch.setenv(api_channel.CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "pg-store"))
+        monkeypatch.setenv(api_channel.DURABILITY_ENV, "postgres")
+
+        @asynccontextmanager
+        async def _lifespan(app: FastAPI):
+            engine = create_async_engine(
+                "sqlite+aiosqlite:///:memory:",
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            yield
+            await engine.dispose()
+
+        application = FastAPI(lifespan=_lifespan)
+        application.include_router(api_channel.checkpoint_channel_router)
+        with TestClient(application) as client:
+            yield client
+
+    @staticmethod
+    def _wire(manifest: bytes, blobs: dict[str, bytes], sequence: int) -> dict:
+        return {
+            "manifest": base64.b64encode(manifest).decode("ascii"),
+            "blobs": {
+                digest: base64.b64encode(data).decode("ascii") for digest, data in blobs.items()
+            },
+            "sequence": sequence,
+        }
+
+    def test_put_get_list_health_go_through_the_db(self, tmp_path: Path, pg_server):
+        manifest, blobs = _tiny_checkpoint(WORK_ID, {"a.txt": b"v1\n"}, 4)
+        put = pg_server.put(
+            f"/lane/checkpoints/{WORK_ID}",
+            json=self._wire(manifest, blobs, 4),
+            headers={"Authorization": _bearer(WORK_ID)},
+        )
+        assert put.status_code == 200
+        assert put.json()["latest"] is True
+        assert put.json()["checkpoint_id"] == _digest(manifest)
+
+        # The index went to the metadata table, not the filesystem: no
+        # works/<id>.json exists (the row-level proof is the store tests').
+        works_dir = tmp_path / "pg-store" / "works"
+        assert not (works_dir.is_dir() and list(works_dir.glob("*.json")))
+        # while the blobs stay content-addressed filesystem bytes
+        assert _cas_file(tmp_path / "pg-store", _digest(b"v1\n")).is_file()
+
+        got = pg_server.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+        assert got.status_code == 200
+        body = got.json()
+        assert body["latest"] is True
+        assert base64.b64decode(body["manifest"]) == manifest
+        assert base64.b64decode(body["blobs"][_digest(b"v1\n")]) == b"v1\n"
+
+        listed = pg_server.get("/lane/checkpoints", headers={"Authorization": _bearer(LIST_SCOPE)})
+        assert listed.status_code == 200
+        entries = listed.json()["checkpoints"]
+        assert [entry["work_id"] for entry in entries] == [WORK_ID]
+        assert entries[0]["latest"] is True
+
+        health = pg_server.get(
+            "/lane/checkpoints/health", headers={"Authorization": _bearer(LIST_SCOPE)}
+        )
+        assert health.status_code == 200
+        report = health.json()
+        assert report["durability"] == "postgres"
+        assert report["works"][WORK_ID]["checkpoints"] == 1
+
+    def test_the_best_effort_default_report_names_its_mode(self, server):
+        health = server.get(
+            "/lane/checkpoints/health", headers={"Authorization": _bearer(LIST_SCOPE)}
+        )
+        assert health.status_code == 200
+        assert health.json()["durability"] == "best_effort"
+
+    def test_postgres_without_wiring_answers_503(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv(api_channel.LANE_CONTROL_SECRET_ENV, SECRET)
+        monkeypatch.setenv(api_channel.CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "store"))
+        monkeypatch.setenv(api_channel.DURABILITY_ENV, "postgres")
+        application = FastAPI()  # standalone mount: no session_factory
+        application.include_router(api_channel.checkpoint_channel_router)
+        client = TestClient(application)
+
+        response = client.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert response.status_code == 503
+        assert "misconfigured" in response.json()["detail"]
+        assert "session factory" in response.json()["detail"]
+
+    def test_a_junk_mode_answers_503(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv(api_channel.LANE_CONTROL_SECRET_ENV, SECRET)
+        monkeypatch.setenv(api_channel.CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "store"))
+        monkeypatch.setenv(api_channel.DURABILITY_ENV, "wal")
+        application = FastAPI()
+        application.include_router(api_channel.checkpoint_channel_router)
+        client = TestClient(application)
+
+        response = client.get(
+            f"/lane/checkpoints/{WORK_ID}", headers={"Authorization": _bearer(WORK_ID)}
+        )
+
+        assert response.status_code == 503
+        assert api_channel.DURABILITY_ENV in response.json()["detail"]
+
+    def test_the_doctor_spelling_names_the_mode(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv(api_channel.DURABILITY_ENV, "postgres")
+        monkeypatch.setenv(api_channel.CHECKPOINT_STORE_DIR_ENV, str(tmp_path / "store"))
+        report = api_channel.storage_health_report(tmp_path / "store")
+        assert report["durability"] == "postgres"

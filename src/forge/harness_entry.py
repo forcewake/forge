@@ -147,9 +147,15 @@ from forge.harnesses.brief_envelope import (
 )
 from forge.harnesses.mcp import McpConfigError, parse_servers
 from forge.runs.execution_profile import (
+    FORGE_EGRESS_ALLOWLIST_ENV,
     FORGE_LANE_PROFILE_ENV,
+    FORGE_LANE_RECIPE_ENV,
     FORGE_LANE_STAGE_ENV,
+    LANE_PROFILE_V1,
+    harness_profile,
     lane_profile,
+    runtime_recipe,
+    validate_profile_coherence,
     validate_runtime,
 )
 
@@ -1055,6 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
     # posture. An unset FORGE_LANE_PROFILE is the legacy/v1 dispatch:
     # no check, behavior unchanged. An UNKNOWN id also fails closed.
     declared_profile_id = str(os.environ.get(FORGE_LANE_PROFILE_ENV) or "").strip()
+    declared_profile = None
     if declared_profile_id:
         try:
             declared_profile = lane_profile(declared_profile_id)
@@ -1073,6 +1080,50 @@ def main(argv: list[str] | None = None) -> int:
                 f"(no silent downgrade): {listed}. Fix the runner container to "
                 "match the declared profile, or dispatch FORGE_LANE_PROFILE=v1 "
                 "explicitly.",
+            )
+
+    # R32-15: validate the whole enabled capability profile as ONE
+    # coherent set at startup. When the dispatch declares the RUNTIME
+    # RECIPE axis (FORGE_LANE_RECIPE), the (profile, recipe, harness)
+    # tuple is checked together — the recipe's toolchain gate over the
+    # checkout, its version env pins, the harness's credential names
+    # against the profile's staging, and the egress posture against the
+    # recipe's registry needs. An incoherent set fails CLOSED with the
+    # exact missing prerequisites — onboarding fails here, not after an
+    # agent has spent tokens. An unset FORGE_LANE_RECIPE keeps the
+    # legacy startup checks exactly as they were (opt-in, like the
+    # profile declaration above).
+    declared_recipe_id = str(os.environ.get(FORGE_LANE_RECIPE_ENV) or "").strip()
+    if declared_recipe_id:
+        try:
+            recipe = runtime_recipe(declared_recipe_id)
+            harness = harness_profile(driver)
+        except ValueError as exc:
+            return _finish("failed", f"harness_entry: {exc}")
+        # (a local alias: the emit leg below re-imports LocalRepoSource
+        # function-locally, which would shadow this use)
+        from forge.runs.execution_profile import LocalRepoSource as _LaneRepoSource
+
+        active_profile = declared_profile if declared_profile_id else LANE_PROFILE_V1
+        raw_allowlist = str(os.environ.get(FORGE_EGRESS_ALLOWLIST_ENV) or "")
+        incoherences = validate_profile_coherence(
+            active_profile,
+            recipe,
+            harness,
+            source=_LaneRepoSource(Path.cwd()),
+            egress_allowlist=(
+                [part.strip() for part in raw_allowlist.split(",")] if raw_allowlist else []
+            ),
+        )
+        if incoherences:
+            listed = "; ".join(str(incoherence) for incoherence in incoherences)
+            return _finish(
+                "failed",
+                "harness_entry: FORGE_LANE_RECIPE="
+                f"{declared_recipe_id} profile INCOHERENT — refusing to run: "
+                f"{listed}. Fix the declared (profile, recipe, harness) set — "
+                "stage the named credentials, export the version pins, or "
+                "widen the egress policy to the recipe's registries.",
             )
 
     if args.render_brief:
