@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0] - 2026-09-23
+
+### Added — the 0fca1b7 review P2 final wave: E2E qualification substrate (7 items)
+
+All 19/19 P2 from the 0fca1b7 review are now closed. Suite 5917 (+455).
+Deep-research basis: `docs/research/2026-09-23-e2e-qualification/` (7 docs).
+
+- R32-13 (#226): `adaptive/qualification.py` — QualificationProfile binds
+  one (recipe, harness) combination into a single digest; installed
+  fingerprints refuse on mismatch; expected-report binding (missing report
+  is never zero failures); egress probe pair detecting
+  policy-declared-but-not-enforced; qualification layer vocabulary
+- R32-14 (#227): `adaptive/research_cohort.py` — versioned cohort spec
+  (4 task archetypes), offline-replayable none/lexical/research
+  comparison over recorded artifacts, semantic grading (content, not
+  filenames), PASS/HOLD/ROLLBACK promotion verdicts
+- R32-19 (#232): `release_promotion.py` — PromotionRecord bound to the
+  exact digest + qualifying CI run; fail-closed promotion gate in
+  release.yml (a failed required check blocks tags even when the canary
+  passed); generated template pins; --seed-real-data upgrade canary;
+  per-release evidence archive. The retrospective v0.33.0 record
+  honestly evaluates `blocked` (red typecheck it shipped with) — and
+  that defect is fixed in this release
+- R32-21 (#234): `adaptive/pilot.py` — the design-partner pilot kit:
+  one-page learning contract (2-of-3 criteria by a named date, frozen
+  baseline, staged ladder), 12–20 task plans with 9 scenario tags,
+  tracker on the five holding-up metrics, stop conditions with
+  preserved diagnostics
+- R32-22 (#235): `adaptive/two_writer_qualification.py` — two-writer
+  producer/consumer scenario frozen through freeze_verified_world;
+  kill-at-step-k matrix (12 cells) + post-pivot forward-only matrix;
+  lost-response adoption; can-i-deploy readiness query; credential
+  scope checks
+- R32-23 (#236): `adaptive/operator_view.py` + `support_bundle.py` —
+  versioned projection with CAS delayed-replay protection, 14-state
+  vocabulary incl. wedged, action validity matrix with audit
+  four-facts; support bundle with explicit missing/unknown coverage
+- R32-24 (#237): ADR-0029 + `runs/composition.py` —
+  RepositoryContext/AttemptStartSpec/ResumeSpec formal types (no
+  permissive defaults), execution-authority owner map, CompositionMatrix
+  can-i-deploy edges, compat fixtures from real git history
+
+### Fixed
+
+- The v0.33.0 red typecheck (`runs/github_service.py:791` — evidence
+  `dict | None` guard); blocking mypy core is clean again
+
 ## [0.33.0] - 2026-09-23
 
 ### Added — the 0fca1b7 review P2: production wiring, supervisor health, lease draining, composed invariants (10 items)

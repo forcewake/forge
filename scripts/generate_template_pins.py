@@ -91,6 +91,27 @@ def latest_record(root: Path) -> tuple[_Record, Path]:
     return record, path
 
 
+def current_version(root: Path) -> str | None:
+    """The version the tree is being released as (``src/forge/__init__.py``).
+
+    Stdlib-only: the ``__version__`` literal is read without importing forge
+    (this script runs in CI before install). Trees without the package file
+    (test fixtures) return ``None`` — no pending window, pins render the
+    archived record verbatim.
+    """
+    init = root / "src" / "forge" / "__init__.py"
+    if not init.is_file():
+        return None
+    match = re.search(
+        r"^__version__\s*=\s*\"([^\"]+)\"", init.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    return match.group(1) if match else None
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version.split(".")[:3] if p.isdigit())
+
+
 def _verdict_line(record: _Record) -> str:
     """A one-line, honest promotion status derived from the record."""
     if record.verdict == "block":
@@ -129,8 +150,33 @@ def render_status_block(record: _Record, evidence_rel: str) -> str:
     )
 
 
-def render_quickstart_block(record: _Record) -> str:
-    """The quick-start bash block: the tag pin plus the digest-pinned form."""
+def render_quickstart_block(record: _Record, pending_version: str | None = None) -> str:
+    """The quick-start bash block: the tag pin plus the digest-pinned form.
+
+    ``pending_version`` is set only in the pre-release window — the tree's
+    ``__version__`` is NEWER than the latest archived record. The quick-start
+    then pulls the tag being released (it exists the moment this release's
+    attach-tags job runs) while stating plainly that its digest is not yet
+    promoted; the archived digest stays the pinned recommendation until the
+    new record lands. The status block never renders pending facts — it
+    always describes the latest PROMOTED release.
+    """
+    if pending_version is not None:
+        return (
+            "```bash\n"
+            f"docker run -d --name forge -p 8420:8420 \\\n"
+            f"  --env-file .env {_IMAGE_TAG}:{pending_version}\n"
+            "# pin the release digest instead of the mutable tag (R30/R32-19):\n"
+            f"#   {pending_version}'s digest is recorded in\n"
+            f"#   docs/releases/evidence/v{pending_version}/promotion.json once the\n"
+            "#   promotion gate qualifies it; until then the digest below (the last\n"
+            "#   promoted release) is the pinned recommendation\n"
+            f"#   docker run -d --name forge -p 8420:8420 --env-file .env {_IMAGE_TAG}@{record.digest}\n"
+            "# or from source:\n"
+            "git clone https://github.com/forcewake/forge && cd forge\n"
+            "uv sync && set -o pipefail && .venv/bin/python -m pytest -q\n"
+            "```"
+        )
     digest_ref = f"{_IMAGE_TAG}@{record.digest}"
     return (
         "```bash\n"
@@ -199,12 +245,16 @@ def _replace_or_insert(content: str, spot: _Spot, block: str, where: str) -> str
 
 
 def generate(
-    root: Path, files: dict[str, dict[str, _Spot]], record: _Record, evidence_rel: str
+    root: Path,
+    files: dict[str, dict[str, _Spot]],
+    record: _Record,
+    evidence_rel: str,
+    pending_version: str | None = None,
 ) -> dict[str, str]:
     """New content per file (unchanged files map to identical strings)."""
     rendered = {
         "status": lambda: render_status_block(record, evidence_rel),
-        "quickstart": lambda: render_quickstart_block(record),
+        "quickstart": lambda: render_quickstart_block(record, pending_version),
     }
     updated: dict[str, str] = {}
     for relpath, spots in files.items():
@@ -230,8 +280,12 @@ def main(argv: list[str] | None = None) -> int:
 
     record, record_path = latest_record(args.root)
     evidence_rel = record_path.relative_to(args.root).as_posix()
+    tree_version = current_version(args.root)
+    pending_version: str | None = None
+    if tree_version and _version_key(tree_version) > _version_key(record.version):
+        pending_version = tree_version
     try:
-        updated = generate(args.root, TARGETS, record, evidence_rel)
+        updated = generate(args.root, TARGETS, record, evidence_rel, pending_version)
     except PinsError as exc:
         print(f"generate-template-pins: REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -257,9 +311,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check and drifted:
         return 1
+    window = (
+        f" — pre-release window: quick-start pulls v{pending_version} (digest pending promotion)"
+        if pending_version
+        else ""
+    )
     print(
         f"generate-template-pins: pins render v{record.version} "
-        f"({_verdict_line(record)}) from {evidence_rel}"
+        f"({_verdict_line(record)}) from {evidence_rel}{window}"
     )
     return 0
 
