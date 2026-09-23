@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0] - 2026-09-23
+
+### Fixed — the c7ae8db review M0: the four P1 execution gaps
+
+All 4 P1 closed (#238-#241). Suite 6224 (+306).
+
+- **#238 Q35-01**: the shipped GitHub Emit step collected the ORIGINAL
+  checkout after a resume — restored work existed on disk but never
+  reached the candidate (0-byte uploads). Now one packaged collector
+  (`candidate_collector.py` + `harness_entry --collect-candidate`) with
+  an ownership-validated generation pointer, `git -C` on the validated
+  generation, and typed errors (`|| true` gone). Negative-arm test
+  proves the old sequence missed generation edits.
+- **#239 Q35-02**: `/retry` unconditionally demanded a checkpoint — an
+  early bootstrap death made the run unretryable. Continuation is now
+  decided from persisted evidence (committed-baseline / exact-WIP /
+  explicit-restart / uncertain); uncertain parks with an operator note
+  and zero dispatches; the strict required-restore guard is untouched.
+- **#240 Q35-03**: upload and resume read different checkpoint
+  authorities in postgres mode (the resume producer used the filesystem
+  JSON index). ONE configured async checkpoint repository now serves
+  upload, resume, health and retention; half-configurations refuse;
+  DB outage is typed unavailable — never a filesystem fallback, never a
+  JSON mirror. PG-gated cross-process proofs.
+- **#241 Q35-04**: execution slots were reservation guarantees, not
+  occupancy guarantees (`record_native_handle` had zero production
+  callers; releases defaulted `native_completed=True`). Migration 027:
+  a native-start intent persisted BEFORE the provider call; derived
+  occupancy states (never_dispatched / dispatched_unknown /
+  native_running / draining / observed_terminal); release requires
+  evidence — a lost start response or failed cancellation HOLDS the
+  slot until the native job is observed terminal. All three providers
+  wired; reconcile probes per provider. Verified on real PostgreSQL.
+
+### Fixed/Added — the M1 wave
+
+- **#242 Q35-05**: reference-safe checkpoint GC — mark/recheck/sweep
+  with the recheck INSIDE the deletion transaction (the scan→unlink
+  window closed); ResumeSpec pins; first-upload advisory lock; quotas
+  count referenced bytes.
+- **#243 Q35-06**: the legacy credential window is restart-stable —
+  write-once persisted anchor (explicit deadline > recorded start >
+  anchor file > fail-closed refusal); doctor check; rotation runbook.
+- **#244 Q35-07**: the ADR-0029 composition types adopted in the GitHub
+  production dispatch path — envelope constructed before any effectful
+  call, axis separation guarded, redispatch digest-verified. The new
+  boundary immediately caught two dispatch fixtures the old code let
+  run with an empty attempt base.
+- **#245 Q35-08**: lane installation reproducible from the promoted
+  release — wheel+sdist per release (sha256 in the promotion record),
+  template defaults GENERATED from the record, the v0.27.0 fallback
+  deleted, installed-identity gate before model calls.
+- **#246 Q35-09**: the mandatory production-entry trace suite
+  (`tests/production_entry/`) — real processes, a fake native server
+  whose state survives worker death, a fake vendor on the REAL codex
+  App-Server wire, the real GitHubClient over HTTP. AT-01..AT-06 with
+  negative arms; PG-gated traces confirmed on real PostgreSQL.
+- **#258 Q35-21**: checkpoint metadata migration as commands —
+  inventory → idempotent import → verify → fenced cutover → gated
+  rollback; doctor preflight; runbook.
+
 ## [0.34.0] - 2026-09-23
 
 ### Added — the 0fca1b7 review P2 final wave: E2E qualification substrate (7 items)
