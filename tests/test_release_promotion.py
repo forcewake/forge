@@ -894,3 +894,23 @@ def test_the_recorder_writes_fail_rows_for_a_failed_stage(tmp_path: Path) -> Non
     # a failure recorded by the stage itself is not duplicated:
     recorder.note_failure("migrate", "boom again")
     assert len(recorder.stages) == 2
+
+
+def test_psql_exec_passes_stdin_through_docker_i() -> None:
+    """``docker exec`` drops piped stdin without ``-i``: psql then reads an
+    EMPTY script, runs nothing, exits 0 — the count parses as ``''`` (the
+    v0.34.0 release-canary bite). The exec argv must carry ``-i``."""
+    canary_smoke = _load_canary_smoke()
+    canary = canary_smoke.Canary(runtime="podman")
+    argv: list[str] = []
+
+    def fake_run(*args: str, input: str | None = None, **_kwargs: object) -> str:
+        argv.extend(args)
+        assert input is not None, "the SQL must ride stdin, not -c"
+        return "42\n"
+
+    canary.run = fake_run  # type: ignore[method-assign]
+    assert canary_smoke._psql(canary, "SELECT 1;") == "42\n"
+    exec_at = argv.index("exec")
+    assert argv[exec_at + 1] == "-i", f"exec must pass -i before the container: {argv}"
+    assert canary_smoke._psql_count(canary, "t") == 42

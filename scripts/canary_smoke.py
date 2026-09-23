@@ -414,8 +414,12 @@ _SEED_FINGERPRINTS: tuple[tuple[str, str], ...] = (
 
 
 def _psql(canary: Canary, sql: str, database: str = PREV_DB) -> str:
+    # ``-i`` is load-bearing: without it ``docker exec`` drops the piped
+    # stdin, psql reads an EMPTY script, runs nothing, and exits 0 — the
+    # canary then parses an empty string as a row count (the v0.34.0 CI bite).
     return canary.run(
         "exec",
+        "-i",
         PG_NAME,
         "psql",
         "-U",
@@ -429,12 +433,22 @@ def _psql(canary: Canary, sql: str, database: str = PREV_DB) -> str:
     )
 
 
+def _psql_count(canary: Canary, table: str) -> int:
+    out = _psql(canary, f"SELECT count(*) FROM {table};").strip()
+    if not out:
+        raise CanaryError(
+            f"count(*) for {table!r} returned no output — did the SQL reach "
+            "psql (docker exec -i) and does the table exist at this schema?"
+        )
+    return int(out)
+
+
 def seed_real_data_fingerprint(canary: Canary) -> str:
     """Seed the previous-schema DB and return its preservation fingerprint."""
     _psql(canary, _SEED_SQL)
     rows = []
     for table, expression in _SEED_FINGERPRINTS:
-        count = int(_psql(canary, f"SELECT count(*) FROM {table};").strip())
+        count = _psql_count(canary, table)
         digest = _psql(
             canary,
             "SELECT encode(sha256(convert_to("
@@ -456,7 +470,7 @@ def verify_seeded_data(canary: Canary, seeded_fingerprint: str) -> None:
     """The upgrade preserved every seeded row: counts AND digests equal."""
     mismatches = []
     for table, expression in _SEED_FINGERPRINTS:
-        count = int(_psql(canary, f"SELECT count(*) FROM {table};").strip())
+        count = _psql_count(canary, table)
         digest = _psql(
             canary,
             "SELECT encode(sha256(convert_to("
