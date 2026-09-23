@@ -61,7 +61,7 @@ jobs:
       # Build once, push by digest. No mutable tag exists yet: nothing can
       # pull :vX or :latest until the canary below has passed on THIS digest.
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build and push by digest
         id: build
@@ -188,7 +188,7 @@ jobs:
         run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Attach tags to the validated digest
         run: |
