@@ -299,10 +299,12 @@ def test_no_records_at_all_is_an_explicit_gap_not_a_crash() -> None:
 def test_the_real_v0330_archive_gaps_are_the_honest_ones() -> None:
     """The committed v0.33.0 record is BLOCKED, so NOTHING clears from it —
     and the manual/none-gated live capabilities stay gaps, exactly as the
-    manifest records them."""
+    manifest records them. (Scoped to the v0.33.0 record: newer PROMOTE
+    records in the archive clear their own gaps — that is the design.)"""
     records = load_promotion_records(ROOT)
-    assert records, "docs/releases/evidence/v0.33.0/promotion.json must be committed"
-    gaps = qualification_gaps(ENTRIES, records)
+    v0330 = [r for r in records if r.version == "0.33.0"]
+    assert v0330, "docs/releases/evidence/v0.33.0/promotion.json must be committed"
+    gaps = qualification_gaps(ENTRIES, tuple(v0330))
     capabilities = {gap.capability for gap in gaps}
     assert _CAP in capabilities and _UPGRADE in capabilities  # blocked record
     assert "real-provider-e2e" in capabilities  # no CI-reproducible evidence
@@ -311,9 +313,11 @@ def test_the_real_v0330_archive_gaps_are_the_honest_ones() -> None:
 
 def test_the_real_v0330_record_evaluates_to_block() -> None:
     """The retrospective demonstration: v0.33.0 shipped with a red typecheck
-    on its sha while the canary passed — under this gate it does not qualify."""
-    record = latest_promotion_record(ROOT)
-    assert record is not None and record.version == "0.33.0"
+    on its sha while the canary passed — under this gate it does not qualify.
+    (Pinned to the v0.33.0 record; the archive's LATEST record moves on with
+    each release — that is the design.)"""
+    record = next((r for r in load_promotion_records(ROOT) if r.version == "0.33.0"), None)
+    assert record is not None, "docs/releases/evidence/v0.33.0/promotion.json must be committed"
     assert record.image_digest.startswith("sha256:")
     assert record.ci_run_id == "35852868044"
     reevaluated = evaluate_promotion(record.required_checks, record.canary)
@@ -377,13 +381,18 @@ def test_loading_refuses_a_foreign_stamp(tmp_path: Path) -> None:
 
 
 def test_the_real_archive_manifest_matches_the_recorded_release() -> None:
-    manifest = json.loads(
-        (ROOT / "docs/releases/evidence/v0.33.0/manifest.json").read_text(encoding="utf-8")
-    )
-    record = latest_promotion_record(ROOT)
-    assert manifest["version"] == "0.33.0" == record.version
-    # The snapshot was generated FROM the tagged tree, not the working tree:
-    assert manifest["sha"] == record.head_sha
+    """Each archived release's manifest and promotion record agree — checked
+    for every version in the archive, not just the latest."""
+    for version_dir in sorted((ROOT / "docs/releases/evidence").glob("v*")):
+        manifest = json.loads((version_dir / "manifest.json").read_text(encoding="utf-8"))
+        record = next(
+            (r for r in load_promotion_records(ROOT) if r.version == version_dir.name[1:]),
+            None,
+        )
+        assert record is not None, f"{version_dir.name}: promotion record missing"
+        assert manifest["version"] == record.version
+        # The snapshot was generated FROM the tagged tree, not the working tree:
+        assert manifest["sha"] == record.head_sha, version_dir.name
 
 
 # ---------------------------------------------------------------------------
