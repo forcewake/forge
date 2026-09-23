@@ -3,8 +3,12 @@ name: release
 # Publishes the release image to GHCR on a version tag. R30: the release
 # ARTIFACT is the smoke target — build once, push BY DIGEST, canary that
 # digest against a disposable Postgres (fresh-DB recipe + previous-release
-# schema upgrade, real alembic chain, NO source mount), and only then attach
-# the mutable tags and sign. The digest — not `latest` — is what this job
+# schema upgrade with seeded real-shaped data, real alembic chain, NO
+# source mount). R32-19 adds the PROMOTION GATE between the canary and any
+# mutable tag: the digest only earns its tags when the qualification
+# profile (explicit required CI checks on the tagged sha) AND the canary
+# evidence qualify — a failed required check blocks promotion even when
+# the canary passed. The digest — not `latest` — is what this workflow
 # publishes for deployers to pin.
 #
 # Publishes only when FORGE_RELEASE_TOKEN (a PAT with write:packages) is
@@ -24,6 +28,9 @@ jobs:
       packages: write
       id-token: write # cosign keyless signing (Fulcio OIDC)
       attestations: write # actions/attest-build-provenance
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      canary: ${{ steps.canary_results.outputs.json }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,28 +87,116 @@ jobs:
       #   migrate: the previous release's image migrates a second fresh DB,
       #            this image must REFUSE to boot on that stale schema (R22
       #            gate), then upgrade prev→head and pass the gate.
+      #   seed:    --seed-real-data seeds the previous-schema DB with
+      #            real-shaped rows (run + frozen spec + bounded steps +
+      #            control command + publication intent); the upgrade must
+      #            preserve them — row counts + sha256 fingerprints per
+      #            table, not just the schema version (R32-19).
       # External LLM keys are unavailable in CI: LiteLLM REACHABILITY (the
       # boundary) is satisfied by a stub served by the image itself; no model
-      # call is made.
-      - name: Canary the digest (fresh DB + previous-release schema)
+      # call is made. --results-json writes the capability-tagged stage
+      # outcomes the promotion gate below consumes as evidence.
+      - name: Canary the digest (fresh DB + previous-release schema + seeded data)
         run: |
           python3 scripts/canary_smoke.py "$IMAGE" \
             --expected-version "${GITHUB_REF_NAME#v}" \
             --previous-image "ghcr.io/${{ github.repository }}:latest" \
-            --stages fresh,migrate
+            --stages fresh,migrate \
+            --seed-real-data \
+            --results-json canary-results.json
         # `latest` still points at the PREVIOUS release here — the tags are
-        # attached below, only after the canary passes. On the first release
-        # (or a re-run where the chains do not differ) the stage skips or
-        # waives the refusal assertion on its own.
+        # attached below, only after canary AND the promotion gate pass. On
+        # the first release (or a re-run where the chains do not differ) the
+        # stage skips or waives the refusal assertion on its own.
 
-      # Only now do the mutable tags move — onto the validated digest.
+      - name: Export the canary results
+        id: canary_results
+        run: echo "json=$(tr -d '\n' < canary-results.json)" >> "$GITHUB_OUTPUT"
+
+  # R32-19 promotion gate: mutable tags move ONLY from qualified profile
+  # evidence. The gate is a QUERY over evidence collected earlier — the CI
+  # check-runs for the tagged sha and the canary results from the job above
+  # — it never re-runs a suite. Required checks are explicit,
+  # provenance-bound names (see forge.release_promotion.REQUIRED_CHECKS):
+  # a FAILED check blocks promotion even when the canary passed; a check
+  # with no recorded result (never run, cancelled, still pending) blocks
+  # fail-closed; a failed-then-passed retry is a conditional pass that
+  # stays on record, never silently green. The promotion record it emits is
+  # the artifact committed under docs/releases/evidence/v<version>/.
+  promotion-gate:
+    needs: publish-ghcr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Evaluate the promotion from recorded evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANARY_RESULTS: ${{ needs.publish-ghcr.outputs.canary }}
+        run: |
+          printf '%s' "$CANARY_RESULTS" > canary-results.json
+          uv run python -m forge.release_promotion gate \
+            --version "${GITHUB_REF_NAME#v}" \
+            --image-ref "ghcr.io/${{ github.repository }}" \
+            --digest "${{ needs.publish-ghcr.outputs.digest }}" \
+            --ci-run-id "${{ github.run_id }}" \
+            --head-sha "${{ github.sha }}" \
+            --checks-from-github "${{ github.repository }}@${{ github.sha }}" \
+            --canary-json canary-results.json \
+            --out promotion.json \
+            --archive
+
+      - name: Keep the promotion record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-record-v${{ github.ref_name }}
+          path: promotion.json
+
+      - name: Publish the promotion decision
+        if: always()
+        run: |
+          {
+            echo "## Promotion gate — v${GITHUB_REF_NAME#v}"
+            echo ""
+            echo '```json'
+            cat promotion.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Only now do the mutable tags move — onto the validated, gate-qualified
+  # digest.
+  attach-tags:
+    needs: [publish-ghcr, promotion-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing (Fulcio OIDC)
+      attestations: write # actions/attest-build-provenance
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.FORGE_RELEASE_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Attach tags to the validated digest
         run: |
           IMAGE_NAME=ghcr.io/${{ github.repository }}
           docker buildx imagetools create \
             -t "$IMAGE_NAME:${GITHUB_REF_NAME#v}" \
             -t "$IMAGE_NAME:latest" \
-            "$IMAGE_NAME@${{ steps.build.outputs.digest }}"
+            "$IMAGE_NAME@${{ needs.publish-ghcr.outputs.digest }}"
 
       # Keyless Sigstore signing — the digest is the thing signed, never a
       # tag. Requires a public repo (public-good Sigstore). If forge goes
@@ -110,28 +205,28 @@ jobs:
       # (docs/research/2026-09-17-schema-upgrade-gates.md, open question 6).
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Sign the digest (keyless)
-        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }}"
 
       - name: Attest build provenance for the digest
         uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.publish-ghcr.outputs.digest }}
 
       - name: Publish the pinning digest
-        if: always() && steps.build.outputs.digest != ''
+        if: always() && needs.publish-ghcr.outputs.digest != ''
         run: |
           {
             echo "## Release image — pin the digest, not the tag"
             echo ""
             echo '```'
-            echo "docker pull ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+            echo "docker pull ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }}"
             echo '```'
             echo ""
             echo "Verify the signature:"
             echo ""
             echo '```'
-            echo "cosign verify ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }} \\"
+            echo "cosign verify ghcr.io/${{ github.repository }}@${{ needs.publish-ghcr.outputs.digest }} \\"
             echo "  --certificate-identity-regexp '^https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*' \\"
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
             echo '```'

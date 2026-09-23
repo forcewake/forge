@@ -1,0 +1,79 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-03-ambiguous-refund-window",
+  "mode": "lexical",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": null,
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "extend checkout request_refund with a window",
+        "evidence_refs": [
+          "l1"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "why": "keyword hit"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def request_refund(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "line": 6,
+        "asserted_content": "def request_refund(order_id: str) -> str:",
+        "importance": "important"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "what are the refund rules?",
+        "specific": false,
+        "citations": []
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "window length follows finance policy",
+        "severity": "medium",
+        "invented_default": false
+      }
+    ]
+  },
+  "reviewer": {
+    "correction_minutes": 30,
+    "correction_severity": "minor",
+    "notes": "single-repo keyword evidence only"
+  }
+}

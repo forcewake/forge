@@ -1,0 +1,69 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-02-neighbor-retry-policy",
+  "mode": "none",
+  "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": null,
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "add retries around dispatch"
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "why": "issue text names dispatch"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 2,
+        "asserted_content": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "importance": "important"
+      }
+    ],
+    "questions": [],
+    "assumptions": [
+      {
+        "text": "retry policy is local to orders",
+        "severity": "high",
+        "invented_default": true
+      }
+    ]
+  },
+  "reviewer": {
+    "correction_minutes": 42,
+    "correction_severity": "major",
+    "notes": "planned blind: wrong or guessed citations"
+  }
+}

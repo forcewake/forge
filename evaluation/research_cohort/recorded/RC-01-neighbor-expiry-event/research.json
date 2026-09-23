@@ -1,0 +1,217 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-01-neighbor-expiry-event",
+  "mode": "research",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 7,
+        "calls_executed": 7,
+        "wall_seconds_used": 41.3,
+        "tokens": {
+          "input": 8123,
+          "output": 1551,
+          "input_lower_bound": 8123,
+          "output_lower_bound": 1551,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 2,
+    "calls_proposed": 7,
+    "calls_executed": 7,
+    "observations": {
+      "count": 7,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 41.3,
+    "tokens": {
+      "input": 8123,
+      "output": 1551,
+      "input_lower_bound": 8123,
+      "output_lower_bound": 1551,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "r1",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "source_oid": "a1f00d0000000000000000000000000000000000",
+        "path": "src/timer.py",
+        "line": 7,
+        "kind": "research_read",
+        "detail": "read window at src/timer.py:7",
+        "text": "\"\"\"\n\nEXPIRY_EVENT = \"order.expired.v2\"\n\nSECONDS_PER_DAY = 86400\n",
+        "content": "\"\"\"\n\nEXPIRY_EVENT = \"order.expired.v2\"\n\nSECONDS_PER_DAY = 86400\n"
+      },
+      {
+        "evidence_id": "r2",
+        "repo_key": "billing",
+        "repository_id": "gitlab-102",
+        "source_oid": "b2e11c0000000000000000000000000000000000",
+        "path": "src/events.py",
+        "line": 7,
+        "kind": "research_read",
+        "detail": "read window at src/events.py:7",
+        "text": "\"\"\"\n\nORDER_EXPIRED_EVENT = \"order.expired.v2\"\nORDER_EXPIRED_PAYLOAD_FIELDS = (\"order_id\", \"lapsed_at\", \"reason\")\n\n",
+        "content": "\"\"\"\n\nORDER_EXPIRED_EVENT = \"order.expired.v2\"\nORDER_EXPIRED_PAYLOAD_FIELDS = (\"order_id\", \"lapsed_at\", \"reason\")\n\n"
+      },
+      {
+        "evidence_id": "r3",
+        "repo_key": "billing",
+        "repository_id": "gitlab-102",
+        "source_oid": "b2e11c0000000000000000000000000000000000",
+        "path": "src/subscriptions.py",
+        "line": 6,
+        "kind": "research_read",
+        "detail": "read window at src/subscriptions.py:6",
+        "text": "\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missin",
+        "content": "\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missing the shared schema fields\")"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Orders' timer publishes order.expired.v2; Billing owns the schema in src/events.py (order_id, lapsed_at, reason) and subscriptions lapses on it.",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "recorded example research document (RC seed)"
+  },
+  "observations": [
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/timer.py offset 4 length 6",
+      "content": "\"\"\"\n\nEXPIRY_EVENT = \"order.expired.v2\"\n\nSECONDS_PER_DAY = 86400\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing",
+      "call": "src/events.py offset 4 length 6",
+      "content": "\"\"\"\n\nORDER_EXPIRED_EVENT = \"order.expired.v2\"\nORDER_EXPIRED_PAYLOAD_FIELDS = (\"order_id\", \"lapsed_at\", \"reason\")\n\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing",
+      "call": "src/subscriptions.py offset 3 length 6",
+      "content": "\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missing the shared schema fields\")",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "publish order.expired.v2 with lapsed_at and reason per billing schema",
+        "evidence_refs": [
+          "r1",
+          "r2"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "verify subscriptions lapses on the same event before changing the payload",
+        "evidence_refs": [
+          "r3"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/timer.py",
+        "why": "publishes the shared event"
+      },
+      {
+        "repo": "billing",
+        "path": "src/events.py",
+        "why": "owns the shared schema"
+      },
+      {
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "why": "consumes the event"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "EXPIRY_EVENT = \"order.expired.v2\"",
+        "repo": "orders",
+        "path": "src/timer.py",
+        "line": 7,
+        "asserted_content": "EXPIRY_EVENT = \"order.expired.v2\"",
+        "importance": "important",
+        "evidence": "evidence:r1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "ORDER_EXPIRED_EVENT = \"order.expired.v2\"",
+        "repo": "billing",
+        "path": "src/events.py",
+        "line": 7,
+        "asserted_content": "ORDER_EXPIRED_EVENT = \"order.expired.v2\"",
+        "importance": "important",
+        "evidence": "evidence:r2"
+      },
+      {
+        "claim_id": "c3",
+        "text": "def lapse_on_expiry(payload: dict) -> str:",
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "line": 6,
+        "asserted_content": "def lapse_on_expiry(payload: dict) -> str:",
+        "importance": "important",
+        "evidence": "evidence:r3"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Billing validates lapsed_at and reason on order.expired.v2 \u2014 should Orders backfill reason for legacy pending orders, and is lapsed_at the timer fire time?",
+        "specific": true,
+        "citations": [
+          "r2"
+        ]
+      }
+    ],
+    "assumptions": []
+  },
+  "reviewer": {
+    "correction_minutes": 8,
+    "correction_severity": "minor",
+    "notes": "plan matched the real contract on both sides"
+  }
+}

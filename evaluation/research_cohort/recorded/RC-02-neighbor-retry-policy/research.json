@@ -1,0 +1,175 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-02-neighbor-retry-policy",
+  "mode": "research",
+  "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 6,
+        "calls_executed": 6,
+        "wall_seconds_used": 35.1,
+        "tokens": {
+          "input": 7002,
+          "output": 1290,
+          "input_lower_bound": 7002,
+          "output_lower_bound": 1290,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 2,
+    "calls_proposed": 6,
+    "calls_executed": 6,
+    "observations": {
+      "count": 6,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 35.1,
+    "tokens": {
+      "input": 7002,
+      "output": 1290,
+      "input_lower_bound": 7002,
+      "output_lower_bound": 1290,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "r1",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "source_oid": "d4c33a0000000000000000000000000000000000",
+        "path": "src/dispatch.py",
+        "line": 20,
+        "kind": "research_read",
+        "detail": "read window at src/dispatch.py:20",
+        "text": "def _log_dispatch(order_id: str, attempt: int) -> None:\n    print(f\"dispatch order={order_id} attempt={attempt}\")\n\n\ndef dispatch_with_retry(order_id: str, attempts: int = 3) -> str:\n    \"\"\"Dispatch an",
+        "content": "def _log_dispatch(order_id: str, attempt: int) -> None:\n    print(f\"dispatch order={order_id} attempt={attempt}\")\n\n\ndef dispatch_with_retry(order_id: str, attempts: int = 3) -> str:\n    \"\"\"Dispatch an order applying Billing's retry policy between tries.\"\"\"\n    for attempt in range(attempts):\n        _log_dispatch(order_id, attempt)\n        pending = asyncio.sleep(_deadline_for(attempt))"
+      },
+      {
+        "evidence_id": "r2",
+        "repo_key": "billing",
+        "repository_id": "gitlab-102",
+        "source_oid": "e5b44f0000000000000000000000000000000000",
+        "path": "src/retry.py",
+        "line": 3,
+        "kind": "research_read",
+        "detail": "read window at src/retry.py:3",
+        "text": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\"\n\nRETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}\n\n",
+        "content": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\"\n\nRETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}\n\n"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "dispatch_with_retry applies billing/src/retry.py RETRY_POLICY; the policy is the neighbor's contract",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "recorded example research document (RC seed)"
+  },
+  "observations": [
+    {
+      "tool": "read_file",
+      "repo_key": "billing",
+      "call": "src/retry.py offset 0 length 5",
+      "content": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\"\n\nRETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}\n\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/dispatch.py offset 16 length 9",
+      "content": "def _log_dispatch(order_id: str, attempt: int) -> None:\n    print(f\"dispatch order={order_id} attempt={attempt}\")\n\n\ndef dispatch_with_retry(order_id: str, attempts: int = 3) -> str:\n    \"\"\"Dispatch an order applying Billing's retry policy between tries.\"\"\"\n    for attempt in range(attempts):\n        _log_dispatch(order_id, attempt)\n        pending = asyncio.sleep(_deadline_for(attempt))",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "apply billing's retry policy inside dispatch_with_retry",
+        "evidence_refs": [
+          "r1",
+          "r2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "why": "applies the neighbor policy"
+      },
+      {
+        "repo": "billing",
+        "path": "src/retry.py",
+        "why": "owns the policy"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 20,
+        "asserted_content": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "importance": "important",
+        "evidence": "evidence:r1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "RETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}",
+        "repo": "billing",
+        "path": "src/retry.py",
+        "line": 3,
+        "asserted_content": "RETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}",
+        "importance": "important",
+        "evidence": "evidence:r2"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Billing's retry policy caps max_attempts at 5 \u2014 should Orders' dispatch stop there or keep its own higher cap for idempotent redelivery?",
+        "specific": true,
+        "citations": [
+          "r2"
+        ]
+      }
+    ],
+    "assumptions": []
+  },
+  "reviewer": {
+    "correction_minutes": 6,
+    "correction_severity": "minor",
+    "notes": "held-back task: found the neighbor policy"
+  }
+}

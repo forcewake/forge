@@ -1,0 +1,174 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-06-holdout-ambiguous-retention",
+  "mode": "research",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 4,
+        "calls_executed": 4,
+        "wall_seconds_used": 22.6,
+        "tokens": {
+          "input": 5200,
+          "output": 933,
+          "input_lower_bound": 5200,
+          "output_lower_bound": 933,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 1,
+    "calls_proposed": 4,
+    "calls_executed": 4,
+    "observations": {
+      "count": 4,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 22.6,
+    "tokens": {
+      "input": 5200,
+      "output": 933,
+      "input_lower_bound": 5200,
+      "output_lower_bound": 933,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "r1",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "source_oid": "a1f00d0000000000000000000000000000000000",
+        "path": "src/checkout.py",
+        "line": 6,
+        "kind": "research_read",
+        "detail": "read window at src/checkout.py:6",
+        "text": "\n\ndef request_refund(order_id: str) -> str:\n    \"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"\n    return f\"refund-requested order={order_id}\"\n",
+        "content": "\n\ndef request_refund(order_id: str) -> str:\n    \"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"\n    return f\"refund-requested order={order_id}\"\n"
+      },
+      {
+        "evidence_id": "r2",
+        "repo_key": "billing",
+        "repository_id": "gitlab-102",
+        "source_oid": "b2e11c0000000000000000000000000000000000",
+        "path": "src/subscriptions.py",
+        "line": 6,
+        "kind": "research_read",
+        "detail": "read window at src/subscriptions.py:6",
+        "text": "\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missin",
+        "content": "\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missing the shared schema fields\")"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "no retention period exists anywhere in the authorized snapshot; deletion would be an invented default",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "recorded example research document (RC seed)"
+  },
+  "observations": [
+    {
+      "tool": "grep",
+      "repo_key": "orders",
+      "call": "pattern retention",
+      "content": "(no matches)",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/checkout.py offset 3 length 6",
+      "content": "\n\ndef request_refund(order_id: str) -> str:\n    \"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"\n    return f\"refund-requested order={order_id}\"\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "hold deletion until the retention period is decided",
+        "evidence_refs": [
+          "r1"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "why": "the only account-adjacent entrypoint"
+      },
+      {
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "why": "subscription state deletion must respect"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def request_refund(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "line": 6,
+        "asserted_content": "def request_refund(order_id: str) -> str:",
+        "importance": "important",
+        "evidence": "evidence:r1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "def lapse_on_expiry(payload: dict) -> str:",
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "line": 6,
+        "asserted_content": "def lapse_on_expiry(payload: dict) -> str:",
+        "importance": "important",
+        "evidence": "evidence:r2"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "The retention period before hard delete is undecided: 30, 60 or 90 days, and does a lapsed billing subscription restart the clock?",
+        "specific": true,
+        "citations": [
+          "r2"
+        ]
+      }
+    ],
+    "assumptions": []
+  },
+  "reviewer": {
+    "correction_minutes": 4,
+    "correction_severity": "minor",
+    "notes": "held-back task: asked instead of inventing"
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "canary": [
+    {
+      "capability": "release-artifact-canary",
+      "detail": "alembic chain at 026; boot gate ok; /health ok (version 0.33.0); /mcp 401; doctor 5 passed",
+      "outcome": "pass",
+      "stage": "fresh"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "previous image (head 024) migrated fresh DB; boot gate refused stale schema; upgrade to 026; gate ok",
+      "outcome": "pass",
+      "stage": "migrate"
+    }
+  ],
+  "ci_run_id": "35852868044",
+  "decision": {
+    "checks": [
+      {
+        "name": "lint",
+        "reason": "required check 'lint' (.github/workflows/ci.yml#jobs.lint) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "typecheck",
+        "reason": "required check 'typecheck' (.github/workflows/ci.yml#jobs.typecheck) FAILED in run 35852857453 — a red check blocks promotion even when the canary passed",
+        "verdict": "fail"
+      },
+      {
+        "name": "test (3.13)",
+        "reason": "required check 'test (3.13)' (.github/workflows/ci.yml#jobs.test[3.13]) did not pass earlier — run 35852857683 (cancelled) — and passed on retry in run 35852857453: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+        "verdict": "conditional_pass"
+      },
+      {
+        "name": "test (3.14)",
+        "reason": "required check 'test (3.14)' (.github/workflows/ci.yml#jobs.test[3.14]) did not pass earlier — run 35852857683 (cancelled) — and passed on retry in run 35852857453: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+        "verdict": "conditional_pass"
+      },
+      {
+        "name": "integration",
+        "reason": "required check 'integration' (.github/workflows/ci.yml#jobs.integration) passed",
+        "verdict": "pass"
+      }
+    ],
+    "reasons": [
+      "required check 'typecheck' (.github/workflows/ci.yml#jobs.typecheck) FAILED in run 35852857453 — a red check blocks promotion even when the canary passed"
+    ],
+    "verdict": "block"
+  },
+  "head_sha": "591da502214c97443491bdc7bb8a0178afcc03db",
+  "image_digest": "sha256:7a4ee44b1b8d07e5058fc6b8e0ff8bade9c97939b900201a4f2b5d732425391a",
+  "image_ref": "ghcr.io/forcewake/forge",
+  "note": "RETROSPECTIVE RECORD (R32-19), reconstructed 2026-09-23 from the GitHub check-runs API for the tagged sha and the release workflow run 35852868044 logs. The v0.33.0 workflow had no promotion gate: the mutable tags were attached on canary-pass alone. Under the R32-19 policy this evidence set does NOT qualify — the blocking typecheck failure (mypy core, runs/github_service.py:791) shipped in the release image. Kept as the demonstration record for the gate: a green canary never outweighs a red required check.",
+  "promoted_at": "2026-09-23T11:11:28Z",
+  "required_checks": [
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-23T11:09:19Z",
+          "conclusion": "success",
+          "run_id": "35852857683"
+        },
+        {
+          "completed_at": "2026-09-23T11:13:06Z",
+          "conclusion": "success",
+          "run_id": "35852857453"
+        }
+      ],
+      "name": "lint",
+      "provenance": ".github/workflows/ci.yml#jobs.lint"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-23T11:09:46Z",
+          "conclusion": "failure",
+          "run_id": "35852857683"
+        },
+        {
+          "completed_at": "2026-09-23T11:13:36Z",
+          "conclusion": "failure",
+          "run_id": "35852857453"
+        }
+      ],
+      "name": "typecheck",
+      "provenance": ".github/workflows/ci.yml#jobs.typecheck"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-23T11:12:50Z",
+          "conclusion": "cancelled",
+          "run_id": "35852857683"
+        },
+        {
+          "completed_at": "2026-09-23T11:18:24Z",
+          "conclusion": "success",
+          "run_id": "35852857453"
+        }
+      ],
+      "name": "test (3.13)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.13]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-23T11:12:49Z",
+          "conclusion": "cancelled",
+          "run_id": "35852857683"
+        },
+        {
+          "completed_at": "2026-09-23T11:18:22Z",
+          "conclusion": "success",
+          "run_id": "35852857453"
+        }
+      ],
+      "name": "test (3.14)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.14]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-23T11:09:46Z",
+          "conclusion": "success",
+          "run_id": "35852857683"
+        },
+        {
+          "completed_at": "2026-09-23T11:13:34Z",
+          "conclusion": "success",
+          "run_id": "35852857453"
+        }
+      ],
+      "name": "integration",
+      "provenance": ".github/workflows/ci.yml#jobs.integration"
+    }
+  ],
+  "stamp": "forge.release.promotion/1",
+  "version": "0.33.0",
+  "wheel": {
+    "note": "no wheel/sdist built by the release pipeline (image-only release)",
+    "sdist": null,
+    "wheel": null
+  }
+}

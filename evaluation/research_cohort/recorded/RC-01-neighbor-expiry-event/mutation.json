@@ -1,0 +1,131 @@
+{
+  "task_id": "RC-01-neighbor-expiry-event",
+  "mutated_snapshot_digest": "63d8a9eb1d3de9f46dcdbcc91ee790030b5e434a282dee59e9d85a82336bdd8e",
+  "reviewer": {
+    "change_reason_substantive": true,
+    "notes": "research reacted to the contract move by re-targeting the event; lexical's plan is byte-identical because it never read the neighbor contract"
+  },
+  "plans": {
+    "lexical": {
+      "steps": [
+        {
+          "step_id": "s1",
+          "objective": "keep publishing order.expired.v2 from the timer",
+          "evidence_refs": [
+            "l1"
+          ]
+        }
+      ],
+      "surface": [
+        {
+          "repo": "orders",
+          "path": "src/timer.py",
+          "why": "symbol probe hit"
+        },
+        {
+          "repo": "orders",
+          "path": "src/checkout.py",
+          "why": "keyword hit"
+        }
+      ],
+      "claims": [
+        {
+          "claim_id": "c1",
+          "text": "EXPIRY_EVENT = \"order.expired.v2\"",
+          "repo": "orders",
+          "path": "src/timer.py",
+          "line": 7,
+          "asserted_content": "EXPIRY_EVENT = \"order.expired.v2\"",
+          "importance": "important"
+        }
+      ],
+      "questions": [],
+      "assumptions": [
+        {
+          "text": "event schema unchanged since last quarter",
+          "severity": "medium",
+          "invented_default": false
+        }
+      ]
+    },
+    "research": {
+      "steps": [
+        {
+          "step_id": "s1",
+          "objective": "publish order.expired.v3 (Billing moved the shared schema) with lapsed_at and reason",
+          "evidence_refs": [
+            "r1",
+            "r2"
+          ]
+        },
+        {
+          "step_id": "s2",
+          "objective": "verify subscriptions lapses on the same event before changing the payload",
+          "evidence_refs": [
+            "r3"
+          ]
+        }
+      ],
+      "surface": [
+        {
+          "repo": "orders",
+          "path": "src/timer.py",
+          "why": "publishes the shared event"
+        },
+        {
+          "repo": "billing",
+          "path": "src/events.py",
+          "why": "owns the shared schema"
+        },
+        {
+          "repo": "billing",
+          "path": "src/subscriptions.py",
+          "why": "consumes the event"
+        }
+      ],
+      "claims": [
+        {
+          "claim_id": "c1",
+          "text": "EXPIRY_EVENT = \"order.expired.v2\"",
+          "repo": "orders",
+          "path": "src/timer.py",
+          "line": 7,
+          "asserted_content": "EXPIRY_EVENT = \"order.expired.v2\"",
+          "importance": "important",
+          "evidence": "evidence:r1"
+        },
+        {
+          "claim_id": "c2",
+          "text": "ORDER_EXPIRED_EVENT = \"order.expired.v2\"",
+          "repo": "billing",
+          "path": "src/events.py",
+          "line": 7,
+          "asserted_content": "ORDER_EXPIRED_EVENT = \"order.expired.v2\"",
+          "importance": "important",
+          "evidence": "evidence:r2"
+        },
+        {
+          "claim_id": "c3",
+          "text": "def lapse_on_expiry(payload: dict) -> str:",
+          "repo": "billing",
+          "path": "src/subscriptions.py",
+          "line": 6,
+          "asserted_content": "def lapse_on_expiry(payload: dict) -> str:",
+          "importance": "important",
+          "evidence": "evidence:r3"
+        }
+      ],
+      "questions": [
+        {
+          "question_id": "q1",
+          "text": "Billing validates lapsed_at and reason on order.expired.v2 \u2014 should Orders backfill reason for legacy pending orders, and is lapsed_at the timer fire time?",
+          "specific": true,
+          "citations": [
+            "r2"
+          ]
+        }
+      ],
+      "assumptions": []
+    }
+  }
+}

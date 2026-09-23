@@ -788,7 +788,7 @@ class GitHubRunService:
             # pointer from the replaced plan would false-refuse the next
             # /go as a digest mismatch.
             if ACTIVE_PLAN_KEY in (run.evidence or {}):
-                superseded = dict(run.evidence)
+                superseded = dict(run.evidence or {})
                 superseded.pop(ACTIVE_PLAN_KEY, None)
                 run.evidence = superseded
             # The backend string flips to ci_harness at dispatch (ADR-0020);

@@ -26,7 +26,10 @@ Levels (strongest last):
 
 Run ``python -m forge.release_manifest`` (repo root) to emit the JSON; pass
 ``--out PATH`` to write it. The manifest carries the HEAD sha it describes;
-regenerate per release rather than committing a drifting copy.
+regenerate per release rather than committing a drifting copy. The one
+COMMITTED manifest artifact is the per-release snapshot archived by
+:mod:`forge.release_promotion` under ``docs/releases/evidence/v<version>/``
+— written once, at promotion time, and never regenerated after.
 
 The seeded registry below is derived from the ACTUAL suite (grep-verifiable)
 and is kept honest by ``tests/test_release_manifest.py``: every evidence
@@ -436,7 +439,30 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         gating="nightly",
         note="R30: the IMAGE is smoke-tested — real alembic chain, boot gate at head, /health "
         "version, MCP mount fail-closed, doctor; also the tag-gate before publish "
-        "(Release / publish-ghcr). Covers boot/migrate ONLY — see the not_run entries below.",
+        "(Release / publish-ghcr). R32-19: the migrate stage seeds real-shaped rows and "
+        "asserts the upgrade preserves them; stage outcomes are capability-tagged "
+        "machine records the promotion gate consumes. Covers boot/migrate ONLY — see "
+        "the not_run entries below.",
+    ),
+    ManifestEntry(
+        capability="release-promotion-gate",
+        provider="*",
+        backend="*",
+        level="contract_tested",
+        evidence_class="contract_suite",
+        evidence=(
+            "src/forge/release_promotion.py",
+            "tests/test_release_promotion.py",
+            ".github/workflows/release.yml",
+        ),
+        ci_jobs=("test", "promotion-gate"),
+        gating="release_tag",
+        note="R32-19: mutable tags attach ONLY when the promotion gate qualifies the digest "
+        "— explicit provenance-bound required CI checks on the tagged sha plus the "
+        "capability-tagged canary outcomes; a failed (or never-executed) check blocks "
+        "fail-closed even when the canary passed, and a failed-then-passed retry stays a "
+        "conditional pass on record. Per-release promotion evidence is archived COMMITTED "
+        "under docs/releases/evidence/v<version>/ and renders the README pins.",
     ),
     ManifestEntry(
         capability="real-provider-e2e",

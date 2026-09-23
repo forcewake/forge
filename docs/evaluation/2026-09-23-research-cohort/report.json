@@ -1,0 +1,2327 @@
+{
+  "schema": "forge.research.cohort.report/1",
+  "cohort_id": "research-cohort-v1",
+  "spec_schema": "forge.research.cohort/1",
+  "recorded_at": "2026-09-23T00:00:00+00:00",
+  "replay": {
+    "pure_over_recorded": true,
+    "live_calls": 0
+  },
+  "mode_spellings": {
+    "none": "none",
+    "lexical": "lexical",
+    "research": "research-harness"
+  },
+  "promotion_policy": {
+    "owner": "R32 review lead (adaptive)",
+    "hold_expires": "2026-10-07",
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    }
+  },
+  "rubric_merge_notes": [
+    "citation validity (file:line resolves) is folded INTO evidence_accuracy \u2014 a syntactically valid citation earns nothing unless the cited bytes support the claim, so validity alone is not a separate dimension",
+    "scope precision (references into the task's irrelevant repositories) is folded INTO impacted_surface_recall as the spurious-surface penalty, not accumulated as a sixth dimension",
+    "assumption COUNT and assumption SEVERITY merge into one unjustified_assumptions weight (severity-weighted, invented defaults penalized) \u2014 count-without-severity double-counts the same mistake",
+    "correction minutes stay OUTSIDE the weighted overall: a speed/effort number is only ever published beside its quality counterweight (research topic 4 \u00a74), never blended into it"
+  ],
+  "integrity": {
+    "binding_violations": [],
+    "missing_runs": [],
+    "held_back_missing_runs": [],
+    "cost_coverage_gaps": [],
+    "budget_mismatches": [],
+    "citation_violations": [],
+    "mutation_mismatches": []
+  },
+  "tasks": {
+    "RC-01-neighbor-expiry-event": {
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "modes": {
+        "none": {
+          "task_id": "RC-01-neighbor-expiry-event",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 1,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "syntactic_only",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.3333,
+            "recall": 0.3333,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "billing",
+                "path": "src/events.py"
+              },
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.5,
+            "weight": 5.0,
+            "count": 1,
+            "by_severity": {
+              "high": 1,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 1,
+            "detail": [
+              {
+                "text": "Billing still consumes order.expired.v2 with the old payload",
+                "severity": "high",
+                "invented_default": true
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 45.0,
+            "severity": "major",
+            "recorded": true
+          },
+          "overall": 0.3333
+        },
+        "lexical": {
+          "task_id": "RC-01-neighbor-expiry-event",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 1,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.3333,
+            "recall": 0.3333,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "billing",
+                "path": "src/events.py"
+              },
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.8,
+            "weight": 2.0,
+            "count": 1,
+            "by_severity": {
+              "high": 0,
+              "medium": 1,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "event schema unchanged since last quarter",
+                "severity": "medium",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 25.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 0.6933
+        },
+        "research": {
+          "task_id": "RC-01-neighbor-expiry-event",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": true,
+            "stopped_reason": "",
+            "partial_retained_as_partial": false,
+            "observations": 3,
+            "truncated_observations": 0,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 7,
+            "calls_executed": 7,
+            "wall_seconds_used": 41.3,
+            "tokens": {
+              "input": 8123,
+              "output": 1551,
+              "input_lower_bound": 8123,
+              "output_lower_bound": 1551,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 3,
+            "verdicts": {
+              "semantic_match": 3,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c3",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "billing",
+                "path": "src/events.py"
+              },
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 1,
+            "specific": 1,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 8.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 1.0
+        }
+      },
+      "mutation": {
+        "task_id": "RC-01-neighbor-expiry-event",
+        "mutated_snapshot_digest": "63d8a9eb1d3de9f46dcdbcc91ee790030b5e434a282dee59e9d85a82336bdd8e",
+        "reapplied_digest": "63d8a9eb1d3de9f46dcdbcc91ee790030b5e434a282dee59e9d85a82336bdd8e",
+        "modes": {
+          "lexical": {
+            "digest_matches_reapplied_mutation": true,
+            "change_reason_substantive": true,
+            "reviewer_notes": "research reacted to the contract move by re-targeting the event; lexical's plan is byte-identical because it never read the neighbor contract",
+            "plan_changed": false
+          },
+          "research": {
+            "digest_matches_reapplied_mutation": true,
+            "change_reason_substantive": true,
+            "reviewer_notes": "research reacted to the contract move by re-targeting the event; lexical's plan is byte-identical because it never read the neighbor contract",
+            "plan_changed": true
+          }
+        }
+      }
+    },
+    "RC-03-ambiguous-refund-window": {
+      "archetype": "ambiguous_requirement",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "modes": {
+        "none": {
+          "task_id": "RC-03-ambiguous-refund-window",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 0,
+              "invalid": 1,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "invalid",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.3,
+            "weight": 7.0,
+            "count": 2,
+            "by_severity": {
+              "high": 1,
+              "medium": 1,
+              "low": 0
+            },
+            "invented_defaults": 1,
+            "detail": [
+              {
+                "text": "grace window is 7 days",
+                "severity": "high",
+                "invented_default": true
+              },
+              {
+                "text": "refunds module exists",
+                "severity": "medium",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 0.0,
+            "total": 1,
+            "specific": 0,
+            "generic": 1,
+            "missing_decision_addressed": false
+          },
+          "human_plan_correction_effort": {
+            "minutes": 40.0,
+            "severity": "major",
+            "recorded": true
+          },
+          "overall": 0.09
+        },
+        "lexical": {
+          "task_id": "RC-03-ambiguous-refund-window",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 1,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/checkout.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.8,
+            "weight": 2.0,
+            "count": 1,
+            "by_severity": {
+              "high": 0,
+              "medium": 1,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "window length follows finance policy",
+                "severity": "medium",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 0.0,
+            "total": 1,
+            "specific": 0,
+            "generic": 1,
+            "missing_decision_addressed": false
+          },
+          "human_plan_correction_effort": {
+            "minutes": 30.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 0.515
+        },
+        "research": {
+          "task_id": "RC-03-ambiguous-refund-window",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": true,
+            "stopped_reason": "",
+            "partial_retained_as_partial": false,
+            "observations": 2,
+            "truncated_observations": 0,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 5,
+            "calls_executed": 5,
+            "wall_seconds_used": 29.8,
+            "tokens": {
+              "input": 6410,
+              "output": 1104,
+              "input_lower_bound": 6410,
+              "output_lower_bound": 1104,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 2,
+            "verdicts": {
+              "semantic_match": 2,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "billing",
+                "path": "src/subscriptions.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/checkout.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 2,
+            "specific": 2,
+            "generic": 0,
+            "missing_decision_addressed": true
+          },
+          "human_plan_correction_effort": {
+            "minutes": 5.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 1.0
+        }
+      }
+    },
+    "RC-04-deep-file-evidence": {
+      "archetype": "deep_file_evidence",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "modes": {
+        "none": {
+          "task_id": "RC-04-deep-file-evidence",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 1,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "syntactic_only",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.8,
+            "weight": 2.0,
+            "count": 1,
+            "by_severity": {
+              "high": 0,
+              "medium": 1,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "the handler is the first function in the file",
+                "severity": "medium",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 28.0,
+            "severity": "major",
+            "recorded": true
+          },
+          "overall": 0.57
+        },
+        "lexical": {
+          "task_id": "RC-04-deep-file-evidence",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.5,
+            "important_claims": 2,
+            "verdicts": {
+              "semantic_match": 1,
+              "syntactic_only": 1,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "syntactic_only",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 14.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 0.8
+        },
+        "research": {
+          "task_id": "RC-04-deep-file-evidence",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": "gateway_error: APIConnectionError"
+            },
+            {
+              "attempt": 2,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 1,
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": true,
+            "stopped_reason": "",
+            "partial_retained_as_partial": false,
+            "observations": 2,
+            "truncated_observations": 0,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 2,
+            "calls_proposed": 11,
+            "calls_executed": 10,
+            "wall_seconds_used": 59.9,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 11211,
+              "output_lower_bound": 1802,
+              "unknown_usage_calls": 1
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 2,
+            "verdicts": {
+              "semantic_match": 2,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 7.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 1.0
+        }
+      }
+    },
+    "RC-05-irrelevant-repo-lifecycle": {
+      "archetype": "irrelevant_repository",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "modes": {
+        "none": {
+          "task_id": "RC-05-irrelevant-repo-lifecycle",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.0,
+            "important_claims": 1,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 1,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "syntactic_only",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": 0.6,
+            "weight": 4.0,
+            "count": 1,
+            "by_severity": {
+              "high": 0,
+              "medium": 1,
+              "low": 0
+            },
+            "invented_defaults": 1,
+            "detail": [
+              {
+                "text": "cancelled orders never reach the expiry timer",
+                "severity": "medium",
+                "invented_default": true
+              }
+            ]
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 35.0,
+            "severity": "major",
+            "recorded": true
+          },
+          "overall": 0.415
+        },
+        "lexical": {
+          "task_id": "RC-05-irrelevant-repo-lifecycle",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": 0,
+              "output": 0,
+              "input_lower_bound": 0,
+              "output_lower_bound": 0,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 0.5,
+            "important_claims": 2,
+            "verdicts": {
+              "semantic_match": 1,
+              "syntactic_only": 1,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "syntactic_only",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.75,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": [
+              {
+                "repo": "docs-site",
+                "path": "index.md"
+              }
+            ]
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 0,
+            "specific": 0,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 20.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 0.7375
+        },
+        "research": {
+          "task_id": "RC-05-irrelevant-repo-lifecycle",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": false,
+            "stopped_reason": "max_calls",
+            "partial_retained_as_partial": true,
+            "observations": 3,
+            "truncated_observations": 1,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 10,
+            "calls_executed": 10,
+            "wall_seconds_used": 88.7,
+            "tokens": {
+              "input": 10244,
+              "output": 2033,
+              "input_lower_bound": 10244,
+              "output_lower_bound": 2033,
+              "unknown_usage_calls": 0
+            }
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 10,
+              "wall_seconds": 90.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": 1.0,
+            "important_claims": 2,
+            "verdicts": {
+              "semantic_match": 2,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": true
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": true
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.75,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "orders",
+                "path": "src/handlers/expiry.py"
+              },
+              {
+                "repo": "orders",
+                "path": "src/timer.py"
+              }
+            ],
+            "missed": [],
+            "spurious": [
+              {
+                "repo": "docs-site",
+                "path": "index.md"
+              }
+            ]
+          },
+          "unjustified_assumptions": {
+            "score": 1.0,
+            "weight": 0.0,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": 1.0,
+            "total": 1,
+            "specific": 1,
+            "generic": 0,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 10.0,
+            "severity": "minor",
+            "recorded": true
+          },
+          "overall": 0.8875
+        }
+      }
+    }
+  },
+  "held_back": {
+    "note": "graded but SEPARATE: held-back tasks never enter the aggregates and can never move the promotion verdict",
+    "tasks": {
+      "RC-02-neighbor-retry-policy": {
+        "archetype": "neighbor_dependency",
+        "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+        "modes": {
+          "none": {
+            "task_id": "RC-02-neighbor-retry-policy",
+            "mode": "none",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 0.0,
+              "important_claims": 1,
+              "verdicts": {
+                "semantic_match": 0,
+                "syntactic_only": 1,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "syntactic_only",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 0.5,
+              "recall": 0.5,
+              "found": [
+                {
+                  "repo": "orders",
+                  "path": "src/dispatch.py"
+                }
+              ],
+              "missed": [
+                {
+                  "repo": "billing",
+                  "path": "src/retry.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 0.5,
+              "weight": 5.0,
+              "count": 1,
+              "by_severity": {
+                "high": 1,
+                "medium": 0,
+                "low": 0
+              },
+              "invented_defaults": 1,
+              "detail": [
+                {
+                  "text": "retry policy is local to orders",
+                  "severity": "high",
+                  "invented_default": true
+                }
+              ]
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 0,
+              "specific": 0,
+              "generic": 0,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 42.0,
+              "severity": "major",
+              "recorded": true
+            },
+            "overall": 0.4
+          },
+          "lexical": {
+            "task_id": "RC-02-neighbor-retry-policy",
+            "mode": "lexical",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 0.5,
+              "important_claims": 2,
+              "verdicts": {
+                "semantic_match": 1,
+                "syntactic_only": 1,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "syntactic_only",
+                  "important": true
+                },
+                {
+                  "claim_id": "c2",
+                  "verdict": "semantic_match",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 1.0,
+              "recall": 1.0,
+              "found": [
+                {
+                  "repo": "billing",
+                  "path": "src/retry.py"
+                },
+                {
+                  "repo": "orders",
+                  "path": "src/dispatch.py"
+                }
+              ],
+              "missed": [],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 0.9,
+              "weight": 1.0,
+              "count": 1,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 1
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "backoff base unchanged",
+                  "severity": "low",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 0,
+              "specific": 0,
+              "generic": 0,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 18.0,
+              "severity": "minor",
+              "recorded": true
+            },
+            "overall": 0.83
+          },
+          "research": {
+            "task_id": "RC-02-neighbor-retry-policy",
+            "mode": "research",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": {
+              "present": true,
+              "schema": "forge.discovery.research/1",
+              "complete": true,
+              "stopped_reason": "",
+              "partial_retained_as_partial": false,
+              "observations": 2,
+              "truncated_observations": 0,
+              "failed_observations": 0
+            },
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 6,
+              "calls_executed": 6,
+              "wall_seconds_used": 35.1,
+              "tokens": {
+                "input": 7002,
+                "output": 1290,
+                "input_lower_bound": 7002,
+                "output_lower_bound": 1290,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 1.0,
+              "important_claims": 2,
+              "verdicts": {
+                "semantic_match": 2,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "semantic_match",
+                  "important": true
+                },
+                {
+                  "claim_id": "c2",
+                  "verdict": "semantic_match",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 1.0,
+              "recall": 1.0,
+              "found": [
+                {
+                  "repo": "billing",
+                  "path": "src/retry.py"
+                },
+                {
+                  "repo": "orders",
+                  "path": "src/dispatch.py"
+                }
+              ],
+              "missed": [],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 1.0,
+              "weight": 0.0,
+              "count": 0,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 0
+              },
+              "invented_defaults": 0,
+              "detail": []
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 1,
+              "specific": 1,
+              "generic": 0,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 6.0,
+              "severity": "minor",
+              "recorded": true
+            },
+            "overall": 1.0
+          }
+        }
+      },
+      "RC-06-holdout-ambiguous-retention": {
+        "archetype": "ambiguous_requirement",
+        "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+        "modes": {
+          "none": {
+            "task_id": "RC-06-holdout-ambiguous-retention",
+            "mode": "none",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 0.0,
+              "important_claims": 1,
+              "verdicts": {
+                "semantic_match": 0,
+                "syntactic_only": 0,
+                "invalid": 1,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "invalid",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 0.0,
+              "recall": 0.0,
+              "found": [],
+              "missed": [
+                {
+                  "repo": "billing",
+                  "path": "src/subscriptions.py"
+                },
+                {
+                  "repo": "orders",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 0.5,
+              "weight": 5.0,
+              "count": 1,
+              "by_severity": {
+                "high": 1,
+                "medium": 0,
+                "low": 0
+              },
+              "invented_defaults": 1,
+              "detail": [
+                {
+                  "text": "retention period is 30 days",
+                  "severity": "high",
+                  "invented_default": true
+                }
+              ]
+            },
+            "question_quality": {
+              "score": 0.0,
+              "total": 1,
+              "specific": 0,
+              "generic": 1,
+              "missing_decision_addressed": false
+            },
+            "human_plan_correction_effort": {
+              "minutes": 38.0,
+              "severity": "major",
+              "recorded": true
+            },
+            "overall": 0.15
+          },
+          "lexical": {
+            "task_id": "RC-06-holdout-ambiguous-retention",
+            "mode": "lexical",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 1.0,
+              "important_claims": 1,
+              "verdicts": {
+                "semantic_match": 1,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "semantic_match",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 0.5,
+              "recall": 0.5,
+              "found": [
+                {
+                  "repo": "orders",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "missed": [
+                {
+                  "repo": "billing",
+                  "path": "src/subscriptions.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 0.8,
+              "weight": 2.0,
+              "count": 1,
+              "by_severity": {
+                "high": 0,
+                "medium": 1,
+                "low": 0
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "retention follows the standard window",
+                  "severity": "medium",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": 0.0,
+              "total": 1,
+              "specific": 0,
+              "generic": 1,
+              "missing_decision_addressed": false
+            },
+            "human_plan_correction_effort": {
+              "minutes": 22.0,
+              "severity": "minor",
+              "recorded": true
+            },
+            "overall": 0.515
+          },
+          "research": {
+            "task_id": "RC-06-holdout-ambiguous-retention",
+            "mode": "research",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": {
+              "present": true,
+              "schema": "forge.discovery.research/1",
+              "complete": true,
+              "stopped_reason": "",
+              "partial_retained_as_partial": false,
+              "observations": 2,
+              "truncated_observations": 0,
+              "failed_observations": 0
+            },
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 4,
+              "calls_executed": 4,
+              "wall_seconds_used": 22.6,
+              "tokens": {
+                "input": 5200,
+                "output": 933,
+                "input_lower_bound": 5200,
+                "output_lower_bound": 933,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 1.0,
+              "important_claims": 2,
+              "verdicts": {
+                "semantic_match": 2,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "semantic_match",
+                  "important": true
+                },
+                {
+                  "claim_id": "c2",
+                  "verdict": "semantic_match",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 1.0,
+              "recall": 1.0,
+              "found": [
+                {
+                  "repo": "billing",
+                  "path": "src/subscriptions.py"
+                },
+                {
+                  "repo": "orders",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "missed": [],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 1.0,
+              "weight": 0.0,
+              "count": 0,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 0
+              },
+              "invented_defaults": 0,
+              "detail": []
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 1,
+              "specific": 1,
+              "generic": 0,
+              "missing_decision_addressed": true
+            },
+            "human_plan_correction_effort": {
+              "minutes": 4.0,
+              "severity": "minor",
+              "recorded": true
+            },
+            "overall": 1.0
+          }
+        }
+      },
+      "RC-07-holdout-deep-retry-handler": {
+        "archetype": "deep_file_evidence",
+        "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+        "modes": {
+          "none": {
+            "task_id": "RC-07-holdout-deep-retry-handler",
+            "mode": "none",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 0.0,
+              "important_claims": 1,
+              "verdicts": {
+                "semantic_match": 0,
+                "syntactic_only": 1,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "syntactic_only",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 0.5,
+              "recall": 0.5,
+              "found": [
+                {
+                  "repo": "orders",
+                  "path": "src/dispatch.py"
+                }
+              ],
+              "missed": [
+                {
+                  "repo": "billing",
+                  "path": "src/retry.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 0.8,
+              "weight": 2.0,
+              "count": 1,
+              "by_severity": {
+                "high": 0,
+                "medium": 1,
+                "low": 0
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "retries are inline in the module header",
+                  "severity": "medium",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 0,
+              "specific": 0,
+              "generic": 0,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 30.0,
+              "severity": "major",
+              "recorded": true
+            },
+            "overall": 0.395
+          },
+          "lexical": {
+            "task_id": "RC-07-holdout-deep-retry-handler",
+            "mode": "lexical",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": 0,
+                "output": 0,
+                "input_lower_bound": 0,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 0
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": 0.5,
+              "important_claims": 2,
+              "verdicts": {
+                "semantic_match": 1,
+                "syntactic_only": 1,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "syntactic_only",
+                  "important": true
+                },
+                {
+                  "claim_id": "c2",
+                  "verdict": "semantic_match",
+                  "important": true
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 1.0,
+              "recall": 1.0,
+              "found": [
+                {
+                  "repo": "billing",
+                  "path": "src/retry.py"
+                },
+                {
+                  "repo": "orders",
+                  "path": "src/dispatch.py"
+                }
+              ],
+              "missed": [],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": 1.0,
+              "weight": 0.0,
+              "count": 0,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 0
+              },
+              "invented_defaults": 0,
+              "detail": []
+            },
+            "question_quality": {
+              "score": 1.0,
+              "total": 0,
+              "specific": 0,
+              "generic": 0,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 15.0,
+              "severity": "minor",
+              "recorded": true
+            },
+            "overall": 0.8
+          },
+          "research": {
+            "task_id": "RC-07-holdout-deep-retry-handler",
+            "mode": "research",
+            "outcome": "failed",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": "gateway_error: RateLimitError"
+              }
+            ],
+            "attempts_stopped": 1,
+            "research": {
+              "present": false,
+              "schema": "",
+              "complete": false,
+              "stopped_reason": "gateway_error: RateLimitError",
+              "partial_retained_as_partial": false,
+              "observations": 0,
+              "truncated_observations": 0,
+              "failed_observations": 0
+            },
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 2,
+              "calls_executed": 1,
+              "wall_seconds_used": 9.8,
+              "tokens": {
+                "input": null,
+                "output": null,
+                "input_lower_bound": 800,
+                "output_lower_bound": 0,
+                "unknown_usage_calls": 1
+              }
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 10,
+                "wall_seconds": 90.0
+              },
+              "within": true
+            },
+            "reason": "gateway_error: RateLimitError"
+          }
+        }
+      }
+    }
+  },
+  "aggregate": {
+    "none": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 0,
+      "evidence_accuracy_mean": 0.0,
+      "impacted_surface_recall_mean": 0.4583,
+      "unjustified_assumptions_weight_mean": 4.5,
+      "question_quality_mean": 0.75,
+      "correction_minutes_mean": 37.0,
+      "invented_defaults_total": 3,
+      "overall_mean": 0.3521,
+      "research": null,
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 0,
+        "calls_executed_total": 0,
+        "wall_seconds_used_total": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      },
+      "budget_overruns": []
+    },
+    "lexical": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 0,
+      "evidence_accuracy_mean": 0.75,
+      "impacted_surface_recall_mean": 0.6458,
+      "unjustified_assumptions_weight_mean": 1.0,
+      "question_quality_mean": 0.75,
+      "correction_minutes_mean": 22.25,
+      "invented_defaults_total": 0,
+      "overall_mean": 0.6865,
+      "research": null,
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 0,
+        "calls_executed_total": 0,
+        "wall_seconds_used_total": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      },
+      "budget_overruns": []
+    },
+    "research": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 1,
+      "evidence_accuracy_mean": 1.0,
+      "impacted_surface_recall_mean": 0.9375,
+      "unjustified_assumptions_weight_mean": 0.0,
+      "question_quality_mean": 1.0,
+      "correction_minutes_mean": 7.5,
+      "invented_defaults_total": 0,
+      "overall_mean": 0.9719,
+      "research": {
+        "complete": 3,
+        "exhausted": 1,
+        "stopped_reasons": {
+          "max_calls": 1
+        }
+      },
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 33,
+        "calls_executed_total": 32,
+        "wall_seconds_used_total": 219.7,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 35988,
+          "output_lower_bound": 6490,
+          "unknown_usage_calls": 1
+        }
+      },
+      "budget_overruns": []
+    }
+  },
+  "promotion": {
+    "verdict": "PASS",
+    "reasons": [
+      "research overall 0.9719 beats lexical 0.6865 by +0.2854 (>= margin +0.0500) under the agreed budget, accuracy 1.0 at/above the floor 0.8"
+    ],
+    "candidate_mode": "research",
+    "baseline_mode": "lexical",
+    "compared": {
+      "lexical": {
+        "overall_mean": 0.6865,
+        "evidence_accuracy_mean": 0.75,
+        "invented_defaults_total": 0
+      },
+      "research": {
+        "overall_mean": 0.9719,
+        "evidence_accuracy_mean": 1.0,
+        "invented_defaults_total": 0
+      }
+    }
+  },
+  "notes": [
+    "Held-back tasks are graded and reported SEPARATELY; they never enter the aggregate means and can never move the promotion verdict.",
+    "Exhaustion is never relabeled complete: a research pass stopped on a budget keeps complete=false and its stopped_reason into the report, and its partial findings stay partial.",
+    "Failed and exhausted attempts appear in this report WITH their cost coverage; quality means run over graded plans only, cost totals over every attempt.",
+    "Token totals stay lower bounds while any call's usage is unknown; unknown usage is counted, never silently re-totalled.",
+    "Every cost number is published beside its quality counterweight; the none/lexical columns are the frozen baseline for this cohort, and a re-recorded baseline is a new cohort.",
+    "Goodhart: the rubric grades recorded artifacts; once the cohort drives optimization, expect gaming \u2014 re-record a fresh cohort before a promotion decision that matters.",
+    "J-curve: early candidate-mode runs are expected to dip (tool-call overhead, wider surfaces); judge promotion on the pre-committed window recorded in the spec, not the first week.",
+    "The recorded artifacts this report replayed are EXAMPLES that exercise every grading path \u2014 not a real partner cohort; the verdict demonstrates the machinery, not evidence about production."
+  ]
+}

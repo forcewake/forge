@@ -1,0 +1,36 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-07-holdout-deep-retry-handler",
+  "mode": "research",
+  "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "gateway_error: RateLimitError",
+      "cost": {
+        "calls_proposed": 2,
+        "calls_executed": 1,
+        "wall_seconds_used": 9.8,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 800,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 1
+        }
+      }
+    }
+  ],
+  "research_document": null,
+  "observations": [],
+  "plan": null,
+  "reviewer": {
+    "correction_minutes": 0,
+    "correction_severity": "unrecorded",
+    "notes": "held-back task: the research attempt died on the gateway; no plan to correct"
+  }
+}

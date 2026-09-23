@@ -1,0 +1,28 @@
+{
+  "repos": {
+    "orders": {
+      "repository_id": "gitlab-101",
+      "source_oid": "d4c33a0000000000000000000000000000000000",
+      "files": {
+        "README.md": "# orders (RC seed)\n\nDispatch domain.\n",
+        "src/dispatch.py": "\"\"\"Dispatch retries (RC seed) \u2014 retry policy lives in Billing, not here.\n\nThe backoff contract is imported from the neighbor repository; the\nhandler that applies it sits deep in this file (deep-file archetype).\n\"\"\"\n\nimport asyncio\n\nfrom src.billing_retry import RETRY_POLICY\n\n\ndef _deadline_for(attempt: int) -> float:\n    return RETRY_POLICY[\"base_seconds\"] * (2**attempt)\n\n\ndef _log_dispatch(order_id: str, attempt: int) -> None:\n    print(f\"dispatch order={order_id} attempt={attempt}\")\n\n\ndef dispatch_with_retry(order_id: str, attempts: int = 3) -> str:\n    \"\"\"Dispatch an order applying Billing's retry policy between tries.\"\"\"\n    for attempt in range(attempts):\n        _log_dispatch(order_id, attempt)\n        pending = asyncio.sleep(_deadline_for(attempt))\n        del pending  # seed stub: no real loop in the fixture\n    return f\"dispatched order={order_id} after {attempts} attempt(s)\"\n"
+      }
+    },
+    "billing": {
+      "repository_id": "gitlab-102",
+      "source_oid": "e5b44f0000000000000000000000000000000000",
+      "files": {
+        "README.md": "# billing (RC seed)\n\nSubscriptions and shared contracts.\n",
+        "src/retry.py": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\"\n\nRETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}\n\n\ndef describe_policy() -> str:\n    return f\"retry policy {RETRY_POLICY['version']} base={RETRY_POLICY['base_seconds']}s\"\n"
+      }
+    },
+    "docs-site": {
+      "repository_id": "gitlab-909",
+      "source_oid": "c3d22b0000000000000000000000000000000000",
+      "files": {
+        "index.md": "# Order lifecycle \u2014 docs site (RC seed)\n\nMarketing-adjacent documentation. This repository is intentionally\nIRRELEVANT to the orders/billing service code: it documents the OLD\nlifecycle diagram and holds no contract either service reads.\n",
+        "theme.css": "body { font-family: sans-serif; }\n.site-header { color: #303030; }\n"
+      }
+    }
+  }
+}

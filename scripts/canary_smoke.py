@@ -19,6 +19,17 @@ NO source mount anywhere — every command runs inside the artifact:
             pullable — e.g. the first release — or predates the migrate
             entrypoint; the refusal assertion is waived when the previous
             chain head equals this one (re-runs, no schema delta).
+            With --seed-real-data the previous-schema DB is seeded with
+            REAL-shaped rows (a run with its frozen spec, bounded steps,
+            a control command, a publication intent — see _SEED_SQL) and
+            the upgrade must preserve them: row counts plus a sha256
+            fingerprint per table, compared across the upgrade. Schema
+            survival alone is no longer enough (R32-19).
+
+--results-json PATH writes the machine-readable stage outcomes — each row
+tagged with the manifest capability slug it qualifies, at collection time —
+for forge.release_promotion's gate and gaps query. pass/skip/fail only: a
+self-skipped stage is recorded as a skip and is never counted as a pass.
 
 No LLM keys are needed: LiteLLM reachability is the boundary, satisfied by
 a stub HTTP server that answers 200 on GET /health — served by the image
@@ -271,6 +282,200 @@ def last_line(text: str) -> str:
     return lines[-1] if lines else "<no output>"
 
 
+# ---------------------------------------------------------------------------
+# Machine-readable stage outcomes (R32-19): every stage is tagged with the
+# manifest capability slug it qualifies AT COLLECTION TIME, so the promotion
+# gate and the gaps query join canary evidence onto capability claims
+# without re-deriving anything at promotion time.
+# ---------------------------------------------------------------------------
+
+#: stage -> the manifest capability slug its evidence qualifies.
+STAGE_CAPABILITIES = {
+    "fresh": "release-artifact-canary",
+    "migrate": "release-canary/previous-release-upgrade",
+    "seed-real-data": "release-canary/previous-release-upgrade",
+}
+
+
+class Recorder:
+    """Accumulates stage outcomes and flushes them to --results-json.
+
+    Written after EVERY add (a failed run must leave its fail row behind —
+    the file is evidence, not a success trophy).
+    """
+
+    def __init__(self, image: str, path: str | None) -> None:
+        self.image = image
+        self.path = path
+        self.stages: list[dict[str, str]] = []
+
+    def add(self, stage: str, outcome: str, detail: str = "") -> None:
+        self.stages.append(
+            {
+                "stage": stage,
+                "capability": STAGE_CAPABILITIES.get(stage, stage),
+                "outcome": outcome,
+                "detail": detail[:400],
+            }
+        )
+        self.flush()
+
+    def flush(self) -> None:
+        if self.path:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump({"image": self.image, "stages": self.stages}, fh, indent=2)
+
+    def note_failure(self, stage: str, detail: str) -> None:
+        """Record a fail row for *stage* unless it already has a verdict."""
+        if not any(row["stage"] == stage for row in self.stages):
+            self.add(stage, "fail", detail)
+
+
+# ---------------------------------------------------------------------------
+# --seed-real-data: schema-accurate direct seeding at the N-1 head.
+#
+# Honest limitation (documented in docs/releases/README.md): the rows are
+# inserted with raw SQL against the schema the PREVIOUS image just created
+# (its own migration chain, at its own head) — real-shaped, but not produced
+# by the previous app's business logic. Driving the previous image's app to
+# mint rows would need a provider fixture the canary deliberately lacks.
+# Tables that do not exist at the previous head (e.g. checkpoint_metadata,
+# new in 026) cannot be seeded and are simply absent from the set.
+# ---------------------------------------------------------------------------
+
+_SEED_SQL = """\
+-- One run mid-flight with its frozen spec, bounded steps, one control
+-- command and one publication intent: the durable shape a real deployment
+-- carries across an upgrade.
+INSERT INTO flow_runs (id, project_id, issue_iid, provider, status, base_sha,
+                       plan_digest, spec_digest, config_digest, commit_cycle,
+                       created_at, updated_at)
+VALUES ('seedrun0000000000000000000001', 4242, 7, 'gitlab', 'waiting_approval',
+        '0123456789abcdef0123456789abcdef01234567',
+        'aa62d845f279c1f7a3ea5f6df4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3',
+        'bb73e956f380d2e8b4fb6a7ea5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4',
+        'cc84fa67e491e3f9c5ac7b8fb6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5',
+        1, now(), now());
+
+INSERT INTO run_specs (id, run_id, schema_version, document, digest, created_at)
+VALUES ('seedspec0000000000000000000001', 'seedrun0000000000000000000001', 3,
+        '{"task_digest": "deadbeef", "frozen": true}'::jsonb,
+        'bb73e956f380d2e8b4fb6a7ea5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4',
+        now());
+
+INSERT INTO step_runs (flow_run_id, step_name, status, attempt, max_attempts,
+                       payload, started_at)
+VALUES ('seedrun0000000000000000000001', 'plan', 'succeeded', 0, 3,
+        '{"checkpoint": "plan-v1"}'::jsonb, now()),
+       ('seedrun0000000000000000000001', 'writer.apply', 'scheduled', 0, 3,
+        '{"checkpoint": "apply-v1"}'::jsonb, now());
+
+INSERT INTO control_commands (id, work_id, run_id, kind, payload, status,
+                              sequence, dedup_key, actor_ref, actor_origin,
+                              journal)
+VALUES ('seedcmd000000000000000000000001', 'seed-work-1',
+        'seedrun0000000000000000000001', 'pause',
+        '{"reason": "human review"}'::jsonb, 'received', 1, 'delivery:9001',
+        'user:42', 'server_authenticated_human', '[]'::jsonb);
+
+INSERT INTO publication_intents (id, run_id, provider, repo, operation,
+                                 target_ref, idempotency_scope, operation_key,
+                                 commit_cycle, content_digest, status,
+                                 created_at, updated_at)
+VALUES ('seedintent0000000000000000000001', 'seedrun0000000000000000000001',
+        'gitlab', '4242', 'commit', 'forge/runs/seedrun1', 'cycle-1',
+        'forge-op:seed-key-1', 1,
+        'dd95ab78f502f4abadbd8c9ac7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
+        'requested', now(), now());
+"""
+
+#: (table, identity-expression) for the preservation fingerprint: the sha256
+#: over the ordered per-row identity strings — upgrade must keep it EXACT.
+_SEED_FINGERPRINTS: tuple[tuple[str, str], ...] = (
+    (
+        "flow_runs",
+        "id || '|' || status || '|' || coalesce(plan_digest, '') "
+        "|| '|' || coalesce(spec_digest, '')",
+    ),
+    ("run_specs", "id || '|' || run_id || '|' || digest || '|' || schema_version"),
+    (
+        "step_runs",
+        "flow_run_id || '|' || step_name || '|' || status || '|' || attempt",
+    ),
+    (
+        "control_commands",
+        "id || '|' || work_id || '|' || kind || '|' || status || '|' || sequence",
+    ),
+    (
+        "publication_intents",
+        "id || '|' || run_id || '|' || status || '|' || operation_key",
+    ),
+)
+
+
+def _psql(canary: Canary, sql: str, database: str = PREV_DB) -> str:
+    return canary.run(
+        "exec",
+        PG_NAME,
+        "psql",
+        "-U",
+        "forge",
+        "-d",
+        database,
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-tA",
+        input=sql,
+    )
+
+
+def seed_real_data_fingerprint(canary: Canary) -> str:
+    """Seed the previous-schema DB and return its preservation fingerprint."""
+    _psql(canary, _SEED_SQL)
+    rows = []
+    for table, expression in _SEED_FINGERPRINTS:
+        count = int(_psql(canary, f"SELECT count(*) FROM {table};").strip())
+        digest = _psql(
+            canary,
+            "SELECT encode(sha256(convert_to("
+            "coalesce(string_agg(x, E'|' ORDER BY x), ''), 'UTF8')), 'hex') "
+            f"FROM (SELECT {expression} AS x FROM {table}) s;",
+        ).strip()
+        rows.append(f"{table} {count} {digest}")
+    fingerprint = "\n".join(rows)
+    print(
+        "migrate/seed: seeded real-shaped rows into the previous-schema DB "
+        f"({len(_SEED_FINGERPRINTS)} tables); fingerprint recorded"
+    )
+    for row in rows:
+        print(f"  seed: {row}")
+    return fingerprint
+
+
+def verify_seeded_data(canary: Canary, seeded_fingerprint: str) -> None:
+    """The upgrade preserved every seeded row: counts AND digests equal."""
+    mismatches = []
+    for table, expression in _SEED_FINGERPRINTS:
+        count = int(_psql(canary, f"SELECT count(*) FROM {table};").strip())
+        digest = _psql(
+            canary,
+            "SELECT encode(sha256(convert_to("
+            "coalesce(string_agg(x, E'|' ORDER BY x), ''), 'UTF8')), 'hex') "
+            f"FROM (SELECT {expression} AS x FROM {table}) s;",
+        ).strip()
+        expected = f"{table} {count} {digest}"
+        if expected not in seeded_fingerprint.splitlines():
+            mismatches.append(f"{table}: now {expected}")
+    if mismatches:
+        seeded = "\n".join(f"  was: {line}" for line in seeded_fingerprint.splitlines())
+        now = "\n".join(f"  {m}" for m in mismatches)
+        raise CanaryError(f"the upgrade did NOT preserve the seeded rows:\n{seeded}\n{now}")
+    print(
+        "migrate/seed: upgrade preserved every seeded row "
+        f"({len(_SEED_FINGERPRINTS)} tables — counts and sha256 fingerprints equal)"
+    )
+
+
 def http_probe(url: str, timeout: int = 10) -> tuple[int, dict[str, object] | None]:
     request = urllib.request.Request(url)  # noqa: S310 — fixed http://localhost target
     try:
@@ -407,10 +612,20 @@ def _script_head(canary: Canary, image: str) -> str | None:
         return None
 
 
-def stage_migrate(canary: Canary, image: str, previous_image: str) -> bool:
+def stage_migrate(
+    canary: Canary,
+    image: str,
+    previous_image: str,
+    seed_real_data: bool = False,
+    recorder: Recorder | None = None,
+) -> bool:
     """prev-release schema → this release: refuse stale, upgrade, boot-gate ok."""
     if not canary.try_pull(previous_image):
         print(f"migrate: SKIP — previous image {previous_image} not pullable (first release?)")
+        if recorder:
+            recorder.add("migrate", "skip", f"previous image {previous_image} not pullable")
+            if seed_real_data:
+                recorder.add("seed-real-data", "skip", "no previous schema to seed")
         return False
     prev_head = _script_head(canary, previous_image)
     if prev_head is None:
@@ -418,6 +633,10 @@ def stage_migrate(canary: Canary, image: str, previous_image: str) -> bool:
             f"migrate: SKIP — previous image {previous_image} predates python -m forge.migrate; "
             "the mechanical upgrade path starts at the first release that ships migrations"
         )
+        if recorder:
+            recorder.add("migrate", "skip", "previous image predates the migrate entrypoint")
+            if seed_real_data:
+                recorder.add("seed-real-data", "skip", "no previous schema to seed")
         return False
     new_head = _script_head(canary, image)
     chain_is_new = prev_head != new_head
@@ -440,6 +659,19 @@ def stage_migrate(canary: Canary, image: str, previous_image: str) -> bool:
     print(
         f"migrate: previous image {previous_image} applied its chain (head {prev_head}) to {PREV_DB}"
     )
+
+    # 1b. Seed the previous-schema DB with real-shaped rows and fingerprint
+    #     them, so the upgrade must preserve DATA, not just schema version.
+    seeded_fingerprint = ""
+    if seed_real_data:
+        try:
+            seeded_fingerprint = seed_real_data_fingerprint(canary)
+            if recorder:
+                recorder.add("seed-real-data", "pass", f"seeded at previous head {prev_head}")
+        except CanaryError as exc:
+            if recorder:
+                recorder.note_failure("seed-real-data", str(exc))
+            raise
 
     if chain_is_new:
         # 2. The R22 gate must REFUSE this release's boot against the stale schema.
@@ -464,6 +696,17 @@ def stage_migrate(canary: Canary, image: str, previous_image: str) -> bool:
     )
     print("migrate: this release upgraded the previous schema to head")
 
+    # 3b. The seeded rows survived the upgrade: counts and digests equal.
+    if seed_real_data:
+        try:
+            verify_seeded_data(canary, seeded_fingerprint)
+            if recorder:
+                recorder.add("seed-real-data", "pass", "upgrade preserved counts + digests")
+        except CanaryError as exc:
+            if recorder:
+                recorder.note_failure("seed-real-data", str(exc))
+            raise
+
     # 4. The boot gate now passes (the upgrade path a real deployment takes).
     out = canary.in_container(
         image,
@@ -474,6 +717,8 @@ def stage_migrate(canary: Canary, image: str, previous_image: str) -> bool:
         input=_GATE_PROBE,
     )
     print(f"migrate: {last_line(out)}")
+    if recorder:
+        recorder.add("migrate", "pass", f"prev head {prev_head} -> {new_head}; gate ok")
     return True
 
 
@@ -506,6 +751,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="accept a tag ref instead of a digest (local builds only)",
     )
+    parser.add_argument(
+        "--seed-real-data",
+        action="store_true",
+        help="migrate stage: seed the previous-schema DB with real-shaped rows "
+        "(run + spec + steps + control command + publication intent) and assert "
+        "the upgrade preserves them (counts + sha256 fingerprints)",
+    )
+    parser.add_argument(
+        "--results-json",
+        default=None,
+        help="write machine-readable stage outcomes here (capability-tagged, "
+        "pass/skip/fail) for the promotion gate",
+    )
     parser.add_argument("--port", type=int, default=HOST_PORT, help="host port for the app")
     parser.add_argument("--keep", action="store_true", help="leave the canary stack running")
     return parser.parse_args(argv)
@@ -530,24 +788,40 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"canary: unknown stages {sorted(unknown)}", file=sys.stderr)
         return 2
+    if args.seed_real_data and "migrate" not in stages:
+        print("canary: --seed-real-data needs the migrate stage", file=sys.stderr)
+        return 2
 
     canary = Canary(runtime)
+    recorder = Recorder(args.image, args.results_json)
     print(f"canary: image={args.image} runtime={runtime} stages={stages}")
     shipped: list[str] = []
+    current = "fresh"
     try:
         canary.network_up()
         if "fresh" in stages:
             stage_fresh(canary, args.image, args.expected_version, args.port)
+            recorder.add("fresh", "pass", "migrate, boot gate, /health, /mcp 401, doctor")
             shipped.append("fresh")
         if "migrate" in stages:
+            current = "migrate"
             if not args.previous_image:
                 print("migrate: SKIP — no --previous-image given (nightly follow-up: pass it)")
-            elif stage_migrate(canary, args.image, args.previous_image):
+                recorder.add("migrate", "skip", "no --previous-image given")
+            elif stage_migrate(
+                canary,
+                args.image,
+                args.previous_image,
+                seed_real_data=args.seed_real_data,
+                recorder=recorder,
+            ):
                 shipped.append("migrate(previous→head)")
     except CanaryError as exc:
+        recorder.note_failure(current, str(exc))
         print(f"canary: FAIL\n{exc}", file=sys.stderr)
         return 1
     finally:
+        recorder.flush()
         if not args.keep:
             canary.down()
         else:

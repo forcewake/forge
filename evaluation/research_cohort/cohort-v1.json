@@ -1,0 +1,168 @@
+{
+  "schema": "forge.research.cohort/1",
+  "cohort_id": "research-cohort-v1",
+  "recorded_at": "2026-09-23T00:00:00+00:00",
+  "promotion": {
+    "owner": "R32 review lead (adaptive)",
+    "hold_expires": "2026-10-07",
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "RC-01-neighbor-expiry-event",
+      "archetype": "neighbor_dependency",
+      "held_back": false,
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "statement": "Align Orders' expiry publication with the event schema Billing consumes. Orders' timer publishes the expiry event; Billing's subscriptions module lapses on it \u2014 the payload contract is defined on Billing's side.",
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/timer.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/events.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/subscriptions.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-02-neighbor-retry-policy",
+      "archetype": "neighbor_dependency",
+      "held_back": true,
+      "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+      "snapshot_ref": "snap-dispatch.json",
+      "statement": "Orders' dispatch must apply the retry policy Billing owns. The backoff contract is defined in the neighbor repository, not in Orders.",
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/dispatch.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/retry.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-03-ambiguous-refund-window",
+      "archetype": "ambiguous_requirement",
+      "held_back": false,
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "statement": "Support refund requests within the grace window after order expiry.",
+      "missing_decision": "the grace-window length (7 or 30 days) and who absorbs the payment fee",
+      "missing_decision_terms": [
+        "grace window",
+        "grace",
+        "7",
+        "30",
+        "fee",
+        "days"
+      ],
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/checkout.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/subscriptions.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-04-deep-file-evidence",
+      "archetype": "deep_file_evidence",
+      "held_back": false,
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "statement": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits.",
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/handlers/expiry.py"
+        },
+        {
+          "repo": "orders",
+          "path": "src/timer.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-05-irrelevant-repo-lifecycle",
+      "archetype": "irrelevant_repository",
+      "held_back": false,
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "statement": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds no contract either service reads.",
+      "irrelevant_repos": [
+        "docs-site"
+      ],
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/timer.py"
+        },
+        {
+          "repo": "orders",
+          "path": "src/handlers/expiry.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-06-holdout-ambiguous-retention",
+      "archetype": "ambiguous_requirement",
+      "held_back": true,
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "statement": "Add account deletion honoring the retention policy.",
+      "missing_decision": "the retention period before a hard delete (30, 60 or 90 days)",
+      "missing_decision_terms": [
+        "retention",
+        "period",
+        "30",
+        "60",
+        "90",
+        "days"
+      ],
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/checkout.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/subscriptions.py"
+        }
+      ]
+    },
+    {
+      "task_id": "RC-07-holdout-deep-retry-handler",
+      "archetype": "deep_file_evidence",
+      "held_back": true,
+      "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+      "snapshot_ref": "snap-dispatch.json",
+      "statement": "Locate the handler deep in Orders' dispatch module that applies Billing's retry policy between attempts.",
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/dispatch.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/retry.py"
+        }
+      ]
+    }
+  ]
+}

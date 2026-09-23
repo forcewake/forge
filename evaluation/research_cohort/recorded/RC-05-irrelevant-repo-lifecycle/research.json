@@ -1,0 +1,190 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-05-irrelevant-repo-lifecycle",
+  "mode": "research",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 10,
+        "calls_executed": 10,
+        "wall_seconds_used": 88.7,
+        "tokens": {
+          "input": 10244,
+          "output": 2033,
+          "input_lower_bound": 10244,
+          "output_lower_bound": 2033,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": false,
+    "stopped_reason": "max_calls",
+    "iterations": 3,
+    "calls_proposed": 10,
+    "calls_executed": 8,
+    "observations": {
+      "count": 10,
+      "truncated": 1,
+      "errors": 2
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 88.7,
+    "tokens": {
+      "input": 10244,
+      "output": 2033,
+      "input_lower_bound": 10244,
+      "output_lower_bound": 2033,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "docs-site",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "r1",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "source_oid": "a1f00d0000000000000000000000000000000000",
+        "path": "src/timer.py",
+        "line": 7,
+        "kind": "research_read",
+        "detail": "read window at src/timer.py:7",
+        "text": "\"\"\"\n\nEXPIRY_EVENT = \"order.expired.v2\"\n\nSECONDS_PER_DAY = 86400\n",
+        "content": "\"\"\"\n\nEXPIRY_EVENT = \"order.expired.v2\"\n\nSECONDS_PER_DAY = 86400\n"
+      },
+      {
+        "evidence_id": "r2",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "source_oid": "a1f00d0000000000000000000000000000000000",
+        "path": "src/handlers/expiry.py",
+        "line": 33,
+        "kind": "research_read",
+        "detail": "read window at src/handlers/expiry.py:33",
+        "text": "    logger.info(\"notify %s on %s\", order_id, channel)\n\n\ndef handle_expiry(order_id: str) -> str:\n    \"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"\n    order = _load_order(or",
+        "content": "    logger.info(\"notify %s on %s\", order_id, channel)\n\n\ndef handle_expiry(order_id: str) -> str:\n    \"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"\n    order = _load_order(order_id)\n    if order[\"state\"] != \"pending\":\n        return \"ignored\"\n    _notify(order_id, \"email\")\n    return f\"lapsed {_format_order(order_id)}\"\n"
+      }
+    ],
+    "omissions": [
+      "call 3: path 'theme.css' listing consumed a slot without contract content"
+    ],
+    "omissions_dropped": 0,
+    "summary": "partial: found the publish site and the cancellation handler; never re-checked Billing's consumer because the call budget went to docs-site listings first",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "recorded example research document (RC seed)"
+  },
+  "observations": [
+    {
+      "tool": "list_paths",
+      "repo_key": "docs-site",
+      "call": "prefix ",
+      "content": "index.md\ntheme.css",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "docs-site",
+      "call": "index.md offset 0 length 10",
+      "content": "# Order lifecycle \u2014 docs site (RC seed)\n\nMarketing-adjacent documentation. This repository is intentionally\nIRRELEVANT to the orders/billing service code: it documents the OLD\nlifecycle diagram and holds no contract either service reads.\n",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/handlers/expiry.py offset 29 length 8",
+      "content": "    logger.info(\"notify %s on %s\", order_id, channel)\n\n\ndef handle_expiry(order_id: str) -> str:\n    \"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"\n    order = _load_order(order_id)\n    if order[\"state\"] != \"pending\":\n        return \"ignored\"\n    _notify(order_id, \"email\")\n    return f\"lapsed {_format_order(order_id)}\"\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "handle_cancellation marks the order; handle_expiry ignores non-pending",
+        "evidence_refs": [
+          "r1",
+          "r2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/timer.py",
+        "why": "publishes the event"
+      },
+      {
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "why": "cancellation + state check"
+      },
+      {
+        "repo": "docs-site",
+        "path": "index.md",
+        "why": "consulted before the budget ran out (kept honestly)"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "EXPIRY_EVENT = \"order.expired.v2\"",
+        "repo": "orders",
+        "path": "src/timer.py",
+        "line": 7,
+        "asserted_content": "EXPIRY_EVENT = \"order.expired.v2\"",
+        "importance": "important",
+        "evidence": "evidence:r1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "def handle_cancellation(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "line": 33,
+        "asserted_content": "def handle_cancellation(order_id: str) -> str:",
+        "importance": "important",
+        "evidence": "evidence:r2"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Should a cancellation AFTER the timer fired but BEFORE the lapse lands still suppress order.expired.v2, or only cancellations before firing?",
+        "specific": true,
+        "citations": [
+          "r2"
+        ]
+      }
+    ],
+    "assumptions": []
+  },
+  "reviewer": {
+    "correction_minutes": 10,
+    "correction_severity": "minor",
+    "notes": "right plan despite the exhausted pass; the docs-site surface entry stayed and is graded spurious"
+  }
+}

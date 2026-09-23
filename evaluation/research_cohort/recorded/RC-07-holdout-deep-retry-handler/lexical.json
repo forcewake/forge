@@ -1,0 +1,81 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-07-holdout-deep-retry-handler",
+  "mode": "lexical",
+  "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": null,
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "wrap dispatch in retries",
+        "evidence_refs": [
+          "l1",
+          "l2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "why": "keyword hit"
+      },
+      {
+        "repo": "billing",
+        "path": "src/retry.py",
+        "why": "symbol probe hit"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 6,
+        "asserted_content": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "importance": "important"
+      },
+      {
+        "claim_id": "c2",
+        "text": "RETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}",
+        "repo": "billing",
+        "path": "src/retry.py",
+        "line": 3,
+        "asserted_content": "RETRY_POLICY = {\"base_seconds\": 2, \"max_attempts\": 5, \"jitter\": \"full\", \"version\": \"v2\"}",
+        "importance": "important"
+      }
+    ],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "correction_minutes": 15,
+    "correction_severity": "minor",
+    "notes": "single-repo keyword evidence only"
+  }
+}
