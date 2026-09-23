@@ -443,6 +443,23 @@ def _install_fragment(path: Path) -> str:
     return "\n".join(line[indent:] if line.strip() else line for line in block) + "\n"
 
 
+def _rendered_fragment(tmp_path: Path, subdir: str, **record_kwargs) -> str:
+    """The install fragment rendered against a CONTROLLED archive.
+
+    The route tests must not depend on which record the live archive
+    happens to carry (image-only renders the tag route; a wheel record
+    renders the wheel route) — each test pins the route it exercises.
+    """
+    pins = _load_pins_module()
+    base = tmp_path / subdir / "base"
+    base.mkdir(parents=True)
+    record = _record_document(**record_kwargs)
+    # _fake_root builds under <root>/repo; give it its own tmp area
+    archive_root = _fake_root(base, record)
+    assert pins.main(["--root", str(archive_root), "--templates"]) == 0
+    return _install_fragment(archive_root / "ci/templates/forge-harness.github.yml")
+
+
 @pytest.fixture(scope="session")
 def lane_runner(tmp_path_factory):
     """An isolated interpreter with a STUB pip first on PATH: the route
@@ -493,9 +510,12 @@ class TestInstallFragmentRoutesOnRealBash:
     def test_a_stripped_pin_with_no_variable_refuses_before_any_install(
         self, tmp_path, lane_runner
     ):
-        fragment = _install_fragment(TEMPLATE)
+        fragment = _rendered_fragment(tmp_path, "stripped-root", wheel_name=None)
+        promoted = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', fragment)
+        assert promoted is not None
         stripped = fragment.replace(
-            'FORGE_LANE_PROMOTED_VERSION="v0.34.0"', 'FORGE_LANE_PROMOTED_VERSION=""'
+            f'FORGE_LANE_PROMOTED_VERSION="v{promoted.group(1)}"',
+            'FORGE_LANE_PROMOTED_VERSION=""',
         )
         workdir = tmp_path / "stripped"
         workdir.mkdir()
@@ -513,7 +533,8 @@ class TestInstallFragmentRoutesOnRealBash:
         reports exactly the pinned version — the identity gate stays open
         (a PYTHONPATH shim stands in for the installed package so the
         comparison is deterministic in any environment)."""
-        pin = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', TEMPLATE.read_text())
+        fragment = _rendered_fragment(tmp_path, "default-root", wheel_name=None)
+        pin = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', fragment)
         assert pin is not None
         shim = tmp_path / "shim-default"
         (shim / "forge").mkdir(parents=True)
@@ -522,9 +543,7 @@ class TestInstallFragmentRoutesOnRealBash:
         )
         workdir = tmp_path / "default"
         workdir.mkdir()
-        result = _run_fragment(
-            lane_runner, workdir, _install_fragment(TEMPLATE), {"PYTHONPATH": str(shim)}
-        )
+        result = _run_fragment(lane_runner, workdir, fragment, {"PYTHONPATH": str(shim)})
         assert result.returncode == 0, result.stdout + result.stderr
         record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
         assert record["pin"] == "git-ref"
@@ -542,7 +561,7 @@ class TestInstallFragmentRoutesOnRealBash:
         result = _run_fragment(
             lane_runner,
             workdir,
-            _install_fragment(TEMPLATE),
+            _rendered_fragment(tmp_path, "dev-root", wheel_name=None),
             {"FORGE_LANE_DEV_SOURCE_INSTALL": "true", "FORGE_LANE_REF": "feature-x"},
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -558,7 +577,7 @@ class TestInstallFragmentRoutesOnRealBash:
         result = _run_fragment(
             lane_runner,
             workdir,
-            _install_fragment(TEMPLATE),
+            _rendered_fragment(tmp_path, "dev-noref-root", wheel_name=None),
             {"FORGE_LANE_DEV_SOURCE_INSTALL": "true"},
         )
         assert result.returncode != 0
@@ -568,7 +587,10 @@ class TestInstallFragmentRoutesOnRealBash:
         workdir = tmp_path / "branch"
         workdir.mkdir()
         result = _run_fragment(
-            lane_runner, workdir, _install_fragment(TEMPLATE), {"FORGE_LANE_REF": "main"}
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "branch-root", wheel_name=None),
+            {"FORGE_LANE_REF": "main"},
         )
         assert result.returncode != 0
         out = result.stdout + result.stderr
@@ -582,7 +604,10 @@ class TestInstallFragmentRoutesOnRealBash:
         workdir = tmp_path / "mismatch"
         workdir.mkdir()
         result = _run_fragment(
-            lane_runner, workdir, _install_fragment(TEMPLATE), {"FORGE_LANE_REF": "v9.9.9"}
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "mismatch-root", wheel_name=None),
+            {"FORGE_LANE_REF": "v9.9.9"},
         )
         assert result.returncode != 0
         out = result.stdout + result.stderr
@@ -604,7 +629,7 @@ class TestInstallFragmentRoutesOnRealBash:
         result = _run_fragment(
             lane_runner,
             workdir,
-            _install_fragment(TEMPLATE),
+            _rendered_fragment(tmp_path, "match-root", wheel_name=None),
             {"FORGE_LANE_REF": "v9.9.9", "PYTHONPATH": str(shim)},
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -619,8 +644,24 @@ class TestInstallFragmentRoutesOnRealBash:
         for fragment_owner in (TEMPLATE, MIRROR):
             workdir = tmp_path / f"mirror-{fragment_owner.name}"
             workdir.mkdir()
-            stripped = _install_fragment(fragment_owner).replace(
-                'FORGE_LANE_PROMOTED_VERSION="v0.34.0"', 'FORGE_LANE_PROMOTED_VERSION=""'
+            live = _install_fragment(fragment_owner)
+            promoted = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', live)
+            assert promoted is not None, "the live pin must always name a version"
+            # Strip the WHOLE generated pin (version + wheel identity): the
+            # route refusal differs (tag route vs wheel route), the
+            # no-pin refusal must fire either way.
+            stripped = live.replace(
+                f'FORGE_LANE_PROMOTED_VERSION="v{promoted.group(1)}"',
+                'FORGE_LANE_PROMOTED_VERSION=""',
+            ).replace(
+                f'FORGE_LANE_PROMOTED_WHEEL_URL="https://github.com/forcewake/forge/'
+                f'releases/download/v{promoted.group(1)}/forge-{promoted.group(1)}-py3-none-any.whl"',
+                'FORGE_LANE_PROMOTED_WHEEL_URL=""',
+            )
+            stripped = re.sub(
+                r'FORGE_LANE_PROMOTED_WHEEL_SHA256="[0-9a-f]+"',
+                'FORGE_LANE_PROMOTED_WHEEL_SHA256=""',
+                stripped,
             )
             result = _run_fragment(lane_runner, workdir, stripped, {})
             assert result.returncode != 0
@@ -695,3 +736,81 @@ class TestPromotionRecordLaneArtifactFields:
         assert document["sdist_sha256"] is None
         assert document["wheel_url"] is None
         assert document["sdist_url"] is None
+
+
+class TestInstallFragmentWheelRouteOnRealBash:
+    """The wheel route — exercised the moment the live archive carries a
+    wheel-bearing record (as v0.35.0 does): exactly-one-wheel, sha256
+    verification, the sdist refusal, and the identity gate."""
+
+    def test_a_matching_wheel_sha_installs_qualified(self, tmp_path, lane_runner):
+        import hashlib
+
+        wheel_bytes = b"PEFkeitenwheel-bytes"
+        sha = hashlib.sha256(wheel_bytes).hexdigest()
+        workdir = tmp_path / "wheel-ok"
+        workdir.mkdir()
+        (workdir / ".forge" / "wheel").mkdir(parents=True)
+        (workdir / ".forge" / "wheel" / "forge-9.8.7-py3-none-any.whl").write_bytes(wheel_bytes)
+        shim = tmp_path / "shim-wheel"
+        (shim / "forge").mkdir(parents=True)
+        (shim / "forge" / "__init__.py").write_text('__version__ = "9.8.7"\n', encoding="utf-8")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(
+                tmp_path,
+                "wheel-ok-root",
+                version="9.8.7",
+                wheel_name="forge-9.8.7-py3-none-any.whl",
+                wheel_sha=sha,
+            ),
+            {"PYTHONPATH": str(shim)},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record["pin"] == "wheel"
+        assert record["qualified"] is True
+
+    def test_zero_wheels_refuses(self, tmp_path, lane_runner):
+        workdir = tmp_path / "wheel-none"
+        workdir.mkdir()
+        (workdir / ".forge" / "wheel").mkdir(parents=True)
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "wheel-none-root"),
+            {},
+        )
+        assert result.returncode != 0
+        assert "exactly one wheel" in result.stdout + result.stderr
+
+    def test_two_wheels_refuse(self, tmp_path, lane_runner):
+        workdir = tmp_path / "wheel-two"
+        workdir.mkdir()
+        (workdir / ".forge" / "wheel").mkdir(parents=True)
+        (workdir / ".forge" / "wheel" / "a-py3-none-any.whl").write_bytes(b"a")
+        (workdir / ".forge" / "wheel" / "b-py3-none-any.whl").write_bytes(b"b")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "wheel-two-root"),
+            {},
+        )
+        assert result.returncode != 0
+        assert "exactly one wheel" in result.stdout + result.stderr
+
+    def test_a_sha256_mismatch_refuses_before_pip(self, tmp_path, lane_runner):
+        workdir = tmp_path / "wheel-badsha"
+        workdir.mkdir()
+        (workdir / ".forge" / "wheel").mkdir(parents=True)
+        (workdir / ".forge" / "wheel" / "forge-9.8.7-py3-none-any.whl").write_bytes(b"tampered")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "wheel-badsha-root", version="9.8.7"),
+            {},
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "sha256" in out and "FORGE_BOOTSTRAP_FAILED" in out
