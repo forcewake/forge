@@ -195,12 +195,23 @@ REQUIRED_TRACES: tuple[RequiredTrace, ...] = (
     ),
 )
 
-#: The podman-bound lab: executed wherever the `forge-postgres` container
-#: exists (the local lab), an *environment* skip elsewhere (CI).
+#: Lab-environment-bound traces: executed wherever the local lab exists
+#: (the podman postgres container / the live GitLab credentials), an
+#: *environment* skip elsewhere (CI). The R37-14 native failpoint matrix
+#: needs BOTH the disposable real Postgres AND the live lab GitLab —
+#: executed in the lab and recorded in
+#: docs/evaluation/2026-09-24-two-writer-native/; CI reruns the sqlite
+#: reference arms (test_saga_native/test_saga_durable) and the recorded
+#: evidence stands for the native arm.
 ENVIRONMENT_SCOPED_TESTS = re.compile(
     r"tests/test_checkpoint_retry_authority\.py::TestAT04PostgresRetryAuthority::"
+    r"|tests/production_entry/test_two_writer_native\.py::"
 )
-_PODMAN_LAB_SKIP = re.compile(r"podman|disposable database cannot be created", re.IGNORECASE)
+_LAB_SKIP = re.compile(
+    r"podman|disposable database cannot be created"
+    r"|FORGE_GITLAB_LIVE_URL/FORGE_GITLAB_LIVE_TOKEN",
+    re.IGNORECASE,
+)
 _PG_URL_SKIP = re.compile(r"FORGE_PG_TEST_URL", re.IGNORECASE)
 
 
@@ -227,17 +238,22 @@ def check_selection_on_disk() -> None:
 def classify_skip(test_id: str, reason: str) -> str:
     """Classify one skipped test: ``required`` (refuse) or ``environment``.
 
-    - any skip whose reason names ``FORGE_PG_TEST_URL`` refuses: the gate
-      exported the URL, so that skipif firing means the prerequisite broke
-      (AT-09's "remove the URL" arm);
-    - the podman-bound retry-authority lab skips as ``environment`` only when
-      the skip is exactly about that container/disposable database;
+    - the lab-environment traces classify FIRST: their combined-reason
+      skips name FORGE_PG_TEST_URL alongside the live-GitLab prerequisite
+      and are environment-bound by design (the PG half IS provided; the
+      live-lab half is the recorded lab evidence);
+    - any other skip whose reason names ``FORGE_PG_TEST_URL`` refuses: the
+      gate exported the URL, so that skipif firing means the prerequisite
+      broke (AT-09's "remove the URL" arm);
+    - the lab-environment-bound traces (podman retry lab; the R37-14
+      native matrix needing the live GitLab credentials) skip as
+      ``environment`` only when the skip is exactly about that lab;
     - anything else refuses too: a required gate must not skip silently.
     """
+    if ENVIRONMENT_SCOPED_TESTS.search(test_id) and _LAB_SKIP.search(reason):
+        return "environment"
     if _PG_URL_SKIP.search(reason):
         return "required"
-    if ENVIRONMENT_SCOPED_TESTS.search(test_id) and _PODMAN_LAB_SKIP.search(reason):
-        return "environment"
     return "required"
 
 
