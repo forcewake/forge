@@ -41,7 +41,6 @@ import base64
 import hashlib
 import json
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -753,32 +752,41 @@ class TestServiceRetryAuthority:
 PG_DISPOSABLE_DB = "forge_retry_test"
 
 
-def _podman_psql(statement: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "podman",
-            "exec",
-            "forge-postgres",
-            "psql",
-            "-U",
-            "forge",
-            "-d",
-            "forge",
-            "-c",
-            statement,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
+async def _psql_over_url(statement: str) -> None:
+    """Run a maintenance statement on the FORGE_PG_TEST_URL's own server.
+
+    The disposable database is created/dropped through the URL's host/port
+    (the maintenance ``postgres`` database) — never via a hardcoded local
+    container. The old podman-exec bootstrap only worked where a lab
+    container happened to sit on the URL's port: CI's service container
+    skipped, and any mixed environment FAILED with InvalidCatalogName
+    (the CI bite this fixture now removes).
+    """
+    import asyncpg
+    from sqlalchemy.engine import make_url
+
+    url = make_url(os.environ["FORGE_PG_TEST_URL"])
+    conn = await asyncpg.connect(
+        host=url.host,
+        port=url.port or 5432,
+        user=url.username,
+        password=url.password,
+        database="postgres",
     )
+    try:
+        # asyncpg's parameterless execute uses the simple-query protocol:
+        # autocommit semantics, valid for CREATE/DROP DATABASE.
+        await conn.execute(statement)
+    finally:
+        await conn.close()
 
 
 @pytest.mark.skipif(
     not os.environ.get("FORGE_PG_TEST_URL"),
     reason=(
         "FORGE_PG_TEST_URL not set — the AT-04 real-isolation proof runs only "
-        "against a disposable real Postgres (created/dropped via the "
-        "forge-postgres podman container)"
+        "against a disposable real Postgres provisioned from that URL's own "
+        "server"
     ),
 )
 class TestAT04PostgresRetryAuthority:
@@ -791,13 +799,11 @@ class TestAT04PostgresRetryAuthority:
     async def lab(self, tmp_path: Path, monkeypatch):
         from sqlalchemy.engine import make_url
 
-        created = _podman_psql(f"CREATE DATABASE {PG_DISPOSABLE_DB}")
-        if created.returncode != 0 and "already exists" not in created.stderr:
-            pytest.skip(f"the forge-postgres podman container is unavailable: {created.stderr}")
-        _podman_psql(f"DROP DATABASE IF EXISTS {PG_DISPOSABLE_DB} WITH (FORCE)")
-        created = _podman_psql(f"CREATE DATABASE {PG_DISPOSABLE_DB}")
-        if created.returncode != 0:
-            pytest.skip(f"the disposable database cannot be created: {created.stderr}")
+        try:
+            await _psql_over_url(f"DROP DATABASE IF EXISTS {PG_DISPOSABLE_DB} WITH (FORCE)")
+            await _psql_over_url(f"CREATE DATABASE {PG_DISPOSABLE_DB}")
+        except Exception as exc:  # noqa: BLE001 — the environment is genuinely unavailable
+            pytest.skip(f"the disposable database cannot be created on the URL's server: {exc}")
 
         # render_as_string: plain str() masks the password as "***"
         # (SQLAlchemy 2.x), and the engine would dial the LITERAL stars.
@@ -813,7 +819,10 @@ class TestAT04PostgresRetryAuthority:
         try:
             yield str(url), root
         finally:
-            _podman_psql(f"DROP DATABASE IF EXISTS {PG_DISPOSABLE_DB} WITH (FORCE)")
+            try:
+                await _psql_over_url(f"DROP DATABASE IF EXISTS {PG_DISPOSABLE_DB} WITH (FORCE)")
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                pass
 
     async def test_upload_then_fresh_instance_retry_selects_the_exact_checkpoint(
         self, lab, tmp_path
