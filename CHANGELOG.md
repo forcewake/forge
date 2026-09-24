@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0] - 2026-09-24
+
+### Added — the 4af6b33 review COMPLETE: all 20 R37 items (#282-#301)
+
+All 20 items (1 P1 + 19 P2) closed in one campaign. Suite 7015 → 7578 (+563).
+For the first time the campaign includes LIVE proofs: the lab was aligned
+for real and the real model ran through the real provider.
+
+**M0 — correctness:**
+- **#282 R37-01 (P1)**: continuation reuse bound to the exact recovery
+  event and source attempt — identity-keyed matching; equal booleans
+  never reuse another event's decision (AT-01/AT-02 green on real PG).
+- **#283/#284**: canonical operator subjects (v2 grants; legacy
+  name-only resolves-or-fails-closed) + a read model that never
+  relabels history (activation matched to the command's checkpoint;
+  historical passes stay historical; source-version fence).
+- **#285/#286**: strict report-inventory identities (per-row matching,
+  unbound subject typed, numeric attempt ordering, exit-code
+  combination) + typed applicability across verdicts and views.
+- **#299**: the fixture-lifecycle leaks closed at the root
+  (undisposed engines 3/8 → 0/8) + the resource-lifecycle meta-gate.
+
+**M1 — the lab aligned + GitLab parity + records:**
+- **#287**: the read-only lab inventory executed (honest MISALIGNED
+  record) + the strict record schema with typed validation.
+- **#288**: GitLab dispatch parity — the full continuation envelope on
+  every pipeline; retry/revival select decisions; callbacks bound to
+  the current attempt.
+- **#289**: THE LIVE QUALIFICATION — the lab aligned for real
+  (0.36.0/schema 027/caps, receipts + rollback tags), then Arm 1 GREEN
+  (real issue → claude-sdk-lane → real model → Draft MR, oracle green,
+  $0.22) and the exact-resume envelope LIVE (mechanics green; the
+  empty-diff failure honestly recorded; a real template exit bug
+  found).
+- **#298**: records promoted from executed evidence only — trace
+  tiers, the supported-profile manifest with the human gate,
+  upgrade-claim honesty, the immutable store.
+
+**M2/M3 — live proofs:**
+- **#290**: read-many/write-one LIVE ($0.39) — the real model cited
+  the neighbor-only line-218 window, excluded the decoy, wrote only
+  the target.
+- **#291**: causal steering PROVEN — scripted AND live-model 3/3
+  ($0.0091); three-way digest equality; old-epoch expiry.
+- **#292**: the genuinely live planning comparison — 15/15 live-model
+  arms ($0.77), HOLD pending human review.
+- **#293**: the staged partner-pilot ladder (fail-closed on the named
+  customer + observed baseline); stage-1 pending-lab honestly.
+- **#294**: economics joined to real receipts (unknown never zero;
+  synthetic counters excluded from throughput).
+- **#297**: the bounded operator experience (typed blocked reasons
+  with evidence links; bundle caps; query observables).
+
+**M4 + separation + ops:**
+- **#295**: the two-writer saga through REAL GitLab native effects
+  (kill matrix live; no duplicates; human edits preserved; zero
+  merges).
+- **#296**: the trusted verification executor — isolation proven by
+  deny probes; BUILT fixture wheels installed by digest; socket
+  redelivery.
+- **#300**: contracts separated from reference scenarios (ADR-0031 +
+  the reference package + AST rules).
+- **#301**: deployment ops EXECUTED on the aligned lab (5/5 drills;
+  a real stale-row finding; rotation generations correct).
+
 ## [0.36.0] - 2026-09-24
 
 ### Added — the 16339c2 review COMPLETE: all 22 R36 items (#260-#281)
