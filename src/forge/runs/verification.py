@@ -504,6 +504,7 @@ def render_stale(
     reason: str,
     *,
     now: datetime | None = None,
+    applicability: Mapping[str, Any] | None = None,
 ) -> dict:
     """Re-render a persisted verdict whose subject no longer binds.
 
@@ -511,7 +512,14 @@ def render_stale(
     it names stay inspectable for audit) while its authority is
     withdrawn: the status becomes :data:`STATUS_STALE` and the summary
     says why. A stale verdict is never ``verified_ready`` — the ready
-    decision requires fresh verification of the current candidate."""
+    decision requires fresh verification of the current candidate.
+
+    R37-05: *applicability* carries the shared applicability decision
+    that withdrew the authority (status, the named equivalent and
+    invalidated inputs) as the ``verification.applicability`` fragment,
+    and the *reason* doubles as the recorded supersession reason — the
+    superseded proof stays archived WITH why it was superseded, never
+    deleted."""
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     rendered: dict = {
         "status": STATUS_STALE,
@@ -519,8 +527,11 @@ def render_stale(
         "observed_at": stamp,
         "producer": str(verification.get("producer") or ""),
         "summary": f"stale: {reason}",
+        "superseded_reason": str(reason),
     }
     subject = verification.get("subject_identity")
     if isinstance(subject, Mapping):
         rendered["subject_identity"] = dict(subject)
+    if applicability is not None:
+        rendered["applicability"] = dict(applicability)
     return rendered

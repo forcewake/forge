@@ -1,0 +1,175 @@
+{
+  "schema": "forge.steering.run/1",
+  "mode": "scripted",
+  "arm": "steered",
+  "provenance": "scripted-causal",
+  "command": {
+    "command_id": "cmd-4a89f0820302",
+    "kind": "steer",
+    "text": "rename refund_limit to approval_threshold in policy.py",
+    "status": "dispatching",
+    "received_at": "2026-09-24T11:15:58.918143+00:00",
+    "authorized_at": "2026-09-24T11:15:59.218156+00:00"
+  },
+  "vendor_events": [
+    {
+      "at": "2026-09-24T11:15:58.908Z",
+      "kind": "vendor_process_started",
+      "cwd": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/steer-qual-4cxxth8c/steered-workspace",
+      "provenance": "scripted-causal"
+    },
+    {
+      "at": "2026-09-24T11:15:58.908Z",
+      "kind": "thread_started",
+      "thread_id": "vendor-thread-58908"
+    },
+    {
+      "at": "2026-09-24T11:15:58.911Z",
+      "kind": "turn_started",
+      "thread_id": "vendor-thread-58908",
+      "turn_id": "turn-1"
+    },
+    {
+      "at": "2026-09-24T11:15:58.911Z",
+      "kind": "vendor_edits",
+      "phase": "pre-instruction",
+      "touched": [
+        "policy.py"
+      ]
+    },
+    {
+      "at": "2026-09-24T11:15:58.924Z",
+      "kind": "steer_poll",
+      "found": "cmd-4a89f0820302",
+      "polls": 1
+    },
+    {
+      "at": "2026-09-24T11:15:58.924Z",
+      "kind": "steer_consumed",
+      "command_id": "cmd-4a89f0820302",
+      "source": "control-plane-poll",
+      "text": "rename refund_limit to approval_threshold in policy.py"
+    },
+    {
+      "at": "2026-09-24T11:15:58.924Z",
+      "kind": "vendor_edits_after_steer",
+      "applied": "control-plane-poll",
+      "command_id": "cmd-4a89f0820302",
+      "touched": [
+        "policy.py"
+      ]
+    },
+    {
+      "at": "2026-09-24T11:15:58.924Z",
+      "kind": "turn_completed",
+      "status": "completed",
+      "thread_id": "vendor-thread-58908",
+      "turn_id": "turn-1"
+    },
+    {
+      "at": "2026-09-24T11:15:59.233Z",
+      "kind": "vendor_process_exit",
+      "thread_id": "vendor-thread-58908"
+    }
+  ],
+  "edits": {
+    "base": {
+      "README.md": "base readme\n",
+      "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    return amount <= refund_limit\n"
+    },
+    "files": {
+      "README.md": "base readme\n",
+      "policy.py": "approval_threshold = 100\n\n\ndef allows(amount):\n    return amount <= approval_threshold\n\n\ndef clamp(amount):\n    return max(0, min(amount, approval_threshold))\n"
+    }
+  },
+  "counterfactual_edits": {
+    "base": {
+      "README.md": "base readme\n",
+      "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    return amount <= refund_limit\n"
+    },
+    "files": {
+      "README.md": "base readme\n",
+      "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    return amount <= refund_limit\n\n\ndef clamp(amount):\n    return max(0, min(amount, refund_limit))\n",
+      "notes.md": "# Policy notes\n\nThe refund gate is `refund_limit` (100).\nOrders at or below it are allowed without review.\n"
+    }
+  },
+  "grade": {
+    "causal": true,
+    "provenance": "scripted-causal",
+    "arms": [
+      {
+        "arm": "ack_precedes_edit",
+        "ok": true,
+        "reason": "command cmd-4a89f0820302 acknowledged at 2026-09-24T11:15:58.918143+00:00, consumed mid-turn at 2026-09-24T11:15:58.924Z, then 1 subsequent edit event(s) in the vendor's own log"
+      },
+      {
+        "arm": "counterfactual_differs",
+        "ok": true,
+        "reason": "the same task without the steer produced a different edit set"
+      },
+      {
+        "arm": "target_matched",
+        "ok": true,
+        "reason": "the edit shows exactly 'refund_limit' renamed to 'approval_threshold' in policy.py, and the unsteered arm did not do it"
+      }
+    ]
+  },
+  "observability": {
+    "control.received_to_applied_ms": 300,
+    "control.effect_outcome": "dispatching",
+    "steer_accepted_at": "2026-09-24T11:15:58.920592+00:00",
+    "lane_wall_s": 0.93
+  },
+  "counterfactual_vendor_events": [
+    {
+      "at": "2026-09-24T11:15:59.853Z",
+      "kind": "vendor_process_started",
+      "cwd": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/steer-qual-4cxxth8c/counterfactual-workspace",
+      "provenance": "scripted-causal"
+    },
+    {
+      "at": "2026-09-24T11:15:59.853Z",
+      "kind": "thread_started",
+      "thread_id": "vendor-thread-59853"
+    },
+    {
+      "at": "2026-09-24T11:15:59.855Z",
+      "kind": "turn_started",
+      "thread_id": "vendor-thread-59853",
+      "turn_id": "turn-1"
+    },
+    {
+      "at": "2026-09-24T11:15:59.855Z",
+      "kind": "vendor_edits",
+      "phase": "pre-instruction",
+      "touched": [
+        "policy.py"
+      ]
+    },
+    {
+      "at": "2026-09-24T11:15:59.855Z",
+      "kind": "steer_window_expired",
+      "reason": "steering disabled on this arm"
+    },
+    {
+      "at": "2026-09-24T11:15:59.856Z",
+      "kind": "vendor_edits",
+      "phase": "default-followup",
+      "touched": [
+        "notes.md"
+      ]
+    },
+    {
+      "at": "2026-09-24T11:15:59.856Z",
+      "kind": "turn_completed",
+      "status": "completed",
+      "thread_id": "vendor-thread-59853",
+      "turn_id": "turn-1"
+    },
+    {
+      "at": "2026-09-24T11:16:00.106Z",
+      "kind": "vendor_process_exit",
+      "thread_id": "vendor-thread-59853"
+    }
+  ]
+}

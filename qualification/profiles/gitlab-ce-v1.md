@@ -7,13 +7,34 @@ the setup — WITHOUT reading implementation files. The qualification
 driver is `scripts/qualify_gitlab_ce.py`; its evidence bundle lands in
 `qualification/profiles/gitlab-ce-v1-evidence.json`.
 
-> **Status (2026-09-23): PARTIALLY QUALIFIED — see "Known limitation".**
+> **Status (2026-09-24): PARTIALLY QUALIFIED — see "Known limitation".**
 > The cold install, native entry arc (issue → plan → `/go` → harness
 > dispatch → candidate → Draft MR → independent verification) and every
-> negative arm are qualified live and offline. The cross-RUNNER resume
-> drill is qualified OFFLINE only: the GitLab dispatch seam does not yet
-> carry the lane-resume contract (see §8). Nothing here claims fleetwide
-> or enterprise readiness, and merge/deploy stay human decisions.
+> negative arm are qualified live and offline. The dispatch-parity wave
+> (R37-07 / issue #288) landed the lane-resume/control ENVELOPE on every
+> GitLab harness dispatch — qualified OFFLINE at production-entry
+> discipline (`tests/production_entry/test_gitlab_dispatch_parity.py`:
+> the exact-resume dispatch, the retired attempt credential, the
+> envelope-driven resumed lane, redelivery and corrupt-checkpoint arms).
+> **R37-08 (#289) has now executed the LIVE trace** on the aligned lab
+> (`qualification/records/gitlab-ce-v1@live.json` +
+> `qualification/profiles/live-single-writer-v1.md`): the uninterrupted
+> flow is live-qualified end to end (real model glm-5.3-flash through the
+> gateway, claude-code 2.1.273 on the `unraid` runner, six-case oracle
+> green on the exact candidate sha, Draft MR left for human review), and
+> the interruption drill's MECHANICS ran live (mid-turn `/pause` →
+> verified checkpoint → honest `blocked` → `/retry` → the exact-resume
+> envelope dispatched → a second lane restored the checkpoint and
+> continued with the real model) — but both resumed turns delivered an
+> EMPTY candidate (`repair_no_effect`), so cross-runner FILE preservation
+> is NOT claimed; the drill's delivery arm stays open, and the live
+> the record's claimed capability (`real-provider-e2e`) derives `supported`
+> and the manifest holds it at `pending-approval` pending that arm
+> (plus the LIVE-found v0.36.0 SDK-lane template exit bug — a green lane
+> exits before building `candidate.diff`; the live run used a one-line
+> guarded-exit patch, root-caused in the record). Nothing here claims
+> fleetwide or enterprise readiness, and merge/deploy stay human
+> decisions.
 
 ## 1. The frozen combination (identity card)
 
@@ -138,7 +159,17 @@ service directly:
 3. The approver comments `@forge /go <run-id>` → the harness pipeline is
    dispatched on `factory/<iid>/<short-id>` with the frozen brief
    (`FORGE_PLAN`, `FORGE_ATTEMPT_BASE`, `FORGE_HARNESS_MODEL`,
-   `FORGE_HARNESS_DRIVER`); the issue gets a taken-into-work note.
+   `FORGE_HARNESS_DRIVER`) plus the dispatch ENVELOPE (R37-07):
+   `FORGE_LANE_RESUME`/`FORGE_LANE_RESUME_MODE` (the WIP-continuity
+   contract the persisted continuation decision selected —
+   fresh|required|restart), `FORGE_RESUME_CHECKPOINT` (the exact pinned
+   checkpoint digest on a required resume), `FORGE_ATTEMPT_GENERATION`,
+   `FORGE_CONTINUATION_DECISION_ID`, and the lane-control dial-out pair
+   `FORGE_LANE_CONTROL_URL` + `FORGE_LANE_CONTROL_TOKEN` (an
+   attempt-scoped HMAC minted at dispatch — never a control-plane root
+   secret, never a publication token). The issue gets a
+   taken-into-work note; the run's evidence journals the envelope
+   digest beside the pipeline handle.
 4. The lane job checks out the frozen attempt base, runs the driver
    WITHOUT write access, uploads `.forge/candidate.diff` +
    `.forge/candidate.meta.json` as artifacts. The control plane
@@ -157,9 +188,11 @@ by cancelling the CI JOB through the GitLab API
 (`POST /projects/:id/jobs/:jid/cancel`) — never by stopping shared lab
 containers. The worker classifies the loss (blocked, zero forge-side
 model calls — no LLM repair); the operator's `@forge /retry` is admitted
-because the durable checkpoint exists, and a second runner continues
-from the exact generation: restored WIP + the resumed turn, collected by
-the shipped collector into the SAME Draft MR.
+because the durable checkpoint exists, and the re-dispatch carries the
+required-resume envelope (R37-07: `FORGE_LANE_RESUME=1` + the pinned
+checkpoint digest + a new attempt-scoped lane token), so a second runner
+continues from the exact generation: restored WIP + the resumed turn,
+collected by the shipped collector into the SAME Draft MR.
 
 ## 7. Budgets and bounds (the caps that must be present)
 
@@ -173,27 +206,66 @@ the shipped collector into the SAME Draft MR.
 - The qualification driver itself bounds every wait (default 900 s) and
   uses the cheapest model route.
 
-## 8. Known limitation (recorded honestly — AT-10's cross-runner arm)
+## 8. Dispatch parity and remaining limitations (updated R37-07 / #288)
 
-The **GitLab** dispatch seam (`CITharnessBackend.start`) dispatches
-`FORGE_RUN_ID`, `FORGE_ISSUE_IID`, `FORGE_ISSUE_TITLE`, `FORGE_PLAN`,
-`FORGE_HARNESS_MODEL`, `FORGE_HARNESS_DRIVER`, `FORGE_ATTEMPT_BASE` —
-it does NOT yet carry the lane-resume contract (`FORGE_LANE_RESUME` /
-`lane_resume_mode` plus lane-control URL/token) that the GitHub lane
-dispatches (R32-04). Consequences, live:
+The **GitLab** dispatch seam now carries the lane-resume/control contract
+(the GitHub lane's R32-04 envelope, mirrored): every harness pipeline is
+triggered with `FORGE_RUN_ID`, `FORGE_ISSUE_IID`, `FORGE_ISSUE_TITLE`,
+`FORGE_PLAN`, `FORGE_HARNESS_MODEL`, `FORGE_HARNESS_DRIVER`,
+`FORGE_ATTEMPT_BASE` **plus** `FORGE_LANE_RESUME` +
+`FORGE_LANE_RESUME_MODE` (fresh|required|restart — the mode the persisted
+continuation decision selected), `FORGE_RESUME_CHECKPOINT` (the exact
+pinned checkpoint digest), `FORGE_ATTEMPT_GENERATION`,
+`FORGE_CONTINUATION_DECISION_ID`, `FORGE_LANE_CONTROL_URL` +
+`FORGE_LANE_CONTROL_TOKEN` (attempt-scoped; a `/retry` opens a new
+attempt generation, so the re-dispatched token differs and the dead
+attempt's credential is refused by the control plane naming the
+superseded generation). The reconciler's callbacks are bound to the
+current attempt: a poll for anything but the live `waiting_harness`
+dispatch (a resurrected worker's stale handle, a delayed old-pipeline
+completion) records `superseded` with ZERO provider writes. Proven
+offline at production-entry discipline:
+`tests/production_entry/test_gitlab_dispatch_parity.py` (envelope per
+mode, pause → checkpoint → `/retry` → exact-resume dispatch, the
+envelope-driven resumed lane, retired credentials, redelivery, a rotted
+required checkpoint halting the lane before any vendor session) and
+`tests/test_gitlab_dispatch_parity.py` (the unit layer).
 
-- A `/retry` after a runner loss re-dispatches a FRESH lane (the
-  checkpoint still gates admission and rides the continuity decision,
-  but the CI job is not told to restore it).
-- Therefore the full pause → kill → resume-exact-WIP drill is proven
-  OFFLINE (production-entry trace CE-2: the resumed runner's lane
-  subprocess is driven with the resume environment the dispatch will
-  carry once the parity lands) and the LIVE flow stage stops after the
-  runner loss at `blocked` + honest `/retry` behavior.
+Honest limitations that REMAIN (unsupported stays unsupported):
 
-Required source change (NOT part of this profile; tracked for the
-GitHub-parity item): extend the GitLab dispatch with the same three-mode
-resume contract and the lane-control credentials the GitHub lane ships.
+- The **live** cross-runner drill has now been EXECUTED (R37-08,
+  2026-09-24): `/pause` mid-turn → verified checkpoint → job-level loss →
+  honest `blocked` → `/retry` → the required-resume envelope dispatched →
+  a second lane restored the checkpoint and continued with the real
+  model. What it did NOT deliver: both resumed turns completed with an
+  EMPTY candidate (`repair_no_effect`), so cross-runner preservation of
+  edited FILES is proven only at the mechanics level, not by a delivered
+  diff — the delivery arm stays open
+  (`qualification/records/gitlab-ce-v1@live.json`).
+- The **v0.36.0 SDK-lane template cannot build a candidate on the success
+  path**: its script ends with an unconditional `exit "$_driver_rc"`, so
+  a green driver run exits before `.forge/candidate.diff` is created
+  (LIVE-found as `harness_artifact_missing`). The R37-08 run used the
+  pinned template with a one-line guarded-exit patch (manual rescue,
+  recorded); the upstream template must be fixed and re-qualified.
+- The **batch** lane template (`claude-code.gitlab-ci.yml`) cannot
+  restore WIP: a `required`-resume dispatch to it REFUSES in the job
+  (infrastructure/config, zero model turns) instead of silently
+  re-implementing. Exact resume needs an SDK lane template
+  (`claude-sdk-lane.gitlab-ci.yml` and siblings) — the profile's frozen
+  lane.
+- The **builtin** implementer backend keeps its legacy `/retry` repair
+  semantics (no lane, no envelope; the published candidate is its
+  continuation source). The continuation decision is recorded for audit
+  on both backends, but only the harness lane dispatches it.
+- Steering (`FORGE_STEERING_ENABLED`) stays opt-in per project; the
+  control URL/token ride the dispatch, the switch does not.
+
+Previously recorded (superseded by this wave): the dispatch did not carry
+`FORGE_LANE_RESUME`/lane-control credentials at all, so a `/retry` after
+a runner loss re-dispatched a FRESH lane and the cross-runner drill was
+proven offline only (CE-2 drove the resumed lane with the environment
+the dispatch would carry).
 
 ## 9. Evidence bundle and observability
 

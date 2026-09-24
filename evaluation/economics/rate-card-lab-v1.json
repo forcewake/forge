@@ -1,0 +1,27 @@
+{
+  "version": "lab-estimate-v1",
+  "currency": "usd",
+  "note": "Authored versioned price ASSUMPTIONS (R37-13). No paid receipt here is ever claimed as billing: the lab pilot's scripted-vendor wire counters have no spend by construction, and the discovery-live captures' own recorded figures are conservative cap-enforcement estimates. Every figure priced from this card is an ESTIMATE labelled with this version, never a billing record and never measured spend.",
+  "rates": [
+    {
+      "provider": "lab-lane/vendor-wire",
+      "model": "",
+      "input_per_mtok_usd": 2.5,
+      "cached_input_per_mtok_usd": null,
+      "cache_write_per_mtok_usd": null,
+      "output_per_mtok_usd": 10.0,
+      "basis": "estimate",
+      "note": "round planning assumptions for a mid-tier gateway route — legible arithmetic, not a vendor price list"
+    },
+    {
+      "provider": "discovery-live/live",
+      "model": "",
+      "input_per_mtok_usd": 2.0,
+      "cached_input_per_mtok_usd": null,
+      "cache_write_per_mtok_usd": null,
+      "output_per_mtok_usd": 8.0,
+      "basis": "estimate",
+      "note": "the discovery-live capture's own recorded conservative cap-enforcement prices (fast / openai/glm-5.3-flash: 2.0 in / 8.0 out per mtok) — reproduced verbatim so card-priced estimates match the capture's arithmetic; actual vendor pricing is not recorded there"
+    }
+  ]
+}

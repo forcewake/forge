@@ -58,6 +58,31 @@ The harness job runs only when forge triggers a pipeline with `FORGE_RUN_ID`
 — normal pipelines skip it. Details and triage:
 [harness-onboarding.md](../harnesses/onboarding.md).
 
+### 5b. The dispatch envelope (pause/steer/resume, R37-07)
+
+Every harness dispatch triggers the pipeline with forge's envelope
+variables — the frozen brief (`FORGE_PLAN`, `FORGE_ATTEMPT_BASE`,
+`FORGE_HARNESS_MODEL`, `FORGE_HARNESS_DRIVER`) plus the lane-resume
+contract the persisted continuation decision selected:
+
+| Variable | Meaning |
+|----------|---------|
+| `FORGE_LANE_RESUME` / `FORGE_LANE_RESUME_MODE` | WIP continuity: `fresh` (nothing restores), `required` (the held checkpoint MUST restore before the turn — a failed restore halts the lane with zero model calls), `restart` (operator-discarded WIP) |
+| `FORGE_RESUME_CHECKPOINT` | the exact pinned checkpoint digest on a `required` resume (empty otherwise) |
+| `FORGE_ATTEMPT_GENERATION` / `FORGE_CONTINUATION_DECISION_ID` | the durable attempt identity and the decision this dispatch executes |
+| `FORGE_LANE_CONTROL_URL` / `FORGE_LANE_CONTROL_TOKEN` | the lane-control dial-out pair (the token is attempt-scoped and minted at dispatch; a retry's new attempt retires the old one) |
+
+No control-plane root secret and no publication token ever rides these
+variables. Exact resume requires an SDK lane template
+(`claude-sdk-lane.gitlab-ci.yml` and siblings — `python -m
+forge.lane_driver` performs the checkpoint restore); the batch templates
+(`claude-code.gitlab-ci.yml`, `grok.gitlab-ci.yml`, …) refuse a
+`required`-resume dispatch in the job rather than silently re-implement
+over discarded WIP. Steering is opt-in: set the project CI variable
+`FORGE_STEERING_ENABLED=1` (plus keep the control URL reachable from the
+runner) and the lane consumes operator commands through the same
+dispatched credentials.
+
 ## 6. Required jobs (quality contract)
 
 `FORGE_REQUIRED_JOBS` (forge-side setting) lists job names that must be

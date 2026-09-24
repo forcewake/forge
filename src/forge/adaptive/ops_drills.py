@@ -76,8 +76,9 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -115,22 +116,35 @@ from forge.durable import FlowRun
 from forge.models.base import Base
 
 __all__ = [
+    "CAS_SHARED_VOLUME_STATEMENT",
+    "CAS_UNSHARED_REPLICA_BOUNDARY",
+    "CONTROL_PLANE_ROOT_CREDENTIAL_NAMES",
+    "DEPLOYMENT_DRILL_SCOPE",
     "DRILLS",
     "DRILL_SCOPE",
     "DrillFixture",
     "DrillOutcome",
     "FaultedNativeLane",
     "LostStartResponse",
+    "RemoteCycleRecord",
+    "RemoteDispatchLane",
     "UploadAdmissionBudget",
     "UploadBudgetExceeded",
     "build_fixture",
+    "build_topology_document",
     "checkpoint_payload",
+    "credential_shaped_names",
     "drill_backup_restore",
     "drill_checkpoint_upload_load",
     "drill_control_responsiveness",
+    "drill_credential_isolation",
     "drill_degraded_faults",
+    "drill_degraded_modes",
     "drill_native_start_load",
     "drill_operator_override_audit",
+    "drill_remote_occupancy",
+    "drill_restore_deployment",
+    "drill_token_rotation",
     "run_drill",
 ]
 
@@ -1576,5 +1590,1029 @@ async def run_drill(
         kwargs: dict[str, Any] = _FAST_KWARGS.get(name, {}) if fast else {}
         drill: Callable[..., Awaitable[DrillOutcome]] = DRILLS[name]
         return await drill(fixture, **kwargs)
+    finally:
+        await fixture.dispose()
+
+
+# ---------------------------------------------------------------------------
+# R37-20 (issue #301) — the DEPLOYMENT drills
+#
+# The R36-21 drills above prove the INVARIANTS on disposable fixtures.
+# The customer-facing question left open (#301) is what those invariants
+# mean on the ACTUAL deployment: the real topology's CAS/storage
+# semantics, capacity against REAL remote occupancy, backup/restore over
+# the deployment's own bytes, credential isolation on the real launch
+# environment, degraded modes through the app's real endpoints, and
+# token rotation. Each drill below is the same composable shape, but its
+# seams are implemented by ``scripts/run_deployment_ops.py`` against the
+# LIVE lab (read-only plus explicitly disposable resources) and by
+# fakes in ``tests/test_deployment_ops.py`` — the machinery is identical.
+# ---------------------------------------------------------------------------
+
+#: The deployment report's scope sentence — every outcome carries it.
+DEPLOYMENT_DRILL_SCOPE: Final = (
+    "measured on the actual lab deployment recorded in this report "
+    "(control plane, database, CAS volume, runner and provider as "
+    "inspected at generation time), through read-only probes and "
+    "explicitly DISPOSABLE resources only — no lab container was "
+    "started, stopped or recreated by the drill run; the tested N, "
+    "budgets and waits are recorded per drill and are NOT a fleet "
+    "throughput claim"
+)
+
+#: The supported-topology CAS statement (R37-20's "a shared database
+#: does not by itself make node-local CAS bytes available to another
+#: replica"): the deployment's CAS bytes live on ONE volume mounted into
+#: BOTH consumers — that, not the shared database, is what makes the
+#: bytes visible to both processes.
+CAS_SHARED_VOLUME_STATEMENT: Final = (
+    "the checkpoint CAS bytes live on the single /app/data volume bind-"
+    "mounted into BOTH the API and the worker (one host directory, one "
+    "set of bytes); every process that mounts the volume sees the same "
+    "content-addressed store, coordinated by the store's volume-wide "
+    "lock and the single-writer publication fence"
+)
+
+#: The boundary the report must STATE rather than silently assume: a
+#: replica WITHOUT the shared volume would not see the bytes, whatever
+#: the database says.
+CAS_UNSHARED_REPLICA_BOUNDARY: Final = (
+    "a second API/worker replica started WITHOUT the same /app/data "
+    "volume would NOT see this node's CAS bytes — the shared database "
+    "does not replicate content-addressed blobs; scaling beyond one "
+    "volume requires a shared/networked CAS root (or per-replica "
+    "stores with an explicit replication contract), which this "
+    "deployment has NOT demonstrated"
+)
+
+#: Control-plane root credentials the model-facing (lane dispatch)
+#: variable set must NEVER carry — the isolation boundary #301 asserts
+#: from the recorded dispatch envelope.
+CONTROL_PLANE_ROOT_CREDENTIAL_NAMES: Final = (
+    "FORGE_LANE_CONTROL_SECRET",
+    "FORGE_MCP_KEY",
+    "FORGE_MCP_SCOPED_TOKENS",
+    "GITLAB_TOKEN",
+    "FORGE_BOT_TOKEN",
+    "FORGE_GITHUB_TOKEN",
+    "FORGE_GITHUB_PRIVATE_KEY",
+    "FORGE_AZDO_PAT",
+    "DATABASE_URL",
+    "REDIS_URL",
+)
+
+#: A credential-shaped env NAME pattern (values are never recorded).
+_CREDENTIAL_NAME_PATTERN = re.compile(
+    r"(?i)(token|secret|key|password|passwd|credential|pat\b|api_key)"
+)
+
+
+def credential_shaped_names(env: Mapping[str, str]) -> list[str]:
+    """The credential-shaped NAMES in *env* (values never touched).
+
+    The #296 executor's ``scan_credential_env`` pattern, applied to a
+    supplied mapping so the deployment drill can name what the control
+    plane holds without ever recording a value.
+    """
+
+    return sorted(name for name in env if _CREDENTIAL_NAME_PATTERN.search(name))
+
+
+# ---------------------------------------------------------------------------
+# The topology declaration — pure composition over read-only inspections
+# ---------------------------------------------------------------------------
+
+
+def build_topology_document(
+    *,
+    app_health: Mapping[str, Any],
+    container_inspections: Mapping[str, Mapping[str, Any]],
+    runners: Sequence[Mapping[str, Any]],
+    admission_env: Mapping[str, str],
+    cas_host_root: str,
+    budget_caps: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compose the deployment topology document from READ-ONLY inputs.
+
+    *container_inspections* maps container name → the fields the drill
+    needs from ``podman inspect`` (``image``, ``mounts`` as destination →
+    source, ``status``, ``ports``). The document states the SUPPORTED
+    topology (what is demonstrated), the observed services, the
+    CAS-semantics statements above, and every DISCREPANCY between the
+    declared single-volume shape and what was actually inspected — the
+    boundary is stated, never silently assumed.
+    """
+
+    declared: dict[str, Any] = {
+        "api_replicas": 1,
+        "worker_replicas": 1,
+        "cas_semantics": "single shared volume (/app/data) mounted into every consumer",
+        "lock_behavior": (
+            "volume-wide CAS lock (GCLockTimeout-bounded waits) + single-writer "
+            "publication fence; the shared database does not replicate CAS bytes"
+        ),
+        "supported_scaling_boundary": CAS_UNSHARED_REPLICA_BOUNDARY,
+    }
+    observed_containers: dict[str, Any] = {}
+    cas_mount_holders: list[str] = []
+    for name, inspection in sorted(container_inspections.items()):
+        mounts = {
+            str(destination): str(source)
+            for destination, source in dict(inspection.get("mounts") or {}).items()
+        }
+        if any(str(destination).startswith("/app/data") for destination in mounts):
+            cas_mount_holders.append(name)
+        observed_containers[name] = {
+            "image": str(inspection.get("image") or ""),
+            "status": str(inspection.get("status") or ""),
+            "mounts": mounts,
+            "ports": dict(inspection.get("ports") or {}),
+        }
+    discrepancies: list[str] = []
+    #: The CAS CONSUMERS — the processes running the forge code. Services
+    #: (postgres/redis/litellm) hold no CAS bytes and are not expected to
+    #: mount the volume; a CONSUMER without the mount is.
+    expected_consumers = (
+        name for name in ("forge-app", "forge-worker") if name in container_inspections
+    )
+    for name in expected_consumers:
+        if name not in cas_mount_holders:
+            discrepancies.append(
+                f"{name} does NOT mount the shared /app/data volume — its view of "
+                "the CAS store is NOT this deployment's bytes (see the boundary "
+                "statement; a consumer without the mount is outside the supported "
+                "single-volume topology)"
+            )
+    limit = 3
+    raw_limit = str(admission_env.get("FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT", "")).strip()
+    if raw_limit:
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            discrepancies.append(
+                "FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT is not an integer — the "
+                "deployment admission bound is the default (3)"
+            )
+    return {
+        "declared": declared,
+        "observed": {
+            "control_plane": {
+                "health": dict(app_health),
+                "version": str(app_health.get("version") or ""),
+                "schema_head": str(app_health.get("schema") or ""),
+                "queue_depth": app_health.get("queue_depth"),
+                "dlq_depth": app_health.get("dlq_depth"),
+            },
+            "containers": observed_containers,
+            "cas_volume": {
+                "host_root": cas_host_root,
+                "mounted_into": cas_mount_holders,
+                "statement": CAS_SHARED_VOLUME_STATEMENT,
+                "boundary": CAS_UNSHARED_REPLICA_BOUNDARY,
+            },
+            "services": {
+                "postgres": "forge-postgres (127.0.0.1:5433 -> 5432, database 'forge')",
+                "redis": "forge-redis (6379)",
+                "litellm": "forge-litellm (127.0.0.1:4000 -> 4000)",
+            },
+            "runner_isolation": {
+                "runners": [
+                    {
+                        "id": runner.get("id"),
+                        "description": runner.get("description"),
+                        "active": runner.get("active"),
+                        "paused": runner.get("paused"),
+                        "runner_type": runner.get("runner_type"),
+                    }
+                    for runner in runners
+                ],
+                "statement": (
+                    "native lane jobs execute on the lab's own runner(s) recorded "
+                    "above (no shared public runner fleet); the runner reaches the "
+                    "control plane and the model route over the network the lane "
+                    "template pins"
+                ),
+            },
+            "admission": {
+                "max_active_per_project": limit,
+                "source": (
+                    "FORGE_ADMISSION_MAX_ACTIVE_PER_PROJECT env"
+                    if raw_limit
+                    else "default (no env override observed)"
+                ),
+            },
+            "budget_caps": dict(budget_caps),
+        },
+        "discrepancies": discrepancies,
+        "read_only": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deployment drill 1 — remote occupancy through the app's dispatch entry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RemoteCycleRecord:
+    """One dispatch cycle's measured arc on the REAL control plane.
+
+    ``queue_wait_s`` is the wait BEFORE the slot (request → lease
+    acquired, or request → the typed park verdict); ``execution_s`` is
+    the slot's OWN window (lease acquired → native job observed
+    terminal/cancelled). The two are measured SEPARATELY exactly as the
+    issue demands — queue wait is never reported as execution time.
+    """
+
+    index: int
+    run_id: str = ""
+    end_state: str = "pending"
+    lease_acquired: bool = False
+    queue_wait_s: float | None = None
+    execution_s: float | None = None
+    pipeline_id: int | None = None
+    job_id: int | None = None
+    occupancy_final: str = ""
+    detail: str = ""
+
+
+class RemoteDispatchLane:
+    """The seam the deployment occupancy drill drives.
+
+    ``scripts/run_deployment_ops.py`` implements this against the LIVE
+    control plane (a disposable GitLab project, the app's own webhook →
+    /implement → /go dispatch entry, REAL native jobs on the lab runner,
+    cancelled job-level immediately after the observation); the tests
+    implement a deterministic fake. The drill code below owns only the
+    invariants and the measurement bookkeeping.
+    """
+
+    #: The deployment's OBSERVED active-per-project bound.
+    limit: int = 3
+
+    async def dispatch(self, index: int) -> RemoteCycleRecord:
+        raise NotImplementedError
+
+    async def occupancy_snapshot(self) -> dict[str, int]:
+        """Open leases by occupancy word for the drill's project."""
+        raise NotImplementedError
+
+    async def lease_state(self, run_id: str) -> str:
+        """One run's lease occupancy word (``""`` when no open lease)."""
+        raise NotImplementedError
+
+    async def cancel_immediately(self, record: RemoteCycleRecord) -> str:
+        """Job-level cancel of a dispatched native job — ``ok``/``failed``."""
+        raise NotImplementedError
+
+    async def cancel_with_lost_response(self, record: RemoteCycleRecord) -> None:
+        """The client-seam lost response: the cancel was issued and its
+        response is DROPPED without processing (the drill then verifies
+        occupancy by observation, never by the dropped answer)."""
+        raise NotImplementedError
+
+    async def cancel_completed_job(self, record: RemoteCycleRecord) -> Mapping[str, Any]:
+        """Job-level cancel of an ALREADY-completed job — the failed-cancel
+        leg. Returns ``{"exercised": bool, "verdict": str, "status_before":
+        str, "status_after": str}``: the provider either REFUSES the cancel
+        or answers an idempotent no-op — either way the completed job's
+        state must not change and no capacity may move."""
+        raise NotImplementedError
+
+    async def wait_project_drained(self, timeout_s: float) -> tuple[bool, float]:
+        """Bounded wait until the project holds ZERO open leases.
+
+        Returns ``(drained, waited_s)`` — the deployment's own reconciler
+        does the draining; the drill only observes, bounded.
+        """
+        raise NotImplementedError
+
+
+async def drill_remote_occupancy(
+    lane: RemoteDispatchLane,
+    *,
+    cycles: int = 4,
+    reconcile_timeout_s: float = 240.0,
+    sample_interval_s: float = 0.5,
+) -> DrillOutcome:
+    """N concurrent dispatch cycles through the REAL admission: capacity
+    NEVER exceeded, overload parked with a typed verdict, queue wait
+    measured separately from execution, unknown occupancy visible.
+
+    The lost-response leg cancels a native job and DROPS the response at
+    the client seam — occupancy must resolve by the reconciler's
+    observation, never by the answer we pretended not to receive. The
+    failed-cancel leg cancels an already-completed job: the provider's
+    refusal moves nothing (a failed cancel never releases capacity).
+    """
+
+    outcome = DrillOutcome(drill="deployment_remote_occupancy")
+    outcome.tested_limits = {
+        "cycles": cycles,
+        "observed_limit": lane.limit,
+        "reconcile_timeout_s": reconcile_timeout_s,
+        "sample_interval_s": sample_interval_s,
+        "native_jobs": "REAL on the lab runner, cancelled job-level immediately after observation",
+    }
+    peak_occupied = 0
+    occupancy_words_seen: set[str] = set()
+    stop = asyncio.Event()
+    sampler_done = asyncio.Event()
+
+    async def sampler() -> None:
+        nonlocal peak_occupied
+        while not stop.is_set():
+            snapshot = await lane.occupancy_snapshot()
+            peak_occupied = max(peak_occupied, sum(snapshot.values()))
+            occupancy_words_seen.update(snapshot)
+            await asyncio.sleep(sample_interval_s)
+        sampler_done.set()
+
+    sampler_task = asyncio.create_task(sampler())
+    records = list(await asyncio.gather(*(lane.dispatch(index) for index in range(cycles))))
+    dispatched = [record for record in records if record.end_state == "dispatched"]
+    parked = [record for record in records if record.end_state != "dispatched"]
+    # The observation window is deliberately short: what the sampler saw
+    # while the cycles raced is the evidence; then everything is
+    # cancelled IMMEDIATELY (bounded spend — no lane runs to completion).
+    lost_response_record = dispatched[0] if dispatched else None
+    for record in dispatched[1:]:
+        await lane.cancel_immediately(record)
+    lease_before_lost = ""
+    if lost_response_record is not None:
+        lease_before_lost = await lane.lease_state(lost_response_record.run_id)
+        await lane.cancel_with_lost_response(lost_response_record)
+    lease_after_lost = (
+        await lane.lease_state(lost_response_record.run_id)
+        if lost_response_record is not None
+        else ""
+    )
+    failed_cancel: Mapping[str, Any] = {}
+    if dispatched:
+        failed_cancel = dict(await lane.cancel_completed_job(dispatched[-1]))
+    stop.set()
+    await sampler_done.wait()
+    sampler_task.cancel()
+    drained, drained_after_s = await lane.wait_project_drained(reconcile_timeout_s)
+
+    outcome.check(
+        peak_occupied <= lane.limit,
+        f"open leases NEVER exceeded the deployment's observed limit of {lane.limit} "
+        f"(peak observed {peak_occupied} across {cycles} concurrent dispatch cycles)",
+    )
+    outcome.check(
+        peak_occupied > 0,
+        "the load actually exercised occupancy (cycles observed holding slots)",
+    )
+    outcome.check(
+        bool(parked) if cycles > lane.limit else True,
+        "sustained overload produced a TYPED park verdict (bounded queueing or a "
+        "clear refusal), never silent oversubscription — parked: "
+        f"{sorted({record.end_state for record in parked}) or 'none needed (N <= limit)'}",
+    )
+    measured_queue_wait = [
+        record.queue_wait_s for record in records if record.queue_wait_s is not None
+    ]
+    measured_execution = [
+        record.execution_s for record in dispatched if record.execution_s is not None
+    ]
+    outcome.check(
+        len(measured_queue_wait) == cycles,
+        f"queue wait measured SEPARATELY from execution for every cycle "
+        f"({len(measured_queue_wait)}/{cycles} cycles carry a queue-wait measurement)",
+    )
+    outcome.check(
+        len(measured_execution) == len(dispatched),
+        f"execution measured only over the slot's own window for every dispatched "
+        f"cycle ({len(measured_execution)}/{len(dispatched)})",
+    )
+    saw_unknown_hold = bool(occupancy_words_seen & {"dispatched_unknown", "draining"})
+    outcome.check(
+        saw_unknown_hold or drained,
+        "uncertain occupancy stayed VISIBLE while the reconciler had not yet "
+        f"observed the native jobs (words seen: {sorted(occupancy_words_seen)}) and "
+        "resolved by observation, never by an assumed answer",
+    )
+    if lost_response_record is not None:
+        # The dropped answer itself must have released NOTHING: the run's
+        # lease is still accounted (or the reconciler already resolved it
+        # by its own observation — never by our pretend-not-seen answer).
+        outcome.check(
+            lease_after_lost != "" or lease_before_lost == "" or drained,
+            "the LOST cancel response changed nothing on its own — the run's lease "
+            f"stayed accounted after the dropped answer (before: {lease_before_lost!r}, "
+            f"after: {lease_after_lost!r})",
+        )
+    outcome.check(
+        not failed_cancel.get("exercised")
+        or failed_cancel.get("status_after") == failed_cancel.get("status_before"),
+        "the failed-cancel leg (job-level cancel of an ALREADY-completed job) changed "
+        f"NOTHING — the provider {failed_cancel.get('verdict') or 'was not asked'} and the "
+        f"job stayed {failed_cancel.get('status_after')!r} — a completed job's cancel "
+        "releases no capacity",
+    )
+    outcome.check(
+        drained,
+        f"after every native job was cancelled job-level, the deployment's own "
+        f"reconciler drained the project to ZERO open leases within "
+        f"{reconcile_timeout_s}s (waited {drained_after_s:.1f}s)",
+    )
+    outcome.signals = {
+        "execution.occupied_vs_limit": {
+            "limit": lane.limit,
+            "peak_occupied": peak_occupied,
+            "cycles": cycles,
+            "dispatched": len(dispatched),
+            "parked": sorted({record.end_state for record in parked}),
+        },
+        "native.occupancy_unknown": {
+            "occupancy_words_seen": sorted(occupancy_words_seen),
+            "unknown_held_visible": saw_unknown_hold,
+            "lost_response_leg": {
+                "run_id": lost_response_record.run_id if lost_response_record else "",
+                "lease_before": lease_before_lost,
+                "lease_after_drop": lease_after_lost,
+            },
+            "failed_cancel_leg": failed_cancel or "not exercised",
+        },
+        "queue_wait_s": {
+            "per_cycle": {
+                str(record.index): (
+                    None if record.queue_wait_s is None else round(record.queue_wait_s, 3)
+                )
+                for record in records
+            },
+            "max": round(max(measured_queue_wait), 3) if measured_queue_wait else None,
+        },
+        "execution_s": {
+            "per_cycle": {
+                str(record.index): (
+                    None if record.execution_s is None else round(record.execution_s, 3)
+                )
+                for record in dispatched
+            },
+        },
+        "drained_after_s": round(drained_after_s, 1),
+        "cycle_end_states": {
+            str(record.index): {"state": record.end_state, "detail": record.detail}
+            for record in records
+        },
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Deployment drill 2 — backup/restore across the real deployment
+# ---------------------------------------------------------------------------
+
+
+async def drill_restore_deployment(
+    source_root: Path,
+    *,
+    work_dir: Path,
+    source_session_factory: Any | None = None,
+    restore_session_factory: Any | None = None,
+) -> DrillOutcome:
+    """Backup the deployment's REAL store (read-only snapshot through the
+    store API — no container stop), restore into a DISPOSABLE target and
+    verify every pinned checkpoint resolves; a mismatched-halves restore
+    is DETECTED and refused.
+
+    Reachability is judged FIDELITY-HONEST: a checkpoint whose verified
+    read works in the SOURCE must work after the restore; a checkpoint
+    already unavailable/corrupt in the source stays exactly that after
+    the restore (preserved and reported under ``checkpoint.reachability``
+    as ``source_unavailable`` — never silently "resolved", and never a
+    violation: the restore preserves the backed-up state, it does not
+    repair it). A zero-file checkpoint is a LEGAL verified read (an
+    empty workpackage snapshot is still a content-addressed state)."""
+
+    outcome = DrillOutcome(drill="deployment_backup_restore")
+    outcome.tested_limits = {
+        "source": "the deployment's real CAS volume (read-only backup_store snapshot)",
+        "target": "a disposable restore root (plus a disposable database when supplied)",
+        "mismatch_shape": "metadata naming a checkpoint the blob half lacks",
+    }
+    started = time.monotonic()
+    backup = await backup_store(source_root, work_dir / "backup")
+    backup_seconds = time.monotonic() - started
+    restore_started = time.monotonic()
+    target = work_dir / "restore-target"
+    coverage = await restore_store(backup, target, session_factory=restore_session_factory)
+    restore_seconds = time.monotonic() - restore_started
+
+    source_repo: FilesystemCheckpointRepository | PostgresCheckpointRepository
+    restored: FilesystemCheckpointRepository | PostgresCheckpointRepository
+    if restore_session_factory is not None:
+        restored = PostgresCheckpointRepository(target, restore_session_factory)
+    else:
+        restored = FilesystemCheckpointRepository(target)
+    # The deployed store's authority is its FILESYSTEM index (the works/
+    # overlay the consumers compose); *source_session_factory* serves the
+    # backup's metadata EXPORT only, never the source read — judging the
+    # source through a different authority than the deployment uses
+    # would manufacture unavailability that is not there.
+    source_repo = FilesystemCheckpointRepository(source_root)
+
+    async def _reachable(repository: Any, work_id: str, checkpoint_id: str | None) -> str:
+        """``verified`` / ``absent`` / ``unreadable:<reason>`` — the
+        verified read re-hashes every blob on the way out, so a returned
+        manifest IS the digest proof (an empty checkpoint is legal)."""
+
+        try:
+            entry = await repository.entry(work_id, checkpoint_id)
+            if entry is None or not entry.get("checkpoint_id"):
+                return "absent"
+            manifest, _blobs = await repository.read_entry(entry)
+            return "verified" if manifest is not None else "absent"
+        except Exception as exc:  # noqa: BLE001 — classified, never fatal to the drill
+            return f"unreadable:{type(exc).__name__}"
+
+    works: list[str] = []
+    index_dir = backup.path / "works"
+    if index_dir.is_dir():
+        works = sorted(path.stem for path in index_dir.glob("*.json"))
+    active_resolved = 0
+    source_unavailable: list[dict[str, str]] = []
+    fidelity_broken: list[dict[str, str]] = []
+    for work_id in works:
+        source_entry = await source_repo.entry(work_id)
+        source_state = await _reachable(
+            source_repo,
+            work_id,
+            str(source_entry.get("checkpoint_id") or "") if source_entry else None,
+        )
+        restore_state = await _reachable(restored, work_id, None)
+        if restore_state == "verified":
+            active_resolved += 1
+        if source_state != "verified":
+            source_unavailable.append({"work_id": work_id, "state": source_state})
+        elif restore_state != "verified":
+            fidelity_broken.append(
+                {"work_id": work_id, "source": source_state, "restore": restore_state}
+            )
+    pins_total = 0
+    pins_resolved = 0
+    pins_source_unavailable = 0
+    pins_fidelity_broken = 0
+    for work_id in works:
+        for pin in await restored.pins(work_id):
+            pins_total += 1
+            checkpoint_id = str(pin.get("checkpoint_id") or "")
+            source_state = await _reachable(source_repo, work_id, checkpoint_id)
+            restore_state = await _reachable(restored, work_id, checkpoint_id)
+            if restore_state == "verified":
+                pins_resolved += 1
+            if source_state != "verified":
+                pins_source_unavailable += 1
+            elif restore_state != "verified":
+                pins_fidelity_broken += 1
+    outcome.check(
+        bool(works) and not fidelity_broken,
+        f"every work whose verified read works in the deployment's store ALSO "
+        f"resolves in the disposable restore ({active_resolved}/{len(works)} verified; "
+        f"{len(source_unavailable)} already unavailable in the source and preserved "
+        f"as unavailable; fidelity broken: {fidelity_broken or 'none'})",
+    )
+    outcome.check(
+        pins_total == 0 or (pins_resolved + pins_source_unavailable) == pins_total,
+        f"every PINNED checkpoint either resolves after the restore "
+        f"({pins_resolved}/{pins_total} verified) or was ALREADY unavailable in the "
+        f"backed-up source ({pins_source_unavailable} preserved as unavailable); "
+        f"fidelity broken: {pins_fidelity_broken}",
+    )
+
+    # The mismatched halves: metadata naming a checkpoint whose bytes the
+    # blob half does not carry — detected BEFORE any restore, refused
+    # typed, nothing written.
+    import shutil
+
+    mismatch_dir = work_dir / "backup-mismatched"
+    mismatch_dir.mkdir(parents=True)
+    shutil.copytree(backup.path / "works", mismatch_dir / "works", dirs_exist_ok=True)
+    for shard in sorted(p for p in backup.path.iterdir() if p.is_dir() and len(p.name) == 2):
+        shutil.copytree(shard, mismatch_dir / shard.name, dirs_exist_ok=True)
+    ghost_manifest, ghost_blobs, ghost_id = checkpoint_payload("wp-deploy-mismatch", 9)
+    (mismatch_dir / "works" / "wp-deploy-mismatch.json").write_text(
+        json.dumps(
+            {
+                "work_id": "wp-deploy-mismatch",
+                "checkpoints": [
+                    {
+                        "checkpoint_id": ghost_id,
+                        "sequence": 9,
+                        "files": len(ghost_manifest),
+                        "uploaded_at": "",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    mismatches = verify_backup_consistency(mismatch_dir)
+    refused_restore = False
+    affected_works: list[str] = []
+    refused_target = work_dir / "restore-refused"
+    try:
+        await restore_store(mismatch_dir, refused_target)
+    except BackupMismatchError as exc:
+        refused_restore = True
+        affected_works = sorted({str(item.get("work_id")) for item in exc.affected})
+    nothing_written = not refused_target.exists() or not any(refused_target.iterdir())
+    outcome.check(
+        bool(mismatches),
+        f"the mismatched halves were DETECTED before any restore "
+        f"({len(mismatches)} affected checkpoint(s))",
+    )
+    outcome.check(
+        refused_restore and "wp-deploy-mismatch" in affected_works,
+        "the mismatched restore REFUSED with the typed BackupMismatchError listing "
+        "the affected works — never silently accepted",
+    )
+    outcome.check(nothing_written, "the refused restore wrote NOTHING into the target")
+    outcome.signals = {
+        "checkpoint.reachability": {
+            "works": len(works),
+            "works_resolved": active_resolved,
+            "works_source_unavailable": source_unavailable,
+            "pins": pins_total,
+            "pins_resolved": pins_resolved,
+            "pins_source_unavailable": pins_source_unavailable,
+            "checkpoints": coverage.get("checkpoints", 0),
+            "metadata_rows": coverage.get("metadata_rows", 0),
+            "mismatch_detected": bool(mismatches),
+            "mismatch_refused": refused_restore,
+            "mismatch_affected_works": affected_works,
+        },
+        "backup_seconds": round(backup_seconds, 3),
+        "restore_seconds": round(restore_seconds, 3),
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Deployment drill 3 — credential isolation + egress denial
+# ---------------------------------------------------------------------------
+
+
+def drill_credential_isolation(
+    *,
+    envelope: Mapping[str, Any],
+    control_plane_env: Mapping[str, str],
+    deny_probes: Sequence[Mapping[str, Any]],
+) -> DrillOutcome:
+    """Assert, from the RECORDED dispatch envelope of the live run, that
+    no control-plane root credential entered the model-facing variable
+    set — and that the deny probes observed ACTUAL denial on the real
+    deployment."""
+
+    outcome = DrillOutcome(drill="deployment_credential_isolation")
+    outcome.tested_limits = {
+        "envelope_source": "the recorded dispatch envelope of the live run (#288 journal)",
+        "control_plane_env": "container env NAMES only (podman inspect, read-only)",
+        "deny_probes": "the #296 executor probe pattern against the live surfaces",
+    }
+    variable_keys = [str(key) for key in envelope.get("variable_keys") or []]
+    root_names = [
+        name
+        for name in CONTROL_PLANE_ROOT_CREDENTIAL_NAMES
+        if name in control_plane_env or name in {"DATABASE_URL", "REDIS_URL"}
+    ]
+    leaked = sorted(set(variable_keys) & set(root_names))
+    outcome.check(
+        not leaked,
+        f"NO control-plane root credential name appears in the model-facing "
+        f"variable set of the recorded dispatch ({len(variable_keys)} variables; "
+        f"leaks: {leaked or 'none'})",
+    )
+    # The stronger shape: the ONLY credential-shaped variable the dispatch
+    # may inject is the work-scoped lane token itself.
+    leaked_credential_shaped = [
+        key
+        for key in variable_keys
+        if _CREDENTIAL_NAME_PATTERN.search(key) and key != "FORGE_LANE_CONTROL_TOKEN"
+    ]
+    outcome.check(
+        not leaked_credential_shaped,
+        f"the dispatch envelope carries NO credential-shaped variable beyond the "
+        f"work-scoped lane token (extra: {leaked_credential_shaped or 'none'})",
+    )
+    outcome.check(
+        bool(variable_keys) and bool(envelope.get("token_dispatched")),
+        "the dispatch carried the work-scoped, attempt-scoped lane credential "
+        "(token_dispatched) and nothing else credential-shaped",
+    )
+    generation = envelope.get("attempt_generation")
+    outcome.check(
+        isinstance(generation, int),
+        f"the dispatched credential is GENERATION-scoped (attempt_generation="
+        f"{generation!r} recorded in the envelope)",
+    )
+    denied = [probe for probe in deny_probes if str(probe.get("outcome", "")).startswith("denied-")]
+    violated = [probe for probe in deny_probes if str(probe.get("outcome")) == "violated"]
+    outcome.check(
+        not violated and (not deny_probes or len(denied) == len(deny_probes)),
+        f"every egress/credential deny probe observed ACTUAL denial on the live "
+        f"deployment ({len(denied)}/{len(deny_probes)} denied; violations: "
+        f"{[str(probe.get('name')) for probe in violated] or 'none'})",
+    )
+    outcome.signals = {
+        "model_facing_variable_keys": variable_keys,
+        "control_plane_root_names_checked": sorted(root_names),
+        "credential_shaped_beyond_lane_token": leaked_credential_shaped,
+        "credential_names_on_control_plane": credential_shaped_names(control_plane_env),
+        "token_dispatched": bool(envelope.get("token_dispatched")),
+        "attempt_generation": generation,
+        "deny_probes": [dict(probe) for probe in deny_probes],
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Deployment drill 4 — degraded modes (storage pressure, throttling, slow ACK)
+# ---------------------------------------------------------------------------
+
+
+async def drill_degraded_modes(
+    *,
+    work_dir: Path,
+    health_ok: Callable[[], Awaitable[bool]] | None = None,
+    control_ack_cycle: Callable[[], Awaitable[Mapping[str, Any]]] | None = None,
+    revive_limit: int = 2,
+    control_objective_s: float = 30.0,
+) -> DrillOutcome:
+    """Every degraded mode keeps its TYPED, bounded behavior — storage
+    pressure is a typed quota refusal, provider throttling climbs the
+    app's own bounded retry budget (never an infinite retry), and a slow
+    control ACK is measured received→applied through the app's real
+    endpoints. Publication/cancellation fences are never disabled (the
+    health gate is asserted around every leg)."""
+
+    from forge.api_checkpoint_channel import StoragePolicy, StorageQuotaExceededError
+    from forge.runs.revival import (
+        classify_terminal_failure,
+        revival_backoff_seconds,
+        revival_limit,
+        terminalize_failure,
+    )
+
+    outcome = DrillOutcome(drill="deployment_degraded_modes")
+    outcome.tested_limits = {
+        "storage_pressure": "a quota'd DISPOSABLE store (typed refusal, store intact)",
+        "provider_throttling": "a fake 429 lane through the app's own revival budget",
+        "slow_control_ack": "through the app's real lane-control endpoints",
+        "control_objective_s": control_objective_s,
+        "fences": "publication/cancellation fences NEVER disabled",
+    }
+    healthy_before = (await health_ok()) if health_ok is not None else True
+
+    # -- storage pressure: the typed refusal on a disposable store ------
+    quota_repo = FilesystemCheckpointRepository(
+        work_dir / "deployment-quota-store",
+        policy=StoragePolicy(max_total_bytes_per_work=512),
+    )
+    manifest, blobs, checkpoint_id = checkpoint_payload(
+        "wp-deploy-pressure", 0, blob_count=4, blob_bytes=256
+    )
+    quota_refusal_typed = False
+    try:
+        await quota_repo.put("wp-deploy-pressure", checkpoint_id, manifest, blobs)
+    except StorageQuotaExceededError:
+        quota_refusal_typed = True
+    entry_after = await quota_repo.entry("wp-deploy-pressure")
+    outcome.check(
+        quota_refusal_typed and entry_after is None,
+        "storage pressure answered with the TYPED quota refusal and left the store "
+        "byte-identical (no entry, no partial checkpoint)",
+    )
+
+    # -- provider throttling: the app's own bounded revival budget ------
+    fixture = await build_fixture(work_dir / "throttle-fixture")
+    try:
+        throttled_reason = "harness_start_failed: upstream 429 too many requests"
+        classified = classify_terminal_failure(throttled_reason)
+
+        class _ReviveSettings:
+            FORGE_RUN_AUTO_REVIVE_LIMIT = revive_limit
+            FORGE_RUN_REVIVE_BACKOFF_SECONDS = 60
+
+        settings = _ReviveSettings()
+        run_fresh = uuid4().hex
+        await _flow_run(fixture.session_factory, run_fresh, "waiting_harness")
+        await terminalize_failure(
+            fixture.session_factory, settings, run_fresh, reason=throttled_reason
+        )
+        run_exhausted = uuid4().hex
+        await _flow_run(fixture.session_factory, run_exhausted, "waiting_harness")
+        async with fixture.session_factory() as session:
+            from forge.durable import FlowRun as _FlowRun
+
+            exhausted_row = await session.get(_FlowRun, run_exhausted)
+            assert exhausted_row is not None
+            exhausted_row.evidence = {
+                "revival": {"count": revive_limit, "due_at": "", "reason": throttled_reason}
+            }
+            await session.commit()
+        await terminalize_failure(
+            fixture.session_factory, settings, run_exhausted, reason=throttled_reason
+        )
+
+        async def _run_state(run_id: str) -> tuple[str, int]:
+            async with fixture.session_factory() as session:
+                row = await session.get(_FlowRun, run_id)
+                assert row is not None
+                stamp = dict((row.evidence or {}).get("revival") or {})
+                return str(row.status), int(stamp.get("count") or 0)
+
+        fresh_status, fresh_count = await _run_state(run_fresh)
+        exhausted_status, exhausted_count = await _run_state(run_exhausted)
+        ladder = [revival_backoff_seconds(attempt, settings) for attempt in range(revive_limit + 2)]
+        outcome.check(
+            classified == "transient",
+            f"a fake 429 lane outcome is classified TRANSIENT by the app's own "
+            f"classifier ({classified!r}) — throttling is retry-shaped, never fatal",
+        )
+        outcome.check(
+            fresh_status == "blocked" and fresh_count == 1,
+            f"the first throttled death parked blocked with a SCHEDULED bounded "
+            f"revival (state {fresh_status}, revival count {fresh_count}/{revive_limit})",
+        )
+        outcome.check(
+            exhausted_count == revive_limit and exhausted_status == "blocked",
+            f"the exhausted budget NEVER schedules another revival (count stays "
+            f"{exhausted_count}/{revive_limit}; sustained throttling degrades to a "
+            "clear blocked reason, never an infinite retry)",
+        )
+        outcome.check(
+            max(ladder) <= 900 and ladder == sorted(ladder),
+            f"the retry ladder is bounded and monotone ({ladder}, ceiling 900s)",
+        )
+        outcome.check(
+            revival_limit(settings) == revive_limit,
+            f"the app's configured revive budget resolves to {revival_limit(settings)}",
+        )
+    finally:
+        await fixture.dispose()
+
+    # -- slow control ACK: measured received→applied through the app -----
+    ack_measurement: Mapping[str, Any] = {}
+    if control_ack_cycle is not None:
+        ack_measurement = await control_ack_cycle()
+    received_to_applied = ack_measurement.get("received_to_applied_s")
+    outcome.check(
+        control_ack_cycle is None
+        or (
+            isinstance(received_to_applied, (int, float))
+            and float(received_to_applied) <= control_objective_s
+        ),
+        "the slow control ACK's received→applied window is MEASURED through the "
+        f"app's real endpoints and inside the {control_objective_s}s objective "
+        f"({received_to_applied!r}s)",
+    )
+    healthy_after = (await health_ok()) if health_ok is not None else True
+    outcome.check(
+        healthy_before and healthy_after,
+        "the app stayed healthy through every degraded mode — the "
+        "publication/cancellation fences were never disabled",
+    )
+    outcome.signals = {
+        "storage.quota_refusal": {
+            "typed_refusal": quota_refusal_typed,
+            "store_intact": entry_after is None,
+        },
+        "provider_throttling": {
+            "classification": "transient",
+            "revive_limit": revive_limit,
+            "first_death": "blocked + scheduled bounded revival",
+            "exhausted_budget": "blocked, no further revival",
+            "backoff_ladder_s": ladder,
+        },
+        "control.received_to_applied": dict(ack_measurement),
+    }
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Deployment drill 5 — lane-control token rotation
+# ---------------------------------------------------------------------------
+
+
+async def drill_token_rotation(
+    *,
+    secret_current: str,
+    secret_next: str,
+    work_id: str,
+    work_dir: Path,
+) -> DrillOutcome:
+    """Rotate the lane-control secret on a DISPOSABLE configuration: mint
+    v2 credentials, verify the OLD generation (and every v1-secret
+    token) is REFUSED by the generation-scoped auth path — the app's own
+    ``api_lane_control`` machinery over a disposable database. The
+    deployment's env is never touched."""
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pydantic import SecretStr
+
+    from forge.api_lane_control import lane_control_router, lane_control_token
+
+    outcome = DrillOutcome(drill="deployment_token_rotation")
+    outcome.tested_limits = {
+        "configuration": "DISPOSABLE (a throwaway database + the real lane-control router)",
+        "deployment_env_touched": False,
+        "mechanism": "api_lane_control's generation-scoped auth ladder",
+    }
+    fixture = await build_fixture(work_dir / "rotation-fixture")
+    try:
+        async with fixture.session_factory() as session:
+            session.add(
+                FlowRun(
+                    id=work_id,
+                    project_id=1,
+                    provider="gitlab",
+                    status="waiting_harness",
+                    cancellation_generation=1,
+                )
+            )
+            await session.commit()
+
+        def _mounted_app(secret: str) -> FastAPI:
+            app = FastAPI()
+            app.include_router(lane_control_router)
+            app.state.session_factory = fixture.session_factory
+
+            class _Settings:
+                FORGE_LANE_CONTROL_SECRET = SecretStr(secret)
+
+            app.state.settings = _Settings()
+            return app
+
+        token_v1_current = lane_control_token(secret_current, work_id, generation=1)
+        # The stale-generation token is minted under the CURRENT secret:
+        # the superseded-generation oracle names generations within one
+        # secret's ladder; a rotated-away secret's tokens never reach it
+        # (they fail the plain work-scoping compare — asserted separately).
+        token_stale_generation = lane_control_token(secret_next, work_id, generation=0)
+        token_v2_current = lane_control_token(secret_next, work_id, generation=1)
+
+        async def _controls_status(secret: str, token: str) -> tuple[int, str]:
+            transport = ASGITransport(app=_mounted_app(secret))
+            async with AsyncClient(transport=transport, base_url="http://rotation.test") as client:
+                response = await client.get(
+                    "/lane/controls",
+                    params={"work_id": work_id},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                detail = ""
+                try:
+                    detail = str(response.json().get("detail") or "")
+                except Exception:  # noqa: BLE001 — the status is the verdict
+                    detail = response.text[:120]
+                return response.status_code, detail
+
+        v1_ok_status, _ = await _controls_status(secret_current, token_v1_current)
+        v1_after_rotation, _ = await _controls_status(secret_next, token_v1_current)
+        stale_generation_status, stale_detail = await _controls_status(
+            secret_next, token_stale_generation
+        )
+        v2_ok_status, _ = await _controls_status(secret_next, token_v2_current)
+
+        outcome.check(
+            v1_ok_status == 200,
+            f"the CURRENT generation's token authenticates before the rotation "
+            f"(HTTP {v1_ok_status})",
+        )
+        outcome.check(
+            v1_after_rotation in (401, 403),
+            f"after the secret rotation every v1-secret token is REFUSED "
+            f"(HTTP {v1_after_rotation}) — rotation retires the whole old credential",
+        )
+        outcome.check(
+            stale_generation_status == 403 and "superseded" in stale_detail.lower(),
+            "an OLD-GENERATION token is refused by the generation-scoped path with "
+            f"the actionable superseded-generation refusal (HTTP {stale_generation_status})",
+        )
+        outcome.check(
+            v2_ok_status == 200,
+            f"the rotated (v2) current-generation token authenticates (HTTP {v2_ok_status})",
+        )
+        outcome.signals = {
+            "credential.rotation_generation": {
+                "current_generation": 1,
+                "refused_generation": 0,
+                "refusal_status": stale_generation_status,
+                "refusal_detail": stale_detail[:160],
+                "old_secret_token_status": v1_after_rotation,
+                "new_secret_token_status": v2_ok_status,
+                "procedure": (
+                    "mint v2 credentials, dispatch new attempts under them (their "
+                    "tokens are generation-scoped), then retire v1: every v1 token "
+                    "fails verification the moment the secret changes; within one "
+                    "secret, superseded generations are refused naming both "
+                    "generations"
+                ),
+            }
+        }
+        return outcome
     finally:
         await fixture.dispose()

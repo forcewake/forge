@@ -466,6 +466,105 @@ class TestPinsGeneratorRendersTemplateDefaults:
         )
 
 
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — the capabilities-qualified pin view: install instructions
+# pin an artifact MATCHING a qualified profile, never just the newest one
+# ---------------------------------------------------------------------------
+
+
+def _capabilities_root(tmp_path: Path, record: dict, *, profiles: tuple = ()) -> Path:
+    """A root with an archived promotion record plus profile records."""
+    root = _fake_root(tmp_path, record)
+    for profile_record in profiles:
+        root_profile = root / "qualification" / "records"
+        root_profile.mkdir(parents=True, exist_ok=True)
+        (root_profile / f"{profile_record.record_id}.json").write_text(
+            json.dumps(profile_record.to_json()), encoding="utf-8"
+        )
+    return root
+
+
+def _qualified_profile_record(
+    *, wheel_sha256: str, evidence_class: str = "live-provider", record_id: str = "probe@0.35.0"
+):
+    from forge.profile_qualification import EvidenceEntry, ProfileQualificationRecord
+
+    return ProfileQualificationRecord(
+        record_id=record_id,
+        profile="probe",
+        provider="gitlab",
+        release_version="0.35.0",
+        provider_version="GitLab CE 19.3.2 (revision 34042bf7d00)",
+        runtime_recipe="python-3.13",
+        harness_binary="claude-code",
+        harness_version="2.1.273",
+        credential_route="bot PAT / read-only clone PAT / BYOK",
+        verification_contract="required-jobs=smoke",
+        capabilities=("real-provider-e2e",),
+        evidence=(
+            EvidenceEntry(
+                evidence_class=evidence_class,
+                capability="real-provider-e2e",
+                outcome="pass",
+                covers="trace",
+                executed_at="2026-09-24T12:00:00+00:00",
+                artifact_sha256="b" * 64,
+            ),
+        ),
+        wheel_sha256=wheel_sha256,
+    )
+
+
+class TestCapabilitiesQualifiedPins:
+    def test_an_image_only_record_refuses_to_pin_a_wheel(self, tmp_path, capsys):
+        """An image-only record's wheel field is empty — the capabilities
+        render REFUSES to pin a wheel for it (typed refusal, no fallback to
+        the newest wheel elsewhere)."""
+        pins = _load_pins_module()
+        root = _capabilities_root(tmp_path, _record_document(wheel_name=None))
+        assert pins.main(["--root", str(root), "--capabilities"]) == 2
+        err = capsys.readouterr().err
+        assert "REFUSED" in err and "image-only" in err.lower()
+        assert "no fallback" in err
+
+    def test_an_unqualified_profile_never_pins_the_promoted_wheel(self, tmp_path, capsys):
+        pins = _load_pins_module()
+        record = _record_document()
+        profiles = (
+            _qualified_profile_record(wheel_sha256="e" * 64, evidence_class="model-fixture"),
+        )
+        root = _capabilities_root(tmp_path, record, profiles=profiles)
+        assert pins.main(["--root", str(root), "--capabilities"]) == 2
+        err = capsys.readouterr().err
+        assert "REFUSED" in err
+        assert "release.tested_sha" in err  # the promoted wheel identity is NAMED
+        assert "declared_only" in err  # …and so is the honest verdict
+
+    def test_no_profile_records_at_all_refuses(self, tmp_path, capsys):
+        pins = _load_pins_module()
+        root = _capabilities_root(tmp_path, _record_document())
+        assert pins.main(["--root", str(root), "--capabilities"]) == 2
+        assert "no profile-qualification records" in capsys.readouterr().err
+
+    def test_a_qualified_profile_pins_the_matching_wheel(self, tmp_path, capsys):
+        pins = _load_pins_module()
+        record = _record_document()  # wheel sha "e"*64
+        profiles = (_qualified_profile_record(wheel_sha256="e" * 64),)
+        root = _capabilities_root(tmp_path, record, profiles=profiles)
+        assert pins.main(["--root", str(root), "--capabilities"]) == 0
+        out = capsys.readouterr().out
+        assert "PIN — matches the promoted artifact" in out
+        assert "capabilities wheel pin:" in out and "release.tested_sha" in out
+
+    def test_a_qualified_profile_pinning_a_different_artifact_does_not_pin(self, tmp_path, capsys):
+        pins = _load_pins_module()
+        record = _record_document()  # promoted wheel "e"*64…
+        profiles = (_qualified_profile_record(wheel_sha256="f" * 64),)  # …qualified on ANOTHER
+        root = _capabilities_root(tmp_path, record, profiles=profiles)
+        assert pins.main(["--root", str(root), "--capabilities"]) == 2
+        assert "REFUSED" in capsys.readouterr().err
+
+
 _LEGACY_README = """\
 # forge
 

@@ -1,0 +1,536 @@
+{
+  "schema": "forge.research.cohort.capture-log/1",
+  "issue": "R37-11 / #292",
+  "captured_at": "2026-09-24",
+  "caps": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "model_identity": "fast",
+  "arms": [
+    {
+      "task_id": "RC-13-live2-neighbor-refund-approval",
+      "mode": "none",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.01966,
+      "receipts": [
+        {
+          "input_tokens": 498,
+          "output_tokens": 2333,
+          "charged_input_tokens": 498,
+          "charged_output_tokens": 2333,
+          "usage_known": true,
+          "usd_estimated": 0.01966,
+          "running_usd_estimated": 0.01966
+        }
+      ]
+    },
+    {
+      "task_id": "RC-13-live2-neighbor-refund-approval",
+      "mode": "lexical",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.03839,
+      "receipts": [
+        {
+          "input_tokens": 787,
+          "output_tokens": 4602,
+          "charged_input_tokens": 787,
+          "charged_output_tokens": 4602,
+          "usage_known": true,
+          "usd_estimated": 0.03839,
+          "running_usd_estimated": 0.05805
+        }
+      ]
+    },
+    {
+      "task_id": "RC-13-live2-neighbor-refund-approval",
+      "mode": "research",
+      "outcome": "graded",
+      "stopped_reason": "max_calls",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.075082,
+      "receipts": [
+        {
+          "input_tokens": 467,
+          "output_tokens": 289,
+          "charged_input_tokens": 467,
+          "charged_output_tokens": 289,
+          "usage_known": true,
+          "usd_estimated": 0.003246,
+          "running_usd_estimated": 0.061296
+        },
+        {
+          "input_tokens": 531,
+          "output_tokens": 617,
+          "charged_input_tokens": 531,
+          "charged_output_tokens": 617,
+          "usage_known": true,
+          "usd_estimated": 0.005998,
+          "running_usd_estimated": 0.067294
+        },
+        {
+          "input_tokens": 1540,
+          "output_tokens": 978,
+          "charged_input_tokens": 1540,
+          "charged_output_tokens": 978,
+          "usage_known": true,
+          "usd_estimated": 0.010904,
+          "running_usd_estimated": 0.078198
+        },
+        {
+          "input_tokens": 2025,
+          "output_tokens": 1181,
+          "charged_input_tokens": 2025,
+          "charged_output_tokens": 1181,
+          "usage_known": true,
+          "usd_estimated": 0.013498,
+          "running_usd_estimated": 0.091696
+        },
+        {
+          "input_tokens": 3618,
+          "output_tokens": 4275,
+          "charged_input_tokens": 3618,
+          "charged_output_tokens": 4275,
+          "usage_known": true,
+          "usd_estimated": 0.041436,
+          "running_usd_estimated": 0.133132
+        }
+      ]
+    },
+    {
+      "task_id": "RC-14-live2-ambiguous-approver",
+      "mode": "none",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.01588,
+      "receipts": [
+        {
+          "input_tokens": 496,
+          "output_tokens": 1861,
+          "charged_input_tokens": 496,
+          "charged_output_tokens": 1861,
+          "usage_known": true,
+          "usd_estimated": 0.01588,
+          "running_usd_estimated": 0.149012
+        }
+      ]
+    },
+    {
+      "task_id": "RC-14-live2-ambiguous-approver",
+      "mode": "lexical",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.024794,
+      "receipts": [
+        {
+          "input_tokens": 833,
+          "output_tokens": 2891,
+          "charged_input_tokens": 833,
+          "charged_output_tokens": 2891,
+          "usage_known": true,
+          "usd_estimated": 0.024794,
+          "running_usd_estimated": 0.173806
+        }
+      ]
+    },
+    {
+      "task_id": "RC-14-live2-ambiguous-approver",
+      "mode": "research",
+      "outcome": "graded",
+      "stopped_reason": "max_calls",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.093672,
+      "receipts": [
+        {
+          "input_tokens": 465,
+          "output_tokens": 1052,
+          "charged_input_tokens": 465,
+          "charged_output_tokens": 1052,
+          "usage_known": true,
+          "usd_estimated": 0.009346,
+          "running_usd_estimated": 0.183152
+        },
+        {
+          "input_tokens": 529,
+          "output_tokens": 1235,
+          "charged_input_tokens": 529,
+          "charged_output_tokens": 1235,
+          "usage_known": true,
+          "usd_estimated": 0.010938,
+          "running_usd_estimated": 0.19409
+        },
+        {
+          "input_tokens": 1559,
+          "output_tokens": 1389,
+          "charged_input_tokens": 1559,
+          "charged_output_tokens": 1389,
+          "usage_known": true,
+          "usd_estimated": 0.01423,
+          "running_usd_estimated": 0.20832
+        },
+        {
+          "input_tokens": 1771,
+          "output_tokens": 1486,
+          "charged_input_tokens": 1771,
+          "charged_output_tokens": 1486,
+          "usage_known": true,
+          "usd_estimated": 0.01543,
+          "running_usd_estimated": 0.22375
+        },
+        {
+          "input_tokens": 1092,
+          "output_tokens": 5193,
+          "charged_input_tokens": 1092,
+          "charged_output_tokens": 5193,
+          "usage_known": true,
+          "usd_estimated": 0.043728,
+          "running_usd_estimated": 0.267478
+        }
+      ]
+    },
+    {
+      "task_id": "RC-15-live2-irrelevant-docs-site",
+      "mode": "none",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.014242,
+      "receipts": [
+        {
+          "input_tokens": 489,
+          "output_tokens": 1658,
+          "charged_input_tokens": 489,
+          "charged_output_tokens": 1658,
+          "usage_known": true,
+          "usd_estimated": 0.014242,
+          "running_usd_estimated": 0.28172
+        }
+      ]
+    },
+    {
+      "task_id": "RC-15-live2-irrelevant-docs-site",
+      "mode": "lexical",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.040182,
+      "receipts": [
+        {
+          "input_tokens": 763,
+          "output_tokens": 4832,
+          "charged_input_tokens": 763,
+          "charged_output_tokens": 4832,
+          "usage_known": true,
+          "usd_estimated": 0.040182,
+          "running_usd_estimated": 0.321902
+        }
+      ]
+    },
+    {
+      "task_id": "RC-15-live2-irrelevant-docs-site",
+      "mode": "research",
+      "outcome": "graded",
+      "stopped_reason": "max_calls",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.107288,
+      "receipts": [
+        {
+          "input_tokens": 458,
+          "output_tokens": 394,
+          "charged_input_tokens": 458,
+          "charged_output_tokens": 394,
+          "usage_known": true,
+          "usd_estimated": 0.004068,
+          "running_usd_estimated": 0.32597
+        },
+        {
+          "input_tokens": 873,
+          "output_tokens": 483,
+          "charged_input_tokens": 873,
+          "charged_output_tokens": 483,
+          "usage_known": true,
+          "usd_estimated": 0.00561,
+          "running_usd_estimated": 0.33158
+        },
+        {
+          "input_tokens": 1152,
+          "output_tokens": 2207,
+          "charged_input_tokens": 1152,
+          "charged_output_tokens": 2207,
+          "usage_known": true,
+          "usd_estimated": 0.01996,
+          "running_usd_estimated": 0.35154
+        },
+        {
+          "input_tokens": 2160,
+          "output_tokens": 1509,
+          "charged_input_tokens": 2160,
+          "charged_output_tokens": 1509,
+          "usage_known": true,
+          "usd_estimated": 0.016392,
+          "running_usd_estimated": 0.367932
+        },
+        {
+          "input_tokens": 2977,
+          "output_tokens": 6913,
+          "charged_input_tokens": 2977,
+          "charged_output_tokens": 6913,
+          "usage_known": true,
+          "usd_estimated": 0.061258,
+          "running_usd_estimated": 0.42919
+        }
+      ]
+    },
+    {
+      "task_id": "RC-16-live2-deep-superseded-policy",
+      "mode": "none",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.019996,
+      "receipts": [
+        {
+          "input_tokens": 510,
+          "output_tokens": 2372,
+          "charged_input_tokens": 510,
+          "charged_output_tokens": 2372,
+          "usage_known": true,
+          "usd_estimated": 0.019996,
+          "running_usd_estimated": 0.449186
+        }
+      ]
+    },
+    {
+      "task_id": "RC-16-live2-deep-superseded-policy",
+      "mode": "lexical",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.020488,
+      "receipts": [
+        {
+          "input_tokens": 848,
+          "output_tokens": 2349,
+          "charged_input_tokens": 848,
+          "charged_output_tokens": 2349,
+          "usage_known": true,
+          "usd_estimated": 0.020488,
+          "running_usd_estimated": 0.469674
+        }
+      ]
+    },
+    {
+      "task_id": "RC-16-live2-deep-superseded-policy",
+      "mode": "research",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.15201,
+      "receipts": [
+        {
+          "input_tokens": 479,
+          "output_tokens": 67,
+          "charged_input_tokens": 479,
+          "charged_output_tokens": 67,
+          "usage_known": true,
+          "usd_estimated": 0.001494,
+          "running_usd_estimated": 0.471168
+        },
+        {
+          "input_tokens": 494,
+          "output_tokens": 673,
+          "charged_input_tokens": 494,
+          "charged_output_tokens": 673,
+          "usage_known": true,
+          "usd_estimated": 0.006372,
+          "running_usd_estimated": 0.47754
+        },
+        {
+          "input_tokens": 982,
+          "output_tokens": 200,
+          "charged_input_tokens": 982,
+          "charged_output_tokens": 200,
+          "usage_known": true,
+          "usd_estimated": 0.003564,
+          "running_usd_estimated": 0.481104
+        },
+        {
+          "input_tokens": 1121,
+          "output_tokens": 1795,
+          "charged_input_tokens": 1121,
+          "charged_output_tokens": 1795,
+          "usage_known": true,
+          "usd_estimated": 0.016602,
+          "running_usd_estimated": 0.497706
+        },
+        {
+          "input_tokens": 2167,
+          "output_tokens": 1715,
+          "charged_input_tokens": 2167,
+          "charged_output_tokens": 1715,
+          "usage_known": true,
+          "usd_estimated": 0.018054,
+          "running_usd_estimated": 0.51576
+        },
+        {
+          "input_tokens": 2413,
+          "output_tokens": 1842,
+          "charged_input_tokens": 2413,
+          "charged_output_tokens": 1842,
+          "usage_known": true,
+          "usd_estimated": 0.019562,
+          "running_usd_estimated": 0.535322
+        },
+        {
+          "input_tokens": 2456,
+          "output_tokens": 1843,
+          "charged_input_tokens": 2456,
+          "charged_output_tokens": 1843,
+          "usage_known": true,
+          "usd_estimated": 0.019656,
+          "running_usd_estimated": 0.554978
+        },
+        {
+          "input_tokens": 1413,
+          "output_tokens": 7985,
+          "charged_input_tokens": 1413,
+          "charged_output_tokens": 7985,
+          "usage_known": true,
+          "usd_estimated": 0.066706,
+          "running_usd_estimated": 0.621684
+        }
+      ]
+    },
+    {
+      "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+      "mode": "none",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.020416,
+      "receipts": [
+        {
+          "input_tokens": 480,
+          "output_tokens": 2432,
+          "charged_input_tokens": 480,
+          "charged_output_tokens": 2432,
+          "usage_known": true,
+          "usd_estimated": 0.020416,
+          "running_usd_estimated": 0.6421
+        }
+      ]
+    },
+    {
+      "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+      "mode": "lexical",
+      "outcome": "graded",
+      "stopped_reason": "",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.020216,
+      "receipts": [
+        {
+          "input_tokens": 764,
+          "output_tokens": 2336,
+          "charged_input_tokens": 764,
+          "charged_output_tokens": 2336,
+          "usage_known": true,
+          "usd_estimated": 0.020216,
+          "running_usd_estimated": 0.662316
+        }
+      ]
+    },
+    {
+      "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+      "mode": "research",
+      "outcome": "graded",
+      "stopped_reason": "max_calls",
+      "plan_failure": "",
+      "provenance": "live-model",
+      "usd_estimated": 0.110748,
+      "receipts": [
+        {
+          "input_tokens": 449,
+          "output_tokens": 535,
+          "charged_input_tokens": 449,
+          "charged_output_tokens": 535,
+          "usage_known": true,
+          "usd_estimated": 0.005178,
+          "running_usd_estimated": 0.667494
+        },
+        {
+          "input_tokens": 683,
+          "output_tokens": 380,
+          "charged_input_tokens": 683,
+          "charged_output_tokens": 380,
+          "usage_known": true,
+          "usd_estimated": 0.004406,
+          "running_usd_estimated": 0.6719
+        },
+        {
+          "input_tokens": 1932,
+          "output_tokens": 2882,
+          "charged_input_tokens": 1932,
+          "charged_output_tokens": 2882,
+          "usage_known": true,
+          "usd_estimated": 0.02692,
+          "running_usd_estimated": 0.69882
+        },
+        {
+          "input_tokens": 2036,
+          "output_tokens": 2033,
+          "charged_input_tokens": 2036,
+          "charged_output_tokens": 2033,
+          "usage_known": true,
+          "usd_estimated": 0.020336,
+          "running_usd_estimated": 0.719156
+        },
+        {
+          "input_tokens": 2798,
+          "output_tokens": 6039,
+          "charged_input_tokens": 2798,
+          "charged_output_tokens": 6039,
+          "usage_known": true,
+          "usd_estimated": 0.053908,
+          "running_usd_estimated": 0.773064
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "arms_captured": 15,
+    "arms_graded": 15,
+    "arms_failed": 0,
+    "usd_estimated_total": 0.773064,
+    "cap_usd_total": 3.0,
+    "cap_exhausted": false,
+    "usd_by_mode": {
+      "none": 0.090194,
+      "lexical": 0.14407,
+      "research": 0.5388
+    }
+  }
+}

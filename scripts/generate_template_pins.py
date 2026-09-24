@@ -29,6 +29,18 @@ latest archived record, BOTH the README pins and the lane pin keep stating
 the LAST PROMOTED release — an unreleased tree never becomes a lane default
 (same window semantics as the README status block).
 
+R37-17 (#298): ``--capabilities`` renders the capabilities-qualified pin
+view — install instructions may only pin an artifact MATCHING A QUALIFIED
+PROFILE (a profile-qualification record whose derived verdict is
+``supported``/``lab-qualified`` and whose ``wheel_sha256`` IS the promoted
+wheel). The promoted record's wheel identity is ``release.tested_sha``;
+when no qualified profile pins it — or the record is IMAGE-ONLY and the
+wheel field is honestly EMPTY — the render REFUSES to pin a wheel with a
+typed :class:`PinsError` (exit 2): there is NO fallback to the newest
+wheel elsewhere. This mode is the only one that imports forge (lazily) —
+the default render stays stdlib-only with the evidence archive as its
+only input.
+
 Idempotent by construction (same facts in, same bytes out). ``--check``
 never writes: it exits non-zero when any target file does not match the
 generated content — the CI drift guard.
@@ -42,9 +54,10 @@ Usage::
     python3 scripts/generate_template_pins.py              # rewrite the blocks
     python3 scripts/generate_template_pins.py --check      # CI drift check
     python3 scripts/generate_template_pins.py --templates  # lane templates only
+    python3 scripts/generate_template_pins.py --capabilities  # qualified-pin view
 
 Stdlib-only (mirrors scripts/canary_smoke.py): no forge import, no network —
-the evidence archive is the only input.
+the evidence archive is the only input. (--capabilities excepted, above.)
 """
 
 from __future__ import annotations
@@ -235,6 +248,89 @@ def render_lane_pin_block(record: _Record) -> str:
     return "\n".join([version_line, *wheel_lines])
 
 
+#: The derived verdicts that make a profile-qualification record a
+#: QUALIFIED profile for pin purposes (R37-17): evidence the record itself
+#: supports, not a declaration. ``declared_only``/``unqualified`` records
+#: never qualify an install artifact.
+_QUALIFIED_VERDICTS = frozenset({"supported", "lab-qualified"})
+
+
+def capabilities_pin_rows(root: Path) -> tuple[list[str], tuple[str, str]]:
+    """The capabilities-qualified pin view (R37-17): per latest profile
+    record, whether ITS wheel may be pinned — plus the qualified pin pair.
+
+    Returns ``(rows, (wheel_url, wheel_sha256))`` where the pair is the
+    promoted wheel IFF some qualified profile pins exactly that identity
+    (``release.tested_sha``). Anything else is a TYPED refusal
+    (:class:`PinsError`) — never a fallback to the newest wheel:
+
+    - the promoted record is image-only (its wheel fields are empty) → the
+      render refuses to pin a wheel FOR it;
+    - no qualified profile pins the promoted wheel → the render refuses;
+      an install artifact must match a qualified profile, not just be the
+      newest version.
+
+    This is the one mode that imports forge (lazily): verdicts are DERIVED
+    by :mod:`forge.profile_qualification`, never re-implemented here.
+    """
+    try:
+        from forge.profile_qualification import (
+            derive_verdict,
+            latest_record_per_profile,
+            load_profile_records,
+        )
+    except ImportError as exc:  # pragma: no cover - environment guard
+        raise PinsError(
+            "--capabilities derives profile verdicts via the forge package — "
+            f"run it inside the project environment (uv run …): {exc}"
+        ) from exc
+
+    record, _ = latest_record(root)
+    latest = latest_record_per_profile(load_profile_records(root))
+    rows = [
+        "| Profile | Release | Derived verdict | Wheel (release.tested_sha) | Pin decision |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    matches: list[tuple[str, str]] = []
+    verdicts: list[str] = []
+    for profile_record in latest:
+        verdict = derive_verdict(profile_record)
+        verdicts.append(f"{profile_record.profile}@v{profile_record.release_version}: {verdict}")
+        wheel = profile_record.wheel_sha256
+        if verdict not in _QUALIFIED_VERDICTS:
+            decision = "no pin — not a qualified profile"
+        elif not wheel:
+            decision = "qualified profile pins NO wheel (image-only record)"
+        elif not record.wheel_sha256:
+            decision = "qualified, but the promoted record built no wheel"
+        elif wheel == record.wheel_sha256:
+            decision = "PIN — matches the promoted artifact"
+            if record.wheel_url:
+                matches.append((record.wheel_url, record.wheel_sha256))
+        else:
+            decision = f"qualified, but pins a different artifact ({wheel[:12]}…)"
+        rows.append(
+            f"| {profile_record.profile} | v{profile_record.release_version} | {verdict} "
+            f"| {wheel[:12] + '…' if wheel else '(empty)'} | {decision} |"
+        )
+    if not record.wheel_sha256:
+        raise PinsError(
+            f"the promoted record v{record.version} is IMAGE-ONLY — its wheel field is "
+            "empty, so the capabilities render REFUSES to pin a wheel for it; the "
+            "qualified install route is the promoted git tag (no fallback to the "
+            "newest wheel elsewhere)"
+        )
+    if not matches:
+        raise PinsError(
+            f"no qualified profile pins release.tested_sha {record.wheel_sha256[:16]}… "
+            f"(the promoted v{record.version} wheel) — profile verdicts: "
+            + ("; ".join(verdicts) if verdicts else "no profile-qualification records")
+            + ". Install instructions pin an artifact matching a qualified profile, "
+            "never just the newest version"
+        )
+    return rows, matches[0]
+
+
 def render_quickstart_block(record: _Record, pending_version: str | None = None) -> str:
     """The quick-start bash block: the tag pin plus the digest-pinned form.
 
@@ -421,7 +517,31 @@ def main(argv: list[str] | None = None) -> int:
         help="render ONLY the lane-template pins (Q35-08); the default run covers "
         "the README pins and the templates together",
     )
+    parser.add_argument(
+        "--capabilities",
+        action="store_true",
+        help=(
+            "render ONLY the capabilities-qualified pin view (R37-17): a wheel pin "
+            "comes from an artifact matching a qualified profile, or the render "
+            "refuses (no fallback to the newest wheel)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.capabilities:
+        try:
+            rows, (wheel_url, wheel_sha256) = capabilities_pin_rows(args.root)
+        except PinsError as exc:
+            print(f"generate-template-pins --capabilities: REFUSED: {exc}", file=sys.stderr)
+            return 2
+        for line in rows:
+            print(line)
+        print(
+            "capabilities wheel pin: "
+            f"{wheel_url} (release.tested_sha {wheel_sha256}) — matches a qualified "
+            "profile, so install instructions may pin it"
+        )
+        return 0
 
     record, record_path = latest_record(args.root)
     evidence_rel = record_path.relative_to(args.root).as_posix()

@@ -1,0 +1,91 @@
+{
+  "schema": "forge.partner-pilot.contract/1",
+  "contract_id": "partner-pilot-v1",
+  "customer": {
+    "name": "pending-recruitment",
+    "organization": "",
+    "code_owner": ""
+  },
+  "window": {
+    "start": "",
+    "end": ""
+  },
+  "task_eligibility": [
+    "one small, single-purpose change per task inside the ONE writable repo granted by the boundary — no marathon tasks, no cross-repo refactors",
+    "every task is approved by the named code owner BEFORE it runs (the task-set approval gate; a task the owner did not approve is not eligible)",
+    "the set must include ambiguity, a neighboring-service dependency, one operator intervention and one controlled infrastructure failure, alongside ordinary useful work",
+    "tasks must be completable by the supported workflow on the qualified native profile (gitlab-ce-v1) with bounded credentials — no task may require production secrets, deploy authority or merge authority"
+  ],
+  "acceptance": [
+    "the INDEPENDENT ORACLE decides acceptance: the contracted verification job (smoke) is green ON THE CANDIDATE SHA and the contracted content/outcome check passes against the candidate branch",
+    "customer acceptance is SEPARATE from PR/MR creation, harness success and test success — a human may reject a green candidate, and the rejection stays in the final denominator",
+    "every task and attempt is recorded, including rejected, abandoned and manually rescued work — failures and drops stay in the ledger and the budget",
+    "manual rescues are OBSERVED and recorded (what the human did, when), never inferred from success labels"
+  ],
+  "available_data": [
+    "the ONE writable repo granted for the pilot (disposable for the lab stage-1 leg; the partner's repo named at signing for the partner stages)",
+    "read-only evidence from the named neighbor repo(s) the task set declares — cited at exact OIDs, never written",
+    "CI logs and pipeline status for the candidate sha on the verification contract (FORGE_REQUIRED_JOBS)",
+    "the runbook (docs/operations/) and the qualification profile record for the deployed lab"
+  ],
+  "prohibited_operations": [
+    "automatic merge — the bot never merges, even when every check is green",
+    "automatic deploy or any production deployment",
+    "production secrets — bounded credentials only, inside the named secrets scope",
+    "repository write scope beyond the one granted writable repo (neighbor repos stay read-only)",
+    "extra data access beyond the declared available data (no scope creep by configuration)",
+    "force-push, branch deletion or any destructive compensation on human-edited branches"
+  ],
+  "stop_rules": [
+    "authority_violation",
+    "budget_overrun",
+    "stop_rule_outcome",
+    "customer_stop"
+  ],
+  "spend_cap_usd": 40.0,
+  "stage_spend_caps_usd": {
+    "one-observed-task": 1.0,
+    "supervised-batch": 6.0,
+    "operational-sample": 33.0
+  },
+  "task_set_approval": "pending-code-owner-approval",
+  "baseline": {
+    "axes": {
+      "assisted_coding_minutes": {
+        "axis": "assisted_coding_minutes",
+        "value_minutes": null,
+        "provenance": "pending",
+        "source": ""
+      },
+      "reviewer_minutes": {
+        "axis": "reviewer_minutes",
+        "value_minutes": null,
+        "provenance": "pending",
+        "source": ""
+      },
+      "ops_intervention_minutes": {
+        "axis": "ops_intervention_minutes",
+        "value_minutes": null,
+        "provenance": "pending",
+        "source": ""
+      },
+      "waiting_minutes": {
+        "axis": "waiting_minutes",
+        "value_minutes": null,
+        "provenance": "pending",
+        "source": ""
+      }
+    },
+    "all_observed": false,
+    "window": {
+      "start": "",
+      "end": ""
+    },
+    "method": "PENDING — the customer's ACTUAL workflow is measured per axis at signing (assisted coding time, reviewer effort, operations intervention, waiting, measured separately); an authored baseline is refused for this ladder"
+  },
+  "notes": [
+    "HONEST CUSTOMER STATE: pending-recruitment. A named external customer (buyer/user + code owner) is a prerequisite the machinery cannot fabricate — recruiting is the maintainer's act. The supervised-batch and operational-sample stages fail closed until the customer, the task-set approval and the observed baseline exist.",
+    "The one-observed-task stage may run against the forge LAB (disposable project, real model through the qualified profile, spend bounded at 1.00 USD) as the machinery-validation leg: that validates the MACHINERY, not customer demand.",
+    "The window is frozen at signing; until then it stays empty rather than invented."
+  ]
+}

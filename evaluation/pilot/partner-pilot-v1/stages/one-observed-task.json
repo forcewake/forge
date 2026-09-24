@@ -1,0 +1,100 @@
+{
+  "records": [
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {},
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+      ],
+      "recorded_at": "2026-09-24T11:52:38.102032+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "one-observed-task",
+      "stage_complete": false,
+      "status": "pending-lab",
+      "task_refs": [
+        "obs-01"
+      ],
+      "timings": {},
+      "unmet_preconditions": [
+        {
+          "check": "lab-aligned",
+          "met": false,
+          "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'lane template pinned to the promoted release', 'installed lane wheel observable']",
+          "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+        },
+        {
+          "check": "gateway-reachable",
+          "met": false,
+          "reason": "the model gateway at http://localhost:4000/health is unreachable: GET http://localhost:4000/health unreachable: timed out",
+          "resolution": "bring the gateway up (the litellm container) and re-run"
+        }
+      ],
+      "usage_receipts": []
+    },
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {},
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+      ],
+      "recorded_at": "2026-09-24T11:53:33.182296+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "one-observed-task",
+      "stage_complete": false,
+      "status": "pending-lab",
+      "task_refs": [
+        "obs-01"
+      ],
+      "timings": {},
+      "unmet_preconditions": [
+        {
+          "check": "lab-aligned",
+          "met": false,
+          "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'lane template pinned to the promoted release', 'installed lane wheel observable']",
+          "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+        }
+      ],
+      "usage_receipts": []
+    },
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {},
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+      ],
+      "recorded_at": "2026-09-24T12:08:14.781486+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "one-observed-task",
+      "stage_complete": false,
+      "status": "pending-lab",
+      "task_refs": [
+        "obs-01"
+      ],
+      "timings": {},
+      "unmet_preconditions": [
+        {
+          "check": "lab-aligned",
+          "met": false,
+          "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'installed lane wheel observable']",
+          "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+        }
+      ],
+      "usage_receipts": []
+    }
+  ],
+  "schema": "forge.partner-pilot.stage-records/1",
+  "stage": "one-observed-task",
+  "status": "pending-lab"
+}

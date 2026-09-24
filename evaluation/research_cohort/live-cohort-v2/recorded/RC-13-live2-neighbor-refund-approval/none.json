@@ -1,0 +1,150 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-13-live2-neighbor-refund-approval",
+  "mode": "none",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 498,
+          "output_lower_bound": 2333,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.01966,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 498,
+            "output_tokens": 2333,
+            "charged_input_tokens": 498,
+            "charged_output_tokens": 2333,
+            "usage_known": true,
+            "usd_estimated": 0.01966,
+            "running_usd_estimated": 0.01966
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Discovery: locate the Orders checkout payment/refund extension point and the order-expiry timestamp semantics in orders-api; locate Billing's refund policy client interface in billing-policy."
+      },
+      {
+        "step_id": "S2",
+        "objective": "In orders-api, add refund-request support to checkout, eligible only for orders that expired less than 30 days ago."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Wire the refund request from orders-api through to billing-policy's policy client and surface any approval-required outcome it returns."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Once the Finance threshold is answered, implement the extra pre-capture approval gate for refunds at or above that amount, with tests for in-window eligibility and the approval path."
+      }
+    ],
+    "surface": [],
+    "claims": [],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "What amount is the threshold for a 'large' refund that requires the extra approval step before capture? Finance's criterion is not stated in the issue."
+      },
+      {
+        "question_id": "q2",
+        "text": "Which orders-api field defines order expiry, and is the 30-day window meant to be measured from that timestamp at request time?"
+      },
+      {
+        "question_id": "q3",
+        "text": "What is Billing's policy client interface (endpoint/method/payload) for refund checks, and does it already return an approval-required signal?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Code changes are scoped to orders-api and billing-policy; docs-site is touched only if documentation updates are requested."
+      },
+      {
+        "text": "No discovery evidence exists in this pass, so the plan asserts zero code claims; all structure is established in S1 before any implementation."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 498,
+        "output_lower_bound": 2333,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.01966,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 498,
+          "output_tokens": 2333,
+          "charged_input_tokens": 498,
+          "charged_output_tokens": 2333,
+          "usage_known": true,
+          "usd_estimated": 0.01966,
+          "running_usd_estimated": 0.01966
+        }
+      ]
+    },
+    "harness": "planner-input construction + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.01966,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

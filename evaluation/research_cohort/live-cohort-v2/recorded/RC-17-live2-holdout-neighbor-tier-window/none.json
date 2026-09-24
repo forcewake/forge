@@ -1,0 +1,147 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+  "mode": "none",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 480,
+          "output_lower_bound": 2432,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.020416,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 480,
+            "output_tokens": 2432,
+            "charged_input_tokens": 480,
+            "charged_output_tokens": 2432,
+            "usage_known": true,
+            "usd_estimated": 0.020416,
+            "running_usd_estimated": 0.6421
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Discovery: locate the contract-tier request window definitions in billing-policy (exact path, symbols, line numbers) and the order-side checkout request-gate constant in orders-api (exact path, symbol, line), plus any other references to that constant."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Decide the consumption mechanism for orders-api to apply billing-policy's tier windows (package dependency, shared config, or generated copy), including tier-key mapping and fallback for a missing/unknown tier; confirm versioning/compat constraints."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Implement: replace the order-side constant in the checkout request gate with the billing-policy tier-window lookup; add/adjust unit tests covering representative tiers and edge cases."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Verify: run orders-api tests, grep for leftover references to the removed constant, and update docs-site pages if they document the gate or the constant."
+      }
+    ],
+    "surface": [],
+    "claims": [],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "What are the exact file path, symbol names, and export mechanism of the contract-tier request windows in billing-policy?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What is the exact file path and line of the order-side checkout request-gate constant in orders-api, and is it referenced anywhere else (tests, other gates)?"
+      },
+      {
+        "question_id": "q3",
+        "text": "How does orders-api currently consume or depend on billing-policy, and is there an approved mechanism or version-pinning contract for cross-repo reuse?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Per the issue statement, billing-policy is the sole source of truth for the tier windows and needs no change; the modification is confined to orders-api's checkout request gate, with an optional docs-site update."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 480,
+        "output_lower_bound": 2432,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.020416,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 480,
+          "output_tokens": 2432,
+          "charged_input_tokens": 480,
+          "charged_output_tokens": 2432,
+          "usage_known": true,
+          "usd_estimated": 0.020416,
+          "running_usd_estimated": 0.6421
+        }
+      ]
+    },
+    "harness": "planner-input construction + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.020416,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

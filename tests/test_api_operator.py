@@ -1,23 +1,26 @@
-"""The operator read API (R36-15) — auth, scoping, honesty, zero writes.
+"""The operator read API (R36-15, R37-02/R37-03) — auth, scoping,
+honesty, zero writes.
 
 The authenticated, subject-scoped projection surface mounted in the app:
 list, detail and support-bundle over the SAME snapshot reader, fail-closed
 like every adaptive route. Pinned here:
 
 - the credential family: the lane-control HMAC under
-  ``FORGE_LANE_CONTROL_SECRET``, signing the SUBJECT SCOPE — a token
-  minted for ``owner/alpha`` cannot read ``owner/beta`` (403 cross-scope)
-  and a run outside the verified scope is a 404, indistinguishable from
-  unknown, on every path;
+  ``FORGE_LANE_CONTROL_SECRET`` signing the CANONICAL SUBJECT scope
+  (v2) — a token minted for one canonical subject cannot declare
+  another's scope (403 cross-scope) and a run outside the verified
+  scope is a 404, indistinguishable from unknown, on every path;
 - the ladder: no secret → 503, no bearer → 401, no declared scope → 400,
-  token/scope mismatch → 403;
-- the shapes: list summaries, the full detail render (coverage, age,
-  occupancy, ADVISORY observer actions), and the bundle document with
-  failed attempts preserved and explicit coverage;
+  token/scope mismatch → 403, both grant families declared → 400;
+- the shapes: list summaries (subject ids, page bound, cursor), the full
+  detail render (coverage, age, occupancy, source-version fence,
+  ADVISORY observer actions), and the bundle document with failed
+  attempts preserved and explicit coverage;
 - redaction: credential-looking values never reach an operator;
 - the read-only charter: rendering performs zero writes — the recording
-  checkpoint authority sees only ``entry``, and the durable row counts do
-  not move across GETs;
+  checkpoint authority sees only ``entry``, the durable row counts do
+  not move across GETs, and an operator bearer cannot drive a guarded
+  control route;
 - stale actions are hints only: replaying one through the REAL guarded
   command route (the lane-control ack's CTL-04 CAS) refuses against the
   current world, and ``RecoveryActions.decide`` names the current state
@@ -37,11 +40,11 @@ from sqlalchemy import func, select
 
 from forge.adaptive.mailbox_db import ControlCommandRow, PostgresMailbox
 from forge.adaptive.models import ControlCommand
-from forge.adaptive.operator_snapshot import OperatorSnapshotReader
+from forge.adaptive.operator_snapshot import CanonicalSubject
 from forge.adaptive.operator_view import RecoveryActions, status_note_lines
 from forge.adaptive.pause_fence import PauseFenceRow
 from forge.api_lane_control import lane_control_token
-from forge.api_operator import operator_scope_token
+from forge.api_operator import operator_subject_scope_token
 from forge.config import Settings
 from forge.database import reset_engine
 from forge.durable.models import ActionLog, FlowRun
@@ -53,6 +56,10 @@ REPO_A = "owner/alpha"
 REPO_B = "owner/beta"
 RUN_A = "a" * 32
 RUN_B = "b" * 32
+SUBJECT_A = CanonicalSubject(provider_family="github", connection="", native_id=REPO_A)
+SUBJECT_B = CanonicalSubject(provider_family="github", connection="", native_id=REPO_B)
+REF_A = SUBJECT_A.subject_id()
+REF_B = SUBJECT_B.subject_id()
 
 
 class RecordingRepository:
@@ -147,8 +154,12 @@ def _steer_command(run_id: str, seq: int = 1, **over) -> ControlCommand:
     return ControlCommand.model_validate(base)
 
 
-def _scope_headers(repos: list[str]) -> dict[str, str]:
-    return {"Authorization": f"Bearer {operator_scope_token(SECRET, repos)}"}
+def _scope_headers(subjects: list[CanonicalSubject]) -> dict[str, str]:
+    return {"Authorization": f"Bearer {operator_subject_scope_token(SECRET, subjects)}"}
+
+
+def _subject_query(subjects: list[CanonicalSubject]) -> str:
+    return "&".join(f"subject={entry.subject_id()}" for entry in subjects)
 
 
 @pytest.fixture()
@@ -194,7 +205,7 @@ async def _row_count(app, model) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The fail-closed ladder and the subject scope
+# The fail-closed ladder and the canonical subject scope
 # ---------------------------------------------------------------------------
 
 
@@ -204,50 +215,84 @@ async def test_no_secret_means_503_never_open(tmp_path):
     bare = create_app(settings=_settings(tmp_path, FORGE_LANE_CONTROL_SECRET=None))
     transport = ASGITransport(app=bare)
     async with AsyncClient(transport=transport, base_url="http://forge.test") as http:
-        response = await http.get(f"/operator/runs?repo={REPO_A}", headers=_scope_headers([REPO_A]))
+        response = await http.get(
+            f"/operator/runs?{_subject_query([SUBJECT_A])}", headers=_scope_headers([SUBJECT_A])
+        )
         assert response.status_code == 503
         assert response.json()["detail"] == "operator endpoint disabled"
 
 
 async def test_missing_bearer_is_401(client):
-    response = await client.get(f"/operator/runs?repo={REPO_A}")
+    response = await client.get(f"/operator/runs?{_subject_query([SUBJECT_A])}")
     assert response.status_code == 401
 
 
-async def test_blank_declared_scope_is_400(client):
-    response = await client.get("/operator/runs?repo=%20", headers=_scope_headers([REPO_A]))
+async def test_no_declared_scope_is_400(client):
+    response = await client.get("/operator/runs", headers=_scope_headers([SUBJECT_A]))
+    assert response.status_code == 400
+
+
+async def test_a_malformed_subject_reference_is_400(client):
+    headers = _scope_headers([SUBJECT_A])
+    response = await client.get("/operator/runs?subject=not-a-subject", headers=headers)
+    assert response.status_code == 400
+    assert "canonical subject" in response.json()["detail"]
+
+
+async def test_declaring_both_grant_families_is_400(client):
+    response = await client.get(
+        f"/operator/runs?{_subject_query([SUBJECT_A])}&repo={REPO_A}",
+        headers=_scope_headers([SUBJECT_A]),
+    )
     assert response.status_code == 400
 
 
 async def test_a_token_for_alpha_cannot_declare_betas_scope(client):
-    response = await client.get(f"/operator/runs?repo={REPO_B}", headers=_scope_headers([REPO_A]))
+    response = await client.get(
+        f"/operator/runs?{_subject_query([SUBJECT_B])}", headers=_scope_headers([SUBJECT_A])
+    )
     assert response.status_code == 403
     wider = await client.get(
-        f"/operator/runs?repo={REPO_A}&repo={REPO_B}", headers=_scope_headers([REPO_A])
+        f"/operator/runs?{_subject_query([SUBJECT_A, SUBJECT_B])}",
+        headers=_scope_headers([SUBJECT_A]),
     )
     assert wider.status_code == 403
 
 
+async def test_a_legacy_name_token_is_not_a_canonical_subject_token(client):
+    """A v1 name-only bearer presented against a canonical declaration
+    does not verify — the grant must be reissued as canonical subjects."""
+    from forge.api_operator import operator_scope_token
+
+    legacy = {"Authorization": f"Bearer {operator_scope_token(SECRET, [REPO_A])}"}
+    response = await client.get(f"/operator/runs?{_subject_query([SUBJECT_A])}", headers=legacy)
+    assert response.status_code == 403
+
+
 async def test_list_detail_and_bundle_are_all_subject_scoped(app, client, repository):
     await _seed(app, _run(RUN_A, REPO_A), _run(RUN_B, REPO_B))
-    headers = _scope_headers([REPO_A])
+    headers = _scope_headers([SUBJECT_A])
 
-    listed = await client.get(f"/operator/runs?repo={REPO_A}", headers=headers)
+    listed = await client.get(f"/operator/runs?{_subject_query([SUBJECT_A])}", headers=headers)
     assert listed.status_code == 200
     assert [run["run_id"] for run in listed.json()["runs"]] == [RUN_A]
 
-    detail = await client.get(f"/operator/runs/{RUN_B}?repo={REPO_A}", headers=headers)
+    detail = await client.get(
+        f"/operator/runs/{RUN_B}?{_subject_query([SUBJECT_A])}", headers=headers
+    )
     assert detail.status_code == 404
     bundle = await client.get(
-        f"/operator/runs/{RUN_B}/support-bundle?repo={REPO_A}", headers=headers
+        f"/operator/runs/{RUN_B}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
     )
     assert bundle.status_code == 404
 
     # the same bearer reads its OWN run on every surface
-    own_detail = await client.get(f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=headers)
+    own_detail = await client.get(
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=headers
+    )
     assert own_detail.status_code == 200
     own_bundle = await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?repo={REPO_A}", headers=headers
+        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}", headers=headers
     )
     assert own_bundle.status_code == 200
 
@@ -265,18 +310,22 @@ async def test_the_list_renders_thin_state_summaries(app, client, repository):
     )
 
     response = await client.get(
-        f"/operator/runs?repo={REPO_A}&repo={REPO_B}", headers=_scope_headers([REPO_A, REPO_B])
+        f"/operator/runs?{_subject_query([SUBJECT_A, SUBJECT_B])}",
+        headers=_scope_headers([SUBJECT_A, SUBJECT_B]),
     )
 
     assert response.status_code == 200
     document = response.json()
-    assert document["scope"] == [REPO_A, REPO_B]
+    assert document["scope"] == [REF_A, REF_B]
+    assert document["scope_version"] == 2
+    assert document["page_size"] >= 1
     by_id = {run["run_id"]: run for run in document["runs"]}
     assert set(by_id) == {RUN_A, RUN_B}
     thin = by_id[RUN_A]
     for key in (
         "run_id",
         "subject",
+        "subject_id",
         "state",
         "underlying_state",
         "blocked_reason",
@@ -284,11 +333,14 @@ async def test_the_list_renders_thin_state_summaries(app, client, repository):
         "summary",
         "updated_at",
         "projection_age_seconds",
+        "projection_inconsistent",
         "unresolved_effects",
     ):
         assert key in thin, key
-    assert thin["subject"] == REPO_A
+    assert thin["subject"] == REPO_A  # the display spelling
+    assert thin["subject_id"] == REF_A  # the canonical one
     assert thin["blocked_reason"] == "waiting on the CI lane"
+    assert thin["projection_inconsistent"] is False
 
 
 async def test_the_detail_renders_the_projection_contract(app, client, repository):
@@ -306,7 +358,7 @@ async def test_the_detail_renders_the_projection_contract(app, client, repositor
     )
 
     response = await client.get(
-        f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=_scope_headers([REPO_A])
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=_scope_headers([SUBJECT_A])
     )
 
     assert response.status_code == 200
@@ -314,12 +366,15 @@ async def test_the_detail_renders_the_projection_contract(app, client, repositor
     assert document["schema"] == "forge.operator.view/1"
     assert document["run_id"] == RUN_A
     assert document["subject"] == REPO_A
+    assert document["subject_id"] == REF_A
     assert document["state"] == "unverified"  # candidate, no verification record
     assert document["identity"]["candidate_shas"] == ["c" * 40]
     assert document["source_coverage"]["run"] == "present"
     assert document["source_coverage"]["attempts"] == "present"
     assert document["source_coverage"]["questions"] == "unknown"
     assert isinstance(document["projection_age_seconds"], float)
+    assert document["source_version"]  # the consistency fence is recorded
+    assert document["projection_inconsistent"] is False
     # the read-only actor's hints: observer role, probe only, advisory
     actions = document["actions"]
     assert actions and {action["action"] for action in actions} == {"probe"}
@@ -350,7 +405,8 @@ async def test_the_bundle_carries_failed_attempts_and_explicit_coverage(app, cli
     )
 
     response = await client.get(
-        f"/operator/runs/{RUN_A}/support-bundle?repo={REPO_A}", headers=_scope_headers([REPO_A])
+        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}",
+        headers=_scope_headers([SUBJECT_A]),
     )
 
     assert response.status_code == 200
@@ -359,11 +415,103 @@ async def test_the_bundle_carries_failed_attempts_and_explicit_coverage(app, cli
     assert bundle["run_id"] == RUN_A
     assert bundle["digest"].startswith("sha256:")
     outcomes = [attempt["outcome"] for attempt in bundle["attempts"]]
-    assert outcomes == ["failed", "succeeded"]  # history preserved, order kept
+    # the initial execution (failed terminal) + both revival rows — history
+    # preserved, order kept, failed attempts included
+    assert outcomes == ["failed", "failed", "succeeded"]
     assert bundle["coverage"]["attempts"] == "present"
     assert bundle["coverage"]["checkpoints"] == "present"
     assert bundle["coverage"]["questions"] == "unknown"
     assert bundle["projection"]["run_id"] == RUN_A
+    assert bundle["subject_id"] == REF_A
+    assert bundle["projection_inconsistent"] is False
+
+
+async def test_at04_the_http_render_matches_the_reader_projection(app, client, repository):
+    """AT-04 (HTTP presentation arm): the current identities the reader
+    derived — CP-B unactivated, B the unverified current candidate, A's
+    pass historical — are what the API renders, on detail and bundle."""
+    cp_a, cp_b = "a" * 64, "b" * 64
+    cand_a, cand_b = "a" * 40, "b" * 40
+    await _seed(
+        app,
+        _run(
+            RUN_A,
+            REPO_A,
+            status="waiting_ci",
+            candidate_shas=[cand_a, cand_b],
+            evidence={
+                "verification": {
+                    "status": "passed",
+                    "tested_oid": cand_a,
+                    "observed_at": (NOW - timedelta(minutes=6)).isoformat(),
+                    "producer": "github-checks",
+                }
+            },
+        ),
+        ActionLog(
+            flow_run_id=RUN_A,
+            action_kind="retry_requested",
+            status="succeeded",
+            retryability="transient_infrastructure",
+            dispatch_state="dispatched",
+            remote_result={"generation": 1},
+            created_at=NOW - timedelta(minutes=12),
+        ),
+        ControlCommandRow(
+            id=f"cmd-{RUN_A[:6]}-1",
+            work_id=RUN_A,
+            run_id=RUN_A,
+            kind="pause",
+            payload={"run_id": RUN_A},
+            status="checkpointed",
+            sequence=1,
+            dedup_key=f"key-{RUN_A[:6]}-1",
+            actor_ref="human:op",
+            actor_origin="server_authenticated_human",
+            created_at=NOW - timedelta(minutes=20),
+        ),
+        ControlCommandRow(
+            id=f"cmd-{RUN_A[:6]}-2",
+            work_id=RUN_A,
+            run_id=RUN_A,
+            kind="resume",
+            payload={"run_id": RUN_A, "checkpoint_ref": f"{RUN_A}@{cp_a}"},
+            status="applied",
+            sequence=2,
+            dedup_key=f"key-{RUN_A[:6]}-2",
+            actor_ref="human:op",
+            actor_origin="server_authenticated_human",
+            created_at=NOW - timedelta(minutes=90),
+            applied_at=NOW - timedelta(minutes=89),
+        ),
+        PauseFenceRow(
+            work_id=RUN_A,
+            publication_epoch_bumped=2,
+            fenced_at=NOW - timedelta(hours=2),
+            cleared_at=NOW - timedelta(minutes=89),
+        ),
+    )
+    repository.entry_document = {
+        "checkpoint_id": cp_b,  # uploaded AFTER the CP-A resume applied
+        "sequence": 5,
+        "files": 3,
+        "uploaded_at": (NOW - timedelta(minutes=10)).isoformat(),
+    }
+    headers = _scope_headers([SUBJECT_A])
+    query = _subject_query([SUBJECT_A])
+
+    detail = (await client.get(f"/operator/runs/{RUN_A}?{query}", headers=headers)).json()
+    assert detail["state"] == "unverified"  # B current, only A passed
+    assert detail["identity"]["active_candidate"] == cand_b
+    assert [entry["verdict"] for entry in detail["verification_history"]] == ["historical_pass"]
+
+    bundle = (
+        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
+    ).json()
+    assert bundle["projection"]["state"] == detail["state"]
+    assert bundle["projection"]["identity"]["active_candidate"] == cand_b
+    assert bundle["checkpoints"][0]["activated_at"] == ""  # no borrowed activation
+    assert bundle["verifications"][0]["candidate_sha"] == cand_a
 
 
 # ---------------------------------------------------------------------------
@@ -380,14 +528,15 @@ async def test_credential_looking_values_are_redacted_on_every_surface(app, clie
             status_reason="pipeline failed: Bearer ghp_aaaaaaaaaaaaaaaaaaaa rejected",
         ),
     )
-    headers = _scope_headers([REPO_A])
+    headers = _scope_headers([SUBJECT_A])
+    query = _subject_query([SUBJECT_A])
 
-    detail = (await client.get(f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=headers)).json()
+    detail = (await client.get(f"/operator/runs/{RUN_A}?{query}", headers=headers)).json()
     assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in str(detail)
     assert detail["blocked_reason"] == "[redacted]"
 
     bundle = (
-        await client.get(f"/operator/runs/{RUN_A}/support-bundle?repo={REPO_A}", headers=headers)
+        await client.get(f"/operator/runs/{RUN_A}/support-bundle?{query}", headers=headers)
     ).json()
     assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in str(bundle)
 
@@ -404,14 +553,14 @@ async def test_rendering_performs_zero_writes(app, client, repository):
         _run(RUN_B, REPO_B),
         _steer_command_row(RUN_A),
     )  # a command row exists so the read has something honest to show
-    headers = _scope_headers([REPO_A])
+    headers = _scope_headers([SUBJECT_A])
     before = {model: await _row_count(app, model) for model in (FlowRun, ActionLog)}
     before[ControlCommandRow] = await _row_count(app, ControlCommandRow)
 
     for path in (
-        f"/operator/runs?repo={REPO_A}",
-        f"/operator/runs/{RUN_A}?repo={REPO_A}",
-        f"/operator/runs/{RUN_A}/support-bundle?repo={REPO_A}",
+        f"/operator/runs?{_subject_query([SUBJECT_A])}",
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}",
+        f"/operator/runs/{RUN_A}/support-bundle?{_subject_query([SUBJECT_A])}",
     ):
         response = await client.get(path, headers=headers)
         assert response.status_code == 200, path
@@ -419,6 +568,27 @@ async def test_rendering_performs_zero_writes(app, client, repository):
     for model, count in before.items():
         assert await _row_count(app, model) == count, model.__name__
     assert set(repository.calls) == {"entry"}  # reads only through the authority
+
+
+async def test_an_operator_bearer_cannot_drive_a_guarded_control_route(app, client, repository):
+    """The read-only token family carries NO control privileges: the
+    lane-control ack route (a real guarded mutation path) refuses the
+    operator bearer outright — it is not a lane token."""
+    await _seed(app, _run(RUN_A, REPO_A))
+    mailbox = PostgresMailbox(app.state.session_factory)
+    command, _ = await mailbox.submit(_steer_command(RUN_A))
+
+    response = await client.post(
+        f"/lane/controls/{command.command_id}/ack",
+        json={"state": "authorized"},
+        headers=_scope_headers([SUBJECT_A]),  # the operator bearer, not a lane token
+    )
+    assert response.status_code == 403
+    async with app.state.session_factory() as session:
+        row = await session.scalar(
+            select(ControlCommandRow).where(ControlCommandRow.id == command.command_id)
+        )
+    assert row is not None and row.status == "received"  # nothing moved
 
 
 def _steer_command_row(run_id: str, seq: int = 1) -> ControlCommandRow:
@@ -480,7 +650,7 @@ async def test_a_stale_action_is_refused_by_the_real_guarded_route(app, client, 
 
     # and the operator surface shows the current world, not the stale one
     detail = await client.get(
-        f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=_scope_headers([REPO_A])
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=_scope_headers([SUBJECT_A])
     )
     assert detail.status_code == 200
     assert detail.json()["source_coverage"]["commands"] == "present"
@@ -492,6 +662,7 @@ async def test_decide_refuses_a_stale_hint_with_the_current_state_and_safe_alter
     """The advisory decision path: an approver's action planned while the
     run was executing is replayed after the world moved to safely_paused —
     refused, with the CURRENT state and the safe next action named."""
+    from forge.adaptive.operator_snapshot import OperatorSnapshotReader
     from forge.adaptive.operator_view import derive_state
 
     await _seed(
@@ -509,7 +680,7 @@ async def test_decide_refuses_a_stale_hint_with_the_current_state_and_safe_alter
     reader = OperatorSnapshotReader(
         app.state.session_factory, checkpoint_repository=repository, clock=lambda: NOW
     )
-    executing = await reader.snapshot(RUN_A, [REPO_A])
+    executing = await reader.snapshot(RUN_A, [SUBJECT_A])
     assert executing is not None
     assert derive_state(executing.rows, NOW).state == "executing"
     planned = RecoveryActions.plan(executing.projection(), "human:op", "approver")
@@ -543,7 +714,7 @@ async def test_decide_refuses_a_stale_hint_with_the_current_state_and_safe_alter
         )
         await session.commit()
 
-    paused = await reader.snapshot(RUN_A, [REPO_A])
+    paused = await reader.snapshot(RUN_A, [SUBJECT_A])
     assert paused is not None
     current = paused.projection()
     assert current.state == "safely_paused"
@@ -556,7 +727,7 @@ async def test_decide_refuses_a_stale_hint_with_the_current_state_and_safe_alter
 
     # the API's own hints for the read-only actor follow the SAME world
     detail = await client.get(
-        f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=_scope_headers([REPO_A])
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=_scope_headers([SUBJECT_A])
     )
     assert detail.status_code == 200
     assert detail.json()["state"] == "safely_paused"
@@ -582,14 +753,16 @@ async def test_native_comment_lines_and_the_api_render_agree(app, client, reposi
     )
 
     response = await client.get(
-        f"/operator/runs/{RUN_A}?repo={REPO_A}", headers=_scope_headers([REPO_A])
+        f"/operator/runs/{RUN_A}?{_subject_query([SUBJECT_A])}", headers=_scope_headers([SUBJECT_A])
     )
     document = response.json()
+
+    from forge.adaptive.operator_snapshot import OperatorSnapshotReader
 
     reader = OperatorSnapshotReader(
         app.state.session_factory, checkpoint_repository=repository, clock=lambda: NOW
     )
-    snapshot = await reader.snapshot(RUN_A, [REPO_A])
+    snapshot = await reader.snapshot(RUN_A, [SUBJECT_A])
     assert snapshot is not None
     lines = status_note_lines(snapshot.projection())
 

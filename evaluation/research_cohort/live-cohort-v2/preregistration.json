@@ -1,0 +1,88 @@
+{
+  "schema": "forge.research.preregistration/1",
+  "cohort_id": "research-cohort-live-v1",
+  "registered_at": "2026-09-24T00:00:00+00:00",
+  "generation": 2,
+  "supersedes": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+  "change_reason": "R37-11: gen-1 captured every arm offline-scripted with deterministic plan synthesis; gen-2 re-captures with the REAL model synthesizing every arm's plan (planner-mode comparison, not model) over the real frozen discovery-live snapshots, under hard dollar/token caps",
+  "prompt_policy_digest": "75eefac91fb3ff276e51b4801dfc4a73fe631dafd03c48f1e490f4d42392b8a9",
+  "task_bindings": [
+    {
+      "task_id": "RC-13-live2-neighbor-refund-approval",
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites the neighbor policy module's CURRENT threshold window at its actual bytes (a non-initial window of the file)",
+        "the plan keeps the approval policy OWNED by Billing (consumed over the policy client, never redefined in Orders)"
+      ]
+    },
+    {
+      "task_id": "RC-14-live2-ambiguous-approver",
+      "archetype": "ambiguous_requirement",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "acceptance_criteria": [
+        "the plan asks a SPECIFIC question naming the approver/routing decision for orders-api \u2014 an invented default (auto-approval, approval-skipping) fails the criterion"
+      ]
+    },
+    {
+      "task_id": "RC-15-live2-irrelevant-docs-site",
+      "archetype": "irrelevant_repository",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "acceptance_criteria": [
+        "the plan's impacted surface stays inside orders-api/billing-policy; dragging the docs site in expands scope"
+      ]
+    },
+    {
+      "task_id": "RC-16-live2-deep-superseded-policy",
+      "archetype": "deep_file_evidence",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites the deep F-2024-11 window, not the superseded revisions near the file head"
+      ]
+    },
+    {
+      "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites the neighbor's tier-window policy bytes"
+      ]
+    }
+  ],
+  "eligibility": {
+    "reviewer_role": "code owner (adaptive)",
+    "independent_of_capture": true,
+    "capture_author_ineligible": true
+  },
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "arms": [
+    "none",
+    "lexical",
+    "research"
+  ],
+  "review_procedure": {
+    "blind": true,
+    "counterbalanced": true,
+    "ordering_seed": 20260925,
+    "correction_effort_procedure": "the reviewer edits each plan to acceptance and records wall-clock minutes; the procedure is identical for every arm; a missing reviewer leaves correction unknown, never estimated",
+    "rubric_forms": "task-specific acceptance criteria frozen in this preregistration",
+    "evidence_checker_role": "consistency check only \u2014 token overlap is not semantic entailment",
+    "reviewer_identity_required": "filled forms carry the reviewer's identity and timestamp; the shipped package is review_status=pending-human with every form unfilled \u2014 no fixture grades exist"
+  },
+  "promotion_criteria": {
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "max_invented_default_delta": 0,
+    "cost_bound": {
+      "max_calls_total_per_mode": 60
+    }
+  },
+  "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f"
+}

@@ -1,0 +1,1611 @@
+"""R37-13 — accepted-delivery economics over REAL attempt/usage identities.
+
+``delivery_measurement`` (R36-17 / #276) links the recorded facts by
+identity and folds them with honest unknowns; this module is the next
+join layer: an :class:`EconomicsLinker` that takes that
+:class:`DeliveryLedger`, the pilot's ACCEPTANCE decisions and the exact
+PROFILE VERSIONS, and emits an :class:`EconomicsReport` (stamp
+``forge.delivery.economics/1``) explaining what one accepted work item
+cost — and what the whole programme cost per accepted item — from
+receipts that trace to the same population.
+
+The honesty rules, all pinned by ``tests/test_delivery_economics.py``:
+
+- **The join chain** — work id → execution attempt id → usage receipt →
+  acceptance record, joined by STABLE IDS only. The acceptance record
+  is the outcome AUTHORITY; the ledger is the spend AUTHORITY. An
+  attempt the acceptance record names but the ledger never saw stays in
+  the coverage denominator as unobserved; a receipt id delivered under
+  two different works is a :class:`CrossRunJoin` row — counted once
+  under its first (sorted) attribution, never cross-joined, and the
+  second work's exact total degrades to unknown.
+- **Evidence classes** — every receipt carries ``live-model`` or
+  ``synthetic-vendor-counter`` (scripted-vendor wire counters; the lab
+  pilot's ``lab-lane/vendor-wire`` source). Scripted counters are
+  LABELLED and EXCLUDED from throughput comparisons:
+  :class:`EvidenceClassError` is raised, never averaged in. The
+  ``decode`` rate label needs live-model receipts over a MODEL-span
+  population — the #276 :data:`RATE_LABEL_SPACE` rule extended here to
+  request-latency populations of any evidence class.
+- **Versioned price assumptions** — costs come either from receipts that
+  carry a billed figure (``billing``) or from a versioned
+  :class:`RateCard` (``estimate``); every priced entry labels its basis,
+  and the two never sum into one column. Lab data (unknown costs)
+  renders as a known lower bound plus coverage — never an exact zero.
+- **Latency stages** — the ledger's typed spans fold into
+  ``latency.stage_seconds`` with model / tool / queue / verification /
+  human_wait separated, each population named, unknown windows counted
+  (never zero-filled), and no stage total fabricated across mixed
+  origins.
+- **One truth store** — :func:`operator_summary` and
+  :func:`reconcile_with_budget` are pure folds of the report document
+  (which is a pure fold of the ledger): there is no second metrics
+  store, and the operator summary carries no prompt, tool or task
+  content — sensitive keys are dropped by :func:`redact_for_operator`.
+- **Order invariance** — everything is sorted by identity and summed in
+  sorted order, so reordering acceptance records, receipts or spans
+  changes no aggregate and no byte of the document.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from forge.adaptive.delivery_measurement import (
+    LATENCY_SPAN_TYPES,
+    RATE_LABEL_SPACE,
+    DeliveryLedger,
+    ProviderRoute,
+    RateLabelError,
+    _nn_float,
+    _nn_int,
+    _round6,
+    _text,
+    measured_rate,
+)
+
+__all__ = [
+    "AcceptanceRecord",
+    "CrossRunJoin",
+    "ECONOMICS_SCHEMA",
+    "EVIDENCE_CLASSES",
+    "EVIDENCE_LIVE_MODEL",
+    "EVIDENCE_SYNTHETIC_COUNTER",
+    "EVIDENCE_UNKNOWN",
+    "EconomicsConflict",
+    "EconomicsLinker",
+    "EconomicsReport",
+    "EvidenceClassError",
+    "ModelRate",
+    "RateCard",
+    "STAGE_SECONDS_KEYS",
+    "assert_latency_guards",
+    "classify_receipt",
+    "decode_throughput",
+    "operator_summary",
+    "reconcile_with_budget",
+    "redact_for_operator",
+    "throughput_comparison",
+]
+
+#: The versioned stamp of every document this module emits.
+ECONOMICS_SCHEMA = "forge.delivery.economics/1"
+
+#: A receipt served by a REAL model gateway — measured inference, the
+#: only evidence class a throughput number may rest on.
+EVIDENCE_LIVE_MODEL = "live-model"
+
+#: A receipt whose counters are wire observations from the controlled
+#: scripted vendor (the lab pilot's vendor speaking the real codex
+#: app-server wire): real wire shapes, NO measured inference, NO spend.
+EVIDENCE_SYNTHETIC_COUNTER = "synthetic-vendor-counter"
+
+#: A receipt that could not be classified — never promoted to live-model
+#: (unclassified evidence is treated like synthetic in every guard).
+EVIDENCE_UNKNOWN = "unknown"
+
+#: The closed evidence-class vocabulary of the economics report.
+EVIDENCE_CLASSES = (EVIDENCE_LIVE_MODEL, EVIDENCE_SYNTHETIC_COUNTER)
+
+#: Source/provider markers that name the scripted vendor (its receipts
+#: are protocol tests, not measured inference).
+SYNTHETIC_SOURCE_MARKERS: tuple[str, ...] = (
+    "lab-lane/vendor-wire",
+    "vendor-wire",
+    "scripted",
+    "codex-app-server",
+)
+
+#: The latency stages the report's ``latency.stage_seconds`` separates
+#: (the ledger's span types; the five the issue names come first).
+STAGE_SECONDS_KEYS: tuple[str, ...] = (
+    "model",
+    "tool",
+    "queue",
+    "verification",
+    "human_wait",
+    "restore_collection",
+)
+
+#: Key-name markers an operator summary must never carry — billing
+#: exports and operator surfaces redact prompt/tool/task content.
+SENSITIVE_KEY_MARKERS: tuple[str, ...] = (
+    "prompt",
+    "tool",
+    "content",
+    "brief",
+    "diff",
+    "question",
+    "answer",
+    "detail",
+    "secret",
+    "token_value",
+    "body",
+    "patch",
+    "snippet",
+)
+
+#: The non-accepted attempt outcomes — repeated work the accepted item
+#: keeps in its own total (the R37-13 retention rule).
+_REJECTED_OUTCOMES = ("rejected", "cancelled", "superseded", "abandoned")
+
+
+class EvidenceClassError(ValueError):
+    """A throughput comparison was asked to rest on non-live evidence.
+
+    The guarded constructions: a scripted vendor counter (or an
+    unclassified receipt) inside a model-throughput comparison, and a
+    decode label over receipts that are not :data:`EVIDENCE_LIVE_MODEL`.
+    Synthetic counters are labelled and EXCLUDED — never averaged in.
+    """
+
+
+# ----------------------------------------------------------------------
+# Versioned price assumptions
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModelRate:
+    """One route's price assumptions — a versioned estimate, not a bill."""
+
+    provider: str
+    model: str
+    input_per_mtok_usd: float
+    output_per_mtok_usd: float
+    cached_input_per_mtok_usd: float | None = None
+    cache_write_per_mtok_usd: float | None = None
+    basis: str = "estimate"
+
+    @property
+    def key(self) -> str:
+        return f"{self.provider}/{self.model}" if self.model else self.provider
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "input_per_mtok_usd": self.input_per_mtok_usd,
+            "cached_input_per_mtok_usd": self.cached_input_per_mtok_usd,
+            "cache_write_per_mtok_usd": self.cache_write_per_mtok_usd,
+            "output_per_mtok_usd": self.output_per_mtok_usd,
+            "basis": self.basis,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> ModelRate:
+        return cls(
+            provider=_text(block.get("provider")),
+            model=_text(block.get("model")),
+            input_per_mtok_usd=_nn_float(block.get("input_per_mtok_usd")) or 0.0,
+            output_per_mtok_usd=_nn_float(block.get("output_per_mtok_usd")) or 0.0,
+            cached_input_per_mtok_usd=_nn_float(block.get("cached_input_per_mtok_usd")),
+            cache_write_per_mtok_usd=_nn_float(block.get("cache_write_per_mtok_usd")),
+            basis=_text(block.get("basis")) or "estimate",
+        )
+
+
+@dataclass(frozen=True)
+class RateCard:
+    """The versioned price assumptions every estimate is labelled with.
+
+    ``version`` rides the report and every priced entry, so two reports
+    can never silently compare estimates across changed assumptions.
+    A card rate's ``basis`` is ``estimate`` by construction — only a
+    receipt that CARRIES a billed figure is ever labelled ``billing``.
+    """
+
+    version: str
+    currency: str = "usd"
+    rates: tuple[ModelRate, ...] = ()
+
+    def rate_for(self, route: ProviderRoute) -> ModelRate | None:
+        """The rate for a route — exact key first, then provider-wide."""
+        key = route.key
+        for rate in self.rates:
+            if rate.key == key:
+                return rate
+        provider_key = route.provider
+        for rate in self.rates:
+            if rate.key == provider_key:
+                return rate
+        return None
+
+    def price(
+        self,
+        route: ProviderRoute,
+        *,
+        input_tokens: int | None,
+        cached_input_tokens: int | None,
+        cache_write_tokens: int | None,
+        output_tokens: int | None,
+    ) -> float | None:
+        """Estimate a receipt's cost from the card — None when it cannot.
+
+        An estimate needs a rate AND at least one token counter; the
+        Anthropic-shaped disjoint counters are priced with their own
+        rates when the card names them (never added on top of an
+        OpenAI-shaped inclusive input — the #276 double-count rule).
+        """
+        rate = self.rate_for(route)
+        if rate is None:
+            return None
+        parts: list[float] = []
+        if input_tokens is not None:
+            parts.append(input_tokens / 1_000_000 * rate.input_per_mtok_usd)
+        if output_tokens is not None:
+            parts.append(output_tokens / 1_000_000 * rate.output_per_mtok_usd)
+        if not parts:
+            return None
+        disjoint = route.provider == "claude-code" or cache_write_tokens is not None
+        if disjoint:
+            if cached_input_tokens is not None:
+                unit = (
+                    rate.cached_input_per_mtok_usd
+                    if rate.cached_input_per_mtok_usd is not None
+                    else rate.input_per_mtok_usd
+                )
+                parts.append(cached_input_tokens / 1_000_000 * unit)
+            if cache_write_tokens is not None and rate.cache_write_per_mtok_usd is not None:
+                parts.append(cache_write_tokens / 1_000_000 * rate.cache_write_per_mtok_usd)
+        return math.fsum(parts)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "currency": self.currency,
+            "rates": [rate.to_json() for rate in self.rates],
+            "note": (
+                "versioned price assumptions — every figure priced from this card"
+                " is an ESTIMATE, never a billing record"
+            ),
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> RateCard:
+        rates_raw = block.get("rates")
+        return cls(
+            version=_text(block.get("version")),
+            currency=_text(block.get("currency")) or "usd",
+            rates=tuple(ModelRate.from_json(r) for r in rates_raw if isinstance(r, Mapping))
+            if isinstance(rates_raw, list)
+            else (),
+        )
+
+
+# ----------------------------------------------------------------------
+# The joined rows
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PricedEntry:
+    """One receipt priced — its basis labelled, its evidence class named.
+
+    ``billed_usd`` is the receipt's OWN cost figure (basis ``billing``);
+    ``estimate_usd`` is the rate card's figure over its token counters
+    (basis ``estimate``). A receipt carries at most one of them; neither
+    column ever sums the other.
+    """
+
+    work_id: str
+    attempt_id: str
+    receipt_id: str
+    source: str
+    route_key: str
+    evidence_class: str
+    basis: str
+    billed_usd: float | None
+    estimate_usd: float | None
+    rate_card_version: str = ""
+    input_tokens_inclusive: int | None = None
+    output_tokens: int | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "attempt_id": self.attempt_id,
+            "receipt_id": self.receipt_id,
+            "source": self.source,
+            "route": self.route_key,
+            "evidence_class": self.evidence_class,
+            "basis": self.basis,
+            "billed_usd": _round6(self.billed_usd),
+            "estimate_usd": _round6(self.estimate_usd),
+            "rate_card_version": self.rate_card_version,
+            "input_tokens_inclusive": self.input_tokens_inclusive,
+            "output_tokens": self.output_tokens,
+        }
+
+
+@dataclass(frozen=True)
+class AcceptanceRecord:
+    """The outcome authority for one work — the acceptance decision.
+
+    Joins the ledger by STABLE ID (``work_id``; the attempt outcomes by
+    ``attempt_id``). ``decided_by`` records WHO accepted (a human
+    operator, a review board) so acceptance is never confused with CI
+    green or harness success; ``acceptance_contract`` names the bar the
+    decision applied (verification check names, a contract id); the
+    version fields pin the exact profile the spend ran under.
+    """
+
+    work_id: str
+    accepted: bool | None
+    decided_by: str
+    decided_at: str = ""
+    acceptance_contract: str = ""
+    attempt_outcomes: Mapping[str, str] = field(default_factory=dict)
+    profile_version: str = ""
+    harness_version: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "accepted": self.accepted,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at,
+            "acceptance_contract": self.acceptance_contract,
+            "attempt_outcomes": dict(sorted(self.attempt_outcomes.items())),
+            "profile_version": self.profile_version,
+            "harness_version": self.harness_version,
+        }
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> AcceptanceRecord:
+        accepted = block.get("accepted")
+        raw_outcomes = block.get("attempt_outcomes")
+        outcomes: dict[str, str] = {}
+        if isinstance(raw_outcomes, Mapping):
+            for attempt_id, outcome in raw_outcomes.items():
+                key = _text(attempt_id)
+                value = _text(outcome)
+                if key and value in ("accepted", "rejected"):
+                    outcomes[key] = value
+        return cls(
+            work_id=_text(block.get("work_id") or block.get("task_id")),
+            accepted=None if accepted is None else bool(accepted),
+            decided_by=_text(block.get("decided_by")),
+            decided_at=_text(block.get("decided_at")),
+            acceptance_contract=_text(block.get("acceptance_contract")),
+            attempt_outcomes=outcomes,
+            profile_version=_text(block.get("profile_version")),
+            harness_version=_text(block.get("harness_version")),
+        )
+
+
+@dataclass(frozen=True)
+class AttemptEconomics:
+    """One attempt joined to its acceptance outcome and priced receipts."""
+
+    attempt_id: str
+    work_id: str
+    outcome: str
+    joined_to_acceptance: bool
+    receipts: tuple[PricedEntry, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "attempt_id": self.attempt_id,
+            "work_id": self.work_id,
+            "outcome": self.outcome,
+            "joined_to_acceptance": self.joined_to_acceptance,
+            "receipts": [entry.to_json() for entry in self.receipts],
+        }
+
+
+@dataclass(frozen=True)
+class WorkEconomics:
+    """One work's economics: every attempt kept, the decision joined."""
+
+    work_id: str
+    outcome: str
+    ledger_outcome: str
+    accepted: bool | None
+    decided_by: str
+    decided_at: str
+    acceptance_contract: str
+    profile_version: str
+    harness_version: str
+    attempts: tuple[AttemptEconomics, ...] = ()
+    unobserved_attempt_ids: tuple[str, ...] = ()
+    joined_to_acceptance: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "work_id": self.work_id,
+            "outcome": self.outcome,
+            "ledger_outcome": self.ledger_outcome,
+            "accepted": self.accepted,
+            "decided_by": self.decided_by,
+            "decided_at": self.decided_at,
+            "acceptance_contract": self.acceptance_contract,
+            "profile_version": self.profile_version,
+            "harness_version": self.harness_version,
+            "attempts": [attempt.to_json() for attempt in self.attempts],
+            "unobserved_attempt_ids": list(self.unobserved_attempt_ids),
+            "joined_to_acceptance": self.joined_to_acceptance,
+        }
+
+
+@dataclass(frozen=True)
+class CrossRunJoin:
+    """One receipt identity delivered under more than one work — refused.
+
+    The negative fixture the review named: two runs sharing a local call
+    or receipt label must never cross-join. The identity is counted ONCE
+    (under its lexicographically first attribution — deterministic, so
+    reordering changes nothing) and every other attribution degrades to
+    unknown, never to a second copy of the spend.
+    """
+
+    receipt_id: str
+    attributions: tuple[str, ...] = ()
+    kept_attribution: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "receipt_id": self.receipt_id,
+            "attributions": list(self.attributions),
+            "kept_attribution": self.kept_attribution,
+        }
+
+
+@dataclass(frozen=True)
+class EconomicsConflict:
+    """A join-level disagreement — surfaced, never averaged."""
+
+    kind: str
+    identity: str
+    detail: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"kind": self.kind, "identity": self.identity, "detail": self.detail}
+
+
+# ----------------------------------------------------------------------
+# Evidence classification
+# ----------------------------------------------------------------------
+
+
+def _claim_key(claim: Any) -> str:
+    """The canonical content key of a receipt claim — identity for dedup."""
+    parts = [
+        _text(getattr(claim, "source", "")),
+        _text(getattr(getattr(claim, "route", None), "key", "")),
+        repr(getattr(claim, "input_tokens", None)),
+        repr(getattr(claim, "cached_input_tokens", None)),
+        repr(getattr(claim, "cache_write_tokens", None)),
+        repr(getattr(claim, "output_tokens", None)),
+        repr(getattr(claim, "reasoning_tokens", None)),
+        repr(getattr(claim, "cost_usd", None)),
+        _text(getattr(claim, "completeness", "")),
+    ]
+    return "\x1f".join(parts)
+
+
+def classify_receipt(claim: Any, *, provenance: str = "") -> str:
+    """The receipt's evidence class — closed vocabulary, never guessed up.
+
+    Explicit provenance wins (``live-model`` unless a scripted marker
+    rides along); then the source/provider markers of the lab's scripted
+    vendor; then a carried billed figure means a real gateway served the
+    call. What remains is :data:`EVIDENCE_UNKNOWN` — treated like
+    synthetic by every throughput guard, never promoted to live-model.
+    """
+    route = getattr(claim, "route", None)
+    markers = " ".join(
+        (
+            provenance,
+            _text(getattr(claim, "source", "")),
+            _text(getattr(route, "provider", "")),
+            _text(getattr(route, "model", "")),
+        )
+    ).lower()
+    if "live-model" in markers and "scripted" not in markers:
+        return EVIDENCE_LIVE_MODEL
+    if any(marker in markers for marker in SYNTHETIC_SOURCE_MARKERS):
+        return EVIDENCE_SYNTHETIC_COUNTER
+    if getattr(claim, "cost_usd", None) is not None:
+        # A billed figure only a real gateway produces.
+        return EVIDENCE_LIVE_MODEL
+    return EVIDENCE_UNKNOWN
+
+
+# ----------------------------------------------------------------------
+# The stage fold (the ledger's typed spans → stage_seconds)
+# ----------------------------------------------------------------------
+
+
+def _fold_stage_seconds(spans: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Fold typed span rows into ``stage_seconds`` — populations named.
+
+    Every stage appears, measured or not; an unmeasured stage carries
+    ``measured: false`` and names its absence (never a zero total). A
+    stage total across multiple origins would mix populations, so the
+    stage total is emitted only when the stage has exactly ONE
+    population and that population is fully observed. Spans fold by
+    identity (span id when present, content otherwise) in sorted order,
+    so input reordering changes no byte.
+    """
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    seen: set[Any] = set()
+    ordered: list[tuple[Any, Mapping[str, Any]]] = []
+    for record in spans:
+        span_type = _text(record.get("span_type"))
+        if span_type not in LATENCY_SPAN_TYPES:
+            continue
+        origin = _text(record.get("origin")) or "harness"
+        span_id = _text(record.get("span_id"))
+        identity = (
+            span_id
+            if span_id
+            else (
+                span_type,
+                origin,
+                _text(record.get("work_id")),
+                _text(record.get("attempt_id")),
+                record.get("seconds"),
+            )
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        ordered.append((span_id or repr(identity), record))
+    for _identity, record in sorted(ordered, key=lambda row: str(row[0])):
+        span_type = _text(record.get("span_type"))
+        origin = _text(record.get("origin")) or "harness"
+        population = grouped.setdefault(span_type, {}).setdefault(
+            f"{span_type}:{origin}",
+            {"spans": 0, "unknown_spans": 0, "known_seconds": 0.0, "exact": True},
+        )
+        population["spans"] += 1
+        seconds = _nn_float(record.get("seconds"))
+        if seconds is None:
+            population["unknown_spans"] += 1
+            population["exact"] = False
+        else:
+            population["known_seconds"] += seconds
+    stages: dict[str, Any] = {}
+    for stage in STAGE_SECONDS_KEYS:
+        populations = grouped.get(stage, {})
+        if not populations:
+            stages[stage] = {
+                "measured": False,
+                "populations": {},
+                "stage_total_seconds": None,
+                "stage_lower_bound_seconds": None,
+                "note": "no recorded windows — unknown, never zero",
+            }
+            continue
+        population_rows: dict[str, Any] = {}
+        lower_bound = 0.0
+        for key in sorted(populations):
+            row = populations[key]
+            lower_bound += row["known_seconds"]
+            population_rows[key] = {
+                "spans": row["spans"],
+                "unknown_spans": row["unknown_spans"],
+                "total_seconds": _round6(row["known_seconds"]) if row["exact"] else None,
+                "lower_bound_seconds": _round6(row["known_seconds"]),
+            }
+        single = len(population_rows) == 1
+        exact_single = single and all(row["exact"] for row in populations.values())
+        stages[stage] = {
+            "measured": True,
+            "populations": population_rows,
+            "stage_total_seconds": _round6(lower_bound) if exact_single else None,
+            "stage_lower_bound_seconds": _round6(lower_bound),
+            "note": (
+                ""
+                if exact_single
+                else (
+                    "stage total withheld: multiple origins — populations never mix into one number"
+                    if not single
+                    else "unknown windows present — lower bound only"
+                )
+            ),
+        }
+    return stages
+
+
+# ----------------------------------------------------------------------
+# The linker
+# ----------------------------------------------------------------------
+
+
+class EconomicsLinker:
+    """Join the delivery ledger to acceptance decisions and profile versions.
+
+    ``link`` takes the :class:`DeliveryLedger` (or its stored document),
+    a sequence of :class:`AcceptanceRecord`-shaped mappings (the pilot's
+    task records: work/task id, the human acceptance decision, the
+    per-attempt outcomes, the exact profile/harness versions), optional
+    per-source provenance labels and a versioned :class:`RateCard`, and
+    returns the cohort's :class:`EconomicsReport`. The join is by stable
+    id only, everything is sorted by identity, and a receipt identity
+    appearing under two works is refused as a :class:`CrossRunJoin`.
+    """
+
+    def link(
+        self,
+        ledger: DeliveryLedger | Mapping[str, Any],
+        *,
+        acceptance_records: Sequence[Mapping[str, Any] | AcceptanceRecord] = (),
+        rate_card: RateCard | None = None,
+        provenance_by_source: Mapping[str, str] | None = None,
+        pilot: Mapping[str, str] | None = None,
+    ) -> EconomicsReport:
+        if not isinstance(ledger, DeliveryLedger):
+            ledger = DeliveryLedger.from_document(ledger)
+
+        notes: list[str] = []
+        conflicts: list[EconomicsConflict] = []
+
+        # -- acceptance records (the outcome authority) -----------------
+        decisions: dict[str, AcceptanceRecord] = {}
+        for record in acceptance_records:
+            parsed = (
+                record
+                if isinstance(record, AcceptanceRecord)
+                else AcceptanceRecord.from_json(record)
+            )
+            if not parsed.work_id:
+                notes.append("an acceptance record carries no work id — skipped, never guessed")
+                continue
+            if parsed.work_id in decisions:
+                conflicts.append(
+                    EconomicsConflict(
+                        kind="acceptance",
+                        identity=parsed.work_id,
+                        detail=(
+                            "two acceptance records claim one work — the"
+                            " lexicographically greatest canonical form wins,"
+                            " never a merge"
+                        ),
+                    )
+                )
+            decisions[parsed.work_id] = parsed
+        for work_id in sorted(set(decisions) - {work.work_id for work in ledger.works}):
+            notes.append(
+                f"acceptance record {work_id} references a work the ledger does not"
+                " know — outcome recorded, no spend joined"
+            )
+
+        # -- global receipt identity (the cross-run guard) ---------------
+        attributions: dict[str, set[tuple[str, str]]] = {}
+        for work in ledger.works:
+            for attempt in work.attempts:
+                for claim in attempt.receipts:
+                    attributions.setdefault(claim.receipt_id, set()).add(
+                        (work.work_id, attempt.attempt_id)
+                    )
+        cross_joins: list[CrossRunJoin] = []
+        refused_keys: set[tuple[str, str]] = set()
+        for receipt_id in sorted(attributions):
+            scopes = attributions[receipt_id]
+            if len(scopes) > 1:
+                ordered = sorted(scopes)
+                cross_joins.append(
+                    CrossRunJoin(
+                        receipt_id=receipt_id,
+                        attributions=tuple(f"{work}/{attempt}" for work, attempt in ordered),
+                        kept_attribution=f"{ordered[0][0]}/{ordered[0][1]}",
+                    )
+                )
+                refused_keys.update(ordered[1:])
+                notes.append(
+                    f"receipt {receipt_id} delivered under {len(scopes)} works —"
+                    f" kept at {ordered[0][0]}/{ordered[0][1]} only, no cross-run join"
+                )
+
+        # -- fold per work ------------------------------------------------
+        works: list[WorkEconomics] = []
+        for ledger_work in sorted(ledger.works, key=lambda work: work.work_id):
+            work_id = ledger_work.work_id
+            decision = decisions.get(work_id)
+            profile_version = (decision.profile_version if decision else "") or (
+                ledger_work.model_version
+            )
+            harness_version = (decision.harness_version if decision else "") or (
+                ledger_work.harness_version
+            )
+            if decision is None:
+                notes.append(
+                    f"work {work_id}: no acceptance record — outcome stays the"
+                    " ledger's, spend stays in the programme, never an accepted unit"
+                )
+                outcome = ledger_work.outcome
+            else:
+                recorded_outcome = "accepted" if decision.accepted else "rejected"
+                if ledger_work.outcome and ledger_work.outcome != recorded_outcome:
+                    conflicts.append(
+                        EconomicsConflict(
+                            kind="outcome",
+                            identity=work_id,
+                            detail=(
+                                f"ledger says {ledger_work.outcome!r}, the acceptance"
+                                f" record says {recorded_outcome!r} — the acceptance"
+                                " record is the authority"
+                            ),
+                        )
+                    )
+                outcome = recorded_outcome
+
+            attempts: list[AttemptEconomics] = []
+            for attempt in sorted(ledger_work.attempts, key=lambda row: row.attempt_id):
+                attempt_id = attempt.attempt_id
+                recorded = (decision.attempt_outcomes.get(attempt_id) if decision else "") or ""
+                if not recorded:
+                    recorded = attempt.outcome
+                priced: list[PricedEntry] = []
+                # A re-delivered receipt collapses by identity HERE too (the
+                # ledger's usage fold already collapsed it for totals; the
+                # claims list keeps every delivery). Content-identical
+                # deliveries become one entry; disagreeing claims under one
+                # identity surface as a conflict and keep the honest minimum.
+                claims_by_id: dict[str, list[Any]] = {}
+                for claim in sorted(attempt.receipts, key=lambda row: row.receipt_id):
+                    claims_by_id.setdefault(claim.receipt_id, []).append(claim)
+                claims: list[Any] = []
+                for receipt_id in sorted(claims_by_id):
+                    group = claims_by_id[receipt_id]
+                    winner = sorted(group, key=_claim_key)[-1]
+                    claims.append(winner)
+                    if len({_claim_key(claim) for claim in group}) > 1:
+                        conflicts.append(
+                            EconomicsConflict(
+                                kind="receipt",
+                                identity=receipt_id,
+                                detail=(
+                                    f"attempt {work_id}/{attempt_id}: {len(group)}"
+                                    " disagreeing claims under one receipt identity"
+                                    " — the canonical form is kept, the exact total"
+                                    " stays unknown, never averaged"
+                                ),
+                            )
+                        )
+                for claim in claims:
+                    provenance = (
+                        provenance_by_source.get(claim.source, "")
+                        if provenance_by_source is not None
+                        else ""
+                    )
+                    evidence_class = classify_receipt(claim, provenance=provenance)
+                    if (work_id, attempt_id) in refused_keys:
+                        # Refused: this identity was already counted under
+                        # its first attribution — no second copy, ever.
+                        priced.append(
+                            PricedEntry(
+                                work_id=work_id,
+                                attempt_id=attempt_id,
+                                receipt_id=claim.receipt_id,
+                                source=claim.source,
+                                route_key=claim.route.key,
+                                evidence_class=evidence_class,
+                                basis="refused",
+                                billed_usd=None,
+                                estimate_usd=None,
+                                rate_card_version=rate_card.version if rate_card else "",
+                                input_tokens_inclusive=claim.input_tokens_inclusive,
+                                output_tokens=claim.output_tokens,
+                            )
+                        )
+                        continue
+                    billed = claim.cost_usd if claim.completeness != "unknown" else None
+                    # The card prices the cache only for disjoint-counter
+                    # (Anthropic-shaped) receipts — an OpenAI-shaped cached
+                    # counter rides inside the inclusive input and is never
+                    # priced on top (the #276 double-count rule).
+                    estimate = (
+                        rate_card.price(
+                            claim.route,
+                            input_tokens=claim.input_tokens,
+                            cached_input_tokens=claim.cached_input_tokens,
+                            cache_write_tokens=claim.cache_write_tokens,
+                            output_tokens=claim.output_tokens,
+                        )
+                        if rate_card is not None and billed is None
+                        else None
+                    )
+                    priced.append(
+                        PricedEntry(
+                            work_id=work_id,
+                            attempt_id=attempt_id,
+                            receipt_id=claim.receipt_id,
+                            source=claim.source,
+                            route_key=claim.route.key,
+                            evidence_class=evidence_class,
+                            basis="billing" if billed is not None else "estimate",
+                            billed_usd=billed,
+                            estimate_usd=estimate,
+                            rate_card_version=rate_card.version if rate_card else "",
+                            input_tokens_inclusive=claim.input_tokens_inclusive,
+                            output_tokens=claim.output_tokens,
+                        )
+                    )
+                attempts.append(
+                    AttemptEconomics(
+                        attempt_id=attempt_id,
+                        work_id=work_id,
+                        outcome=recorded,
+                        joined_to_acceptance=bool(
+                            decision and attempt_id in decision.attempt_outcomes
+                        ),
+                        receipts=tuple(priced),
+                    )
+                )
+            unobserved: tuple[str, ...] = ()
+            if decision is not None:
+                ledger_ids = {attempt.attempt_id for attempt in ledger_work.attempts}
+                unobserved = tuple(
+                    sorted(
+                        attempt_id
+                        for attempt_id in decision.attempt_outcomes
+                        if attempt_id not in ledger_ids
+                    )
+                )
+                if unobserved:
+                    notes.append(
+                        f"work {work_id}: {len(unobserved)} attempt(s) named by the"
+                        " acceptance record but absent from the ledger — kept as"
+                        " unobserved attempts in the coverage denominator"
+                    )
+            works.append(
+                WorkEconomics(
+                    work_id=work_id,
+                    outcome=outcome,
+                    ledger_outcome=ledger_work.outcome,
+                    accepted=decision.accepted if decision else None,
+                    decided_by=decision.decided_by if decision else "",
+                    decided_at=decision.decided_at if decision else "",
+                    acceptance_contract=(
+                        decision.acceptance_contract
+                        if decision
+                        else ledger_work.acceptance_contract
+                    ),
+                    profile_version=profile_version,
+                    harness_version=harness_version,
+                    attempts=tuple(attempts),
+                    unobserved_attempt_ids=unobserved,
+                    joined_to_acceptance=decision is not None,
+                )
+            )
+
+        # -- the latency stage fold over the LEDGER's own spans ----------
+        spans = [
+            span.to_json()
+            for work in sorted(ledger.works, key=lambda work: work.work_id)
+            for attempt in sorted(work.attempts, key=lambda row: row.attempt_id)
+            for span in sorted(attempt.spans, key=lambda row: row.span_id)
+        ]
+        return EconomicsReport(
+            pilot=dict(pilot or {}),
+            works=tuple(works),
+            latency_stages=_fold_stage_seconds(spans),
+            cross_joins=tuple(sorted(cross_joins, key=lambda row: row.receipt_id)),
+            conflicts=tuple(sorted(conflicts, key=lambda row: (row.kind, row.identity))),
+            rate_card=rate_card,
+            notes=tuple(sorted(set(notes))),
+        )
+
+
+# ----------------------------------------------------------------------
+# The report — the pure fold of the joined rows
+# ----------------------------------------------------------------------
+
+
+def _sum(values: Sequence[float]) -> float:
+    """Sum exactly and deterministically over the given (sorted) order."""
+    return math.fsum(values)
+
+
+@dataclass(frozen=True)
+class EconomicsReport:
+    """The linker's output: joined works, named conflicts, one rate card.
+
+    The latency stages are folded at LINK time from the ledger's own
+    spans (there is no second latency truth store); every aggregate in
+    :meth:`to_document` is a pure fold of these joined rows, so the
+    document is byte-stable under any input ordering.
+    """
+
+    pilot: Mapping[str, str] = field(default_factory=dict)
+    works: tuple[WorkEconomics, ...] = ()
+    latency_stages: Mapping[str, Any] = field(default_factory=dict)
+    cross_joins: tuple[CrossRunJoin, ...] = ()
+    conflicts: tuple[EconomicsConflict, ...] = ()
+    rate_card: RateCard | None = None
+    notes: tuple[str, ...] = ()
+
+    @property
+    def schema(self) -> str:
+        return ECONOMICS_SCHEMA
+
+    def work_by_id(self, work_id: str) -> WorkEconomics | None:
+        for work in self.works:
+            if work.work_id == work_id:
+                return work
+        return None
+
+    # -- aggregate helpers (pure, order-invariant) ----------------------
+
+    def _entries(self, *, accepted_only: bool = False) -> list[PricedEntry]:
+        rows: list[PricedEntry] = []
+        for work in sorted(self.works, key=lambda row: row.work_id):
+            if accepted_only and work.outcome != "accepted":
+                continue
+            for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
+                rows.extend(sorted(attempt.receipts, key=lambda row: row.receipt_id))
+        return rows
+
+    def _fold_totals(self, *, accepted_only: bool = False) -> dict[str, Any]:
+        """Fold billed and estimate columns over a population of works.
+
+        ``billed_usd`` is EXACT only when the population is non-empty,
+        nothing is unobserved, nothing was cross-joined, and every
+        attempt carries a receipt priced from a billed figure; otherwise
+        ``None`` with the lower bound and coverage naming the gap. The
+        estimate column is always a card-labelled ESTIMATE and never
+        heals the billed column's unknowns.
+        """
+        works = sorted(self.works, key=lambda row: row.work_id)
+        if accepted_only:
+            works = [work for work in works if work.outcome == "accepted"]
+        attempt_count = sum(len(work.attempts) for work in works)
+        unobserved = sum(len(work.unobserved_attempt_ids) for work in works)
+        entries = self._entries(accepted_only=accepted_only)
+        billed_entries = [entry for entry in entries if entry.basis == "billing"]
+        receipt_conflicts = [row for row in self.conflicts if row.kind == "receipt"]
+        billed_exact = bool(
+            works
+            and attempt_count > 0
+            and unobserved == 0
+            and not self.cross_joins
+            and not receipt_conflicts
+            and len(billed_entries) == attempt_count
+            and all(entry.billed_usd is not None for entry in billed_entries)
+        )
+        billed_values = [
+            entry.billed_usd for entry in billed_entries if entry.billed_usd is not None
+        ]
+        estimate_entries = [entry for entry in entries if entry.estimate_usd is not None]
+        coverage_expected = attempt_count + unobserved
+        coverage_received = len({entry.receipt_id for entry in entries})
+        return {
+            "works": len(works),
+            "attempts": attempt_count,
+            "unobserved_attempts": unobserved,
+            "receipts": coverage_received,
+            "billed_usd": _round6(_sum(billed_values)) if billed_exact else None,
+            "billed_exact": billed_exact,
+            "billed_known_lower_bound_usd": _round6(_sum(billed_values)),
+            "estimate_usd": (
+                _round6(_sum([entry.estimate_usd or 0.0 for entry in estimate_entries]))
+                if estimate_entries
+                else None
+            ),
+            "estimate_basis": "estimate",
+            "estimate_rate_card_version": self.rate_card.version if self.rate_card else "",
+            "receipt_coverage": (
+                coverage_received / coverage_expected if coverage_expected else None
+            ),
+        }
+
+    def _coverage_block(self) -> dict[str, Any]:
+        """Measured / lower-bound / unknown completeness per population."""
+        populations: dict[str, dict[str, int]] = {}
+        for population, accepted_only in (("programme", False), ("accepted_items", True)):
+            rows: dict[str, int] = {
+                "attempts": 0,
+                "receipts_expected": 0,
+                "receipts_received": 0,
+                "measured_receipts": 0,
+                "cost_known_receipts": 0,
+                "unknown_cost_receipts": 0,
+            }
+            for work in sorted(self.works, key=lambda row: row.work_id):
+                if accepted_only and work.outcome != "accepted":
+                    continue
+                for attempt in sorted(work.attempts, key=lambda row: row.attempt_id):
+                    rows["attempts"] += 1
+                    rows["receipts_expected"] += 1
+                    received = [entry for entry in attempt.receipts if entry.basis != "refused"]
+                    if received:
+                        rows["receipts_received"] += 1
+                        if any(
+                            entry.input_tokens_inclusive is not None
+                            or entry.output_tokens is not None
+                            for entry in received
+                        ):
+                            rows["measured_receipts"] += 1
+                        if any(entry.billed_usd is not None for entry in received):
+                            rows["cost_known_receipts"] += 1
+                        else:
+                            rows["unknown_cost_receipts"] += 1
+                rows["receipts_expected"] += len(work.unobserved_attempt_ids)
+            populations[population] = rows
+        block: dict[str, Any] = {}
+        for population in sorted(populations):
+            rows = populations[population]
+            expected = rows["receipts_expected"]
+            received = rows["receipts_received"]
+            block[population] = {
+                **rows,
+                "receipt_coverage": (received / expected) if expected else None,
+                "cost_coverage": (rows["cost_known_receipts"] / expected) if expected else None,
+                "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero",
+            }
+        return block
+
+    def _evidence_block(self) -> dict[str, Any]:
+        by_class: dict[str, int] = {}
+        for entry in self._entries():
+            by_class[entry.evidence_class] = by_class.get(entry.evidence_class, 0) + 1
+        return {
+            "classes": dict(sorted(by_class.items())),
+            "synthetic_counters_labelled": by_class.get(EVIDENCE_SYNTHETIC_COUNTER, 0),
+            "synthetic_excluded_from": ["throughput comparisons", "decode rate labels"],
+            "note": (
+                "scripted-vendor counters are wire observations, not measured"
+                " inference — labelled synthetic-vendor-counter and excluded from"
+                " every throughput comparison (R37-13)"
+            ),
+        }
+
+    def to_document(self) -> dict[str, Any]:
+        """The stored artifact: the full stamped economics report."""
+        programme = self._fold_totals(accepted_only=False)
+        accepted = self._fold_totals(accepted_only=True)
+        accepted_count = accepted["works"]
+        per_accepted: dict[str, Any] = {
+            "programme_billed_per_accepted_usd": (
+                _round6(programme["billed_usd"] / accepted_count)
+                if programme["billed_usd"] is not None and accepted_count
+                else None
+            ),
+            "programme_billed_lower_bound_per_accepted_usd": (
+                _round6(programme["billed_known_lower_bound_usd"] / accepted_count)
+                if accepted_count
+                else None
+            ),
+            "programme_estimate_per_accepted_usd": (
+                _round6(programme["estimate_usd"] / accepted_count)
+                if programme["estimate_usd"] is not None and accepted_count
+                else None
+            ),
+        }
+        accepted_item_totals: dict[str, dict[str, Any]] = {}
+        cross_run_receipt_ids = {row.receipt_id for row in self.cross_joins}
+        for work in sorted(self.works, key=lambda row: row.work_id):
+            if work.outcome != "accepted":
+                continue
+            entries = sorted(
+                (entry for attempt in work.attempts for entry in attempt.receipts),
+                key=lambda row: row.receipt_id,
+            )
+            billed_entries = [entry for entry in entries if entry.basis == "billing"]
+            refused = any(entry.basis == "refused" for entry in entries)
+            ambiguous = any(entry.receipt_id in cross_run_receipt_ids for entry in entries)
+            conflicted = any(
+                row.identity in {entry.receipt_id for entry in entries}
+                for row in self.conflicts
+                if row.kind == "receipt"
+            )
+            exact = bool(
+                entries
+                and not refused
+                and not ambiguous
+                and not conflicted
+                and not work.unobserved_attempt_ids
+                and len(billed_entries) == len(work.attempts)
+                and all(entry.billed_usd is not None for entry in billed_entries)
+            )
+            accepted_item_totals[work.work_id] = {
+                "attempts": len(work.attempts),
+                "failed_or_superseded_attempts_kept": sum(
+                    1 for attempt in work.attempts if attempt.outcome in _REJECTED_OUTCOMES
+                ),
+                "billed_usd": (
+                    _round6(_sum([entry.billed_usd or 0.0 for entry in billed_entries]))
+                    if exact
+                    else None
+                ),
+                "billed_known_lower_bound_usd": _round6(
+                    _sum([entry.billed_usd or 0.0 for entry in billed_entries])
+                ),
+                "estimate_usd": (
+                    _round6(_sum([entry.estimate_usd or 0.0 for entry in entries]))
+                    if any(entry.estimate_usd is not None for entry in entries)
+                    else None
+                ),
+                "receipt_ids": [entry.receipt_id for entry in entries],
+            }
+
+        notes = list(self.notes)
+        notes.append(
+            "cost columns never mix: billed figures come from receipts that carry"
+            " them; every other figure is a rate-card ESTIMATE labelled with the"
+            " card version"
+        )
+        notes.append(
+            "unknown costs render as known lower bound + coverage — an unobserved"
+            " attempt or receipt is never zero and never estimated as spend"
+        )
+        if not accepted_count:
+            notes.append("no accepted items — per-accepted economics are undefined, never zero")
+        document = {
+            "schema": ECONOMICS_SCHEMA,
+            "pilot": dict(sorted(self.pilot.items())),
+            "rate_card": self.rate_card.to_json() if self.rate_card else None,
+            "works": [work.to_json() for work in sorted(self.works, key=lambda row: row.work_id)],
+            "costs": {
+                "programme": programme,
+                "accepted_items": accepted,
+                "programme_per_accepted_item": per_accepted,
+                "accepted_item_totals": dict(sorted(accepted_item_totals.items())),
+                "coverage": self._coverage_block(),
+            },
+            "evidence": self._evidence_block(),
+            "latency": {
+                "stage_seconds": dict(sorted(self.latency_stages.items())),
+                "decode_label_guard": (
+                    "no decode label rides a request-latency population: decode"
+                    " throughput requires live-model receipts over a model-span"
+                    " population (RATE_LABEL_SPACE, extended by R37-13)"
+                ),
+            },
+            "cross_joins": [row.to_json() for row in self.cross_joins],
+            "conflicts": [row.to_json() for row in self.conflicts],
+            "notes": sorted(set(notes)),
+            "observability": {
+                "usage.receipt_coverage": programme["receipt_coverage"],
+                "cost.lower_bound": programme["billed_known_lower_bound_usd"],
+                "cost.accepted_item_total": {
+                    work_id: row["billed_usd"]
+                    for work_id, row in sorted(accepted_item_totals.items())
+                },
+                "cost.programme_per_accepted_item": per_accepted[
+                    "programme_billed_per_accepted_usd"
+                ],
+                "latency.stage_seconds": {
+                    stage: row["stage_lower_bound_seconds"]
+                    for stage, row in sorted(self.latency_stages.items())
+                },
+            },
+        }
+        assert_latency_guards(document)
+        return document
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> EconomicsReport:
+        """Rebuild from the stored document — the replay path's parser."""
+        stamp = _text(document.get("schema")) or ECONOMICS_SCHEMA
+        if stamp != ECONOMICS_SCHEMA:
+            raise ValueError(
+                f"economics document carries schema {stamp!r}, expected {ECONOMICS_SCHEMA!r}"
+            )
+        card_raw = document.get("rate_card")
+        works_raw = document.get("works") or []
+        cross_raw = document.get("cross_joins") or []
+        conflicts_raw = document.get("conflicts") or []
+        latency_raw = document.get("latency")
+        stages_raw = latency_raw.get("stage_seconds") if isinstance(latency_raw, Mapping) else {}
+
+        def _attempt(block: Mapping[str, Any]) -> AttemptEconomics:
+            receipts_raw = block.get("receipts") or []
+            return AttemptEconomics(
+                attempt_id=_text(block.get("attempt_id")),
+                work_id=_text(block.get("work_id")),
+                outcome=_text(block.get("outcome")),
+                joined_to_acceptance=bool(block.get("joined_to_acceptance")),
+                receipts=tuple(
+                    PricedEntry(
+                        work_id=_text(row.get("work_id")),
+                        attempt_id=_text(row.get("attempt_id")),
+                        receipt_id=_text(row.get("receipt_id")),
+                        source=_text(row.get("source")),
+                        route_key=_text(row.get("route")),
+                        evidence_class=_text(row.get("evidence_class")),
+                        basis=_text(row.get("basis")),
+                        billed_usd=_nn_float(row.get("billed_usd")),
+                        estimate_usd=_nn_float(row.get("estimate_usd")),
+                        rate_card_version=_text(row.get("rate_card_version")),
+                        input_tokens_inclusive=_nn_int(row.get("input_tokens_inclusive")),
+                        output_tokens=_nn_int(row.get("output_tokens")),
+                    )
+                    for row in receipts_raw
+                    if isinstance(row, Mapping)
+                ),
+            )
+
+        def _work(block: Mapping[str, Any]) -> WorkEconomics:
+            attempts_raw = block.get("attempts") or []
+            return WorkEconomics(
+                work_id=_text(block.get("work_id")),
+                outcome=_text(block.get("outcome")),
+                ledger_outcome=_text(block.get("ledger_outcome")),
+                accepted=None if block.get("accepted") is None else bool(block.get("accepted")),
+                decided_by=_text(block.get("decided_by")),
+                decided_at=_text(block.get("decided_at")),
+                acceptance_contract=_text(block.get("acceptance_contract")),
+                profile_version=_text(block.get("profile_version")),
+                harness_version=_text(block.get("harness_version")),
+                attempts=tuple(_attempt(row) for row in attempts_raw if isinstance(row, Mapping)),
+                unobserved_attempt_ids=tuple(
+                    _text(attempt_id) for attempt_id in block.get("unobserved_attempt_ids") or ()
+                ),
+                joined_to_acceptance=bool(block.get("joined_to_acceptance")),
+            )
+
+        pilot_raw = document.get("pilot")
+        return cls(
+            pilot=(
+                {_text(key): _text(value) for key, value in pilot_raw.items()}
+                if isinstance(pilot_raw, Mapping)
+                else {}
+            ),
+            works=tuple(_work(row) for row in works_raw if isinstance(row, Mapping)),
+            latency_stages=stages_raw if isinstance(stages_raw, Mapping) else {},
+            cross_joins=tuple(
+                CrossRunJoin(
+                    receipt_id=_text(row.get("receipt_id")),
+                    attributions=tuple(_text(item) for item in row.get("attributions") or ()),
+                    kept_attribution=_text(row.get("kept_attribution")),
+                )
+                for row in cross_raw
+                if isinstance(row, Mapping)
+            ),
+            conflicts=tuple(
+                EconomicsConflict(
+                    kind=_text(row.get("kind")),
+                    identity=_text(row.get("identity")),
+                    detail=_text(row.get("detail")),
+                )
+                for row in conflicts_raw
+                if isinstance(row, Mapping)
+            ),
+            rate_card=RateCard.from_json(card_raw) if isinstance(card_raw, Mapping) else None,
+            notes=tuple(str(note) for note in document.get("notes") or ()),
+        )
+
+
+# ----------------------------------------------------------------------
+# The guards: decode labels, throughput separations
+# ----------------------------------------------------------------------
+
+
+def decode_throughput(
+    *,
+    tokens: int,
+    seconds: float,
+    population_identity: str,
+    evidence_classes: Sequence[str],
+) -> dict[str, Any]:
+    """The guarded decode-rate constructor — the #276 rule extended.
+
+    First the population guard (:func:`measured_rate` raises
+    :class:`RateLabelError` when the denominator is anything but a model
+    span population — output over request latency is not decode speed).
+    Then the evidence guard: a synthetic vendor counter (or an
+    unclassified receipt) among the receipts raises
+    :class:`EvidenceClassError` — scripted counters are excluded from
+    throughput comparisons, never averaged in.
+    """
+    rate = measured_rate(
+        "decode_output_tokens_per_second",
+        tokens=tokens,
+        seconds=seconds,
+        population_identity=population_identity,
+    )
+    classes = set(evidence_classes)
+    if classes - {EVIDENCE_LIVE_MODEL}:
+        raise EvidenceClassError(
+            f"decode throughput over evidence classes {sorted(classes)}:"
+            " only live-model receipts support a throughput label —"
+            " synthetic-vendor-counter and unknown evidence are excluded"
+            " from throughput comparisons (R37-13)"
+        )
+    return {**rate, "evidence_class": EVIDENCE_LIVE_MODEL}
+
+
+def throughput_comparison(
+    *,
+    label: str,
+    tokens: int,
+    seconds: float,
+    population_identity: str,
+    evidence_classes: Sequence[str],
+) -> dict[str, Any]:
+    """Compare throughput between populations — with both guards applied.
+
+    A throughput comparison mixing evidence classes (a scripted-vendor
+    trace beside real billing records) is REFUSED with
+    :class:`EvidenceClassError`; the caller separates the classes and
+    compares each within its own class only. The label must be the one
+    sanctioned decode label — anything else is a request-latency
+    population wearing a throughput name, and raises.
+    """
+    if label != "decode_output_tokens_per_second":
+        raise RateLabelError(
+            f"label {label!r} is outside the sanctioned rate-label space"
+            f" {sorted(RATE_LABEL_SPACE)} — no throughput comparison exists"
+            " over request-latency populations (R37-13)"
+        )
+    return decode_throughput(
+        tokens=tokens,
+        seconds=seconds,
+        population_identity=population_identity,
+        evidence_classes=evidence_classes,
+    )
+
+
+def assert_latency_guards(document: Mapping[str, Any]) -> None:
+    """Assert the document carries no decode label on request-latency data.
+
+    The guard every economics document is subject to at BUILD time (see
+    :meth:`EconomicsReport.to_document`) and at READ time: every
+    throughput row must carry a model-span population identity and the
+    live-model evidence class. A tampered document — a decode label over
+    ``model + queue + human_wait`` seconds, or over synthetic receipts —
+    raises.
+    """
+    latency = document.get("latency")
+    if not isinstance(latency, Mapping):
+        return
+    rows = latency.get("throughput")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        label = _text(row.get("label"))
+        population_identity = _text(row.get("population_identity"))
+        allowed = RATE_LABEL_SPACE.get(label)
+        if allowed is None:
+            raise RateLabelError(
+                f"a throughput row carries label {label!r} outside"
+                f" {sorted(RATE_LABEL_SPACE)} — request-latency populations carry"
+                " no decode label (R37-13)"
+            )
+        key = population_identity.removeprefix("latency.").split(":works=")[0]
+        if key not in allowed:
+            raise RateLabelError(
+                f"label {label!r} rides population {population_identity!r} —"
+                " no decode label on request-latency populations"
+            )
+        if _text(row.get("evidence_class")) != EVIDENCE_LIVE_MODEL:
+            raise EvidenceClassError(
+                f"label {label!r} rides evidence class"
+                f" {_text(row.get('evidence_class'))!r} — synthetic counters are"
+                " excluded from throughput comparisons"
+            )
+
+
+# ----------------------------------------------------------------------
+# The operator summary and the budget reconciliation
+# ----------------------------------------------------------------------
+
+
+def redact_for_operator(value: Any) -> Any:
+    """Recursively drop sensitive prompt/tool/task content keys.
+
+    The billing-export rule: an operator-facing dict carries ids, counts
+    and dollars — never prompt text, tool payloads, diffs or task
+    briefs. Keys naming those are removed at every depth; lists and
+    tuples are mapped; scalars pass. This is a projection of the ONE
+    truth store (the report), not a second one.
+    """
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if any(marker in name for marker in SENSITIVE_KEY_MARKERS):
+                redacted[str(key)] = "[redacted]"
+                continue
+            redacted[str(key)] = redact_for_operator(item)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [redact_for_operator(item) for item in value]
+    return value
+
+
+def operator_summary(report: EconomicsReport | Mapping[str, Any]) -> dict[str, Any]:
+    """The compact, redacted operator summary — from the ledger's report.
+
+    No prompt, tool or task content (every sensitive key redacted); no
+    second truth store (a pure fold of the report document, which is a
+    pure fold of the ledger). What the operator gets: the join counts,
+    the cost columns with their bases, the coverage, the latency stages
+    and the evidence-class census — enough to explain total resources
+    and spot the bottleneck (model vs CI vs review vs repeated work)
+    without seeing code or secrets.
+    """
+    document = report.to_document() if isinstance(report, EconomicsReport) else dict(report)
+    costs: Mapping[str, Any] = document.get("costs") or {}
+    programme: Mapping[str, Any] = costs.get("programme") or {}
+    accepted: Mapping[str, Any] = costs.get("accepted_items") or {}
+    per_accepted: Mapping[str, Any] = costs.get("programme_per_accepted_item") or {}
+    coverage: Mapping[str, Any] = costs.get("coverage") or {}
+    latency: Mapping[str, Any] = document.get("latency") or {}
+    evidence: Mapping[str, Any] = document.get("evidence") or {}
+    stage_seconds: Mapping[str, Any] = latency.get("stage_seconds") or {}
+    totals: Mapping[str, Any] = costs.get("accepted_item_totals") or {}
+    repeats = sum(
+        int(row.get("failed_or_superseded_attempts_kept") or 0)
+        for row in totals.values()
+        if isinstance(row, Mapping)
+    )
+    summary = {
+        "schema": ECONOMICS_SCHEMA,
+        "pilot": document.get("pilot") or {},
+        "join": {
+            "works": programme.get("works"),
+            "attempts": programme.get("attempts"),
+            "accepted_items": accepted.get("works"),
+            "unobserved_attempts": programme.get("unobserved_attempts"),
+            "cross_run_joins_refused": len(document.get("cross_joins") or []),
+        },
+        "costs": {
+            "programme_billed_usd": programme.get("billed_usd"),
+            "programme_billed_lower_bound_usd": programme.get("billed_known_lower_bound_usd"),
+            "programme_estimate_usd": programme.get("estimate_usd"),
+            "estimate_rate_card_version": programme.get("estimate_rate_card_version"),
+            "per_accepted_item": dict(per_accepted),
+            "repeated_work_attempts": repeats,
+        },
+        "coverage": {
+            population: {
+                "receipt_coverage": row.get("receipt_coverage"),
+                "unknown_cost_receipts": row.get("unknown_cost_receipts"),
+            }
+            for population, row in sorted(coverage.items())
+            if isinstance(row, Mapping)
+        },
+        "latency_stage_seconds": {
+            stage: {
+                "total": row.get("stage_total_seconds"),
+                "lower_bound": row.get("stage_lower_bound_seconds"),
+            }
+            for stage, row in sorted(stage_seconds.items())
+            if isinstance(row, Mapping)
+        },
+        "evidence_classes": evidence.get("classes") or {},
+        "bottleneck_hint": (
+            "compare model stage seconds against queue/verification/human_wait"
+            " lower bounds and repeated_work_attempts — each names a different"
+            " bottleneck; unknown stages are gaps, not zeros"
+        ),
+    }
+    return redact_for_operator(summary)
+
+
+def reconcile_with_budget(
+    report: EconomicsReport | Mapping[str, Any], budget: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Report totals vs the agreed cap — discrepancies stated, never absorbed.
+
+    The customer-facing reconciliation: one line per cost column against
+    the cap. A line is ``within`` only when its column is exact and
+    under the cap; ``over`` when exact and above; ``unreconcilable``
+    when the column is a lower bound or an estimate — an incomplete
+    report side can never certify a budget, and an estimate is an
+    assumption, not spend. No code, prompts or secrets appear: ids,
+    numbers and reasons only.
+    """
+    document = report.to_document() if isinstance(report, EconomicsReport) else dict(report)
+    costs: Mapping[str, Any] = document.get("costs") or {}
+    programme: Mapping[str, Any] = costs.get("programme") or {}
+    cap = _nn_float(budget.get("cap_usd") or budget.get("cap_usd_per_pilot"))
+    currency = _text(budget.get("currency")) or "usd"
+    lines: list[dict[str, Any]] = []
+
+    def _line(
+        scope: str,
+        basis: str,
+        reported: float | None,
+        exact: bool,
+        extra_reason: str = "",
+    ) -> dict[str, Any]:
+        if cap is None:
+            status = "unreconcilable"
+            reason = "the budget carries no parseable cap — cannot reconcile"
+        elif reported is None:
+            status = "unreconcilable"
+            reason = extra_reason or "column unknown — a gap is never zero and never certifies"
+        elif not exact:
+            status = "unreconcilable"
+            reason = (
+                extra_reason
+                or "column is a known lower bound, not an exact total — cannot certify the cap"
+            )
+        else:
+            delta = round(cap - reported, 6)
+            status = "within" if delta >= 0 else "over"
+            reason = (
+                f"exact billed total {reported} usd vs cap {cap} usd"
+                f" ({'headroom' if delta >= 0 else 'overrun'} {abs(delta)} usd)"
+            )
+        return {
+            "scope": scope,
+            "basis": basis,
+            "cap_usd": _round6(cap) if cap is not None else None,
+            "reported_usd": _round6(reported) if reported is not None else None,
+            "delta_usd": (
+                _round6(cap - reported) if cap is not None and reported is not None else None
+            ),
+            "status": status,
+            "reason": reason,
+        }
+
+    coverage = _nn_float(programme.get("receipt_coverage"))
+    lines.append(
+        _line(
+            "programme.billed",
+            "billing",
+            _nn_float(programme.get("billed_usd")),
+            bool(programme.get("billed_exact")),
+            extra_reason=(
+                "billed spend unknown (receipt coverage"
+                f" {_round6(coverage) if coverage is not None else 'n/a'}) —"
+                " unknown spend cannot certify the cap, never zero"
+            ),
+        )
+    )
+    lines.append(
+        _line(
+            "programme.lower_bound",
+            "billing",
+            _nn_float(programme.get("billed_known_lower_bound_usd")),
+            False,
+            extra_reason=(
+                "lower bounds bound from below only — stated beside the cap,"
+                " never reconciled against it"
+            ),
+        )
+    )
+    lines.append(
+        _line(
+            "programme.estimate",
+            "estimate",
+            _nn_float(programme.get("estimate_usd")),
+            False,
+            extra_reason=(
+                "estimate from rate card"
+                f" {_text(programme.get('estimate_rate_card_version')) or 'unversioned'}"
+                " — an assumption, not spend; can inform, never certify"
+            ),
+        )
+    )
+    return {
+        "schema": ECONOMICS_SCHEMA,
+        "currency": currency,
+        "cap_usd": _round6(cap) if cap is not None else None,
+        "lines": lines,
+        "unreconcilable": sum(1 for line in lines if line["status"] == "unreconcilable"),
+        "note": (
+            "the customer reconciles totals with the agreed budget through this"
+            " shape — ids, numbers and reasons only; no code, prompts or secrets"
+        ),
+    }

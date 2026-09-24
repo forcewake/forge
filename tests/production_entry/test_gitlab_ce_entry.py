@@ -39,14 +39,18 @@ Traces (AT-10 → CE-1..CE-4):
   rotted checkpoint blob halts the resumed lane before the vendor exists,
   with zero publication.
 
-Honesty note (what this trace does NOT claim): the GitLab dispatch seam
-(``CITharnessBackend.start``) does not yet carry the lane-resume contract
-(``FORGE_LANE_RESUME`` / lane-control credentials) the GitHub lane
-dispatches (R32-04) — so CE-2 drives the RESUMED runner's lane
-subprocess directly with the resume environment the CI job will receive
-when that parity lands, exactly like the provider-neutral PE-1 trace
-does. Everything the control plane owns (checkpoint authority, resume
-command, resume-spec) is REAL here.
+Honesty note (what this trace does NOT claim): since R37-07 (issue #288)
+the GitLab dispatch seam carries the lane-resume / lane-control envelope
+(``FORGE_LANE_RESUME``, the pinned checkpoint digest, the attempt-scoped
+control token) on every pipeline — the dispatch-parity trace
+(``test_gitlab_dispatch_parity.py``) proves THAT contract end to end,
+including a resumed lane driven by nothing but the dispatched variables.
+THIS trace still drives the resumed runner's lane subprocess with the
+resume environment directly (rather than through the CI job's own env
+plumbing), because the fake native server has no real runner that would
+materialize the job env — everything the control plane owns (checkpoint
+authority, resume command, resume-spec, the dispatched envelope) is REAL
+here.
 
 Assertions are on ARTIFACTS — the native server's dispatch ledger and
 notes, branch heads, MR documents, DB row identities, file bytes — never

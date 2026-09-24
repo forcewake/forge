@@ -187,9 +187,11 @@ def native(tmp_path: Path) -> FakeNative:
     deadline = time.monotonic() + 20.0
     while not ready.is_file():
         if process.poll() is not None:
+            process.wait(timeout=10)  # R37-18: join even the dead child
             raise AssertionError("the fake native server died at startup")
         if time.monotonic() > deadline:
             process.kill()
+            process.wait(timeout=10)  # R37-18: a killed child is joined, not zombied
             raise AssertionError("the fake native server never became ready")
         time.sleep(0.02)
     port = int(json.loads(ready.read_text())["port"])
@@ -589,9 +591,11 @@ def gitlab_native(tmp_path: Path) -> FakeGitLabNative:
     deadline = time.monotonic() + 20.0
     while not ready.is_file():
         if process.poll() is not None:
+            process.wait(timeout=10)  # R37-18: join even the dead child
             raise AssertionError("the fake gitlab server died at startup")
         if time.monotonic() > deadline:
             process.kill()
+            process.wait(timeout=10)  # R37-18: a killed child is joined, not zombied
             raise AssertionError("the fake gitlab server never became ready")
         time.sleep(0.02)
     port = int(json.loads(ready.read_text())["port"])

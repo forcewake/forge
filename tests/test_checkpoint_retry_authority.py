@@ -42,6 +42,8 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -100,15 +102,30 @@ def _checkpoint(
     return manifest, blobs, _digest(manifest)
 
 
-async def _sqlite_factory() -> tuple[Any, async_sessionmaker]:
+@asynccontextmanager
+async def _sqlite_factory() -> AsyncIterator[async_sessionmaker]:
+    """The in-memory authority — an ENGINE THE CALLER CANNOT LEAK.
+
+    R37-18: this helper used to hand back the engine beside the factory,
+    and every caller dropped it on the floor. The engine's aiosqlite
+    connection kept its worker thread alive past the test's loop close;
+    the thread then finalized against the CLOSED loop and the resulting
+    ``Event loop is closed`` traceback smeared across WHATEVER test the
+    GC happened to interrupt (the upstream 11-warning reviewed run). As
+    a context manager the engine is disposed in the finally block — the
+    worker thread joins before the loop closes, on every path.
+    """
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +196,18 @@ class TestStoreBackedLookupOutcome:
         assert outcome.checkpoint_id is None  # rot never carries identity
 
     async def test_the_postgres_authority_answers_through_the_same_contract(self, tmp_path):
-        _engine, factory = await _sqlite_factory()
-        repository = PostgresCheckpointRepository(tmp_path / "store", factory)
-        manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 2)
-        await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
+        async with _sqlite_factory() as factory:
+            repository = PostgresCheckpointRepository(tmp_path / "store", factory)
+            manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 2)
+            await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
 
-        exact = await repository.lookup_outcome(WORK_ID)
-        absent = await repository.lookup_outcome(f"{WORK_ID}-other")
+            exact = await repository.lookup_outcome(WORK_ID)
+            absent = await repository.lookup_outcome(f"{WORK_ID}-other")
 
-        assert exact.state == LOOKUP_EXACT
-        assert exact.authority == AUTHORITY_POSTGRES
-        assert exact.checkpoint_id == checkpoint_id
-        assert absent.state == LOOKUP_ABSENT
+            assert exact.state == LOOKUP_EXACT
+            assert exact.authority == AUTHORITY_POSTGRES
+            assert exact.checkpoint_id == checkpoint_id
+            assert absent.state == LOOKUP_ABSENT
 
 
 # ---------------------------------------------------------------------------
@@ -324,29 +341,27 @@ def _env(**extra: str) -> dict[str, str]:
 
 class TestSelectionMatrix:
     async def test_a_session_factory_selects_the_configured_repository(self, tmp_path):
-        _engine, factory = await _sqlite_factory()
+        async with _sqlite_factory() as factory:
+            authority = cr.resolve_checkpoint_lookup_authority(
+                env=_env(**{api_channel.DURABILITY_ENV: "postgres"}),
+                session_factory=factory,
+                root=tmp_path / "store",
+            )
 
-        authority = cr.resolve_checkpoint_lookup_authority(
-            env=_env(**{api_channel.DURABILITY_ENV: "postgres"}),
-            session_factory=factory,
-            root=tmp_path / "store",
-        )
-
-        assert isinstance(authority, PostgresCheckpointRepository)
-        assert await authority.authority() == AUTHORITY_POSTGRES
+            assert isinstance(authority, PostgresCheckpointRepository)
+            assert await authority.authority() == AUTHORITY_POSTGRES
 
     async def test_a_factory_with_the_default_durability_selects_the_filesystem(self, tmp_path):
         """The default durability's configured authority is the
         filesystem repository — the SAME one upload/resume use (never a
         bare index read beside it)."""
-        _engine, factory = await _sqlite_factory()
+        async with _sqlite_factory() as factory:
+            authority = cr.resolve_checkpoint_lookup_authority(
+                env=_env(**{api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store")}),
+                session_factory=factory,
+            )
 
-        authority = cr.resolve_checkpoint_lookup_authority(
-            env=_env(**{api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store")}),
-            session_factory=factory,
-        )
-
-        assert isinstance(authority, FilesystemCheckpointRepository)
+            assert isinstance(authority, FilesystemCheckpointRepository)
 
     async def test_no_factory_with_url_and_token_selects_the_http_proxy(self):
         authority = cr.resolve_checkpoint_lookup_authority(
@@ -377,21 +392,20 @@ class TestSelectionMatrix:
         """A junk durability value with a factory wired: the composition
         point refuses at construction and the refusal is TYPED — never a
         filesystem fallback, never "absent"."""
-        _engine, factory = await _sqlite_factory()
+        async with _sqlite_factory() as factory:
+            outcome = await revival.durable_checkpoint_outcome(
+                WORK_ID,
+                session_factory=factory,
+                env=_env(
+                    **{
+                        api_channel.DURABILITY_ENV: "junk-mode",
+                        api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store"),
+                    }
+                ),
+            )
 
-        outcome = await revival.durable_checkpoint_outcome(
-            WORK_ID,
-            session_factory=factory,
-            env=_env(
-                **{
-                    api_channel.DURABILITY_ENV: "junk-mode",
-                    api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store"),
-                }
-            ),
-        )
-
-        assert outcome.state == LOOKUP_UNAVAILABLE
-        assert "misconfigured" in outcome.detail
+            assert outcome.state == LOOKUP_UNAVAILABLE
+            assert "misconfigured" in outcome.detail
 
     async def test_an_injected_repository_wins(self, tmp_path):
         repository = FilesystemCheckpointRepository(tmp_path / "store")
@@ -408,32 +422,32 @@ class TestSelectionMatrix:
     async def test_the_configured_postgres_authority_wins_over_a_stale_mirror(self, tmp_path):
         """AT-04 arm 2: a stale ``works/<id>.json`` index is never read
         on the modern path — the configured PostgreSQL authority wins."""
-        _engine, factory = await _sqlite_factory()
-        root = tmp_path / "shared-blobs"
-        repository = PostgresCheckpointRepository(root, factory)
-        manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 5)
-        await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
-        stale = root / "works" / f"{WORK_ID}.json"
-        stale.parent.mkdir(parents=True, exist_ok=True)
-        stale_bytes = json.dumps(
-            {"work_id": WORK_ID, "checkpoints": [{"checkpoint_id": "b" * 64, "sequence": 99}]}
-        ).encode()
-        stale.write_bytes(stale_bytes)
+        async with _sqlite_factory() as factory:
+            root = tmp_path / "shared-blobs"
+            repository = PostgresCheckpointRepository(root, factory)
+            manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 5)
+            await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
+            stale = root / "works" / f"{WORK_ID}.json"
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale_bytes = json.dumps(
+                {"work_id": WORK_ID, "checkpoints": [{"checkpoint_id": "b" * 64, "sequence": 99}]}
+            ).encode()
+            stale.write_bytes(stale_bytes)
 
-        outcome = await revival.durable_checkpoint_outcome(
-            WORK_ID,
-            session_factory=factory,
-            env=_env(
-                **{
-                    api_channel.DURABILITY_ENV: "postgres",
-                    api_channel.CHECKPOINT_STORE_DIR_ENV: str(root),
-                }
-            ),
-        )
+            outcome = await revival.durable_checkpoint_outcome(
+                WORK_ID,
+                session_factory=factory,
+                env=_env(
+                    **{
+                        api_channel.DURABILITY_ENV: "postgres",
+                        api_channel.CHECKPOINT_STORE_DIR_ENV: str(root),
+                    }
+                ),
+            )
 
-        assert outcome.state == LOOKUP_EXACT
-        assert outcome.checkpoint_id == checkpoint_id  # the DB row, not the mirror
-        assert stale.read_bytes() == stale_bytes  # and the mirror was untouched
+            assert outcome.state == LOOKUP_EXACT
+            assert outcome.checkpoint_id == checkpoint_id  # the DB row, not the mirror
+            assert stale.read_bytes() == stale_bytes  # and the mirror was untouched
 
 
 # ---------------------------------------------------------------------------
@@ -502,26 +516,26 @@ class TestLegacyWindowClosed:
         checkpoint metadata — the legacy token is not on its path."""
         from datetime import UTC, datetime, timedelta
 
-        _engine, factory = await _sqlite_factory()
-        repository = PostgresCheckpointRepository(tmp_path / "store", factory)
-        manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 1)
-        await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
+        async with _sqlite_factory() as factory:
+            repository = PostgresCheckpointRepository(tmp_path / "store", factory)
+            manifest, blobs, checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"pg\n"}, 1)
+            await repository.put(WORK_ID, checkpoint_id, manifest, blobs)
 
-        past = (datetime.now(UTC) - timedelta(days=30)).isoformat()
-        outcome = await revival.durable_checkpoint_outcome(
-            WORK_ID,
-            session_factory=factory,
-            env=_env(
-                **{
-                    api_channel.DURABILITY_ENV: "postgres",
-                    api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store"),
-                    "FORGE_LEGACY_CREDENTIAL_DEADLINE": past,
-                }
-            ),
-        )
+            past = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+            outcome = await revival.durable_checkpoint_outcome(
+                WORK_ID,
+                session_factory=factory,
+                env=_env(
+                    **{
+                        api_channel.DURABILITY_ENV: "postgres",
+                        api_channel.CHECKPOINT_STORE_DIR_ENV: str(tmp_path / "store"),
+                        "FORGE_LEGACY_CREDENTIAL_DEADLINE": past,
+                    }
+                ),
+            )
 
-        assert outcome.state == LOOKUP_EXACT
-        assert outcome.checkpoint_id == checkpoint_id
+            assert outcome.state == LOOKUP_EXACT
+            assert outcome.checkpoint_id == checkpoint_id
 
 
 # ---------------------------------------------------------------------------
@@ -689,15 +703,18 @@ class TestServiceRetryAuthority:
         pins = await repository.pins(run_id)
         assert len(pins) == 1
         assert pins[0]["checkpoint_id"] == checkpoint_id
-        assert pins[0]["reason"] == "retry-continuation:retry-pin-1"
+        # R37-01: the pin names its DECISION owner (``decision:<id>``) — the
+        # pre-R37-01 ``retry-continuation:<command id>`` pins stay readable.
+        assert pins[0]["reason"] == f"decision:{doc['decision_id']}"
 
     async def test_a_post_decision_upload_never_changes_the_dispatched_reference(
         self, db, fake, tmp_path, monkeypatch
     ):
-        """Acceptance 6 + the dedup reconciliation: a NEWER checkpoint
-        landing after the decision changes neither the persisted digest
-        nor the pin set — the reused decision binds what the request
-        approved."""
+        """Acceptance 6 + the dedup reconciliation (R37-01 shape): the SAME
+        event replaying after a NEWER checkpoint landed keeps the ORIGINAL
+        pinned reference — the frozen decision binds what the request
+        approved. A NEW event (a fresh delivery id on a later attempt)
+        mints its OWN decision over the CURRENT checkpoint."""
         from forge.adaptive.continuation import CONTINUATION_EVIDENCE_KEY
         from tests.test_adaptive_continuation import (
             DEATH_PLAIN_TIMEOUT,
@@ -716,9 +733,39 @@ class TestServiceRetryAuthority:
         self._outcomes(monkeypatch, CheckpointLookupOutcome.exact(first, authority="test"))
         fake.dispatch_inputs.clear()
         await retry_cmd(service, run_id, delivery_id="retry-pin-a")
+        first_doc = dict((await get_run(db, run_id)).evidence[CONTINUATION_EVIDENCE_KEY])
 
-        # The attempt dies again; a NEWER checkpoint lands; a repeated
-        # command (a fresh delivery id) arrives.
+        # A NEWER checkpoint lands, and the SAME event is re-presented (the
+        # recovery re-drive reconstructing the stranded delivery): the
+        # frozen decision replays — the persisted digest and the pin set
+        # keep the ORIGINAL reference.
+        async with db() as session:
+            from forge.durable import FlowRun
+
+            run = await session.get(FlowRun, run_id)
+            run.status = "proposing"
+            run.status_reason = DEATH_PLAIN_TIMEOUT
+            await session.commit()
+        m2, b2, newer = _checkpoint(run_id, {"a.txt": b"second\n"}, 2)
+        await repository.put(run_id, newer, m2, b2)
+        self._outcomes(monkeypatch, CheckpointLookupOutcome.exact(newer, authority="test"))
+        replayed = await service._select_continuation(
+            run_id,
+            death_reason=DEATH_PLAIN_TIMEOUT,
+            evidence=dict((await get_run(db, run_id)).evidence or {}),
+            candidate_shas=[],
+            native_command_id="retry-pin-a",
+            source_attempt=0,
+        )
+        assert replayed.reused is True
+        assert replayed.evidence.checkpoint_digest == first  # the ORIGINAL, not the newer
+        pins = await repository.pins(run_id)
+        assert len(pins) == 1  # one decision, one pin — the replay added none
+        assert pins[0]["checkpoint_id"] == first
+        assert pins[0]["reason"] == f"decision:{first_doc['decision_id']}"
+
+        # The attempt dies again and a NEW event arrives: its OWN decision
+        # binds the CURRENT (newer) checkpoint — never the old graft (R37-01).
         async with db() as session:
             from forge.durable import FlowRun
 
@@ -726,9 +773,6 @@ class TestServiceRetryAuthority:
             run.status = "failed"
             run.status_reason = DEATH_PLAIN_TIMEOUT
             await session.commit()
-        m2, b2, newer = _checkpoint(run_id, {"a.txt": b"second\n"}, 2)
-        await repository.put(run_id, newer, m2, b2)
-        self._outcomes(monkeypatch, CheckpointLookupOutcome.exact(newer, authority="test"))
         fake.dispatch_inputs.clear()
         await retry_cmd(service, run_id, delivery_id="retry-pin-b")
 
@@ -736,12 +780,16 @@ class TestServiceRetryAuthority:
         assert dispatch["inputs"]["lane_resume_mode"] == "required"
         run = await get_run(db, run_id)
         doc = run.evidence[CONTINUATION_EVIDENCE_KEY]
-        assert doc["checkpoint_digest"] == first  # the ORIGINAL, not the newer
-        assert doc["decided_at"] == doc["decided_at"]
+        assert doc["checkpoint_digest"] == newer  # E2's OWN decision, over CP-2
+        assert doc["decision_id"] != first_doc["decision_id"]
+        assert doc["native_command_id"] == "retry-pin-b"
         pins = await repository.pins(run_id)
-        assert len(pins) == 1  # one decision, one pin — the repeat added none
-        assert pins[0]["checkpoint_id"] == first
-        assert pins[0]["reason"] == "retry-continuation:retry-pin-a"
+        assert {pin["checkpoint_id"] for pin in pins} == {first, newer}
+        reasons = {pin["reason"] for pin in pins}
+        assert reasons == {
+            f"decision:{first_doc['decision_id']}",
+            f"decision:{doc['decision_id']}",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -918,7 +966,8 @@ class TestAT04PostgresRetryAuthority:
             pins = await repository.pins(run_id)
             assert len(pins) == 1
             assert pins[0]["checkpoint_id"] == checkpoint_id
-            assert pins[0]["reason"] == "retry-continuation:retry-at04-1"
+            # R37-01: the pin names its DECISION owner.
+            assert pins[0]["reason"] == f"decision:{doc['decision_id']}"
         finally:
             await engine_b.dispose()
 

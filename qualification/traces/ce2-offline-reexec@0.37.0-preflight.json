@@ -1,0 +1,14 @@
+{
+  "stamp": "forge.trace/1",
+  "trace_id": "ce2-offline-reexec@0.37.0-preflight",
+  "record_id": "gitlab-ce-v1@0.37.0-preflight",
+  "capability": "real-provider-e2e",
+  "provenance": "scripted",
+  "executed_at": "2026-09-24T09:36:17Z",
+  "artifact_sha256": "835b0b3bef8fed13925e0dad25bd5a45ea43546e58bd8b0c857d2b47ce0983e4",
+  "provider": "",
+  "provider_version": "",
+  "model_route": "",
+  "invokes_real_protocol_code": true,
+  "note": "production-entry offline trace CE-2 re-executed for the R37-06 preflight record: env-stripped pytest tests/production_entry/test_gitlab_ce_entry.py, 6 passed. The trace drives the REAL production-entry protocol code (real lane/collector subprocesses, real durable state) against authored fakes — invoking real protocol code is a stronger scripted trace, never live provenance, so the tier stays scripted and the real-provider-e2e capability stays HELD."
+}

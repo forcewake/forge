@@ -1,0 +1,14 @@
+{
+  "stamp": "forge.trace/1",
+  "trace_id": "live-flow-preflight-refusal@0.37.0-preflight",
+  "record_id": "gitlab-ce-v1@0.37.0-preflight",
+  "capability": "live-flow-preflight",
+  "provenance": "refused",
+  "executed_at": "2026-09-24T09:36:17Z",
+  "artifact_sha256": "d983ff4a3943fb936167fbc12e4685d03925641e46e2a01d16bb4424be651386",
+  "provider": "gitlab",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
+  "model_route": "",
+  "invokes_real_protocol_code": false,
+  "note": "The executed observation that the LIVE flow preflight REFUSES (observed, not inferred): deployed control plane 0.28.0 vs pinned v0.36.0 artifacts; schema 026 vs 027; no FORGE_BUDGET_PROFILES / FORGE_LANE_BUDGET_SECONDS in the app/worker env; templates at 2fbc321; plus the GitLab lane-resume dispatch gap (#288). A paid flow against another build qualifies nothing — refusal evidence is honest and loadable, and it NEVER upgrades anything. Informational entry — live-flow-preflight is not a required capability of the record."
+}

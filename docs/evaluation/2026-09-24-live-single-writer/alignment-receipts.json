@@ -1,0 +1,2128 @@
+{
+  "already_aligned_at_start": false,
+  "generated_at": "2026-09-24T12:58:24.335505+00:00",
+  "observations": {
+    "caps": {
+      "forge-app": {
+        "FORGE_BUDGET_PROFILES": {
+          "numerical": true,
+          "present": true
+        },
+        "FORGE_LANE_BUDGET_SECONDS": {
+          "numerical": true,
+          "present": true
+        }
+      },
+      "forge-worker": {
+        "FORGE_BUDGET_PROFILES": {
+          "numerical": true,
+          "present": true
+        },
+        "FORGE_LANE_BUDGET_SECONDS": {
+          "numerical": true,
+          "present": true
+        }
+      }
+    },
+    "caps_ok": true,
+    "controlplane_unreachable": "",
+    "deployed_schema_head": "027",
+    "deployed_version": "0.36.0",
+    "extra_env_keys": [
+      "FORGE_HARNESS_PREFERENCE",
+      "FORGE_LANE_CONTROL_URL"
+    ],
+    "extra_env_ok": true,
+    "repo_schema_head": "027",
+    "repo_version": "0.36.0",
+    "schema_ok": true,
+    "version_ok": true,
+    "worker_mounts_ok": false,
+    "worker_mounts_requested": [
+      "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data"
+    ]
+  },
+  "result": "aligned",
+  "runs": [
+    {
+      "finished_at": "2026-09-24T11:42:56.930351+00:00",
+      "result": "stopped-at-backup",
+      "started_at": "2026-09-24T11:42:56.633544+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T114256Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:42:56.863689+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:42:56.633581+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.23
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T114256Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T114256Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:42:56.930281+00:00",
+              "returncode": 1,
+              "started_at": "2026-09-24T11:42:56.863803+00:00",
+              "stderr_tail": "924T114256Z.dump /Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T114256Z.dump\u2026 failed (125): Error: \"/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T114256Z.dump\" could not be found on the host: no such file or directory",
+              "stdout_tail": "",
+              "wall_seconds": 0.067
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-c7e42f90dd10",
+          "result": "failed",
+          "step": "backup"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T11:46:14.030449+00:00",
+      "result": "stopped-at-recreate-forge-app",
+      "started_at": "2026-09-24T11:45:20.738722+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T114520Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:45:20.894924+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:45:20.738852+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.156
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T114520Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T114520Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:45:21.013015+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:45:20.894986+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.118
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-0c76a2e9ab46",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T114520Z"
+              ],
+              "finished_at": "2026-09-24T11:45:21.087190+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:45:21.013199+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.074
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T114520Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-e1d1ec170828",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T11:45:59.808080+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:45:21.087301+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "///app)\n--> b6ace630877b\nSTEP 13/16: USER forge\n--> 41137f1e627f\nSTEP 14/16: ENV PATH=\"/app/.venv/bin:$PATH\"\n--> a4d3a2a69589\nSTEP 15/16: EXPOSE 8420\n--> 40f76e184bd3\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\nCOMMIT localhost/forge:dev\n--> 6c2b1a5d3c25\nSuccessfully tagged localhost/forge:dev\n6c2b1a5d3c255bcf02c09eee39421351db67fa169185db470f758ca5409cdfd9",
+              "wall_seconds": 38.72
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-847022212426",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T11:46:09.594452+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:45:59.808319+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 9.786
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-0db3c675a403",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T11:46:13.905370+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:46:09.594691+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 4.311
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (026 -> 027)",
+          "receipt_id": "r3708-76aa41b26246",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e REDIS_URL=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e HOME=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e GITLAB_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e container=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T11:46:14.030397+00:00",
+              "returncode": 1,
+              "started_at": "2026-09-24T11:46:13.905500+00:00",
+              "stderr_tail": "podman run -d --name\u2026 failed (125): Error: creating container storage: the container name \"forge-app\" is already in use by a613bfe02ff2b446a3107a438990ebbade6e84bcd8e36850337a39939fdb9227. You have to remove that container to be able to reuse that name: that name is already in use",
+              "stdout_tail": "",
+              "wall_seconds": 0.125
+            }
+          ],
+          "description": "podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-27c9c09c1c7b",
+          "result": "failed",
+          "step": "recreate-forge-app"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T11:50:05.790625+00:00",
+      "result": "refused",
+      "started_at": "2026-09-24T11:48:00.566118+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T114800Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:48:00.848526+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:00.566214+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.284
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T114800Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T114800Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:48:01.123878+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:00.849794+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.274
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-b5671fcb3b7f",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T114800Z"
+              ],
+              "finished_at": "2026-09-24T11:48:01.219289+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:01.124055+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.095
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T114800Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-b60a2ce121ab",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T11:48:52.007457+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:01.219415+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "///app)\n--> a6a5ffeeb3b3\nSTEP 13/16: USER forge\n--> 9097053be79d\nSTEP 14/16: ENV PATH=\"/app/.venv/bin:$PATH\"\n--> d6a9a8388c43\nSTEP 15/16: EXPOSE 8420\n--> e699a9d45dce\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\nCOMMIT localhost/forge:dev\n--> dc217cf0f672\nSuccessfully tagged localhost/forge:dev\ndc217cf0f6721dace2a99d3493ffc4d17825c965188ff0b7e0ab74077cc75eb5",
+              "wall_seconds": 50.788
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-c1f955bcc4d3",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T11:48:52.377404+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:52.007661+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 0.37
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-34a9472018dd",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T11:49:19.731599+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:48:52.377629+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 27.354
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (027 -> 027)",
+          "receipt_id": "r3708-c2c852942c5d",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T11:49:22.755030+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:49:19.731735+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-app",
+              "wall_seconds": 3.023
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e REDIS_URL=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e HOME=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e GITLAB_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e container=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T11:49:23.784529+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:49:22.755099+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "42983790d7e0cb02c738fcdc1bfc26f45b853ff3fd821de6f405cc4385190b06",
+              "wall_seconds": 1.029
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-42b293f6ec35",
+          "result": "ok",
+          "step": "recreate-forge-app"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-worker"
+              ],
+              "finished_at": "2026-09-24T11:49:26.546992+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:49:23.784700+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker",
+              "wall_seconds": 2.764
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-worker",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e HOME=***",
+                "-e LITELLM_URL=***",
+                "-e ZAI_API_KEY=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_DISCOVERY_ENABLED=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e container=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e REDIS_URL=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.worker"
+              ],
+              "finished_at": "2026-09-24T11:49:30.855932+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:49:26.551543+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "a5bcc83dae8ebafbe03bb42bf96741f819331f9e5c58977906d9ab53d05b714d",
+              "wall_seconds": 4.304
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-147df5ce881f",
+          "result": "ok",
+          "step": "recreate-forge-worker"
+        },
+        {
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "reason": "GET http://localhost:8420/health unreachable: Server disconnected without sending a response.",
+          "receipt_id": "r3708-5bb5fc45e265",
+          "result": "refused",
+          "step": "verify"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T11:52:58.566318+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-24T11:52:52.134851+00:00",
+      "steps": [
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.36.0",
+              "observed": "0.36.0",
+              "result": "match"
+            },
+            "health.status": "ok",
+            "schema == repo chain head": {
+              "expected": "027",
+              "observed": "027",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-86b6018bbc16",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T12:00:35.836055+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-24T11:59:21.494061+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T115921Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:59:21.696465+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:59:21.494181+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.202
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T115921Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T115921Z.dump"
+              ],
+              "finished_at": "2026-09-24T11:59:21.867867+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:59:21.696514+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.171
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-6561cad5149f",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T115921Z"
+              ],
+              "finished_at": "2026-09-24T11:59:21.955401+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:59:21.867945+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.087
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T115921Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-139663e77e35",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T12:00:07.363239+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T11:59:21.955576+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "///app)\n--> a21b31d2c4af\nSTEP 13/16: USER forge\n--> a83f235364f0\nSTEP 14/16: ENV PATH=\"/app/.venv/bin:$PATH\"\n--> 517970dde383\nSTEP 15/16: EXPOSE 8420\n--> 2699e0b0554b\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\nCOMMIT localhost/forge:dev\n--> 7b82f146905c\nSuccessfully tagged localhost/forge:dev\n7b82f146905c96d86e4bf11b8964bae0878ae240f6233b7adba6e91687989e5f",
+              "wall_seconds": 45.407
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-7b99c67103c3",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:00:16.226742+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:07.363366+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 8.863
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-e68047413cdb",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T12:00:19.262578+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:16.226841+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 3.036
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (027 -> 027)",
+          "receipt_id": "r3708-45bebfe2c94e",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:00:19.484989+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:19.262723+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-app",
+              "wall_seconds": 0.222
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e container=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e HOME=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e REDIS_URL=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T12:00:19.711468+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:19.485047+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "4b848b5f214910ae45dc9c522d4f47d69e765cfd69d4603bc1b7cd8422f56680",
+              "wall_seconds": 0.226
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-8a5e1cd7c56f",
+          "result": "ok",
+          "step": "recreate-forge-app"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-worker"
+              ],
+              "finished_at": "2026-09-24T12:00:19.926528+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:19.711554+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker",
+              "wall_seconds": 0.215
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-worker",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-e GITLAB_URL=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e LITELLM_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_DISCOVERY_ENABLED=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e REDIS_URL=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e container=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e HOME=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.worker"
+              ],
+              "finished_at": "2026-09-24T12:00:20.158153+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:00:19.926595+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "71bd54febf3ce22f3d1d66014112c9452417bf8c7c9e101fd824534da296c5d0",
+              "wall_seconds": 0.232
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-1b751a897b46",
+          "result": "ok",
+          "step": "recreate-forge-worker"
+        },
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.36.0",
+              "observed": "0.36.0",
+              "result": "match"
+            },
+            "health.status": "ok",
+            "schema == repo chain head": {
+              "expected": "027",
+              "observed": "027",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-fa2d3c9beab8",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T12:06:28.303553+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-24T12:05:48.016589+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T120548Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:05:48.248450+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:05:48.016658+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.232
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T120548Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T120548Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:05:48.383074+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:05:48.248514+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.135
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-d30bbc7dc159",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T120548Z"
+              ],
+              "finished_at": "2026-09-24T12:05:48.492663+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:05:48.383359+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.109
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T120548Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-adaea5ed7667",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T12:06:06.342063+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:05:48.492763+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "///app)\n--> 93c4cd199d09\nSTEP 13/16: USER forge\n--> 4c85ddff08e7\nSTEP 14/16: ENV PATH=\"/app/.venv/bin:$PATH\"\n--> e99352777f47\nSTEP 15/16: EXPOSE 8420\n--> 2118515e9fad\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\nCOMMIT localhost/forge:dev\n--> 15a5ad7e1364\nSuccessfully tagged localhost/forge:dev\n15a5ad7e136402bd36c835d49544f416a934adde7b2504ff113aa97e5a0576be",
+              "wall_seconds": 17.849
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-0351b42d72e8",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:06:12.306289+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:06.342197+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 5.964
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-36420d01c29a",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T12:06:14.346828+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:12.306380+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 2.04
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (027 -> 027)",
+          "receipt_id": "r3708-aa6480c52060",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:06:14.508852+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:14.346927+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-app",
+              "wall_seconds": 0.162
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e container=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e REDIS_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e GITLAB_TOKEN=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e HOME=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T12:06:14.701076+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:14.508918+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "d78d920e50f9988e6f5a1ef347a460c43ab8ca0c5677ab2433a9734fec5d3d67",
+              "wall_seconds": 0.192
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-4e9bc95a2695",
+          "result": "ok",
+          "step": "recreate-forge-app"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-worker"
+              ],
+              "finished_at": "2026-09-24T12:06:14.845275+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:14.701181+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker",
+              "wall_seconds": 0.144
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-worker",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-e HOME=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e container=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e REDIS_URL=***",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_DISCOVERY_ENABLED=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_APPROVERS=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e GITLAB_URL=***",
+                "-e ZAI_API_KEY=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.worker"
+              ],
+              "finished_at": "2026-09-24T12:06:14.984414+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:06:14.845337+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "86bddfa320eb530dd25ed5110484a4a09517ed76276493fdc37815d5188f5368",
+              "wall_seconds": 0.139
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-cfc44d49a12d",
+          "result": "ok",
+          "step": "recreate-forge-worker"
+        },
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.36.0",
+              "observed": "0.36.0",
+              "result": "match"
+            },
+            "health.status": "ok",
+            "schema == repo chain head": {
+              "expected": "027",
+              "observed": "027",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-81628e5122e2",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T12:25:30.637004+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-24T12:24:29.598065+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T122429Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:24:29.856040+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:24:29.598160+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.258
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T122429Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T122429Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:24:30.015510+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:24:29.856107+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.159
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-98d23543f75d",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T122429Z"
+              ],
+              "finished_at": "2026-09-24T12:24:30.424068+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:24:30.015609+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.408
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T122429Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-2661bdf8cb94",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T12:25:05.034778+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:24:30.424157+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "///app)\n--> 1f1f4b8323e2\nSTEP 13/16: USER forge\n--> 0240c0319c44\nSTEP 14/16: ENV PATH=\"/app/.venv/bin:$PATH\"\n--> d3ce9f9feeaf\nSTEP 15/16: EXPOSE 8420\n--> a1506b32a9ba\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\nCOMMIT localhost/forge:dev\n--> fb348b53476f\nSuccessfully tagged localhost/forge:dev\nfb348b53476ffbfc4e8498f8f87aa5f0d2474a957f5f5bdb3ce0a8bd20921f5f",
+              "wall_seconds": 34.61
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-4cbd6c423f03",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:25:11.809248+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:05.034858+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 6.774
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-c3271b439291",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T12:25:14.664727+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:11.809331+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 2.855
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (027 -> 027)",
+          "receipt_id": "r3708-e4d37bc05dae",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:25:14.864510+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:14.664834+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-app",
+              "wall_seconds": 0.2
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e container=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e REDIS_URL=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e HOME=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T12:25:15.109776+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:14.864620+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "2e5287c95e8953f1deba5c0882360292101aa15889195cdee6c094ad42c848f1",
+              "wall_seconds": 0.245
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-3b93cf32ee77",
+          "result": "ok",
+          "step": "recreate-forge-app"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-worker"
+              ],
+              "finished_at": "2026-09-24T12:25:15.349093+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:15.109876+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker",
+              "wall_seconds": 0.239
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-worker",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e FORGE_DISCOVERY_ENABLED=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e container=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e LITELLM_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e HOME=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e REDIS_URL=***",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.worker"
+              ],
+              "finished_at": "2026-09-24T12:25:15.570583+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:25:15.349170+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "93a92e6242c83252bf4f2ae6745a960e33e47bb876c509452fd0847c5b1cf975",
+              "wall_seconds": 0.221
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-bad0c20b9c90",
+          "result": "ok",
+          "step": "recreate-forge-worker"
+        },
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.36.0",
+              "observed": "0.36.0",
+              "result": "match"
+            },
+            "health.status": "degraded",
+            "schema == repo chain head": {
+              "expected": "027",
+              "observed": "027",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-e5945397451a",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    },
+    {
+      "finished_at": "2026-09-24T12:58:24.335477+00:00",
+      "result": "aligned",
+      "started_at": "2026-09-24T12:57:53.143175+00:00",
+      "steps": [
+        {
+          "commands": [
+            {
+              "argv": [
+                "exec",
+                "forge-postgres",
+                "pg_dump",
+                "-U",
+                "forge",
+                "-d",
+                "forge",
+                "-Fc",
+                "-f",
+                "/tmp/pre-r3708-alignment-20260924T125753Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:57:53.329832+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:57:53.143271+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.187
+            },
+            {
+              "argv": [
+                "cp",
+                "forge-postgres:/tmp/pre-r3708-alignment-20260924T125753Z.dump",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/docs/evaluation/2026-09-24-live-single-writer/backups/pre-r3708-alignment-20260924T125753Z.dump"
+              ],
+              "finished_at": "2026-09-24T12:57:53.479313+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:57:53.329917+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.149
+            }
+          ],
+          "description": "pg_dump out of forge-postgres (runbook \u00a73 step 0)",
+          "receipt_id": "r3708-8ebbd2497fe3",
+          "result": "ok",
+          "step": "backup"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "tag",
+                "localhost/forge:dev",
+                "localhost/forge:pre-r3708-20260924T125753Z"
+              ],
+              "finished_at": "2026-09-24T12:57:53.553915+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:57:53.479632+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "",
+              "wall_seconds": 0.074
+            }
+          ],
+          "description": "keep the current image addressable as localhost/forge:pre-r3708-20260924T125753Z (images are never pruned \u2014 rollback stays possible)",
+          "receipt_id": "r3708-7843ba0b93ef",
+          "result": "ok",
+          "step": "rollback-tag"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "build",
+                "-t",
+                "localhost/forge:dev",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge"
+              ],
+              "finished_at": "2026-09-24T12:58:02.009887+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:57:53.554031+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "10a6b\n--> a1506b32a9ba\nSTEP 16/16: CMD [\"uvicorn\", \"forge.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8420\"]\n--> Using cache fb348b53476ffbfc4e8498f8f87aa5f0d2474a957f5f5bdb3ce0a8bd20921f5f\nCOMMIT localhost/forge:dev\n--> fb348b53476f\nSuccessfully tagged localhost/forge:dev\nSuccessfully tagged localhost/forge:pre-r3708-20260924T125753Z\nfb348b53476ffbfc4e8498f8f87aa5f0d2474a957f5f5bdb3ce0a8bd20921f5f",
+              "wall_seconds": 8.456
+            }
+          ],
+          "description": "podman build localhost/forge:dev from the repo (Containerfile) \u2014 the working tree carries the #288 dispatch envelope the promoted release predates",
+          "receipt_id": "r3708-03d9222d539a",
+          "result": "ok",
+          "step": "build"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "stop",
+                "forge-worker",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:58:08.126098+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:02.009987+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker\nforge-app",
+              "wall_seconds": 6.116
+            }
+          ],
+          "description": "stop the consumers only (postgres/redis/litellm untouched)",
+          "receipt_id": "r3708-f07987bab306",
+          "result": "ok",
+          "step": "stop"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "run",
+                "--rm",
+                "--network",
+                "podman",
+                "-e DATABASE_URL=***",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.migrate"
+              ],
+              "finished_at": "2026-09-24T12:58:10.658787+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:08.126272+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-migrate: schema is up to date",
+              "wall_seconds": 2.533
+            }
+          ],
+          "description": "python -m forge.migrate on the NEW image before consumers start (027 -> 027)",
+          "receipt_id": "r3708-fbbbfe34b2bb",
+          "result": "ok",
+          "step": "migrate"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-app"
+              ],
+              "finished_at": "2026-09-24T12:58:10.889228+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:10.658898+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-app",
+              "wall_seconds": 0.23
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-app",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-p",
+                "0.0.0.0:8420:8420",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e container=***",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e REDIS_URL=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e LITELLM_URL=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e HOME=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "localhost/forge:dev",
+                "uvicorn",
+                "forge.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8420"
+              ],
+              "finished_at": "2026-09-24T12:58:11.060823+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:10.889292+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "bc90a10cafa55a2bb3aa78763536c2e67e90a6e10046cd2a04c758dc864edc64",
+              "wall_seconds": 0.172
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-35ebf860f7e8",
+          "result": "ok",
+          "step": "recreate-forge-app"
+        },
+        {
+          "commands": [
+            {
+              "argv": [
+                "rm",
+                "forge-worker"
+              ],
+              "finished_at": "2026-09-24T12:58:11.229472+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:11.060913+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "forge-worker",
+              "wall_seconds": 0.169
+            },
+            {
+              "argv": [
+                "run",
+                "-d",
+                "--name",
+                "forge-worker",
+                "--network",
+                "podman",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets:/app/.secrets",
+                "-v",
+                "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data:/app/data",
+                "-e FORGE_MCP_KEY=***",
+                "-e FORGE_GITHUB_TOKEN=***",
+                "-e FORGE_HARNESS_TIMEOUT_SECONDS=***",
+                "-e FORGE_HARNESS_MODEL=***",
+                "-e FORGE_GITHUB_ENABLED=***",
+                "-e FORGE_DISCOVERY_ENABLED=***",
+                "-e FORGE_VERIFICATION_GRACE_SECONDS=***",
+                "-e FORGE_STEERING_ENABLED=***",
+                "-e FORGE_MCP_ENABLED=***",
+                "-e FORGE_BUDGET_PROFILES={\"trivial\":{\"max_calls\":8,\"max_tokens\":40000,\"wallclock_s\":900},\"standard\":{\"max_calls\":40,\"max_tokens\":200000,\"wallclock_s\":3600},\"heavy\":{\"max_calls\":120,\"max_tokens\":600000,\"wallclock_s\":10800}}",
+                "-e FORGE_AZDO_WEBHOOK_PASSWORD=***",
+                "-e GITLAB_URL=***",
+                "-e FORGE_AZDO_BOT_NAME=***",
+                "-e FORGE_CAPTURE_DIR=***",
+                "-e FORGE_GITHUB_WEBHOOK_SECRET=***",
+                "-e REDIS_URL=***",
+                "-e DATABASE_URL=***",
+                "-e FORGE_ADAPTIVE_COMMANDS_ENABLED=***",
+                "-e FORGE_BOT_TOKEN=***",
+                "-e FORGE_LANE_CONTROL_SECRET=***",
+                "-e FORGE_MAX_COMMIT_CYCLES=3",
+                "-e FORGE_HARNESS_PREFERENCE=***",
+                "-e FORGE_APPROVERS=***",
+                "-e FORGE_GITHUB_INSTALLATION_ID=***",
+                "-e FORGE_LANE_CONTROL_URL=***",
+                "-e FORGE_IMPLEMENTER_BACKEND=***",
+                "-e LITELLM_URL=***",
+                "-e FORGE_LANE_BUDGET_SECONDS=1800",
+                "-e GITLAB_TOKEN=***",
+                "-e FORGE_MCP_ALLOWED_HOSTS=***",
+                "-e HOME=***",
+                "-e FORGE_CONTROL_MAILBOX=***",
+                "-e FORGE_BOT_USERNAME=***",
+                "-e container=***",
+                "-e ZAI_API_KEY=***",
+                "-e FORGE_REQUIRED_JOBS=***",
+                "-e FORGE_AZDO_APPROVERS=***",
+                "-e FORGE_AZDO_ORG_URL=***",
+                "-e FORGE_GITHUB_PRIVATE_KEY=***",
+                "-e FORGE_AZDO_ENABLED=***",
+                "-e FORGE_GITHUB_APP_ID=***",
+                "-e FORGE_AZDO_LANE_PIPELINE_ID=***",
+                "-e FORGE_GITHUB_HARNESS_WORKFLOW=***",
+                "-e GITLAB_WEBHOOK_SECRET=***",
+                "-e FORGE_AZDO_PAT=***",
+                "-e FORGE_AZDO_WEBHOOK_USERNAME=***",
+                "-e FORGE_MCP_SCOPED_TOKENS=***",
+                "-e FORGE_LANE_GRACE_SECONDS=60",
+                "localhost/forge:dev",
+                "python",
+                "-m",
+                "forge.worker"
+              ],
+              "finished_at": "2026-09-24T12:58:11.422794+00:00",
+              "returncode": 0,
+              "started_at": "2026-09-24T12:58:11.229547+00:00",
+              "stderr_tail": "",
+              "stdout_tail": "280489174f1c3f3031bd7d3536af7536adcf3f9139947265445dd4b86eff1fe6",
+              "wall_seconds": 0.193
+            }
+          ],
+          "description": "remove the stopped consumer, then podman run with the OBSERVED config plus the budget caps",
+          "receipt_id": "r3708-def287383b72",
+          "result": "ok",
+          "step": "recreate-forge-worker"
+        },
+        {
+          "checks": {
+            "budget caps numerical": {
+              "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical on both consumers",
+              "observed": {
+                "forge-app": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                },
+                "forge-worker": {
+                  "FORGE_BUDGET_PROFILES": "present+numerical",
+                  "FORGE_LANE_BUDGET_SECONDS": "present+numerical"
+                }
+              },
+              "result": "match"
+            },
+            "controlplane.version == repo __version__": {
+              "expected": "0.36.0",
+              "observed": "0.36.0",
+              "result": "match"
+            },
+            "health.status": "ok",
+            "schema == repo chain head": {
+              "expected": "027",
+              "observed": "027",
+              "result": "match"
+            }
+          },
+          "description": "/health reports the repo version, schema at the repo head, numerical caps on both consumers",
+          "receipt_id": "r3708-52e6f7bcfdd8",
+          "result": "aligned",
+          "step": "verify"
+        }
+      ]
+    }
+  ],
+  "stamp": "forge.lab.alignment/1",
+  "steps": []
+}

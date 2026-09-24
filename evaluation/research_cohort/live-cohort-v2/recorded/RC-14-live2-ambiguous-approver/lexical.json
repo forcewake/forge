@@ -1,0 +1,179 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-14-live2-ambiguous-approver",
+  "mode": "lexical",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 833,
+          "output_lower_bound": 2891,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.024794,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 833,
+            "output_tokens": 2891,
+            "charged_input_tokens": 833,
+            "charged_output_tokens": 2891,
+            "usage_known": true,
+            "usd_estimated": 0.024794,
+            "running_usd_estimated": 0.173806
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Inspect orders-api to locate where refund requests enter the manual approval step and how that step is routed today; no routing decision is made in this pass."
+      },
+      {
+        "step_id": "S2",
+        "objective": "BLOCKING: ask the requester/maintainers to name whoever performs approvals for orders-api and the target to route them; do not proceed to S3 without an answer."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Route refund requests that reach the manual approval step to the approver confirmed in S2, introducing no approver defaults or silent fallbacks."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Verify the routing reconciles with the current billing-policy revision F-2024-11 (final revision block of src/policy/refunds.py) and document the approver's source of authority."
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "README.md",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "C1",
+        "text": "The current refund approval policy is revision F-2024-11.",
+        "repo": "billing-policy",
+        "path": "README.md",
+        "line": 7,
+        "asserted_content": "The CURRENT refund approval policy (revision F-2024-11) lives in the"
+      },
+      {
+        "claim_id": "C2",
+        "text": "The current refund approval policy lives in the final revision block of src/policy/refunds.py.",
+        "repo": "billing-policy",
+        "path": "README.md",
+        "line": 8,
+        "asserted_content": "final revision block of `src/policy/refunds.py`; the F-2023/F-2024-02"
+      },
+      {
+        "claim_id": "C3",
+        "text": "billing-policy documents read-only access to its refund policy decisions via refund_status; the shown bytes name no approver.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 9,
+        "asserted_content": "\"\"\"Read-only access to Billing's refund policy decisions.\"\"\""
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Who performs the manual approval step for orders-api refund requests (person, team, or role)?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What routing target (queue, address, or assignment field) should receive manual-approval refund requests once the approver is named?"
+      },
+      {
+        "question_id": "q3",
+        "text": "Where in orders-api is the manual-approval branch for refunds and its routing configured?"
+      }
+    ],
+    "assumptions": [],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 833,
+        "output_lower_bound": 2891,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.024794,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 833,
+          "output_tokens": 2891,
+          "charged_input_tokens": 833,
+          "charged_output_tokens": 2891,
+          "usage_known": true,
+          "usd_estimated": 0.024794,
+          "running_usd_estimated": 0.173806
+        }
+      ]
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.024794,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

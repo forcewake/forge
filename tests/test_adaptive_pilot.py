@@ -1131,3 +1131,76 @@ def test_usage_ledger_rows_label_unknown_costs_never_zero() -> None:
         pilot_module.usage_ledger_document("", source="s")
     with pytest.raises(PilotError, match="named source"):
         pilot_module.usage_ledger_document("a4", source=" ")
+
+
+# ---------------------------------------------------------------------------
+# R37-12 (#293): the budget-overrun stop rule + the all-attempt spend fold
+# ---------------------------------------------------------------------------
+
+
+def test_spend_total_usd_folds_every_attempt_and_degrades_to_unknown() -> None:
+    tracker = _tracker_with_tasks(
+        (
+            _record(
+                "PT-a",
+                "2026-10-21T09:00:00+00:00",
+                attempts=(
+                    AttemptUsage("a1", accepted=True, spend_usd=1.0),
+                    AttemptUsage("a2", accepted=False, spend_usd=0.5),
+                ),
+            ),
+        )
+    )
+    # Unaccepted attempts' spend counts — the all-attempt fold.
+    assert tracker.spend_total_usd == 1.5
+
+    unknown = _tracker_with_tasks(
+        (
+            _record(
+                "PT-b",
+                "2026-10-21T09:30:00+00:00",
+                attempts=(
+                    AttemptUsage("a1", accepted=True, spend_usd=1.0),
+                    AttemptUsage("a2", spend_usd=None),
+                ),
+            ),
+        )
+    )
+    assert unknown.spend_total_usd is None  # unknown, never zero
+    assert tracker.spend_total_usd is not None  # a full-known tracker stays known
+
+
+def test_budget_overrun_stops_the_pilot_and_preserves_diagnostics() -> None:
+    tracker = _tracker_with_tasks((_record("PT-c", "2026-10-21T09:00:00+00:00", accepted=False),))
+    tracker.record_budget_overrun(
+        detail="recorded spend 30.0 USD passed the agreed cap 25.0 USD", task_id="PT-c"
+    )
+    decision = evaluate_stop(tracker, as_of="2026-11-18")
+    assert decision.decision == DECISION_STOP
+    assert "budget overrun" in decision.reasons[0]
+    assert tracker.diagnostics is not None
+    assert decision.diagnostics_pointer == tracker.diagnostics.pointer
+    # A stopped pilot refuses further recording — never silently retried.
+    with pytest.raises(PilotError, match="cannot record task"):
+        tracker.record_task(_record("PT-d", "2026-10-21T10:00:00+00:00"))
+
+
+def test_budget_overrun_replays_from_the_snapshot_exactly() -> None:
+    records = (
+        _record(
+            "PT-e",
+            "2026-10-21T09:00:00+00:00",
+            attempts=(AttemptUsage("a1", accepted=True, spend_usd=30.0),),
+        ),
+    )
+    tracker = _tracker_with_tasks(records)
+    tracker.record_budget_overrun("cap passed", task_id="PT-e")
+    decision = evaluate_stop(tracker, as_of="2026-11-18")
+    assert decision.decision == DECISION_STOP
+    snapshot = tracker.snapshot_document()
+    rebuilt = pilot_module.tracker_from_snapshot(
+        tracker.spec, snapshot, stop_reason=tracker.diagnostics.stop_reason
+    )
+    assert [v.kind for v in rebuilt.violations] == [v.kind for v in tracker.violations]
+    assert rebuilt.diagnostics is not None and tracker.diagnostics is not None
+    assert rebuilt.diagnostics.pointer == tracker.diagnostics.pointer

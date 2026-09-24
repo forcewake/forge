@@ -11,6 +11,24 @@
 # which also filters on $FORGE_HARNESS_DRIVER (ADR-0023 §7): a repo that
 # includes several forge templates runs exactly one lane (driver: claude-code).
 #
+# Dispatched pipeline variables (R37-07 / issue #288 — the dispatch
+# envelope; GitLab exports every pipeline variable into the job env, so
+# each step below sees them without further plumbing):
+#   FORGE_RUN_ID / FORGE_ISSUE_IID / FORGE_ISSUE_TITLE / FORGE_PLAN /
+#   FORGE_HARNESS_MODEL / FORGE_HARNESS_DRIVER / FORGE_ATTEMPT_BASE  (the
+#     frozen brief, ADR-0015 §5)
+#   FORGE_LANE_RESUME ("1" | "restart" | "") + FORGE_LANE_RESUME_MODE
+#     (fresh|required|restart) — the WIP-continuity contract the dispatch
+#     selected. This BATCH lane (a scripted `claude -p` call, no
+#     forge.lane_driver process) cannot restore a held checkpoint: a
+#     `required` resume REFUSES below (infrastructure/config — zero model
+#     turns), never silently re-implements over discarded WIP. `fresh` and
+#     `restart` proceed (neither restores anything). Exact-resume support
+#     lives in the SDK lane templates (claude-sdk-lane and siblings).
+#   FORGE_LANE_CONTROL_URL / FORGE_LANE_CONTROL_TOKEN — the lane-control
+#     dial-out pair. Inert in this batch lane (no steering consumer);
+#     carried for envelope parity and never a control-plane root secret.
+#
 # Required project CI variables (masked/protected per policy; forge stores
 # none of them — ADR-0015 §4):
 #   ANTHROPIC_AUTH_TOKEN   harness API key (never forge's)
@@ -77,6 +95,17 @@ forge-agent:
     - git fetch origin "$CI_COMMIT_REF_NAME" || git fetch origin || true
     - git checkout --detach "$FORGE_ATTEMPT_BASE"
   script:
+    # R37-07 (#288): the WIP-continuity contract gate. A `required` resume
+    # (FORGE_LANE_RESUME=1) names a held checkpoint this batch lane has NO
+    # mechanism to restore — running anyway would silently discard the
+    # operator's authorized WIP. Refuse BEFORE any vendor call
+    # (infrastructure/config, never code repair — the classifier reads the
+    # marker below); `fresh` and `restart` restore nothing and proceed.
+    - |
+      if [ "${FORGE_LANE_RESUME:-}" = "1" ]; then
+        echo "FORGE_BOOTSTRAP_FAILED: this batch lane (claude-code) cannot restore WIP — the dispatch demanded a REQUIRED resume (FORGE_LANE_RESUME=1, mode ${FORGE_LANE_RESUME_MODE:-required}) but only the SDK lane templates run forge.lane_driver's checkpoint restore. Re-dispatch with an SDK lane driver (claude-sdk-lane) or restart explicitly (infrastructure/config, never code repair)"
+        exit 1
+      fi
     # Live visibility: the compacted agent-event stream (tool calls,
     # thinking, API errors, retries, final result) flows into the job trace
     # while the harness works — GitLab tails job traces live. The full

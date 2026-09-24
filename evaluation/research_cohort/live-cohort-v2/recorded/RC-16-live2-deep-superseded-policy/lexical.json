@@ -1,0 +1,202 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-16-live2-deep-superseded-policy",
+  "mode": "lexical",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 848,
+          "output_lower_bound": 2349,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.020488,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 848,
+            "output_tokens": 2349,
+            "charged_input_tokens": 848,
+            "charged_output_tokens": 2349,
+            "usage_known": true,
+            "usd_estimated": 0.020488,
+            "running_usd_estimated": 0.469674
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "In billing-policy src/policy/refunds.py, locate the F-2024-11 finance revision block (below the superseded F-2023/F-2024-02 head) and quote its exact approval window verbatim with line numbers."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Resolve REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS to its F-2024-11 value and confirm the boundary operator at src/policy/refunds.py:230 (int(amount_cents) >= threshold)."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Verify src/policy/client.py maps the CURRENT revision's decision onto manual_review/auto_capture wire statuses without exposing the numeric threshold (lines 14-21)."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Confirm orders-api src/checkout.py consumes only the manual_review status and defers threshold/approver to policy (lines 38-42)."
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "why": "claim"
+      },
+      {
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "C1",
+        "text": "Manual approval is triggered by comparing the refund amount against the REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS constant; approval applies when amount_cents >= threshold.",
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 228,
+        "asserted_content": "def requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS"
+      },
+      {
+        "claim_id": "C2",
+        "text": "The policy client maps the CURRENT policy revision's decision onto wire statuses; the threshold value never leaves the service as a number.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 14,
+        "asserted_content": "Maps the CURRENT policy revision's decision onto the wire\n        statuses consumers route on: ``manual_review`` or\n        ``auto_capture``. The threshold itself never leaves this\n        service as a number \u2014 consumers route on the status."
+      },
+      {
+        "claim_id": "C3",
+        "text": "Decision-to-status mapping: manual_approval maps to manual_review; any other decision falls back to auto_capture.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 19,
+        "asserted_content": "decision = refunds.decide(amount_cents)\n        return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\n            decision.decision, \"auto_capture\"\n        )"
+      },
+      {
+        "claim_id": "C4",
+        "text": "orders-api checkout routes on the manual_review status only; the amount threshold and approver are not decided in checkout.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 40,
+        "asserted_content": "if status == \"manual_review\":\n            # Finance requires an approval step for large refunds, but the\n            # amount threshold and the approver are NOT decided in this"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "What exact amount_cents window does the F-2024-11 finance revision set for REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS, and at which line of src/policy/refunds.py is it defined?"
+      },
+      {
+        "question_id": "q2",
+        "text": "Which line ranges of src/policy/refunds.py contain the superseded F-2023 and F-2024-02 revisions versus the current F-2024-11 revision, so citations exclude the superseded head?"
+      },
+      {
+        "question_id": "q3",
+        "text": "Does F-2024-11 alter the boundary semantics (>= vs >) or the approver routing relative to the superseded F-2024-02 revision?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Snapshots are frozen at the provided source OIDs for billing-policy and orders-api; docs-site is out of scope for this confirmation."
+      },
+      {
+        "text": "The threshold constant is resolved entirely within billing-policy src/policy/refunds.py, consistent with client.py stating the threshold never leaves the service as a number."
+      },
+      {
+        "text": "The effective numeric threshold cannot be cited from the evidence shown in this pass and must be sourced from the F-2024-11 revision text before any threshold value is asserted."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 848,
+        "output_lower_bound": 2349,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.020488,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 848,
+          "output_tokens": 2349,
+          "charged_input_tokens": 848,
+          "charged_output_tokens": 2349,
+          "usage_known": true,
+          "usd_estimated": 0.020488,
+          "running_usd_estimated": 0.469674
+        }
+      ]
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.020488,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

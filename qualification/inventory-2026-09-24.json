@@ -1,0 +1,232 @@
+{
+  "compatibility_verdict": {
+    "checks": [
+      {
+        "check": "control-plane.version == pinned release",
+        "expected": "0.36.0",
+        "observed": "0.36.0",
+        "resolution": "runbook \u00a73 step 2 \u2014 pull the promoted image digest and recreate forge-app + forge-worker via podman (NOT docker-compose)",
+        "result": "match"
+      },
+      {
+        "check": "control-plane.image_digest == promoted image digest",
+        "expected": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
+        "observed": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+        "resolution": "runbook \u00a73 step 2 \u2014 pin ghcr.io/forcewake/forge@<promoted digest>, not localhost/forge:dev",
+        "result": "mismatch"
+      },
+      {
+        "check": "schema at repo chain head",
+        "expected": "027",
+        "observed": "027",
+        "resolution": "runbook \u00a73 step 3 \u2014 python -m forge.migrate on the new image BEFORE the consumers start (026 -> 027)",
+        "result": "match"
+      },
+      {
+        "check": "lane template pinned to the promoted release",
+        "expected": "v0.36.0",
+        "observed": "v0.36.0",
+        "resolution": "runbook \u00a75 \u2014 refresh the project's .gitlab-ci.yml remote includes to the v<promoted> tag refs",
+        "result": "match"
+      },
+      {
+        "check": "installed lane wheel observable",
+        "expected": "forge==0.36.0 in the lane venv",
+        "observed": "lane venv /tmp/forge-lane-venv absent on this host \u2014 the lane installs per CI job on the runner; observe it there or via the next install-check",
+        "resolution": "runbook \u00a76 \u2014 observe the lane wheel on the runner (or via the qualification install-check) and record it in the next profile record",
+        "result": "unverified"
+      },
+      {
+        "check": "numerical budget caps configured",
+        "expected": "all of FORGE_BUDGET_PROFILES, FORGE_LANE_BUDGET_SECONDS numerical",
+        "observed": "present and numerical",
+        "resolution": "runbook \u00a74 \u2014 append the FORGE_BUDGET_PROFILES / FORGE_LANE_BUDGET_SECONDS block to .env and recreate the containers",
+        "result": "match"
+      }
+    ],
+    "derived_from": "the intended profile vs the stages' observed facts",
+    "verdict": "misaligned"
+  },
+  "generated_at": "2026-09-24T13:19:39.649801+00:00",
+  "intended_profile": {
+    "image_digest": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
+    "release_version": "0.36.0",
+    "required_caps": [
+      "FORGE_BUDGET_PROFILES",
+      "FORGE_LANE_BUDGET_SECONDS"
+    ],
+    "schema_head": "027",
+    "source": "docs/releases/evidence/v0.36.0/promotion.json",
+    "wheel_sha256": "4ecd680afeb7b23301d079ff06386e91dd5c9b5756560ca88c8db8c2941b2005",
+    "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.36.0/forge-0.36.0-py3-none-any.whl"
+  },
+  "read_only": true,
+  "stages": {
+    "caps": {
+      "caps_present_and_numerical": true,
+      "containers": {
+        "forge-app": {
+          "caps": {
+            "FORGE_BUDGET_PROFILES": {
+              "numerical": true,
+              "present": true,
+              "profiles": {
+                "heavy": {
+                  "axes": {
+                    "max_calls": 120,
+                    "max_tokens": 600000,
+                    "wallclock_s": 10800
+                  },
+                  "numerical": true
+                },
+                "standard": {
+                  "axes": {
+                    "max_calls": 40,
+                    "max_tokens": 200000,
+                    "wallclock_s": 3600
+                  },
+                  "numerical": true
+                },
+                "trivial": {
+                  "axes": {
+                    "max_calls": 8,
+                    "max_tokens": 40000,
+                    "wallclock_s": 900
+                  },
+                  "numerical": true
+                }
+              }
+            },
+            "FORGE_LANE_BUDGET_SECONDS": {
+              "numerical": true,
+              "present": true
+            }
+          },
+          "status": "observed"
+        },
+        "forge-worker": {
+          "caps": {
+            "FORGE_BUDGET_PROFILES": {
+              "numerical": true,
+              "present": true,
+              "profiles": {
+                "heavy": {
+                  "axes": {
+                    "max_calls": 120,
+                    "max_tokens": 600000,
+                    "wallclock_s": 10800
+                  },
+                  "numerical": true
+                },
+                "standard": {
+                  "axes": {
+                    "max_calls": 40,
+                    "max_tokens": 200000,
+                    "wallclock_s": 3600
+                  },
+                  "numerical": true
+                },
+                "trivial": {
+                  "axes": {
+                    "max_calls": 8,
+                    "max_tokens": 40000,
+                    "wallclock_s": 900
+                  },
+                  "numerical": true
+                }
+              }
+            },
+            "FORGE_LANE_BUDGET_SECONDS": {
+              "numerical": true,
+              "present": true
+            }
+          },
+          "status": "observed"
+        }
+      },
+      "required": [
+        "FORGE_BUDGET_PROFILES",
+        "FORGE_LANE_BUDGET_SECONDS"
+      ],
+      "status": "observed"
+    },
+    "control-plane": {
+      "components": {
+        "database": "ok",
+        "dlq_depth": "3",
+        "litellm": "ok",
+        "queue_depth": "0",
+        "redis": "ok"
+      },
+      "health_status": "ok",
+      "health_url": "http://localhost:8420/health",
+      "image": {
+        "container": "forge-app",
+        "image_digest": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+        "image_name": "localhost/forge:dev",
+        "status": "observed"
+      },
+      "reported_version": "0.36.0",
+      "status": "observed"
+    },
+    "lane": {
+      "installed_lane_wheel": {
+        "reason": "lane venv /tmp/forge-lane-venv absent on this host \u2014 the lane installs per CI job on the runner; observe it there or via the next install-check",
+        "status": "refused"
+      },
+      "installed_template": {
+        "content_sha256": "49c604df4abddf23a13ec778d708bd3f8cb83fb5be695489528f9c07cb8282bc",
+        "include_refs": [
+          "v0.36.0"
+        ],
+        "last_commit_id": "4fde219030ece0d22897737938274d74f76a4016",
+        "path": ".gitlab-ci.yml",
+        "project_id": 68,
+        "ref": "main",
+        "status": "observed"
+      },
+      "pinned_wheel": {
+        "release_version": "0.36.0",
+        "sha256": "4ecd680afeb7b23301d079ff06386e91dd5c9b5756560ca88c8db8c2941b2005",
+        "source": "docs/releases/evidence/v0.36.0/promotion.json",
+        "url": "https://github.com/forcewake/forge/releases/download/v0.36.0/forge-0.36.0-py3-none-any.whl"
+      },
+      "status": "observed"
+    },
+    "runner": {
+      "containers": [
+        {
+          "container": "forge-worker",
+          "image_digest": "sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78",
+          "image_name": "localhost/forge:dev",
+          "status": "observed"
+        }
+      ],
+      "gitlab_runners": {
+        "runners": [
+          {
+            "active": false,
+            "description": "forge-lab runner (podman docker executor)",
+            "id": 3,
+            "status": "stale"
+          },
+          {
+            "active": true,
+            "description": "unraid",
+            "id": 4,
+            "status": "online"
+          }
+        ],
+        "status": "observed"
+      },
+      "status": "observed"
+    },
+    "schema": {
+      "deployed_head": "027",
+      "method": "podman exec forge-postgres psql (read-only SELECT on alembic_version)",
+      "repo_chain_head": "027",
+      "status": "observed"
+    }
+  },
+  "stamp": "forge.lab.inventory/1"
+}

@@ -1,0 +1,570 @@
+{
+  "drills": [
+    {
+      "achieved_objectives": [
+        "open leases NEVER exceeded the deployment's observed limit of 3 (peak observed 3 across 4 concurrent dispatch cycles)",
+        "the load actually exercised occupancy (cycles observed holding slots)",
+        "sustained overload produced a TYPED park verdict (bounded queueing or a clear refusal), never silent oversubscription \u2014 parked: ['parked_execution_capacity']",
+        "queue wait measured SEPARATELY from execution for every cycle (4/4 cycles carry a queue-wait measurement)",
+        "execution measured only over the slot's own window for every dispatched cycle (3/3)",
+        "uncertain occupancy stayed VISIBLE while the reconciler had not yet observed the native jobs (words seen: ['dispatched_unknown', 'native_running']) and resolved by observation, never by an assumed answer",
+        "the LOST cancel response changed nothing on its own \u2014 the run's lease stayed accounted after the dropped answer (before: 'native_running', after: 'native_running')",
+        "the failed-cancel leg (job-level cancel of an ALREADY-completed job) changed NOTHING \u2014 the provider answered:201 and the job stayed 'success' \u2014 a completed job's cancel releases no capacity",
+        "after every native job was cancelled job-level, the deployment's own reconciler drained the project to ZERO open leases within 300.0s (waited 20.4s)"
+      ],
+      "drill": "deployment_remote_occupancy",
+      "lane_notes": [
+        "slow-ack: 9.796s received\u2192applied",
+        "failed-cancel leg: job 754 (success) \u2192 answered:201 (job still success)"
+      ],
+      "outcome": "pass",
+      "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+      "signals": {
+        "cycle_end_states": {
+          "0": {
+            "detail": "pipeline 409, lane job 755 (pending) on runner 4 (unraid)",
+            "state": "dispatched"
+          },
+          "1": {
+            "detail": "pipeline 411, lane job 757 (pending) on runner 4 (unraid)",
+            "state": "dispatched"
+          },
+          "2": {
+            "detail": "pipeline 412, lane job 758 (pending) on runner 4 (unraid)",
+            "state": "dispatched"
+          },
+          "3": {
+            "detail": "execution_capacity: no execution slot free in this project \u2014 retry once the running work drains",
+            "state": "parked_execution_capacity"
+          }
+        },
+        "drained_after_s": 20.4,
+        "execution.occupied_vs_limit": {
+          "cycles": 4,
+          "dispatched": 3,
+          "limit": 3,
+          "parked": [
+            "parked_execution_capacity"
+          ],
+          "peak_occupied": 3
+        },
+        "execution_s": {
+          "per_cycle": {
+            "0": 3.007,
+            "1": 2.594,
+            "2": 1.96
+          }
+        },
+        "native.occupancy_unknown": {
+          "failed_cancel_leg": {
+            "exercised": true,
+            "status_after": "success",
+            "status_before": "success",
+            "verdict": "answered:201"
+          },
+          "lost_response_leg": {
+            "lease_after_drop": "native_running",
+            "lease_before": "native_running",
+            "run_id": "b05e7708a6714b899997dd93454fd3bb"
+          },
+          "occupancy_words_seen": [
+            "dispatched_unknown",
+            "native_running"
+          ],
+          "unknown_held_visible": true
+        },
+        "queue_wait_s": {
+          "max": 3.34,
+          "per_cycle": {
+            "0": 0.591,
+            "1": 1.212,
+            "2": 1.817,
+            "3": 3.34
+          }
+        }
+      },
+      "slow_control_ack": {
+        "ack_statuses": [
+          200,
+          200,
+          200,
+          200
+        ],
+        "applied_at": "2026-09-24 14:58:56.094012+00",
+        "command_id": "cmd-caaa6d14d582",
+        "exercised": true,
+        "received_at": "2026-09-24 14:58:46.297782+00",
+        "received_to_applied_s": 9.796,
+        "slow_ack_delay_s": 8.0,
+        "work_id": "b05e7708a6714b899997dd93454fd3bb"
+      },
+      "tested_limits": {
+        "cycles": 4,
+        "native_jobs": "REAL on the lab runner, cancelled job-level immediately after observation",
+        "observed_limit": 3,
+        "reconcile_timeout_s": 300.0,
+        "sample_interval_s": 3.0
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "every work whose verified read works in the deployment's store ALSO resolves in the disposable restore (9/9 verified; 0 already unavailable in the source and preserved as unavailable; fidelity broken: none)",
+        "every PINNED checkpoint either resolves after the restore (2/2 verified) or was ALREADY unavailable in the backed-up source (0 preserved as unavailable); fidelity broken: 0",
+        "the mismatched halves were DETECTED before any restore (1 affected checkpoint(s))",
+        "the mismatched restore REFUSED with the typed BackupMismatchError listing the affected works \u2014 never silently accepted",
+        "the refused restore wrote NOTHING into the target"
+      ],
+      "disposable_database_restore": {
+        "database": "forge_ops_restore",
+        "exercised": true,
+        "finding": "the deployment's checkpoint_metadata carries row(s) whose CAS bytes are absent \u2014 a backup of BOTH halves refuses typed on restore (detect-missing-bytes observed on the real data; the row predates this deployment's live work)",
+        "mismatch_affected_works": [
+          "wp-q35-03"
+        ],
+        "mismatch_refused": true
+      },
+      "drill": "deployment_backup_restore",
+      "metadata_rows_read_only_count": 1,
+      "outcome": "pass",
+      "pg_dump": {
+        "bytes": 2401,
+        "note": "read-only pg_dump of the checkpoint metadata (no container stop)",
+        "path": "checkpoint-metadata.dump",
+        "sha256": "235ab47420f6214eb989152b716553c9cfd3fa35436e9a37612a4a81336ab392"
+      },
+      "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+      "signals": {
+        "backup_seconds": 0.172,
+        "checkpoint.reachability": {
+          "checkpoints": 9,
+          "metadata_rows": 0,
+          "mismatch_affected_works": [
+            "wp-deploy-mismatch"
+          ],
+          "mismatch_detected": true,
+          "mismatch_refused": true,
+          "pg_dump_captured": true,
+          "pins": 2,
+          "pins_resolved": 2,
+          "pins_source_unavailable": 0,
+          "works": 9,
+          "works_resolved": 9,
+          "works_source_unavailable": []
+        },
+        "restore_seconds": 0.152
+      },
+      "tested_limits": {
+        "mismatch_shape": "metadata naming a checkpoint the blob half lacks",
+        "source": "the deployment's real CAS volume (read-only backup_store snapshot)",
+        "target": "a disposable restore root (plus a disposable database when supplied)"
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "NO control-plane root credential name appears in the model-facing variable set of the recorded dispatch (7 variables; leaks: none)",
+        "the dispatch envelope carries NO credential-shaped variable beyond the work-scoped lane token (extra: none)",
+        "the dispatch carried the work-scoped, attempt-scoped lane credential (token_dispatched) and nothing else credential-shaped",
+        "the dispatched credential is GENERATION-scoped (attempt_generation=0 recorded in the envelope)",
+        "every egress/credential deny probe observed ACTUAL denial on the live deployment (3/3 denied; violations: none)"
+      ],
+      "drill": "deployment_credential_isolation",
+      "envelope_source": "docs/evaluation/2026-09-24-live-single-writer/live-run-evidence.json",
+      "outcome": "pass",
+      "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+      "signals": {
+        "attempt_generation": 0,
+        "control_plane_root_names_checked": [
+          "DATABASE_URL",
+          "FORGE_AZDO_PAT",
+          "FORGE_BOT_TOKEN",
+          "FORGE_GITHUB_PRIVATE_KEY",
+          "FORGE_GITHUB_TOKEN",
+          "FORGE_LANE_CONTROL_SECRET",
+          "FORGE_MCP_KEY",
+          "FORGE_MCP_SCOPED_TOKENS",
+          "GITLAB_TOKEN",
+          "REDIS_URL"
+        ],
+        "credential_names_on_control_plane": [
+          "FORGE_AZDO_PAT",
+          "FORGE_AZDO_WEBHOOK_PASSWORD",
+          "FORGE_BOT_TOKEN",
+          "FORGE_GITHUB_PRIVATE_KEY",
+          "FORGE_GITHUB_TOKEN",
+          "FORGE_GITHUB_WEBHOOK_SECRET",
+          "FORGE_LANE_CONTROL_SECRET",
+          "FORGE_MCP_KEY",
+          "FORGE_MCP_SCOPED_TOKENS",
+          "GITLAB_TOKEN",
+          "GITLAB_WEBHOOK_SECRET",
+          "GPG_KEY",
+          "ZAI_API_KEY"
+        ],
+        "credential_shaped_beyond_lane_token": [],
+        "deny_probes": [
+          {
+            "detail": "answered 422",
+            "name": "lane-control with the MCP master key (FORGE_MCP_KEY)",
+            "outcome": "denied-other-status",
+            "presented": "the MCP master key (FORGE_MCP_KEY)",
+            "status_code": 422,
+            "url": "http://localhost:8420/lane/controls"
+          },
+          {
+            "detail": "answered 422",
+            "name": "lane-control with the root model broker key (ZAI_API_KEY)",
+            "outcome": "denied-other-status",
+            "presented": "the root model broker key (ZAI_API_KEY)",
+            "status_code": 422,
+            "url": "http://localhost:8420/lane/controls"
+          },
+          {
+            "detail": "answered 422",
+            "name": "lane-control with the GitLab root token (GITLAB_TOKEN)",
+            "outcome": "denied-other-status",
+            "presented": "the GitLab root token (GITLAB_TOKEN)",
+            "status_code": 422,
+            "url": "http://localhost:8420/lane/controls"
+          }
+        ],
+        "model_facing_variable_keys": [
+          "FORGE_LANE_RESUME_MODE",
+          "FORGE_LANE_RESUME",
+          "FORGE_RESUME_CHECKPOINT",
+          "FORGE_ATTEMPT_GENERATION",
+          "FORGE_CONTINUATION_DECISION_ID",
+          "FORGE_LANE_CONTROL_URL",
+          "FORGE_LANE_CONTROL_TOKEN"
+        ],
+        "token_dispatched": true
+      },
+      "tested_limits": {
+        "control_plane_env": "container env NAMES only (podman inspect, read-only)",
+        "deny_probes": "the #296 executor probe pattern against the live surfaces",
+        "envelope_source": "the recorded dispatch envelope of the live run (#288 journal)"
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "storage pressure answered with the TYPED quota refusal and left the store byte-identical (no entry, no partial checkpoint)",
+        "a fake 429 lane outcome is classified TRANSIENT by the app's own classifier ('transient') \u2014 throttling is retry-shaped, never fatal",
+        "the first throttled death parked blocked with a SCHEDULED bounded revival (state blocked, revival count 1/2)",
+        "the exhausted budget NEVER schedules another revival (count stays 2/2; sustained throttling degrades to a clear blocked reason, never an infinite retry)",
+        "the retry ladder is bounded and monotone ([60, 120, 240, 480], ceiling 900s)",
+        "the app's configured revive budget resolves to 2",
+        "the slow control ACK's received\u2192applied window is MEASURED through the app's real endpoints and inside the 60.0s objective (9.796s)",
+        "the app stayed healthy through every degraded mode \u2014 the publication/cancellation fences were never disabled"
+      ],
+      "drill": "deployment_degraded_modes",
+      "outcome": "pass",
+      "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+      "signals": {
+        "control.received_to_applied": {
+          "ack_statuses": [
+            200,
+            200,
+            200,
+            200
+          ],
+          "applied_at": "2026-09-24 14:58:56.094012+00",
+          "command_id": "cmd-caaa6d14d582",
+          "exercised": true,
+          "received_at": "2026-09-24 14:58:46.297782+00",
+          "received_to_applied_s": 9.796,
+          "slow_ack_delay_s": 8.0,
+          "work_id": "b05e7708a6714b899997dd93454fd3bb"
+        },
+        "provider_throttling": {
+          "backoff_ladder_s": [
+            60,
+            120,
+            240,
+            480
+          ],
+          "classification": "transient",
+          "exhausted_budget": "blocked, no further revival",
+          "first_death": "blocked + scheduled bounded revival",
+          "revive_limit": 2
+        },
+        "storage.quota_refusal": {
+          "store_intact": true,
+          "typed_refusal": true
+        }
+      },
+      "tested_limits": {
+        "control_objective_s": 60.0,
+        "fences": "publication/cancellation fences NEVER disabled",
+        "provider_throttling": "a fake 429 lane through the app's own revival budget",
+        "slow_control_ack": "through the app's real lane-control endpoints",
+        "storage_pressure": "a quota'd DISPOSABLE store (typed refusal, store intact)"
+      },
+      "violations": []
+    },
+    {
+      "achieved_objectives": [
+        "the CURRENT generation's token authenticates before the rotation (HTTP 200)",
+        "after the secret rotation every v1-secret token is REFUSED (HTTP 403) \u2014 rotation retires the whole old credential",
+        "an OLD-GENERATION token is refused by the generation-scoped path with the actionable superseded-generation refusal (HTTP 403)",
+        "the rotated (v2) current-generation token authenticates (HTTP 200)"
+      ],
+      "drill": "deployment_token_rotation",
+      "outcome": "pass",
+      "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+      "signals": {
+        "credential.rotation_generation": {
+          "current_generation": 1,
+          "new_secret_token_status": 200,
+          "old_secret_token_status": 403,
+          "procedure": "mint v2 credentials, dispatch new attempts under them (their tokens are generation-scoped), then retire v1: every v1 token fails verification the moment the secret changes; within one secret, superseded generations are refused naming both generations",
+          "refusal_detail": "this credential belongs to a superseded runner generation (0; the work is at generation 1) \u2014 the current attempt must dial in with its own dispatch-issued token",
+          "refusal_status": 403,
+          "refused_generation": 0
+        }
+      },
+      "tested_limits": {
+        "configuration": "DISPOSABLE (a throwaway database + the real lane-control router)",
+        "deployment_env_touched": false,
+        "mechanism": "api_lane_control's generation-scoped auth ladder"
+      },
+      "violations": []
+    }
+  ],
+  "generated_at": "2026-09-24T14:58:25+00:00",
+  "issue": "R37-20 (#301) \u2014 qualify customer operating limits, recovery and data boundaries",
+  "read_only": true,
+  "refusals": [],
+  "runbook": "docs/operations/deployment-boundaries.md",
+  "schema": "forge.deployment.ops/1",
+  "scope": "measured on the actual lab deployment recorded in this report (control plane, database, CAS volume, runner and provider as inspected at generation time), through read-only probes and explicitly DISPOSABLE resources only \u2014 no lab container was started, stopped or recreated by the drill run; the tested N, budgets and waits are recorded per drill and are NOT a fleet throughput claim",
+  "sections_requested": [
+    "topology",
+    "occupancy",
+    "backup_restore",
+    "credentials",
+    "degraded",
+    "rotation"
+  ],
+  "service_objectives": {
+    "documented_degraded_modes": {
+      "control.received_to_applied": {
+        "ack_statuses": [
+          200,
+          200,
+          200,
+          200
+        ],
+        "applied_at": "2026-09-24 14:58:56.094012+00",
+        "command_id": "cmd-caaa6d14d582",
+        "exercised": true,
+        "received_at": "2026-09-24 14:58:46.297782+00",
+        "received_to_applied_s": 9.796,
+        "slow_ack_delay_s": 8.0,
+        "work_id": "b05e7708a6714b899997dd93454fd3bb"
+      },
+      "provider_throttling": {
+        "backoff_ladder_s": [
+          60,
+          120,
+          240,
+          480
+        ],
+        "classification": "transient",
+        "exhausted_budget": "blocked, no further revival",
+        "first_death": "blocked + scheduled bounded revival",
+        "revive_limit": 2
+      },
+      "storage.quota_refusal": {
+        "store_intact": true,
+        "typed_refusal": true
+      }
+    },
+    "note": "the small agreed-objectives table; every value is THIS run's measurement (the exact N/waits are in each drill's tested_limits)",
+    "objectives": [
+      {
+        "guarantee": "best-effort (webhook + dispatch latency)",
+        "measured_s": 3.34,
+        "objective": "queue wait (request \u2192 lease), worst cycle",
+        "target": "bounded, reported separately from execution"
+      },
+      {
+        "guarantee": "best-effort (the ladder is bounded by the mailbox CAS)",
+        "measured_s": 9.796,
+        "objective": "control.received_to_applied (slow ACK tolerated)",
+        "target": "\u2264 60s through the app's real lane-control endpoints"
+      },
+      {
+        "guarantee": "guaranteed by verify-before-restore (typed refusal)",
+        "measured_s": 0.152,
+        "objective": "restore of the deployment's CAS + metadata into a disposable target",
+        "target": "every pinned checkpoint resolves; mismatch detected"
+      },
+      {
+        "guarantee": "guaranteed (durable lease CAS; lost responses hold)",
+        "measured": {
+          "cycles": 4,
+          "dispatched": 3,
+          "limit": 3,
+          "parked": [
+            "parked_execution_capacity"
+          ],
+          "peak_occupied": 3
+        },
+        "objective": "capacity: open leases \u2264 the observed per-project bound",
+        "target": "never exceeded; overload parks typed"
+      }
+    ]
+  },
+  "summary": {
+    "drills_run": 5,
+    "failed": 0,
+    "passed": 5,
+    "refused_sections": 0
+  },
+  "topology": {
+    "declared": {
+      "api_replicas": 1,
+      "cas_semantics": "single shared volume (/app/data) mounted into every consumer",
+      "lock_behavior": "volume-wide CAS lock (GCLockTimeout-bounded waits) + single-writer publication fence; the shared database does not replicate CAS bytes",
+      "supported_scaling_boundary": "a second API/worker replica started WITHOUT the same /app/data volume would NOT see this node's CAS bytes \u2014 the shared database does not replicate content-addressed blobs; scaling beyond one volume requires a shared/networked CAS root (or per-replica stores with an explicit replication contract), which this deployment has NOT demonstrated",
+      "worker_replicas": 1
+    },
+    "discrepancies": [],
+    "observed": {
+      "admission": {
+        "max_active_per_project": 3,
+        "source": "default (no env override observed)"
+      },
+      "budget_caps": {
+        "FORGE_BUDGET_PROFILES_configured": true,
+        "FORGE_LANE_BUDGET_SECONDS": "1800",
+        "statement": "numerical model/provider budgets configured on both consumers (trivial/standard/heavy: max_calls, max_tokens, wallclock_s; per-lane wall clock) \u2014 budget/resource uncertainty is never free capacity or zero spend"
+      },
+      "cas_volume": {
+        "boundary": "a second API/worker replica started WITHOUT the same /app/data volume would NOT see this node's CAS bytes \u2014 the shared database does not replicate content-addressed blobs; scaling beyond one volume requires a shared/networked CAS root (or per-replica stores with an explicit replication contract), which this deployment has NOT demonstrated",
+        "host_root": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data/checkpoints",
+        "mounted_into": [
+          "forge-app",
+          "forge-worker"
+        ],
+        "statement": "the checkpoint CAS bytes live on the single /app/data volume bind-mounted into BOTH the API and the worker (one host directory, one set of bytes); every process that mounts the volume sees the same content-addressed store, coordinated by the store's volume-wide lock and the single-writer publication fence"
+      },
+      "containers": {
+        "forge-app": {
+          "image": "localhost/forge:dev",
+          "mounts": {
+            "/app/.secrets": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets",
+            "/app/data": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data"
+          },
+          "ports": {
+            "8420/tcp": [
+              {
+                "HostIp": "0.0.0.0",
+                "HostPort": "8420"
+              }
+            ]
+          },
+          "status": "running"
+        },
+        "forge-litellm": {
+          "image": "docker.io/litellm/litellm:main-stable",
+          "mounts": {
+            "/app/config.yaml": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/litellm-config.yaml"
+          },
+          "ports": {
+            "4000/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "4000"
+              }
+            ]
+          },
+          "status": "running"
+        },
+        "forge-postgres": {
+          "image": "docker.io/library/postgres:17-alpine",
+          "mounts": {
+            "/var/lib/postgresql/data": "/var/home/core/.local/share/containers/storage/volumes/forge-pg-data/_data"
+          },
+          "ports": {
+            "5432/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "5433"
+              }
+            ]
+          },
+          "status": "running"
+        },
+        "forge-redis": {
+          "image": "docker.io/library/redis:7-alpine",
+          "mounts": {
+            "/data": "/var/home/core/.local/share/containers/storage/volumes/f61d05a9000a4f8ed2c07b0a7dc2065f5daa4e2a1fc569e9424b0fee4baa5013/_data"
+          },
+          "ports": {
+            "6379/tcp": [
+              {
+                "HostIp": "0.0.0.0",
+                "HostPort": "6379"
+              }
+            ]
+          },
+          "status": "running"
+        },
+        "forge-worker": {
+          "image": "localhost/forge:dev",
+          "mounts": {
+            "/app/.secrets": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/.secrets",
+            "/app/data": "/Users/Pavel_Nasovich/Projects/personal/codeward/forge/data"
+          },
+          "ports": {
+            "8420/tcp": null
+          },
+          "status": "running"
+        }
+      },
+      "control_plane": {
+        "dlq_depth": 3,
+        "health": {
+          "database": "ok",
+          "dlq_depth": 3,
+          "litellm": "ok",
+          "queue_depth": 0,
+          "redis": "ok",
+          "status": "ok",
+          "version": "0.36.0"
+        },
+        "queue_depth": 0,
+        "schema_head": "",
+        "version": "0.36.0"
+      },
+      "runner_isolation": {
+        "runners": [
+          {
+            "active": false,
+            "description": "forge-lab runner (podman docker executor)",
+            "id": 3,
+            "paused": true,
+            "runner_type": "project_type"
+          },
+          {
+            "active": true,
+            "description": "unraid",
+            "id": 4,
+            "paused": false,
+            "runner_type": "instance_type"
+          }
+        ],
+        "statement": "native lane jobs execute on the lab's own runner(s) recorded above (no shared public runner fleet); the runner reaches the control plane and the model route over the network the lane template pins"
+      },
+      "services": {
+        "litellm": "forge-litellm (127.0.0.1:4000 -> 4000)",
+        "postgres": "forge-postgres (127.0.0.1:5433 -> 5432, database 'forge')",
+        "redis": "forge-redis (6379)"
+      }
+    },
+    "read_only": true
+  }
+}

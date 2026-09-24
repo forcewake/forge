@@ -412,6 +412,16 @@ async def test_revival_redispatch_follows_the_frozen_backend(db, service, monkey
         evidence={"backend": "builtin"},
         candidate_shas=["c2"],
     )
+    # R37-07 (#288): the harness revival re-dispatches only with a
+    # JUSTIFIED continuation — a committed checkpoint makes the exact-WIP
+    # resume the authorized one (the builtin lane has no envelope at all).
+    from forge.adaptive import checkpoint_repository as _cr
+    from forge.runs import revival
+
+    async def _exact(run_id, **_):
+        return _cr.CheckpointLookupOutcome.exact("d" * 64, authority="test")
+
+    monkeypatch.setattr(revival, "durable_checkpoint_outcome", _exact)
     harness: list[str] = []
     builtin: list[str] = []
     harness_rec = advance_recorder(harness)
@@ -556,6 +566,16 @@ async def test_retry_of_a_harness_run_redispatches_the_lane(db, service, monkeyp
         evidence={"backend": "ci_harness:claude-code", "harness": {"handle": "{}"}},
         status_reason="harness_code: driver exit failed",
     )
+    # R37-07 (#288): the harness /retry dispatches only with a JUSTIFIED
+    # continuation — a committed checkpoint makes the exact-WIP resume the
+    # authorized one, and the lane leg then receives the decision's mode.
+    from forge.adaptive import checkpoint_repository as _cr
+    from forge.runs import revival
+
+    async def _exact(run_id, **_):
+        return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+    monkeypatch.setattr(revival, "durable_checkpoint_outcome", _exact)
     dispatched: list[str] = []
     monkeypatch.setattr(service, "_advance_harness", advance_recorder(dispatched))
     monkeypatch.setattr(service, "_advance_proposal", advance_recorder(dispatched))
@@ -563,6 +583,8 @@ async def test_retry_of_a_harness_run_redispatches_the_lane(db, service, monkeyp
     await service.handle_retry_note(PROJECT_ID, retry_note(run_id), "alice", ISSUE_IID)
 
     assert [rid for _, rid, _ in dispatched] == [run_id]
+    (_, _, kwargs) = dispatched[0]
+    assert kwargs["resume_mode"] == "required"
 
 
 async def test_retry_prefix_resolves_a_unique_run(db, service, fake_gitlab, monkeypatch):

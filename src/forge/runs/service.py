@@ -35,8 +35,10 @@ run — the service never blind-retries a write.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -52,6 +54,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_dialect_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from forge.adaptive import continuation
 from forge.adaptive.admission import QUEUED_STATUSES
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import check_admission as check_fair_use
@@ -69,6 +72,7 @@ from forge.adaptive.admission import (
     release_lease_with_evidence,
     try_acquire_lease,
 )
+from forge.adaptive.pause_fence import pause_fence_decision
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -165,6 +169,8 @@ from forge.runs.revival import (
     RECONCILE_RE,
     STATUS_RE,
     WHY_BLOCKED_RE,
+    RetryRefusalCode,
+    RetryRejection,
     build_retry_context,
     begin_revival_attempt,
     claim_attempt_dispatch,
@@ -241,6 +247,62 @@ _RESUMABLE_PLAN_STATUSES = frozenset({"preflight", "planning"})
 
 #: Fallback when FORGE_DECISION_TTL_SECONDS is unset (ADR-0018 §2: one week).
 _DECISION_TTL_FALLBACK_SECONDS = 7 * 86400
+
+# ----------------------------------------------------------------------
+# R37-07 (issue #288): the GitLab dispatch envelope — the lane-resume /
+# lane-control contract the GitHub lane dispatches (R32-04) carried over
+# to the ci_harness pipeline dispatch, byte-compatible with
+# forge.lane_driver's env spelling.
+# ----------------------------------------------------------------------
+
+#: The WIP-continuity contract the dispatch SELECTS for the lane — the
+#: same three-mode vocabulary the GitHub dispatch carries as the
+#: ``lane_resume_mode`` workflow input (``forge.runs.github_service.
+#: LANE_RESUME_MODES``) and ``forge.adaptive.continuation.ContinuationMode``
+#: emits. The three modes are DISTINCT product actions, never three
+#: combinations of accidentally absent variables:
+#:
+#: - ``fresh`` — the initial dispatch (and a repair cycle that re-implements
+#:   from the attempt base): nothing restores accidentally; a missing
+#:   checkpoint (404) is normal for it;
+#: - ``required`` — retry/revival re-dispatch over a committed checkpoint:
+#:   the pre-turn restore of the held checkpoint is REQUIRED (a failed
+#:   download halts the lane before any vendor session exists);
+#: - ``restart`` — the operator EXPLICITLY discarded the held WIP
+#:   (``/retry <run-id> restart``): no download at all.
+LANE_RESUME_MODES: frozenset[str] = frozenset({"fresh", "required", "restart"})
+LANE_RESUME_MODE_FRESH: str = "fresh"
+LANE_RESUME_MODE_REQUIRED: str = "required"
+LANE_RESUME_MODE_RESTART: str = "restart"
+
+#: The env spelling ``forge.lane_driver.resume_mode`` reads (dispatched as
+#: a pipeline VARIABLE, which GitLab exports into every step's env — the
+#: same mapping the GitHub template performs in its driver step):
+#: required → the truthy marker, restart → the literal discard marker,
+#: fresh/absent → '' (a first run; a 404 restore is normal).
+LANE_RESUME_ENV_SPELLING: dict[str, str] = {
+    LANE_RESUME_MODE_FRESH: "",
+    LANE_RESUME_MODE_REQUIRED: "1",
+    LANE_RESUME_MODE_RESTART: "restart",
+}
+
+#: The envelope's pipeline variable names (all prefixed FORGE_, exported
+#: into the job env by GitLab; the observability mode word rides beside the
+#: env spelling so the dispatch ledger can fingerprint the contract).
+LANE_RESUME_VARIABLE: str = "FORGE_LANE_RESUME"
+LANE_RESUME_MODE_VARIABLE: str = "FORGE_LANE_RESUME_MODE"
+LANE_CHECKPOINT_VARIABLE: str = "FORGE_RESUME_CHECKPOINT"
+LANE_ATTEMPT_VARIABLE: str = "FORGE_ATTEMPT_GENERATION"
+LANE_DECISION_VARIABLE: str = "FORGE_CONTINUATION_DECISION_ID"
+LANE_CONTROL_URL_VARIABLE: str = "FORGE_LANE_CONTROL_URL"
+LANE_CONTROL_TOKEN_VARIABLE: str = "FORGE_LANE_CONTROL_TOKEN"
+
+#: The process-env name the CONTROL PLANE deployment carries its own
+#: externally-reachable lane-control URL under (the same source the app
+#: deployment and the tests use; GitLab-parity of the GitHub lane's repo
+#: VARIABLE — the dispatch repeats it into the pipeline variables so the
+#: lane's dial-out never depends on a project variable being set).
+LANE_CONTROL_URL_ENV: str = "FORGE_LANE_CONTROL_URL"
 
 
 def task_digest_of(title: str, description: str) -> str:
@@ -550,6 +612,39 @@ async def execute_run_command(
             config=forge_config,
         )
         await service.run_command(metadata)
+
+
+class _DispatchEnvelopeClient:
+    """R37-07 (#288): a per-dispatch proxy over the GitLab client that
+    appends the lane-resume/control ENVELOPE variables to every pipeline
+    the ci_harness backend triggers.
+
+    ``CITharnessBackend.start`` (forge.runs.backends — the shared,
+    provider-neutral seam both lanes use) assembles the pipeline variables
+    itself; the envelope is GITLAB-dispatch policy, so this proxy injects
+    it AT THE PROVIDER BOUNDARY instead of forking the backend or its
+    variable list. Everything but ``create_pipeline`` delegates verbatim
+    to the inner client — the writer's branch calls, the poll reads and
+    the artifact downloads are untouched.
+    """
+
+    def __init__(self, inner: GitLabClient, envelope: list[dict[str, str]]) -> None:
+        self._inner = inner
+        self._envelope = [dict(entry) for entry in envelope]
+
+    async def create_pipeline(
+        self,
+        project_id: int,
+        ref: str,
+        variables: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        merged = [dict(entry) for entry in (variables or [])] + [
+            dict(entry) for entry in self._envelope
+        ]
+        return await self._inner.create_pipeline(project_id, ref, variables=merged)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 class RunService:
@@ -1369,6 +1464,212 @@ class RunService:
         )
         logger.info("Run %s cancelled by @%s", run_id[:8], author_username)
 
+    async def _select_continuation(
+        self,
+        run_id: str,
+        *,
+        death_reason: str,
+        evidence: dict,
+        candidate_shas: list | None = None,
+        operator_discard_requested: bool = False,
+        checkpoint: Any | None = None,
+        intent_lookup: continuation.IntentLookup | None = None,
+        discard_authorized_by: str | None = None,
+        native_command_id: str | None = None,
+        source_attempt: int | None = None,
+        lineage: str | None = None,
+        dispatches: bool = False,
+    ) -> continuation.ContinuationDecision:
+        """The run's continuation decision — reused when the EVENT says so.
+
+        R37-07 (#288): the GitLab half of Q35-02/R37-01 — one decision per
+        recovery event, computed BEFORE the ack note and persisted on the
+        run's evidence (``continuation``: mode, reason, decided_at, the
+        evidence digest, the decision identity and the pinned
+        ``checkpoint_digest`` the dispatch later carries as the exact
+        resume reference). Reuse is keyed on the decision IDENTITY (the
+        same ``native_command_id`` AND ``source_attempt`` re-materializes
+        the SAME frozen decision with the ORIGINAL pinned checkpoint; a
+        genuinely new event never matches the old document); the same
+        identity returning with MOVED objective booleans is the typed
+        ``ContinuationConflictError`` — surfaced on the document, never a
+        silent reuse. The shape mirrors ``GitHubRunService.
+        _select_continuation`` exactly; the mode it selects is what
+        :meth:`_advance_harness` dispatches as the lane-resume contract.
+
+        R36-03: checkpoint presence comes from the CONFIGURED ASYNC
+        AUTHORITY — a pre-resolved typed *checkpoint* (the caller's single
+        consultation) wins; else this service's session factory selects
+        the same repository the upload/resume surfaces share. The typed
+        outcome also pins the exact checkpoint's digest on the decision.
+        """
+        if checkpoint is None:
+            try:
+                result = await revival.durable_checkpoint_outcome(
+                    run_id, session_factory=self._session_factory
+                )
+            except Exception:  # noqa: BLE001 — a failed lookup is unknown, not False
+                result = None
+        else:
+            result = checkpoint
+        committed, checkpoint_digest = continuation.normalize_checkpoint_result(result)
+        prior_doc = evidence.get(continuation.CONTINUATION_EVIDENCE_KEY)
+        snapshot = await continuation.evidence_from_record(
+            death_reason=death_reason,
+            run_id=run_id,
+            evidence=evidence,
+            candidate_shas=candidate_shas,
+            operator_discard_requested=operator_discard_requested,
+            checkpoint_committed=committed,
+            prior_mode_selected=(
+                str(prior_doc.get("mode")) if isinstance(prior_doc, dict) else None
+            ),
+            intent_lookup=intent_lookup or self._native_start_verdict,
+            discard_authorized_by=discard_authorized_by,
+            native_command_id=native_command_id,
+            source_attempt=source_attempt,
+            checkpoint_digest=checkpoint_digest,
+        )
+        conflict: dict[str, Any] | None = None
+        try:
+            reused = continuation.matching_decision(prior_doc, snapshot)
+        except continuation.ContinuationConflictError as exc:
+            # The SAME event identity returned with moved objective
+            # evidence — surfaced, never silently reused; the decision is
+            # re-made below with the conflict recorded beside it.
+            conflict = {
+                "decision_id": exc.decision_id,
+                "recorded_digest": exc.recorded_digest,
+                "delivered_digest": exc.delivered_digest,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.warning(
+                "continuation.conflicting_recovery_event: run %s — the recovery event "
+                "behind decision %s returned with a changed objective snapshot "
+                "(recorded %s, delivered %s); re-deciding (R37-01)",
+                run_id[:8],
+                exc.decision_id[:12],
+                exc.recorded_digest[:12],
+                exc.delivered_digest[:12],
+            )
+            reused = None
+        if reused is not None:
+            # An EXACT replay of the same recovery event: re-persist the
+            # frozen decision as the LATEST (the dispatch leg consumes the
+            # decision BY identity — the re-drive of a stranded /retry pins
+            # the SAME checkpoint the event approved, not whatever is
+            # newest), history carried forward untouched.
+            document = continuation.persisted_document(reused, prior_doc)
+            if dispatches:
+                document["continuation_decision_id"] = reused.decision_id
+            await self._merge_run_evidence(
+                run_id, {continuation.CONTINUATION_EVIDENCE_KEY: document}
+            )
+            logger.info(
+                "Run %s continuation decision replayed by identity %s (%s, checkpoint %s) "
+                "— replay_outcome=exact (R37-01)",
+                run_id[:8],
+                reused.decision_id[:12],
+                reused.mode_selected,
+                (reused.evidence.checkpoint_digest or "none")[:12],
+            )
+            return reused
+        if lineage and not isinstance(prior_doc, dict):
+            lineage = None  # nothing to re-establish — this is the first decision
+        if lineage is None and continuation.legacy_decision(prior_doc):
+            lineage = "reestablished"
+        decision = continuation.decide_continuation(snapshot, lineage=lineage)
+        document = continuation.persisted_document(decision, prior_doc)
+        if conflict is not None:
+            document["conflicting_recovery_event"] = conflict
+        # R36-03/R37-01: pin the EXACT checkpoint the decision approves —
+        # one pin per authorized decision, keyed by its DECISION identity
+        # (idempotent per (checkpoint_id, reason); the lane's strict
+        # required-restore guard stays the safety line when the pin fails).
+        if (
+            decision.mode is continuation.ContinuationMode.EXACT_WIP
+            and checkpoint_digest
+            and decision.dispatchable
+        ):
+            try:
+                from forge.adaptive.checkpoint_repository import (
+                    resolve_checkpoint_lookup_authority,
+                )
+
+                authority = resolve_checkpoint_lookup_authority(
+                    session_factory=self._session_factory
+                )
+                pin = getattr(authority, "pin", None)
+                pinned = (
+                    bool(await pin(run_id, checkpoint_digest, f"decision:{decision.decision_id}"))
+                    if pin is not None
+                    else False
+                )
+            except Exception as exc:  # noqa: BLE001 — the pin is protection, not authority
+                pinned = False
+                logger.warning(
+                    "Run %s: pinning continuation checkpoint %s for decision %s failed: %s",
+                    run_id[:8],
+                    checkpoint_digest[:12],
+                    decision.decision_id[:12],
+                    exc,
+                )
+            if not pinned:
+                logger.warning(
+                    "Run %s continuation decision %s approved checkpoint %s but the GC "
+                    "pin did not land — the lane's strict required-restore guard "
+                    "remains the safety net (R37-01)",
+                    run_id[:8],
+                    decision.decision_id[:12],
+                    checkpoint_digest[:12],
+                )
+        if dispatches:
+            document["continuation_decision_id"] = decision.decision_id
+        await self._merge_run_evidence(run_id, {continuation.CONTINUATION_EVIDENCE_KEY: document})
+        logger.info(
+            "Run %s continuation decision %s (%s, attempt %s, event %s): %s — %s (R37-07)",
+            run_id[:8],
+            decision.decision_id[:12],
+            "reestablished" if decision.lineage else "new",
+            source_attempt,
+            native_command_id or "none",
+            decision.mode_selected,
+            decision.reason,
+        )
+        return decision
+
+    async def _native_start_verdict(self, run_id: str) -> str:
+        """The persisted native-start intent verdict (R36-02).
+
+        The evidence source for vendor-start certainty: the
+        ``execution_leases`` rows :func:`record_native_start_intent` wrote
+        BEFORE every provider call on this run (the GitLab dispatch leg
+        records them around ``backend.start``). Lease rows with NO intent
+        on a dead run PROVE the provider call was never attempted
+        (``never_dispatched``); an intent anywhere means the call WAS
+        attempted (``dispatched``) — which still leaves the vendor start
+        unknown; no lease rows at all is ``unknown``.
+        """
+        from forge.adaptive.admission import ExecutionLease
+
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ExecutionLease.native_intent_at).where(
+                            ExecutionLease.run_id == run_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if not rows:
+            return continuation.NATIVE_START_UNKNOWN
+        if any(intent_at is not None for intent_at in rows):
+            return continuation.NATIVE_START_DISPATCHED
+        return continuation.NATIVE_START_NEVER_DISPATCHED
+
     async def handle_retry_note(
         self,
         project_id: int,
@@ -1401,6 +1702,18 @@ class RunService:
         machinery; the persisted ``pending`` dispatch state lets the
         recovery scan (:meth:`evaluate_revival_recovery`) re-drive a lost
         dispatch exactly once.
+
+        R37-07 (#288): the harness lane's re-dispatch carries the
+        continuation decision — selected ONCE from the recorded recoverable
+        state (Q35-02/R37-01: identity-keyed reuse, pinned checkpoint
+        digest), persisted BEFORE the ack note, and dispatched as the
+        lane-resume envelope (``required`` over the exact checkpoint /
+        ``fresh`` on a proven no-WIP death / ``restart`` on the operator's
+        explicit discard). An UNCERTAIN harness recoverable state
+        dispatches NOTHING — the ambiguity goes to the operator, never
+        into a guessed re-execution. The retry also opens a NEW attempt
+        generation (NEXT-01), so the re-dispatched lane token is
+        attempt-scoped and the dead attempt's credentials retire.
         """
         match = _RETRY_RE.search(note_text or "")
         if match is None:
@@ -1426,6 +1739,11 @@ class RunService:
         status_reason = ""
         cycle = 1
         evidence: dict = {}
+        candidates: list = []
+        cancel_requested = False
+        other_active = False
+        source_attempt = 0
+        checkpoint_outcome: Any = None
         async with self._session_factory() as session:
             run = await resolve_retry_target(
                 session,
@@ -1455,36 +1773,139 @@ class RunService:
                     if await open_revival_attempt(session, run_id=run.id) is not None:
                         rejection = retry_in_flight_rejection(run.id)
                 if not rejection:
-                    # R36-03: the typed refusal consumes the CONFIGURED
-                    # async checkpoint authority — never the retired
-                    # raw-index/legacy-token boolean.
-                    rejection = retry_rejection(
-                        run,
-                        other_active=await has_active_run(
-                            session,
-                            provider=run.provider,
-                            project_id=run.project_id,
-                            issue_iid=run.issue_iid,
-                            repo_full_name=run.github_repo_full_name,
-                            exclude_run_id=run.id,
-                        ),
-                        checkpoint=await revival.durable_checkpoint_outcome(
-                            run.id, session_factory=self._session_factory
-                        ),
+                    # R36-03: ONE typed consultation of the CONFIGURED async
+                    # checkpoint authority feeds BOTH the refusal evaluation
+                    # and the continuation decision below.
+                    checkpoint_outcome = await revival.durable_checkpoint_outcome(
+                        run.id, session_factory=self._session_factory
                     )
-                if not rejection:
-                    status = run.status
-                    status_reason = run.status_reason or ""
-                    cycle = run.commit_cycle or 1
-                    evidence = dict(run.evidence or {})
+                    other_active = await has_active_run(
+                        session,
+                        provider=run.provider,
+                        project_id=run.project_id,
+                        issue_iid=run.issue_iid,
+                        repo_full_name=run.github_repo_full_name,
+                        exclude_run_id=run.id,
+                    )
+                    rejection = retry_rejection(
+                        run, other_active=other_active, checkpoint=checkpoint_outcome
+                    )
+                # Captured regardless of the rejection so the decision below
+                # always decides over the run's real record.
+                status = run.status
+                status_reason = run.status_reason or ""
+                cycle = run.commit_cycle or 1
+                evidence = dict(run.evidence or {})
+                candidates = list(run.candidate_shas or [])
+                cancel_requested = bool(run.cancel_requested)
+                source_attempt = int(run.cancellation_generation or 0)
         if run_id is None:
             logger.info("/retry on issue !%s — no retryable run", issue_iid)
             return
+
+        # R37-07 (#288): the typed recovery request — the ``restart`` verb is
+        # granted only from its documented argument position and only when
+        # the token addresses the resolved subject (R36-02).
+        recovery = continuation.parse_recovery_request(note_text, run_id)
+        # Q35-02/R37-01: decide ONCE, from the recorded recoverable state,
+        # BEFORE the ack note — the persisted decision (its identity, its
+        # pinned checkpoint digest) is what the dispatch leg later carries as
+        # the exact-resume envelope. A repeated retry EVENT re-materializes
+        # the SAME frozen decision; a new event never reuses the old one.
+        decision = await self._select_continuation(
+            run_id,
+            death_reason=status_reason,
+            evidence=evidence,
+            candidate_shas=candidates,
+            operator_discard_requested=recovery.restart,
+            discard_authorized_by=(f"operator:@{author_username}" if recovery.restart else None),
+            native_command_id=delivery_id,
+            source_attempt=source_attempt,
+            checkpoint=checkpoint_outcome,
+            dispatches=True,
+        )
+        backend_name = str(evidence.get("backend") or "").strip() or self._backend_name()
+        harness_lane = is_harness_backend(backend_name)
+        # R36-02: the typed override matrix — ONLY the continuity arm
+        # (``nothing_to_retry``) may be superseded, and only when the
+        # decision PROVES the demand wrong (a proven no-WIP death) or the
+        # operator authorized the discard. Every other code keeps refusing.
+        rejection_code = rejection.code if isinstance(rejection, RetryRejection) else ""
+        if (
+            rejection
+            and rejection_code == RetryRefusalCode.NOTHING_TO_RETRY.value
+            and decision.mode
+            in (
+                continuation.ContinuationMode.COMMITTED_BASELINE,
+                continuation.ContinuationMode.EXPLICIT_RESTART,
+            )
+            and not other_active
+            and status in ("failed", "blocked")
+            and not cancel_requested
+            and not candidates
+        ):
+            logger.info(
+                "/retry of run %s — %s overrides the no-candidate/no-checkpoint refusal (R36-02)",
+                run_id[:8],
+                decision.mode_selected,
+            )
+            rejection = ""
         if rejection:
+            if rejection_code == RetryRefusalCode.NOTHING_TO_RETRY.value and harness_lane:
+                # The continuity arm refused a harness lane whose
+                # recoverable state is UNCERTAIN: the honest reply is the
+                # decision note (the park WITH its explanation and the
+                # documented ways out), never a dispatch that would guess.
+                await self._post_journaled_note(
+                    project_id,
+                    issue_iid,
+                    continuation.uncertain_retry_note(run_id, decision),
+                    run_id,
+                    "retry_uncertain_note",
+                )
+                logger.info(
+                    "/retry of run %s parked for an operator decision — continuation "
+                    "source unknown (%s), nothing dispatched (R37-07)",
+                    run_id[:8],
+                    decision.mode_selected,
+                )
+                return
             await self._post_journaled_note(
                 project_id, issue_iid, f"🔁 {rejection}", run_id, "retry_rejected_note"
             )
             return
+        if harness_lane and not decision.dispatchable:
+            # Q35-02, UNCERTAIN on the harness lane: absence of a checkpoint
+            # never proves there was no WIP — NOTHING is dispatched (zero
+            # pipelines, zero vendor sessions, no attempt, no cycle bump).
+            # The builtin backend keeps its legacy repair semantics (the
+            # published candidate IS its durable continuation; there is no
+            # held WIP to mis-restore) — recorded as an honest limitation of
+            # this parity wave, not a silent divergence.
+            await self._post_journaled_note(
+                project_id,
+                issue_iid,
+                continuation.uncertain_retry_note(run_id, decision),
+                run_id,
+                "retry_uncertain_note",
+            )
+            logger.info(
+                "/retry of run %s stood down — continuation source unknown (%s), "
+                "nothing dispatched (R37-07)",
+                run_id[:8],
+                decision.mode_selected,
+            )
+            return
+
+        # NEXT-01 (the harness lane): the retry opens a NEW attempt — the
+        # durable attempt generation is bumped (aligned with the pause
+        # fence's resumed epoch) BEFORE the lane launches, so the
+        # re-dispatch's lane token is attempt-scoped to the retry and every
+        # credential of the dead attempt retires at both control APIs.
+        fence_floor = 0
+        if harness_lane:
+            fence = await pause_fence_decision(self._session_factory, run_id)
+            fence_floor = fence.resumed_publication_epoch or 0
 
         # One durable, idempotent transition (A11): the attempt record and
         # the CAS revival walk commit atomically. The attempt carries the
@@ -1513,6 +1934,10 @@ class RunService:
                 )
                 run = await self._get_run(session, run_id)
                 run.commit_cycle = cycle + 1
+                if harness_lane:
+                    run.cancellation_generation = max(
+                        int(run.cancellation_generation or 0) + 1, fence_floor
+                    )
                 await session.commit()
         except RevivalInFlight:
             # A concurrent driver opened an attempt between the check and the
@@ -1529,18 +1954,23 @@ class RunService:
 
         branch = factory_branch(retry_issue_iid, run_id)
         logger.info(
-            "Run %s retried by @%s — re-dispatching %s (cycle %d)",
+            "Run %s retried by @%s — re-dispatching %s (cycle %d, continuation %s)",
             run_id[:8],
             author_username,
             branch,
             cycle + 1,
+            decision.mode_selected,
         )
         await self._post_journaled_note(
             project_id,
             issue_iid,
             f"## 🔁 Run `{run_id[:8]}` retried by @{author_username}\n\n"
             f"- Branch: `{branch}` — the work continues in place, no re-planning\n"
-            f"- Commit cycle: {cycle + 1}\n\n*This is an automated message.*",
+            f"- Commit cycle: {cycle + 1}\n"
+            # Q35-02: the ack NAMES the selected source of continuation (and
+            # never promises preservation when the decision is a discard).
+            f"- Continuation: {continuation.retry_ack_line(decision)}\n"
+            "\n*This is an automated message.*",
             run_id,
             "retry_ack_note",
         )
@@ -1560,14 +1990,20 @@ class RunService:
 
         repair_context = build_retry_context(self._settings, status_reason, evidence)
         repair_reason = f"retry by @{author_username}: {status_reason or status}"
-        backend_name = str(evidence.get("backend") or "").strip() or self._backend_name()
         try:
-            if is_harness_backend(backend_name):
+            if harness_lane:
                 await self._advance_harness(
                     retry_project_id,
                     run_id,
                     repair_context=repair_context,
                     repair_reason=repair_reason,
+                    # R37-07: the WIP-continuity contract the decision
+                    # SELECTED — ``required`` only when an exact committed
+                    # checkpoint is the authorized continuation (the lane's
+                    # strict restore guard then enforces it); a PROVEN
+                    # no-WIP death retries ``fresh`` on the frozen base; an
+                    # explicit operator discard is ``restart``.
+                    resume_mode=decision.resume_mode(),
                 )
             else:
                 await self._advance_proposal(
@@ -2747,6 +3183,7 @@ class RunService:
         repair_context: str = "",
         repair_reason: str | None = None,
         driver: str | None = None,
+        resume_mode: str = LANE_RESUME_MODE_FRESH,
     ) -> None:
         """ci_harness leg (ADR-0015): start the harness job, park the run.
 
@@ -2762,7 +3199,31 @@ class RunService:
         §6); *driver* overrides it for a fallback advance. Called for a
         fallback the run is already ``waiting_harness`` — it stays parked,
         only the handle moves (ADR-0004 has no waiting_harness self-loop).
+
+        R37-07 (#288): *resume_mode* is the WIP-continuity contract THIS
+        dispatch selects for the lane — the GitLab half of R32-04, riding
+        the pipeline variables the dispatched job exports into its env
+        (``FORGE_LANE_RESUME`` carries ``forge.lane_driver.resume_mode``'s
+        exact spelling; ``FORGE_LANE_RESUME_MODE`` carries the mode word for
+        the dispatch ledger). ``fresh`` (the default — the initial dispatch
+        and a repair cycle) restores nothing accidentally; ``required``
+        (the ``/retry``/revival legs, selected by the persisted continuation
+        decision) makes the held checkpoint's restore a precondition of the
+        turn and the dispatch carries the decision's EXACT pinned
+        ``continuation.checkpoint_digest``; ``restart`` is the operator's
+        explicit discard. The same envelope carries the attempt-scoped
+        lane-control credentials (URL + generation-scoped HMAC token —
+        never a control-plane root secret) so the lane's steering channel
+        dials out with exactly the authority this attempt owns. A
+        ``required`` mode whose persisted decision pins NO checkpoint
+        digest is a corrupt dispatch contract: the run parks BEFORE any
+        provider I/O (no branch, no intent, no pipeline — zero model
+        turns).
         """
+        if resume_mode not in LANE_RESUME_MODES:
+            raise ValueError(
+                f"resume_mode must be one of {sorted(LANE_RESUME_MODES)}, got {resume_mode!r}"
+            )
         # NEXT-11/R32-05: the harness dispatch is a dispatch boundary too —
         # the ``/retry`` revival, the recovery scan's re-drive and a repair
         # re-dispatch all reach this leg directly, so the execution lease is
@@ -2790,6 +3251,50 @@ class RunService:
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             already_waiting = run.status == FlowStatus.WAITING_HARNESS.value
+            # R37-07: the attempt generation the dispatch mints the lane
+            # credential FOR — FlowRun.cancellation_generation, the one
+            # durable attempt counter the lane-control and checkpoint APIs
+            # verify against (NEXT-01: the retry/revival legs bump it, so a
+            # re-dispatched token is scoped to the NEW attempt and the dead
+            # attempt's credential retires at both APIs).
+            generation = int(run.cancellation_generation or 0)
+            # The pinned continuation identity — the EXACT checkpoint
+            # content address the persisted continuation decision approved
+            # (``continuation.checkpoint_digest``), read from durable state
+            # when this dispatch resumes WIP (``required``); empty for
+            # fresh/restart, which resume nothing. The decision id rides
+            # beside it (``control.applied_attempt`` observability: which
+            # authorized decision this dispatch executes).
+            continuation_document = (run.evidence or {}).get("continuation")
+            continuation_ref_digest = (
+                str(continuation_document.get("checkpoint_digest") or "")
+                if isinstance(continuation_document, dict)
+                else ""
+            )
+            continuation_decision_id = (
+                str(continuation_document.get("decision_id") or "")
+                if isinstance(continuation_document, dict)
+                else ""
+            )
+
+        if resume_mode == LANE_RESUME_MODE_REQUIRED and not continuation_ref_digest:
+            # The dispatch-side half of the zero-model-turns contract: a
+            # required resume MUST name the exact checkpoint it authorizes
+            # — a decision that pinned nothing is a corrupt dispatch
+            # contract, refused BEFORE any provider I/O (the lane-side
+            # strict restore guard is the second half).
+            logger.warning(
+                "Run %s required-resume dispatch refused — the persisted continuation "
+                "decision pins no checkpoint digest (continuation_ref_missing)",
+                run_id[:8],
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                "continuation_ref_missing: a required-resume dispatch must carry the "
+                "persisted decision's exact checkpoint digest",
+            )
+            return
 
         plan_summary = spec.plan_summary
         brief = plan_summary
@@ -2802,8 +3307,60 @@ class RunService:
         issue_title = spec.task_title
         if driver is None:
             driver = spec.harness_driver
+        # R37-07 (#288): the dispatch ENVELOPE — the lane-resume/continuity
+        # contract plus the attempt-scoped lane-control credentials, riding
+        # the pipeline variables the job exports into every step's env. The
+        # token is COMPUTED here (never stored): HMAC of the run id AND its
+        # CURRENT attempt generation under FORGE_LANE_CONTROL_SECRET — the
+        # same derivation both lane APIs verify; empty when no secret is
+        # configured (the steering channel stays off, fail-closed). The
+        # control URL repeats the control plane's own externally reachable
+        # address (the same env the deployment carries); NO control-plane
+        # root secret and NO publication token ever enters this set.
+        control_url = (os.environ.get(LANE_CONTROL_URL_ENV) or "").strip()
+        lane_token = self._lane_control_token(run_id, generation=generation)
+        envelope_variables: list[dict[str, str]] = [
+            # The WIP-continuity contract: the env spelling lane_driver's
+            # resume_mode() reads, plus the mode word for the ledger.
+            {"key": LANE_RESUME_MODE_VARIABLE, "value": resume_mode},
+            {"key": LANE_RESUME_VARIABLE, "value": LANE_RESUME_ENV_SPELLING[resume_mode]},
+            # The exact checkpoint content address the persisted decision
+            # approved (empty on fresh/restart — they restore nothing).
+            {"key": LANE_CHECKPOINT_VARIABLE, "value": continuation_ref_digest},
+            # The durable attempt identity the credentials are scoped to.
+            {"key": LANE_ATTEMPT_VARIABLE, "value": str(generation)},
+            # The decision identity this dispatch executes.
+            {"key": LANE_DECISION_VARIABLE, "value": continuation_decision_id},
+            # NXT-10 outbound leg (the lane dials OUT): the control-plane
+            # URL + the work-scoped, attempt-scoped token.
+            {"key": LANE_CONTROL_URL_VARIABLE, "value": control_url},
+            {"key": LANE_CONTROL_TOKEN_VARIABLE, "value": lane_token},
+        ]
+        # `gitlab.dispatch_envelope_digest` — a stable fingerprint over the
+        # identity fields (the token only enters as a boolean: digests are
+        # journaled, credentials are not).
+        dispatch_envelope_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "resume_mode": resume_mode,
+                    "checkpoint": continuation_ref_digest,
+                    "attempt_generation": generation,
+                    "decision_id": continuation_decision_id,
+                    "driver": driver or "",
+                    "control_url": control_url,
+                    "token_dispatched": bool(lane_token),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         try:
-            backend = self._harness_backend(project_id, driver=driver)
+            backend = self._harness_backend(
+                project_id,
+                driver=driver,
+                gitlab=_DispatchEnvelopeClient(self._gitlab, envelope_variables),
+            )
         except ValueError as exc:
             await self._to_terminal(run_id, FlowStatus.FAILED, f"backend_config: {exc}")
             return
@@ -2903,7 +3460,24 @@ class RunService:
                         "branch": handle_data.get("branch"),
                         # ADR-0023: the driver this leg actually dispatched.
                         "driver": str(handle_data.get("harness") or driver or ""),
-                    }
+                        # R37-07: the dispatch envelope this leg carried —
+                        # the journal records the CONTRACT (mode, pinned
+                        # checkpoint, attempt generation, decision id, the
+                        # digest) and NEVER the token value; the variable
+                        # KEYS name what the pipeline received so the
+                        # native ledger's recorded variables reconcile
+                        # key-for-key against this journal entry.
+                        "dispatch_envelope": {
+                            "resume_mode": resume_mode,
+                            "checkpoint_digest": continuation_ref_digest,
+                            "decision_id": continuation_decision_id,
+                            "attempt_generation": generation,
+                            "control_url": control_url,
+                            "token_dispatched": bool(lane_token),
+                            "variable_keys": [entry["key"] for entry in envelope_variables],
+                            "digest": dispatch_envelope_digest,
+                        },
+                    },
                 },
             )
             await session.commit()
@@ -2940,6 +3514,16 @@ class RunService:
             )
 
         logger.info(
+            "gitlab.dispatch_envelope_digest: run %s attempt %d dispatched a %s resume "
+            "(checkpoint %s, decision %s) — envelope %s",
+            run_id[:8],
+            generation,
+            resume_mode,
+            continuation_ref_digest[:12] or "none",
+            continuation_decision_id[:12] or "none",
+            dispatch_envelope_digest[:12],
+        )
+        logger.info(
             "Run %s delegated to harness backend (pipeline %d, driver %s) — waiting_harness",
             run_id[:8],
             pipeline_id,
@@ -2972,24 +3556,58 @@ class RunService:
                 await session.commit()
             return block
 
-    def _harness_backend(self, project_id: int, *, driver: str | None = None):
+    def _harness_backend(
+        self,
+        project_id: int,
+        *,
+        driver: str | None = None,
+        gitlab: Any = None,
+    ):
         """Construct the ci_harness backend for *project_id* (ADR-0015).
 
         *driver* (ADR-0023) pins the leg to the RunSpec's frozen selection.
+        *gitlab* (R37-07) lets the dispatch leg hand the backend an
+        envelope-injecting client proxy (a ``create_pipeline``-intercepting
+        delegation over the real client — duck-typed like the test fakes);
+        the default is the service's own client, byte-compatible with the
+        pre-envelope dispatch.
         """
+        client = gitlab if gitlab is not None else self._gitlab
         writer = self._writer_class(
-            self._gitlab,
+            client,
             self._session_factory,
             project_id,
             settle_seconds=self._publish_settle_seconds(),
         )
         return build_backend(
             self._settings,
-            gitlab=self._gitlab,
+            gitlab=client,
             session_factory=self._session_factory,
             writer=writer,
             driver=driver,
         )
+
+    def _lane_control_token(self, run_id: str, *, generation: int | None = None) -> str:
+        """The per-work HMAC token for the lane control channel (or "").
+
+        R37-07 (the GitLab half of NXT-10/NEXT-01): with *generation* the
+        token is ATTEMPT-SCOPED — the dispatch passes the run's CURRENT
+        ``cancellation_generation`` so the credential dies with the attempt
+        it was minted for (both the lane-control API and the checkpoint
+        channel verify exactly this derivation). Empty when no
+        FORGE_LANE_CONTROL_SECRET is configured — the lane's steering
+        channel stays off, fail-closed.
+        """
+        secret = getattr(self._settings, "FORGE_LANE_CONTROL_SECRET", None)
+        if not secret:
+            return ""
+        from forge.api_lane_control import lane_control_token
+
+        # SecretStr: str() is "**********" — the masked repr, NEVER the
+        # value. get_secret_value() is the value (the GitHub lane's
+        # LIVE-found lesson, kept identical here).
+        raw = secret.get_secret_value() if hasattr(secret, "get_secret_value") else str(secret)
+        return lane_control_token(raw, run_id, generation=generation)
 
     def _mr_io_timeout_s(self) -> float:
         """C08: the bounded provider-I/O window under the reservation lock."""
@@ -3902,15 +4520,106 @@ class RunService:
         )
 
     async def _redispatch_revival(self, run_id: str) -> None:
-        """Re-dispatch a revived run — same branch, attempt base = last candidate."""
+        """Re-dispatch a revived run — same branch, attempt base = last candidate.
+
+        R37-07 (#288): a HARNESS revival carries a continuation decision
+        selected from the recorded recoverable state (Q35-02), dispatched
+        as the lane-resume envelope; an UNCERTAIN decision dispatches
+        NOTHING — zero pipelines, zero vendor sessions; the ambiguity goes
+        to the operator via /retry's note. The revival also opens a NEW
+        attempt generation (NEXT-01 — the dispatched lane token is
+        attempt-scoped, the stalled attempt's credentials retire), bumped
+        BEFORE the lane launches and aligned with the pause fence's
+        resumed epoch.
+
+        R37-01 (issue #282): the re-drive resolves the recovery EVENT it
+        stands for from the ``retry_delivery_key`` history — the OPEN
+        revival attempt's idempotency key names the delivery that
+        stranded. With the identity established, the re-drive
+        RECONSTRUCTS the identical committed decision BY ID (the frozen
+        checkpoint loads — a newer checkpoint landing meanwhile changes
+        nothing); with the identity unestablishable (an auto-revive
+        window, an unkeyed direct drive) the decision is re-made and
+        marked ``lineage: reestablished``. The builtin backend keeps its
+        legacy repair re-proposal (recorded as this wave's honest
+        limitation: no lane, no held WIP, no envelope).
+        """
+        fence_floor = 0
+        fence = await pause_fence_decision(self._session_factory, run_id)
         async with self._session_factory() as session:
             run = await self._get_run(session, run_id)
             project_id = run.project_id
-            backend_name = (
-                str((run.evidence or {}).get("backend") or "").strip() or self._backend_name()
+            evidence = dict(run.evidence or {})
+            candidates = list(run.candidate_shas or [])
+            backend_name = str(evidence.get("backend") or "").strip() or self._backend_name()
+            # The death reason the walk to ``proposing`` overwrote: the
+            # auto-revive stamp keeps the ORIGINAL terminal reason.
+            revival_reason = str(
+                (evidence.get("revival") or {}).get("reason")
+                if isinstance(evidence.get("revival"), dict)
+                else ""
             )
+            death_reason = revival_reason or str(run.status_reason or "")
+            # R36-02 lineage: the dead attempt's durable generation the
+            # decision continues FROM — captured BEFORE the bump below opens
+            # the revival's NEW attempt.
+            source_attempt = int(run.cancellation_generation or 0)
+            # R37-01: the stranded delivery this re-drive stands for — the
+            # OPEN revival attempt's idempotency key (the
+            # ``retry_delivery_key`` history). A ``delivery:<id>`` key names
+            # the /retry event; anything else has no event identity.
+            native_command_id: str | None = None
+            open_attempt = await open_revival_attempt(session, run_id=run_id)
+            if open_attempt is not None:
+                open_key = str(open_attempt.idempotency_key or "")
+                if open_key.startswith("delivery:"):
+                    native_command_id = open_key[len("delivery:") :] or None
+            if native_command_id is not None:
+                # The committed decision the stranded event owns — its own
+                # recorded event block is the authoritative source attempt
+                # (the run row has since moved past it).
+                stranded_entry = continuation.find_decision_by_event(
+                    evidence.get(continuation.CONTINUATION_EVIDENCE_KEY), native_command_id
+                )
+                if stranded_entry is not None:
+                    recorded_attempt = (stranded_entry.get("event") or {}).get("source_attempt")
+                    if isinstance(recorded_attempt, int):
+                        source_attempt = recorded_attempt
+            if is_harness_backend(backend_name):
+                fence_floor = fence.resumed_publication_epoch or 0
+                run.cancellation_generation = max(
+                    int(run.cancellation_generation or 0) + 1, fence_floor
+                )
+                await session.commit()
         if is_harness_backend(backend_name):
-            await self._advance_harness(project_id, run_id)
+            decision = await self._select_continuation(
+                run_id,
+                death_reason=death_reason,
+                evidence=evidence,
+                candidate_shas=candidates,
+                source_attempt=source_attempt,
+                native_command_id=native_command_id,
+                # No durable lineage to the stranded event's decision could be
+                # established — whatever is minted now RE-ESTABLISHES it.
+                lineage="reestablished",
+                dispatches=True,
+            )
+            if not decision.dispatchable:
+                logger.warning(
+                    "Run %s revival stood down — continuation source unknown (%s); "
+                    "an operator must resolve it via /retry (R37-07)",
+                    run_id[:8],
+                    decision.mode_selected,
+                )
+                return
+            await self._advance_harness(
+                project_id,
+                run_id,
+                # Q35-02: the WIP-continuity contract the decision selected
+                # from the recoverable state — the same envelope /retry
+                # dispatches.
+                resume_mode=decision.resume_mode(),
+            )
         else:
             await self._advance_proposal(project_id, run_id)
 
@@ -4377,6 +5086,7 @@ class RunService:
             evidence = dict(run.evidence or {})
             project_id = run.project_id
             cancel_requested = bool(run.cancel_requested)
+            entry_status = run.status
 
         backend_name = str(evidence.get("backend") or "").strip()
         if backend_name and not is_harness_backend(backend_name):
@@ -4389,6 +5099,40 @@ class RunService:
         if not handle:
             await self._to_terminal(
                 run_id, FlowStatus.BLOCKED, "waiting_harness without harness handle"
+            )
+            return
+
+        # R37-07 (#288): the callback is bound to the CURRENT attempt — the
+        # run's live state names which dispatch this reconciler drives. A
+        # poll arriving for anything but ``waiting_harness`` (a resurrected
+        # worker holding the PREVIOUS dispatch's journaled handle after a
+        # pause/resume, a late pipeline completion) reconciles to a
+        # superseded record with ZERO provider writes — a delayed older
+        # pipeline can never become the current WIP/candidate source. The
+        # durable handle the reconciler restarts from is the LAST
+        # dispatch's (the retry leg replaced it), so the binding key is the
+        # run's own state, checked before any provider I/O. (A CANCELLED
+        # run falls through to the grant-revocation branch below, whose
+        # wording is its own.)
+        if entry_status != FlowStatus.WAITING_HARNESS.value and not cancel_requested:
+            try:
+                stale_attempt_base = str((json.loads(handle) or {}).get("attempt_base") or "")
+            except (TypeError, ValueError):
+                stale_attempt_base = ""
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "superseded": {
+                        "reason": f"run already {entry_status}",
+                        "attempt_base": stale_attempt_base,
+                    }
+                },
+            )
+            logger.info(
+                "Run %s is %s — harness callback for a previous dispatch recorded as "
+                "superseded, zero writes (R37-07)",
+                run_id[:8],
+                entry_status,
             )
             return
 

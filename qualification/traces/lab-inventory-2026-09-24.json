@@ -1,0 +1,14 @@
+{
+  "stamp": "forge.trace/1",
+  "trace_id": "lab-inventory-2026-09-24",
+  "record_id": "gitlab-ce-v1@0.37.0-preflight",
+  "capability": "lab-alignment-preflight",
+  "provenance": "scripted",
+  "executed_at": "2026-09-24T09:36:17Z",
+  "artifact_sha256": "4c0ee10ea973b4dc9ee436261073af0d19186fc9a918f0306d60e99c45f0ce53",
+  "provider": "gitlab",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
+  "model_route": "",
+  "invokes_real_protocol_code": false,
+  "note": "R37-06 read-only inventory of the REAL lab (qualification/inventory-2026-09-24.json, stamp forge.lab.inventory/1): /health reports 0.28.0 on localhost/forge:dev@sha256:a09ad6a0…, schema head 026 (repo 027), .gitlab-ci.yml includes pinned at 2fbc321, budget caps absent, GitLab CE 19.3.2, runner id3 stale / id4 online — verdict misaligned. Observation only: no provider task or recovery flow executed, so the provenance is scripted (offline), not live. Informational entry — lab-alignment-preflight is not a required capability of the record."
+}

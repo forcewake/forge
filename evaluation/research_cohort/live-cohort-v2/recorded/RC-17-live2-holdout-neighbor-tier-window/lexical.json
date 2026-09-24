@@ -1,0 +1,204 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+  "mode": "lexical",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 764,
+          "output_lower_bound": 2336,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.020216,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 764,
+            "output_tokens": 2336,
+            "charged_input_tokens": 764,
+            "charged_output_tokens": 2336,
+            "usage_known": true,
+            "usd_estimated": 0.020216,
+            "running_usd_estimated": 0.662316
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Locate the contract-tier request window definition in billing-policy (probe src/policy/) and the policy client accessor (`src/policy/client.py`) that exposes it to Orders."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Locate the order-side constant window and the checkout request gate in orders-api `src/checkout.py` (and `src/orders/handlers/refunds.py`), plus any tests covering the gate."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Replace the order-side constant in the checkout gate with an import/call through the policy client to billing-policy's tier window; leave no local copy."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Update/extend orders-api tests for the checkout gate to exercise the imported tier window and run the orders-api test suite."
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "README.md",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "why": "claim"
+      },
+      {
+        "repo": "orders-api",
+        "path": "README.md",
+        "why": "claim"
+      },
+      {
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "C1",
+        "text": "Billing's policy is a READ-ONLY neighbor and Orders imports its decisions over the policy client at `src/policy/client.py`.",
+        "repo": "billing-policy",
+        "path": "README.md",
+        "line": 4,
+        "asserted_content": "imports its decisions over the policy client (`src/policy/client.py`)"
+      },
+      {
+        "claim_id": "C2",
+        "text": "billing-policy's policy module is the single source of truth for refund policy decisions consumed by Orders' checkout.",
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 3,
+        "asserted_content": "This module is the SINGLE source of truth for refund policy decisions"
+      },
+      {
+        "claim_id": "C3",
+        "text": "orders-api is the writable target; refund request handling lives in `src/checkout.py` and `src/orders/handlers/refunds.py`.",
+        "repo": "orders-api",
+        "path": "README.md",
+        "line": 4,
+        "asserted_content": "refund request handling lives in `src/checkout.py` and"
+      },
+      {
+        "claim_id": "C4",
+        "text": "The checkout refund-request flow owns no policy of its own.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 3,
+        "asserted_content": "The refund-request flow deliberately OWNS no policy of its own: every"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Where exactly in billing-policy is the contract-tier request window defined (symbol and module)? The shown bytes of src/policy/refunds.py (lines 2-6) do not display a tier window."
+      },
+      {
+        "question_id": "q2",
+        "text": "What is the order-side constant currently gating the checkout request window in orders-api, and at which path/line does it live?"
+      },
+      {
+        "question_id": "q3",
+        "text": "What accessor does `src/policy/client.py` expose for Orders to fetch the tier window?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Only orders-api is modified in this pass; billing-policy and docs-site snapshots stay frozen."
+      },
+      {
+        "text": "Scope is limited to the checkout request gate in orders-api, not other refund handlers."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 764,
+        "output_lower_bound": 2336,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.020216,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 764,
+          "output_tokens": 2336,
+          "charged_input_tokens": 764,
+          "charged_output_tokens": 2336,
+          "usage_known": true,
+          "usd_estimated": 0.020216,
+          "running_usd_estimated": 0.662316
+        }
+      ]
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.020216,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

@@ -1,0 +1,614 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-14-live2-ambiguous-approver",
+  "mode": "research",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "max_calls",
+      "cost": {
+        "calls_proposed": 12,
+        "calls_executed": 12,
+        "wall_seconds_used": 108.866,
+        "tokens": {
+          "input": 5416,
+          "output": 10355,
+          "input_lower_bound": 5416,
+          "output_lower_bound": 10355,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.093672,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 465,
+            "output_tokens": 1052,
+            "charged_input_tokens": 465,
+            "charged_output_tokens": 1052,
+            "usage_known": true,
+            "usd_estimated": 0.009346,
+            "running_usd_estimated": 0.183152
+          },
+          {
+            "input_tokens": 529,
+            "output_tokens": 1235,
+            "charged_input_tokens": 529,
+            "charged_output_tokens": 1235,
+            "usage_known": true,
+            "usd_estimated": 0.010938,
+            "running_usd_estimated": 0.19409
+          },
+          {
+            "input_tokens": 1559,
+            "output_tokens": 1389,
+            "charged_input_tokens": 1559,
+            "charged_output_tokens": 1389,
+            "usage_known": true,
+            "usd_estimated": 0.01423,
+            "running_usd_estimated": 0.20832
+          },
+          {
+            "input_tokens": 1771,
+            "output_tokens": 1486,
+            "charged_input_tokens": 1771,
+            "charged_output_tokens": 1486,
+            "usage_known": true,
+            "usd_estimated": 0.01543,
+            "running_usd_estimated": 0.22375
+          },
+          {
+            "input_tokens": 1092,
+            "output_tokens": 5193,
+            "charged_input_tokens": 1092,
+            "charged_output_tokens": 5193,
+            "usage_known": true,
+            "usd_estimated": 0.043728,
+            "running_usd_estimated": 0.267478
+          }
+        ]
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": false,
+    "stopped_reason": "max_calls",
+    "iterations": 4,
+    "calls_proposed": 12,
+    "calls_executed": 12,
+    "observations": {
+      "count": 12,
+      "truncated": 1,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0
+    },
+    "wall_seconds_used": 108.866,
+    "tokens": {
+      "input": 4324,
+      "output": 5162,
+      "input_lower_bound": 4324,
+      "output_lower_bound": 5162,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing-policy",
+      "docs-site",
+      "orders-api"
+    ],
+    "repos_authorized": [
+      "billing-policy",
+      "docs-site",
+      "orders-api"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "README.md",
+        "line": 7,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line": 4,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line": 6,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-4",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 7,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-5",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 20,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-6",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 9,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-7",
+        "repo_key": "docs-site",
+        "repository_id": "gitlab:docs-site",
+        "path": "content/refunds.md",
+        "line": 11,
+        "kind": "research_match",
+        "detail": "[Aa]pprov"
+      },
+      {
+        "evidence_id": "ev-8",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 196,
+        "kind": "research_read",
+        "detail": "read 70 chars from offset 195"
+      },
+      {
+        "evidence_id": "ev-9",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 40 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-10",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 40 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-11",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 206,
+        "kind": "research_read",
+        "detail": "read 40 chars from offset 205"
+      },
+      {
+        "evidence_id": "ev-12",
+        "repo_key": "docs-site",
+        "repository_id": "gitlab:docs-site",
+        "path": "content/refunds.md",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 60 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-13",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 60 chars from offset 0"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "list_paths",
+      "repo_key": "billing-policy",
+      "call": "prefix",
+      "content": "README.md\nsrc/policy/client.py\nsrc/policy/refunds.py",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "list_paths",
+      "repo_key": "docs-site",
+      "call": "prefix",
+      "content": "content/index.md\ncontent/refunds.md",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "list_paths",
+      "repo_key": "orders-api",
+      "call": "prefix",
+      "content": "README.md\nsrc/checkout.py\nsrc/orders/handlers/refunds.py\nsrc/orders/models.py",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern [Aa]pprov",
+      "content": "README.md:7: The CURRENT refund approval policy (revision F-2024-11) lives in the\nsrc/policy/client.py:20:         return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\nsrc/policy/refunds.py:9: Layout note: the CURRENT manual-approval policy lives near the END of\nsrc/policy/refunds.py:104: #: in basis points. These are accounting inputs, not approval rules.\nsrc/policy/refunds.py:134: # SUPERSEDED history \u2014 F-2023-04 and older approval rules.\nsrc/policy/refunds.py:139: # end of this file. A service reading an approval threshold from this\nsrc/policy/refunds.py:144: #: DEPRECATED (F-2023-04): the old auto-approve ceiling. Superseded \u2014 do\nsrc/policy/refunds.py:157:         return \"auto_approve\"\nsrc/policy/refunds.py:170: # F-2024-02 temporarily routed approvals through the finance duty roster\nsrc/policy/refunds.py:171: # with per-region ceilings. It was retired when the approvals service\nsrc/policy/refunds.py:184: #: DEPRECATED (F-2024-02): the interim duty roster that approvals were\nsrc/policy/refunds.py:185: #: routed to before the approvals service existed.\nsrc/policy/refunds.py:200:     \"\"\"DEPRECATED (F-2024-02): where interim approvals were routed.\"\"\"\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:208: # billing lead's approval BEFORE capture. Automated approval at or above\nsrc/policy/refunds.py:210: # allowed. The approver identity and routing live in the approvals\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:217: #: above this amount require a human approval step before capture.\nsrc/policy/refunds.py:223: #: Who owns approval routing for manual-review refunds (the approvals\nsrc/policy/refunds.py:225: APPROVALS_OWNERSHIP = \"approvals-service\"\nsrc/policy/refunds.py:228: def requires_manual_approval(amount_cents: int) -> bool:\nsrc/policy/refunds.py:229:     \"\"\"True when a refund of this amount ne",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern [Aa]pprov",
+      "content": "README.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/checkout.py:6: checkout-side auto-approve limit (2000 cents) was REMOVED in PR #4471\nsrc/checkout.py:22: #: (fees, approval) is billing-policy's, not ours.\nsrc/checkout.py:41:             # Finance requires an approval step for large refunds, but the\nsrc/checkout.py:42:             # amount threshold and the approver are NOT decided in this\nsrc/checkout.py:44:             return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "docs-site",
+      "call": "pattern [Aa]pprov",
+      "content": "content/refunds.md:11: ## Do refunds need approval?",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern [Rr]efund",
+      "content": "README.md:7: The CURRENT refund approval policy (revision F-2024-11) lives in the\nREADME.md:8: final revision block of `src/policy/refunds.py`; the F-2023/F-2024-02\nsrc/policy/client.py:5: from src.policy import refunds\nsrc/policy/client.py:9:     \"\"\"Read-only access to Billing's refund policy decisions.\"\"\"\nsrc/policy/client.py:11:     def refund_status(self, order_id: str, amount_cents: int) -> str:\nsrc/policy/client.py:12:         \"\"\"The policy status for a refund of this amount.\nsrc/policy/client.py:19:         decision = refunds.decide(amount_cents)\nsrc/policy/refunds.py:1: \"\"\"Billing-owned refund policy primitives (finance policy F-series).\nsrc/policy/refunds.py:3: This module is the SINGLE source of truth for refund policy decisions\nsrc/policy/refunds.py:60: def is_positive_refund_amount(amount_cents: int) -> bool:\nsrc/policy/refunds.py:61:     \"\"\"A refund of zero or negative cents is a no-op, not a refund.\"\"\"\nsrc/policy/refunds.py:70: #: The default window during which a refund REQUEST is accepted after the\nsrc/policy/refunds.py:99: # Fee and surcharge tables used when a refund is captured.\nsrc/policy/refunds.py:103: #: Interchange-plus style fee components billed against a captured refund,\nsrc/policy/refunds.py:112: def fee_cents_on_refund(amount_cents: int) -> int:\nsrc/policy/refunds.py:113:     \"\"\"The fee components charged when a refund of this size is captured.\"\"\"\nsrc/policy/refunds.py:128:         - fee_cents_on_refund(amount_cents)\nsrc/policy/refunds.py:137: # already-captured refunds. They MUST NOT be used for NEW decisions:\nsrc/policy/refunds.py:172: # took over routing; nothing may consult these values for new refunds.\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:220: #: The CURRENT refund policy revision identifier.\nsrc/policy/refunds.py:223: #: Who owns approval routing for manua",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern [Rr]efund",
+      "content": "README.md:3: The Orders service. The writable target of the refund-request task:\nREADME.md:4: refund request handling lives in `src/checkout.py` and\nREADME.md:5: `src/orders/handlers/refunds.py`.\nREADME.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nsrc/checkout.py:1: \"\"\"Orders' checkout \u2014 where refund requests enter this service.\nsrc/checkout.py:3: The refund-request flow deliberately OWNS no policy of its own: every\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/checkout.py:8: reintroduce local refund thresholds here.\nsrc/checkout.py:17: from src.orders.models import Order, RefundRequest\nsrc/checkout.py:21: #: refund. This is the ORDER-SIDE request gate; the money-side decision\nsrc/checkout.py:27:     \"\"\"The checkout surface: place orders, request refunds.\"\"\"\nsrc/checkout.py:32:     def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\nsrc/checkout.py:33:         \"\"\"Accept a refund request for an expired order.\nsrc/checkout.py:39:         status = self._policy.refund_status(order.id, amount_cents)\nsrc/checkout.py:41:             # Finance requires an approval step for large refunds, but the\nsrc/checkout.py:44:             return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")\nsrc/checkout.py:46:             return RefundRequest(order=order, amount_cents=amount_cents, state=\"capturing\")\nsrc/checkout.py:52:             raise ValueError(\"refund request window has closed\")\nsrc/orders/handlers/refunds.py:1: \"\"\"HTTP handlers for refund requests (Orders' public surface).\"\"\"\nsrc/orders/handlers/refunds.py:8: from src.orders.models import Order, RefundRequest\nsrc/orders/handlers/refunds.py:11: def handle_refund_request(\nsrc/orders/handlers/refunds.py:14:     \"\"\"POST /orders/{id}/refunds \u2014 accept and route a refund request.\"\"\"\nsrc/orders/handlers/refunds.py:16:         request: RefundRequest = checkout.request_refund(\nsrc/orders/",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "grep",
+      "repo_key": "docs-site",
+      "call": "pattern [Rr]efund",
+      "content": "content/index.md:5: - [Requesting a refund](/content/refunds.md)\ncontent/refunds.md:1: # Requesting a refund\ncontent/refunds.md:3: This help-center page explains how CUSTOMERS request a refund. It is\ncontent/refunds.md:6: ## When can I ask for a refund?\ncontent/refunds.md:8: You can request a refund for up to 30 days after your order expires.\ncontent/refunds.md:9: Open the order in your account page and choose **Request refund**.\ncontent/refunds.md:11: ## Do refunds need approval?\ncontent/refunds.md:13: Some refunds are reviewed before the money moves back to your card. If\ncontent/refunds.md:20: After a refund is issued, card refunds take 3-5 business days and bank\ncontent/refunds.md:22: for refunds.",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern [Aa]pprov",
+      "content": "README.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/checkout.py:6: checkout-side auto-approve limit (2000 cents) was REMOVED in PR #4471\nsrc/checkout.py:22: #: (fees, approval) is billing-policy's, not ours.\nsrc/checkout.py:41:             # Finance requires an approval step for large refunds, but the\nsrc/checkout.py:42:             # amount threshold and the approver are NOT decided in this\nsrc/checkout.py:44:             return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern [Aa]pprov",
+      "content": "README.md:7: The CURRENT refund approval policy (revision F-2024-11) lives in the\nsrc/policy/client.py:20:         return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\nsrc/policy/refunds.py:9: Layout note: the CURRENT manual-approval policy lives near the END of\nsrc/policy/refunds.py:104: #: in basis points. These are accounting inputs, not approval rules.\nsrc/policy/refunds.py:134: # SUPERSEDED history \u2014 F-2023-04 and older approval rules.\nsrc/policy/refunds.py:139: # end of this file. A service reading an approval threshold from this\nsrc/policy/refunds.py:144: #: DEPRECATED (F-2023-04): the old auto-approve ceiling. Superseded \u2014 do\nsrc/policy/refunds.py:157:         return \"auto_approve\"\nsrc/policy/refunds.py:170: # F-2024-02 temporarily routed approvals through the finance duty roster\nsrc/policy/refunds.py:171: # with per-region ceilings. It was retired when the approvals service\nsrc/policy/refunds.py:184: #: DEPRECATED (F-2024-02): the interim duty roster that approvals were\nsrc/policy/refunds.py:185: #: routed to before the approvals service existed.\nsrc/policy/refunds.py:200:     \"\"\"DEPRECATED (F-2024-02): where interim approvals were routed.\"\"\"\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:208: # billing lead's approval BEFORE capture. Automated approval at or above\nsrc/policy/refunds.py:210: # allowed. The approver identity and routing live in the approvals\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:217: #: above this amount require a human approval step before capture.\nsrc/policy/refunds.py:223: #: Who owns approval routing for manual-review refunds (the approvals\nsrc/policy/refunds.py:225: APPROVALS_OWNERSHIP = \"approvals-service\"\nsrc/policy/refunds.py:228: def requires_manual_approval(amount_cents: int) -> bool:\nsrc/policy/refunds.py:229:     \"\"\"True when a refund of this amount ne",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "grep",
+      "repo_key": "docs-site",
+      "call": "pattern [Aa]pprov",
+      "content": "content/refunds.md:11: ## Do refunds need approval?",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern [Oo]wner|[Rr]out(e|ing)|[Oo]n-?call|[Aa]ssign|[Qq]ueue|[Tt]eam",
+      "content": "README.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/orders/handlers/refunds.py:14:     \"\"\"POST /orders/{id}/refunds \u2014 accept and route a refund request.\"\"\"",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern [Oo]wner|[Rr]out(e|ing)|[Oo]n-?call|[Aa]ssign|[Qq]ueue|[Tt]eam",
+      "content": "src/policy/client.py:15:         statuses consumers route on: ``manual_review`` or\nsrc/policy/client.py:17:         service as a number \u2014 consumers route on the status.\nsrc/policy/refunds.py:170: # F-2024-02 temporarily routed approvals through the finance duty roster\nsrc/policy/refunds.py:172: # took over routing; nothing may consult these values for new refunds.\nsrc/policy/refunds.py:185: #: routed to before the approvals service existed.\nsrc/policy/refunds.py:199: def deprecated_f2024_route(region: str) -> str:\nsrc/policy/refunds.py:200:     \"\"\"DEPRECATED (F-2024-02): where interim approvals were routed.\"\"\"\nsrc/policy/refunds.py:210: # allowed. The approver identity and routing live in the approvals\nsrc/policy/refunds.py:223: #: Who owns approval routing for manual-review refunds (the approvals\nsrc/policy/refunds.py:285:     \"deprecated_f2024_route\",",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "docs-site",
+      "call": "pattern [Oo]wner|[Rr]out(e|ing)|[Oo]n-?call|[Aa]ssign|[Qq]ueue|[Tt]eam",
+      "content": "content/refunds.md:15: within two business days. The support team cannot see the internal",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 195 length 70",
+      "content": "he policy client.\nServices must IMPORT these decisions and must never ",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "README.md offset 0 length 40",
+      "content": "# billing-policy\n\nBilling's policy servi",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/client.py offset 0 length 40",
+      "content": "\"\"\"The billing-policy client other servi",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/handlers/refunds.py offset 0 length 80",
+      "content": "\"\"\"HTTP handlers for refund requests (Orders' public surface).\"\"\"\n\nfrom __future",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "docs-site",
+      "call": "content/refunds.md offset 0 length 40",
+      "content": "# Requesting a refund\n\nThis help-center ",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 205 length 40",
+      "content": "client.\nServices must IMPORT these decis",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "docs-site",
+      "call": "content/refunds.md offset 0 length 60",
+      "content": "# Requesting a refund\n\nThis help-center page explains how CU",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/handlers/refunds.py offset 0 length 60",
+      "content": "\"\"\"HTTP handlers for refund requests (Orders' public surface",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "Block the routing decision: record that the approver and routing owner for orders-api manual refund approvals is unresolved, and make no silent choice of target.",
+        "evidence_refs": [
+          "ev-13"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "Ask the orders-api maintainers/requester to explicitly name the person or team performing the manual approval step for refund requests, the routing mechanism, and the repository owning that routing.",
+        "evidence_refs": [
+          "ev-13"
+        ]
+      },
+      {
+        "step_id": "s3",
+        "objective": "Only after the approver/owner is explicitly named: implement the routing in the owner-designated repository and update the refund help-center page; keep change scope empty until then.",
+        "evidence_refs": [
+          "ev-12"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "why": "claim"
+      },
+      {
+        "repo": "docs-site",
+        "path": "content/refunds.md",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "orders-api's public refund surface is this handlers module; its visible docstring names no approver and no routing owner.",
+        "repo": "orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "line": 1,
+        "asserted_content": "\"\"\"HTTP handlers for refund requests (Orders' public surface.\"\"\""
+      },
+      {
+        "claim_id": "c2",
+        "text": "billing-policy exposes a client for other services; the visible bytes name no approver for orders-api refund requests.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 1,
+        "asserted_content": "\"\"\"The billing-policy client other servi"
+      },
+      {
+        "claim_id": "c3",
+        "text": "The help-center refund page exists but its visible bytes name no approver or routing target.",
+        "repo": "docs-site",
+        "path": "content/refunds.md",
+        "line": 1,
+        "asserted_content": "# Requesting a refund"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Who (person or team) performs the manual approval step for orders-api refund requests?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What mechanism should route approval-needed refunds to that approver (queue, label, config entry), and in which repository does that routing live?"
+      },
+      {
+        "question_id": "q3",
+        "text": "What do the approval-matched but unshown lines say (orders-api:src/checkout.py:4,6; billing-policy:src/policy/refunds.py:9,196; billing-policy:README.md:7; docs-site:content/refunds.md:11) \u2014 do any of them name the approver or the routing?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "No approver identity, team, routing mechanism, or owning repo is assumed; the plan blocks on an explicit answer."
+      },
+      {
+        "text": "Only the three listed repositories at their given source OIDs are readable evidence."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 12,
+      "calls_executed": 12,
+      "wall_seconds_used": 108.866,
+      "tokens": {
+        "input": 5416,
+        "output": 10355,
+        "input_lower_bound": 5416,
+        "output_lower_bound": 10355,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.093672,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 465,
+          "output_tokens": 1052,
+          "charged_input_tokens": 465,
+          "charged_output_tokens": 1052,
+          "usage_known": true,
+          "usd_estimated": 0.009346,
+          "running_usd_estimated": 0.183152
+        },
+        {
+          "input_tokens": 529,
+          "output_tokens": 1235,
+          "charged_input_tokens": 529,
+          "charged_output_tokens": 1235,
+          "usage_known": true,
+          "usd_estimated": 0.010938,
+          "running_usd_estimated": 0.19409
+        },
+        {
+          "input_tokens": 1559,
+          "output_tokens": 1389,
+          "charged_input_tokens": 1559,
+          "charged_output_tokens": 1389,
+          "usage_known": true,
+          "usd_estimated": 0.01423,
+          "running_usd_estimated": 0.20832
+        },
+        {
+          "input_tokens": 1771,
+          "output_tokens": 1486,
+          "charged_input_tokens": 1771,
+          "charged_output_tokens": 1486,
+          "usage_known": true,
+          "usd_estimated": 0.01543,
+          "running_usd_estimated": 0.22375
+        },
+        {
+          "input_tokens": 1092,
+          "output_tokens": 5193,
+          "charged_input_tokens": 1092,
+          "charged_output_tokens": 5193,
+          "usage_known": true,
+          "usd_estimated": 0.043728,
+          "running_usd_estimated": 0.267478
+        }
+      ]
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.093672,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 5,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

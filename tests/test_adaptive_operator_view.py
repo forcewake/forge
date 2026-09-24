@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from forge.adaptive.operator_view import (
+    BLOCKED_CODES,
+    NON_RETRYABLE_CODES,
     OPERATOR_STATES,
     OperatorAction,
     OperatorProjection,
@@ -25,8 +27,10 @@ from forge.adaptive.operator_view import (
     StaleProjectionRejected,
     apply_update,
     derive_state,
+    explain_blocked,
     initial_projection,
     render,
+    status_note_lines,
 )
 
 NOW = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -267,6 +271,73 @@ class TestStateDerivation:
         )
 
         assert derivation.state == "unverified"
+
+    # -- R37-03: the CURRENT candidate binds readiness; older passes are
+    # -- history, never current readiness.
+
+    def test_a_pass_for_an_earlier_candidate_is_history_not_readiness(self):
+        """Candidate history [A, B] with a pass only for A: B is the
+        CURRENT candidate (the last member) and reads unverified; A's
+        pass renders as a historical_pass, never as current readiness."""
+        a, b = "a" * 40, "b" * 40
+        projection = initial_projection(
+            _rows(
+                run=_run(candidate_shas=[a, b]),
+                attempts=[_attempt("succeeded")],
+                verifications=[_verification("passed", candidate_sha=a)],
+            ),
+            NOW,
+        )
+
+        assert projection.state == "unverified"
+        assert projection.identity["active_candidate"] == b
+        assert projection.action_digest == b  # the headline names the CURRENT one
+        assert [entry["verdict"] for entry in projection.verification_history] == [
+            "historical_pass"
+        ]
+        assert projection.verification_history[0]["candidate_sha"] == a
+
+    def test_a_pass_for_the_last_member_is_current_readiness(self):
+        a, b = "a" * 40, "b" * 40
+        derivation = derive_state(
+            _rows(
+                run=_run(candidate_shas=[a, b]),
+                attempts=[_attempt("succeeded")],
+                verifications=[_verification("passed", candidate_sha=b)],
+            ),
+            NOW,
+        )
+
+        assert derivation.state == "verified_ready"
+
+    def test_an_explicit_active_candidate_pointer_wins_over_the_list_order(self):
+        """The run row's ``active_candidate_sha`` pointer names the current
+        candidate even when it is not the last list member — and a pass
+        for the LAST member is then the historical one."""
+        a, b = "a" * 40, "b" * 40
+        projection = initial_projection(
+            _rows(
+                run=_run(candidate_shas=[a, b], active_candidate_sha=a),
+                attempts=[_attempt("succeeded")],
+                verifications=[_verification("passed", candidate_sha=b)],
+            ),
+            NOW,
+        )
+
+        assert projection.identity["active_candidate"] == a
+        assert projection.state == "unverified"
+        assert projection.verification_history[0]["candidate_sha"] == b
+
+    def test_the_candidate_history_renders_beside_the_current_one(self):
+        a, b = "a" * 40, "b" * 40
+        projection = initial_projection(
+            _rows(run=_run(candidate_shas=[a, b]), attempts=[_attempt("succeeded")]), NOW
+        )
+        document = render(projection)
+
+        assert document["identity"]["candidate_shas"] == [a, b]
+        assert document["identity"]["active_candidate"] == b
+        assert "1 earlier candidate" in "\n".join(status_note_lines(projection))
 
     def test_a_failed_attempt_derives_rejected(self):
         derivation = derive_state(_rows(attempts=[_attempt("failed")]), NOW)
@@ -840,6 +911,7 @@ class TestRender:
         assert document["identity"] == {
             "source_sha": "b" * 40,
             "candidate_shas": ["c" * 40],
+            "active_candidate": "c" * 40,  # R37-03: the CURRENT candidate
             "checkpoint_id": "ck-9",
             "checkpoint_digest": "e" * 64,
             "plan_digest": "p" * 64,
@@ -933,3 +1005,230 @@ class TestRender:
         assert document["rows_observed"]["attempts"]  # observed, with a stamp
         assert document["rows_observed"]["checkpoints"] == ""  # never observed
         assert document["rows_observed"]["run"]
+
+
+# -- the typed blocked-reason explanations (R37-16) ---------------------------
+
+
+class TestExplainBlocked:
+    """``explain_blocked`` — the typed, evidence-linked diagnostics: each
+    observed condition renders its outcome CODE, a one-line explanation,
+    a thin link to the EXACT proving row and the SAFE next action; the
+    non-retryable conditions never suggest retry."""
+
+    def test_a_revoked_authority_is_never_answered_with_retry(self):
+        rows = _rows(run=_run(blocked_reason="provider credential revoked (401 unauthorized)"))
+        projection = initial_projection(rows, NOW)
+
+        reasons = explain_blocked(projection)
+        revoked = next(reason for reason in reasons if reason.code == "revoked_authority")
+
+        assert revoked.retryable is False
+        assert revoked.suggested_action == "rotate_or_rebind_credential"
+        assert revoked.via == "runbook:token-rotation"
+        assert "retry" not in revoked.suggested_action  # the headline pin
+        assert revoked.explanation.lower().startswith("the run is blocked")
+        assert revoked.evidence["of"] == "run"
+        assert revoked.evidence["id"] == RUN_ID
+        assert revoked.evidence["ref"].startswith("sha256:")
+
+    def test_the_revocation_vocabulary_covers_the_provider_refusals(self):
+        for reason_text in (
+            "token expired",
+            "permission denied on the project",
+            "forbidden: the app was suspended",
+            "webhook secret unauthorized",
+        ):
+            rows = _rows(run=_run(blocked_reason=reason_text))
+            projection = initial_projection(rows, NOW)
+            assert any(r.code == "revoked_authority" for r in explain_blocked(projection)), (
+                reason_text
+            )
+
+    def test_a_plain_blockage_is_not_a_revocation(self):
+        rows = _rows(run=_run(blocked_reason="waiting on the CI lane"))
+        projection = initial_projection(rows, NOW)
+
+        assert not any(reason.code == "revoked_authority" for reason in explain_blocked(projection))
+
+    def test_each_uncertain_effect_renders_its_own_reason_with_its_row_link(self):
+        rows = _rows(
+            run=_run(status="failed"),
+            publications=[
+                _publication(status="dispatched", operation_key="op-inflight"),
+                _publication(status="unknown", operation_key="op-lost"),
+                _publication(status="committed", operation_key="op-done"),
+            ],
+        )
+        projection = initial_projection(rows, NOW)
+
+        uncertain = [
+            reason
+            for reason in explain_blocked(projection)
+            if reason.code == "uncertain_native_effect"
+        ]
+
+        assert [reason.evidence["id"] for reason in uncertain] == ["op-inflight", "op-lost"]
+        for reason in uncertain:
+            assert reason.retryable is False
+            assert reason.suggested_action == "reconcile"
+            assert reason.evidence["of"] == "publication"
+            assert reason.evidence["ref"].startswith("sha256:")
+            assert "unproven" in reason.explanation
+
+    def test_a_lost_required_checkpoint_names_restore_not_retry(self):
+        """A held pause fence whose checkpoint authority reads missing: the
+        resume path is gone — restore or retire, never retry."""
+        rows = _rows(
+            run=_run(status="proposing"),
+            commands=[_cmd(1, "pause", "checkpointed")],
+            checkpoints=[_checkpoint(checkpoint_id="", digest="", fence="held")],
+        )
+        projection = initial_projection(rows, NOW)
+
+        reasons = explain_blocked(
+            projection, coverage={"checkpoints": "missing"}, checkpoints=rows["checkpoints"]
+        )
+        loss = next(reason for reason in reasons if reason.code == "required_checkpoint_loss")
+
+        assert loss.retryable is False
+        assert loss.suggested_action == "restore_checkpoint_or_retire"
+        assert loss.via == "runbook:backup-restore"
+        assert "bytes to restore" in loss.explanation
+        assert loss.evidence["of"] == "checkpoint"
+
+    def test_a_present_checkpoint_authority_is_not_a_loss(self):
+        rows = _rows(
+            run=_run(status="proposing"),
+            commands=[_cmd(1, "pause", "checkpointed")],
+            checkpoints=[_checkpoint(fence="held")],
+        )
+        projection = initial_projection(rows, NOW)
+
+        assert not any(
+            reason.code == "required_checkpoint_loss"
+            for reason in explain_blocked(
+                projection, coverage={"checkpoints": "present"}, checkpoints=rows["checkpoints"]
+            )
+        )
+
+    def test_an_uncertain_lease_renders_a_capacity_wait_with_its_age(self):
+        rows = _rows(run=_run(status="proposing"))
+        projection = initial_projection(rows, NOW)
+        occupancy = [
+            {
+                "lease_id": "lease-1",
+                "occupancy": "dispatched_unknown",
+                "acquired_at": (NOW - timedelta(hours=2)).isoformat(),
+                "released_at": "",
+            },
+            {
+                "lease_id": "lease-2",
+                "occupancy": "observed_terminal",
+                "acquired_at": (NOW - timedelta(hours=3)).isoformat(),
+                "released_at": (NOW - timedelta(minutes=1)).isoformat(),
+            },
+        ]
+
+        reasons = explain_blocked(projection, occupancy=occupancy)
+        waits = [reason for reason in reasons if reason.code == "capacity_wait"]
+
+        assert len(waits) == 1  # the released lease is not a wait
+        wait = waits[0]
+        assert wait.evidence == {
+            "of": "lease",
+            "id": "lease-1",
+            "ref": wait.evidence["ref"],
+        }
+        assert "dispatched_unknown" in wait.explanation
+        assert "7200s" in wait.explanation  # the age of the uncertain hold
+        assert wait.retryable is True
+
+    def test_an_admission_wording_renders_a_capacity_wait_on_the_run_row(self):
+        rows = _rows(run=_run(blocked_reason="queued: project at capacity (queue full)"))
+        projection = initial_projection(rows, NOW)
+
+        wait = next(
+            reason for reason in explain_blocked(projection) if reason.code == "capacity_wait"
+        )
+
+        assert wait.evidence["of"] == "run"
+        assert "capacity" in wait.explanation
+        assert wait.suggested_action == "wait_for_reconciler"
+
+    def test_a_stale_verification_reason_names_the_old_and_current_candidates(self):
+        old, current = "a" * 40, "b" * 40
+        rows = _rows(
+            run=_run(status="waiting_ci", candidate_shas=[old, current]),
+            verifications=[_verification(candidate_sha=old)],
+        )
+        projection = initial_projection(rows, NOW)
+
+        stale = next(
+            reason for reason in explain_blocked(projection) if reason.code == "verification_stale"
+        )
+
+        assert old[:12] in stale.explanation
+        assert current[:12] in stale.explanation
+        assert stale.evidence["of"] == "verification"
+        assert stale.evidence["id"] == "ver-1"
+        assert stale.suggested_action == "verify_current_candidate"
+        assert stale.retryable is True
+
+    def test_a_current_green_verification_needs_no_stale_reason(self):
+        rows = _rows(
+            run=_run(status="waiting_ci", candidate_shas=["c" * 40]),
+            verifications=[_verification(candidate_sha="c" * 40)],
+        )
+        projection = initial_projection(rows, NOW)
+
+        assert not any(
+            reason.code == "verification_stale" for reason in explain_blocked(projection)
+        )
+
+    def test_a_healthy_projection_carries_no_reasons(self):
+        projection = initial_projection(_rows(), NOW)
+
+        assert explain_blocked(projection) == []
+
+    def test_reasons_use_only_the_closed_code_vocabulary(self):
+        rows = _rows(
+            run=_run(status="failed", blocked_reason="credential revoked"),
+            publications=[_publication(status="dispatched")],
+        )
+        projection = initial_projection(rows, NOW)
+
+        codes = {reason.code for reason in explain_blocked(projection)}
+
+        assert codes <= set(BLOCKED_CODES)
+        assert {"revoked_authority", "uncertain_native_effect"} <= codes
+
+    def test_non_retryable_codes_never_suggest_retry(self):
+        rows = _rows(
+            run=_run(status="failed", blocked_reason="revoked"),
+            publications=[_publication(status="unknown")],
+        )
+        projection = initial_projection(rows, NOW)
+
+        for reason in explain_blocked(projection):
+            if reason.code in NON_RETRYABLE_CODES:
+                assert reason.retryable is False
+                assert "retry" not in reason.suggested_action
+
+    def test_the_document_render_is_redacted(self):
+        rows = _rows(run=_run(blocked_reason="forbidden: Bearer ghp_aaaaaaaaaaaaaaaaaaaa"))
+        projection = initial_projection(rows, NOW)
+
+        document = next(
+            reason for reason in explain_blocked(projection) if reason.code == "revoked_authority"
+        ).as_document()
+
+        assert set(document) == {
+            "code",
+            "explanation",
+            "evidence",
+            "suggested_action",
+            "via",
+            "retryable",
+        }
+        assert "ghp_aaaaaaaaaaaaaaaaaaaa" not in json.dumps(document)

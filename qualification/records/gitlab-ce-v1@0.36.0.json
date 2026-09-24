@@ -20,7 +20,7 @@
     {
       "capability": "real-provider-e2e",
       "class": "model-fixture",
-      "covers": "production-entry offline trace CE-2 (issue -> plan -> /go -> dispatch -> candidate -> Draft MR): env-stripped pytest tests/production_entry/test_gitlab_ce_entry.py, 6 passed \u2014 authored scenario against fakes, NO live provider or model",
+      "covers": "production-entry offline trace CE-2 (issue -> plan -> /go -> dispatch -> candidate -> Draft MR): env-stripped pytest tests/production_entry/test_gitlab_ce_entry.py, 6 passed — authored scenario against fakes, NO live provider or model",
       "executed_at": "16339c2d0e667111972c47ccf0a370b888ca0635",
       "outcome": "pass"
     }
@@ -33,7 +33,8 @@
   "harness_binary": "claude-code",
   "harness_version": "2.1.273",
   "image_digest": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
-  "note": "The live flow stage was REFUSED at preflight (deployed control plane reports 0.28.0 while the profile pins the promoted wheel; no budget caps configured; the GitLab lane-resume dispatch gap is recorded in the evidence bundle and ADR-0030's registry) \u2014 a paid flow against another build qualifies nothing, so no live-provider evidence is claimed. The offline CE-1..CE-4 production-entry traces (real RunService + real GitLabClient over HTTP, cross-runner resume) are the strongest evidence at this version.",
+  "legacy": true,
+  "note": "The live flow stage was REFUSED at preflight (deployed control plane reports 0.28.0 while the profile pins the promoted wheel; no budget caps configured; the GitLab lane-resume dispatch gap is recorded in the evidence bundle and ADR-0030's registry) — a paid flow against another build qualifies nothing, so no live-provider evidence is claimed. The offline CE-1..CE-4 production-entry traces (real RunService + real GitLabClient over HTTP, cross-runner resume) are the strongest evidence at this version.",
   "profile": "gitlab-ce-v1",
   "provider": "gitlab",
   "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
@@ -46,6 +47,6 @@
   "template_defaults_digest": "",
   "upgrade": null,
   "verification_contract": "one required job named smoke (FORGE_REQUIRED_JOBS=smoke) on the current candidate sha",
-  "wheel_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
-  "version": "0.36.0"
+  "version": "0.36.0",
+  "wheel_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9"
 }

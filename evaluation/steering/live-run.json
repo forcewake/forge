@@ -1,0 +1,93 @@
+{
+  "schema": "forge.steering.run/1",
+  "mode": "live",
+  "status": "graded",
+  "gateway": {
+    "url": "http://localhost:4000",
+    "model": "fast"
+  },
+  "grade": {
+    "causal": true,
+    "provenance": "live-model:fast",
+    "arms": [
+      {
+        "arm": "ack_precedes_edit",
+        "ok": true,
+        "reason": "command live-steer-1790248564 acknowledged at 2026-09-24T11:16:04.351134+00:00, consumed mid-turn at 2026-09-24T11:16:04.401134+00:00, then 1 subsequent edit event(s) in the vendor's own log"
+      },
+      {
+        "arm": "counterfactual_differs",
+        "ok": true,
+        "reason": "the same task without the steer produced a different edit set"
+      },
+      {
+        "arm": "target_matched",
+        "ok": true,
+        "reason": "the edit shows exactly 'refund_limit' renamed to 'approval_threshold' in policy.py, and the unsteered arm did not do it"
+      }
+    ]
+  },
+  "run": {
+    "arm": "steered",
+    "provenance": "live-model:fast",
+    "command": {
+      "command_id": "live-steer-1790248564",
+      "kind": "steer",
+      "text": "rename refund_limit to approval_threshold in policy.py",
+      "status": "received",
+      "received_at": "2026-09-24T11:16:04.351134+00:00",
+      "authorized_at": ""
+    },
+    "vendor_events": [
+      {
+        "at": "2026-09-24T11:16:04.351134+00:00",
+        "kind": "vendor_edits",
+        "touched": [
+          "policy.py"
+        ],
+        "phase": "pre-instruction"
+      },
+      {
+        "at": "2026-09-24T11:16:04.401134+00:00",
+        "kind": "steer_consumed",
+        "command_id": "live-steer-1790248564",
+        "text": "rename refund_limit to approval_threshold in policy.py",
+        "source": "conversation-injection"
+      },
+      {
+        "at": "2026-09-24T11:16:08.040584+00:00",
+        "kind": "vendor_edits_after_steer",
+        "touched": [
+          "policy.py"
+        ],
+        "applied": "live"
+      }
+    ],
+    "edits": {
+      "base": {
+        "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    return amount <= refund_limit\n"
+      },
+      "files": {
+        "policy.py": "approval_threshold = 100\n\n\ndef allows(amount):\n    return amount <= approval_threshold\n\n\ndef clamp(amount):\n    return max(0, min(amount, approval_threshold))\n"
+      }
+    },
+    "counterfactual_edits": {
+      "base": {
+        "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    return amount <= refund_limit\n"
+      },
+      "files": {
+        "policy.py": "refund_limit = 100\n\n\ndef allows(amount):\n    \"\"\"Return True if the amount is within the policy knob.\"\"\"\n    return amount <= refund_limit\n\n\ndef clamp(amount):\n    \"\"\"Bound an amount to the policy knob: at least 0, at most refund_limit.\"\"\"\n    return max(0, min(amount, refund_limit))\n"
+      }
+    }
+  },
+  "spend": {
+    "calls": 4,
+    "tokens_in": 639,
+    "tokens_out": 755,
+    "estimate_usd": 0.009147,
+    "cost_state": "capped-estimate(lab-estimate-v1)",
+    "capped": false,
+    "spend_cap_usd": 1.0
+  },
+  "counterfactual_status": "ran within caps"
+}

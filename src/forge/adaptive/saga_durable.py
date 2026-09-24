@@ -20,29 +20,29 @@ PROVIDER-REALISTIC:
   vocabulary of ``publication_intents`` has no slot for
   ``parked_human``/``preparing`` and forcing one would be dishonest —
   the JSON column on the existing row is the established pattern.
-- **:class:`NativeShapedRemote`** — a GitLab/GitHub-shaped remote as a
-  strict in-process object. Commits append on the current head with NO
-  dedup by marker (a repeated identical commit creates a SECOND commit —
-  the marker is a commit-message trailer, exactly how forge's real
-  writer correlates, never an upstream idempotency key); the refs
-  surface carries EXPECTED-HEAD preconditions (a 422-shaped refusal on a
-  moved head); merge requests are idempotent ONLY by the provider-native
-  key ``(repository, source branch)``; protected targets refuse direct
-  commits. Every effect lands in a journal with its NATIVE identity
-  (commit sha + parent + author, MR iid + url). There is no merge, no
-  force-push and no branch-delete anywhere the publication protocol can
-  reach — structurally, not just by convention.
+- **The native-shaped reference remote moved OUT** (R37-19/#300):
+  ``NativeShapedRemote`` — the in-process GitLab/GitHub-shaped remote
+  with provider-realistic duplicate behavior — now lives in
+  :mod:`forge.adaptive.reference.native_shaped_remote` (the labelled
+  evaluation package). The old ``saga_durable.NativeShapedRemote``
+  import path keeps working through a LAZY compatibility re-export, so
+  importing this runtime module (and everything downstream of it,
+  including the native adapters) stays reference-free — no
+  reference-native implementation is ever selected implicitly by an
+  import.
 - **:class:`DurablePublicationEntry`** — the customer-shaped entry: the
   REAL :class:`WorkPackageCoordinator` starts the package (durable
   child-start intents, REAL child ``FlowRun`` rows through
   :func:`workpackage_service.start_child_run_row`), the REAL
   :class:`SagaCoordinator` drives each writer's publication over the
-  durable store and the native remote, and — the R36-18 gate — a
-  dependent child's publication CANNOT EVEN PERSIST ITS INTENT while the
-  required producer outcome is unproven: the store refuses saves that
-  would move a repository whose phase has not been admitted
-  (:class:`PhaseAdmissionRefused`), and outcomes are recorded only from
-  the PERSISTED saga state, never from invocation completion.
+  durable store and whatever effect surface the caller hands it (the
+  reference remote in tests/qualification; the REAL native adapters of
+  ``forge.adaptive.saga_native`` against live providers), and — the
+  R36-18 gate — a dependent child's publication CANNOT EVEN PERSIST ITS
+  INTENT while the required producer outcome is unproven: the store
+  refuses saves that would move a repository whose phase has not been
+  admitted (:class:`PhaseAdmissionRefused`), and outcomes are recorded
+  only from the PERSISTED saga state, never from invocation completion.
 
 The kill discipline (the crash matrix): death is injected at the store's
 COMMIT BOUNDARY — an :class:`observer <CommitObserver>` fires after every
@@ -58,19 +58,18 @@ is a HUMAN edit: parked, preserved, never force-overwritten.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from forge.adaptive.publication_saga import (
     PublicationSaga,
-    ProviderRejectedError,
-    ProviderUnavailableError,
+    ProviderRejectedError,  # noqa: F401 — compat: the reference remote's refusal surface
+    ProviderUnavailableError,  # noqa: F401 — compat: the reference remote's refusal surface
     RepoPublication,
     SagaCoordinator,
     begin_saga,
@@ -85,6 +84,17 @@ from forge.adaptive.workpackage import (
 from forge.adaptive.workpackage_service import ChildSubject, start_child_run_row
 from forge.adaptive.two_writer_qualification import TwoWriterScenario
 from forge.durable import FlowRun, Outbox
+
+if TYPE_CHECKING:
+    # The effect-interface seam (#295): the remote the entry drives is any
+    # SagaEffectSurface — the reference NativeShapedRemote (now in the
+    # evaluation package, re-exported lazily below) or the native adapters
+    # in ``forge.adaptive.saga_native`` over the REAL provider clients.
+    # TYPE_CHECKING-only: saga_native imports this module's NativeCommit at
+    # runtime (no cycle), and this module's runtime import stays
+    # reference-free.
+    from forge.adaptive.reference.native_shaped_remote import NativeShapedRemote
+    from forge.adaptive.saga_native import SagaEffectSurface
 
 __all__ = [
     "SAGA_RECORD_KEY",
@@ -109,6 +119,27 @@ __all__ = [
     "saga_from_document",
     "saga_to_document",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """The R37-19 (#300) compatibility re-export — LAZY on purpose.
+
+    ``NativeShapedRemote`` moved to
+    ``forge.adaptive.reference.native_shaped_remote`` (the labelled
+    evaluation package). Re-exporting it lazily keeps this runtime
+    module's import REFERENCE-FREE: production imports (saga_native and
+    everything downstream) never load the reference package, while the
+    old ``saga_durable.NativeShapedRemote`` path keeps working for
+    tests and qualification runners. Removing the re-export is gated on
+    the callers draining to the reference path — pinned by
+    ``tests/test_reference_separation.py``.
+    """
+    if name == "NativeShapedRemote":
+        from forge.adaptive.reference.native_shaped_remote import NativeShapedRemote
+
+        return NativeShapedRemote
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: Where the saga document lives inside the parent run's evidence blob
 #: (the same JSON-column pattern ``WorkPackageCoordinator`` persists under;
@@ -485,252 +516,6 @@ class NativeCommit(NamedTuple):
     author: str
 
 
-class NativeShapedRemote:
-    """A GitLab/GitHub-shaped remote whose DUPLICATE BEHAVIOR IS REALISTIC.
-
-    The native surface (what a provider actually offers):
-
-    - :meth:`create_commit` appends on the branch's CURRENT head — there
-      is NO dedup by content or marker; a repeated call creates a SECOND
-      commit. Safety comes from the caller probing FIRST, never from the
-      provider remembering.
-    - :meth:`update_ref` carries an EXPECTED-HEAD precondition — a moved
-      head is a 422-shaped :class:`ProviderRejectedError` (GitHub's
-      update-refs contract; :meth:`pin_expected_head` gives the
-      publication the same CAS on its commits).
-    - :meth:`create_merge_request` is idempotent ONLY by the
-      provider-native key ``(repository, source branch)`` — a second
-      creation for the same source branch returns the SAME MR (GitLab
-      refuses duplicates; so does GitHub).
-    - protected branches refuse direct commits; publication rides the MR
-      flow.
-    - every effect lands in :attr:`journal` with its native identity;
-      every commit records its author (``forge-bot`` vs ``human``). No
-      merge/force-push/delete exists on the writer surface at all — the
-      only human merge is :meth:`human_merge`, a WORLD knob tests use,
-      never a publication call.
-
-    The :class:`PublicationProvider` adapter methods sit on top and keep
-    those semantics: :meth:`commit` refuses (4xx) before any effect when
-    the branch is protected or the pinned head moved; a lost response
-    (:attr:`lose_commit_response`) lands the effect and kills the answer
-    (:class:`TimeoutError`); :meth:`head_carries_marker` is NATIVE
-    correlation — it lists the branch's commits and scans messages.
-    """
-
-    def __init__(self) -> None:
-        self._history: dict[tuple[str, str], list[NativeCommit]] = {}
-        self._merge_requests: dict[tuple[str, str], dict[str, Any]] = {}
-        self._protected: set[tuple[str, str]] = set()
-        self._pins: dict[tuple[str, str], str] = {}
-        self._counter = 0
-        self._mr_counter = 0
-        #: Every effect with its native identity, oldest first.
-        self.journal: list[dict[str, Any]] = []
-        self.commit_calls: dict[str, int] = {}
-        self.review_calls: dict[str, int] = {}
-        # -- the injected windows (test knobs) --------------------------------
-        self.unavailable: set[str] = set()
-        self.lose_commit_response: set[str] = set()
-        self.refuse_commits: set[str] = set()
-
-    # -- world knobs ----------------------------------------------------------
-
-    def seed(self, repository_id: str, branch: str, base_oid: str) -> None:
-        self._history[(repository_id, branch)] = [
-            NativeCommit(sha=base_oid, parent="", message="base", author="provider")
-        ]
-
-    def protect_branch(self, repository_id: str, branch: str) -> None:
-        self._protected.add((repository_id, branch))
-
-    def pin_expected_head(self, repository_id: str, branch: str, expected_head: str) -> None:
-        """The publication's CAS pin (the writer's ``expected_head`` drift guard)."""
-        self._pins[(repository_id, branch)] = expected_head
-
-    def human_commit(self, repository_id: str, branch: str, message: str = "human edit") -> str:
-        """A person pushed: appended, never overwritten, journaled as human."""
-        return self.create_commit(repository_id, branch, message, author="human")
-
-    def human_merge(self, repository_id: str, source_branch: str) -> None:
-        """A person merged the MR — a WORLD event, never a publication call."""
-        request = self._merge_requests.get((repository_id, source_branch))
-        if request is None:
-            raise KeyError(f"no merge request for {repository_id}/{source_branch}")
-        request["merged"] = True
-        self.journal.append(
-            {
-                "op": "merge_merge_request",
-                "repository_id": repository_id,
-                "source_branch": source_branch,
-                "iid": request["iid"],
-                "author": "human",
-            }
-        )
-
-    # -- reads ------------------------------------------------------------------
-
-    def list_commits(self, repository_id: str, branch: str) -> tuple[NativeCommit, ...]:
-        """The branch's commits, oldest first — the listing providers offer."""
-        return tuple(self._history.setdefault((repository_id, branch), []))
-
-    def branch_history(self, repository_id: str, branch: str) -> tuple[str, ...]:
-        """The branch's commit shas, oldest first (the prefix-check view)."""
-        return tuple(commit.sha for commit in self.list_commits(repository_id, branch))
-
-    def commits_carrying(
-        self, repository_id: str, branch: str, marker: str
-    ) -> tuple[NativeCommit, ...]:
-        """Every DISTINCT commit whose message carries the marker — the
-        duplicate-effect view (two entries = a duplicated logical effect)."""
-        return tuple(
-            commit
-            for commit in self.list_commits(repository_id, branch)
-            if marker in commit.message
-        )
-
-    def merge_request_creates(self, repository_id: str) -> int:
-        """How many DISTINCT merge requests were created (native idempotence)."""
-        return sum(
-            1
-            for entry in self.journal
-            if entry["op"] == "create_merge_request" and entry["repository_id"] == repository_id
-        )
-
-    def effects_for(self, repository_id: str) -> list[dict[str, Any]]:
-        return [dict(entry) for entry in self.journal if entry["repository_id"] == repository_id]
-
-    def destructive_operations(self) -> list[str]:
-        """Always empty — the surface cannot express a force-push or delete."""
-        return []
-
-    def _head(self, repository_id: str, branch: str) -> str:
-        history = self._history.setdefault((repository_id, branch), [])
-        return history[-1].sha if history else ""
-
-    # -- the native write surface ------------------------------------------------
-
-    def create_commit(self, repository_id: str, branch: str, message: str, *, author: str) -> str:
-        """Append a commit on the CURRENT head — no dedup, no CAS (the
-        provider's commits-API shape). Returns the new commit's sha."""
-        self._counter += 1
-        parent = self._head(repository_id, branch)
-        sha = hashlib.sha256(
-            f"{repository_id}|{branch}|{parent}|{message}|{author}|{self._counter}".encode()
-        ).hexdigest()[:40]
-        self._history[(repository_id, branch)].append(
-            NativeCommit(sha=sha, parent=parent, message=message, author=author)
-        )
-        self.journal.append(
-            {
-                "op": "create_commit",
-                "repository_id": repository_id,
-                "branch": branch,
-                "sha": sha,
-                "parent": parent,
-                "author": author,
-            }
-        )
-        return sha
-
-    def update_ref(self, repository_id: str, branch: str, sha: str, *, expected_head: str) -> None:
-        """The refs API with its CAS: a moved head is a 422 refusal."""
-        if self._head(repository_id, branch) != expected_head:
-            raise ProviderRejectedError(
-                f"422 update_ref {repository_id}/{branch}: expected head {expected_head},"
-                f" live head {self._head(repository_id, branch)}"
-            )
-        history = self._history[(repository_id, branch)]
-        if not history or history[-1].sha != sha:
-            raise ProviderRejectedError(
-                f"422 update_ref {repository_id}/{branch}: {sha} is not the live head"
-            )
-
-    def create_merge_request(
-        self, repository_id: str, source_branch: str, *, target_branch: str, title: str
-    ) -> str:
-        """Idempotent ONLY by the provider-native key (repository, source
-        branch): a repeat returns the SAME MR — no second review is
-        created, exactly the native duplicate behavior."""
-        key = (repository_id, source_branch)
-        existing = self._merge_requests.get(key)
-        if existing is not None:
-            return str(existing["url"])
-        self._mr_counter += 1
-        iid = self._mr_counter
-        url = f"https://native.test/{repository_id}/merge_requests/{iid}"
-        self._merge_requests[key] = {
-            "iid": iid,
-            "url": url,
-            "title": title,
-            "target_branch": target_branch,
-            "merged": False,
-        }
-        self.journal.append(
-            {
-                "op": "create_merge_request",
-                "repository_id": repository_id,
-                "source_branch": source_branch,
-                "target_branch": target_branch,
-                "iid": iid,
-                "url": url,
-            }
-        )
-        return url
-
-    # -- the PublicationProvider adapter --------------------------------------
-
-    async def remote_head(self, repository_id: str, branch: str) -> str:
-        if repository_id in self.unavailable:
-            raise ProviderUnavailableError(f"{repository_id}: surface unreadable")
-        return self._head(repository_id, branch)
-
-    async def head_carries_marker(self, repository_id: str, branch: str, marker: str) -> bool:
-        """NATIVE correlation: list the branch's commits, scan the messages."""
-        if repository_id in self.unavailable:
-            raise ProviderUnavailableError(f"{repository_id}: surface unreadable")
-        return bool(self.commits_carrying(repository_id, branch, marker))
-
-    async def commit(self, repository_id: str, branch: str, marker: str) -> str:
-        self.commit_calls[repository_id] = self.commit_calls.get(repository_id, 0) + 1
-        if repository_id in self.unavailable:
-            raise ProviderUnavailableError(f"{repository_id}: surface unreadable")
-        if repository_id in self.refuse_commits:
-            raise ProviderRejectedError(f"{repository_id}: the provider refused the commit")
-        if (repository_id, branch) in self._protected:
-            raise ProviderRejectedError(
-                f"{repository_id}/{branch} is protected — direct commits are refused,"
-                " publication rides the merge-request flow"
-            )
-        pin = self._pins.get((repository_id, branch))
-        live = self._head(repository_id, branch)
-        if pin is not None and live != pin:
-            raise ProviderRejectedError(
-                f"422 commit {repository_id}/{branch}: expected head {pin}, live head {live}"
-                " — the branch moved under the publication"
-            )
-        sha = self.create_commit(
-            repository_id,
-            branch,
-            f"forge: publish candidate\n\n({marker})",
-            author="forge-bot",
-        )
-        if repository_id in self.lose_commit_response:
-            raise TimeoutError(f"{repository_id}: response lost after the effect landed")
-        return sha
-
-    async def open_review(self, repository_id: str, branch: str, marker: str) -> str:
-        self.review_calls[repository_id] = self.review_calls.get(repository_id, 0) + 1
-        if repository_id in self.unavailable:
-            raise ProviderUnavailableError(f"{repository_id}: surface unreadable")
-        return self.create_merge_request(
-            repository_id,
-            branch,
-            target_branch="main",
-            title=f"forge publication ({marker})",
-        )
-
-
 # ---------------------------------------------------------------------------
 # The durable publication entry — children gated on PERSISTED outcomes.
 # ---------------------------------------------------------------------------
@@ -817,7 +602,7 @@ class DurablePublicationEntry:
         session_factory: SessionFactory,
         scenario: TwoWriterScenario,
         *,
-        remote: NativeShapedRemote,
+        remote: SagaEffectSurface | NativeShapedRemote,
         subjects: Mapping[str, ChildSubject] | None = None,
         on_boundary: CommitObserver | None = None,
     ) -> None:

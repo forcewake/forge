@@ -98,12 +98,37 @@ WORLD = SCENARIO.freeze().tested_world_digest or ""
 # fresh "process" (the production-entry convention).
 # ---------------------------------------------------------------------------
 
+#: Engines minted by ``_process``/``_fresh_worker`` during the CURRENT
+#: test, drained by the autouse disposer below (R37-18): the inline
+#: ``await engine.dispose()`` calls carry the process-death semantics on
+#: the happy path, but a test dying mid-assertion must not leave its
+#: aiosqlite worker thread to finalize against the CLOSED loop — the
+#: leak that smeared "Event loop is closed" tracebacks across whatever
+#: test the GC happened to interrupt.
+_pending_engines: list[AsyncEngine] = []
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_every_owned_engine():
+    """Dispose, in a finally block, every engine this test minted.
+
+    ``AsyncEngine.dispose()`` is idempotent — the inline process-death
+    disposes keep their meaning; this fixture only guarantees the ones
+    a failing test never reached.
+    """
+    try:
+        yield
+    finally:
+        while _pending_engines:
+            await _pending_engines.pop().dispose()
+
 
 async def _process(
     db_path: Path,
 ) -> tuple[async_sessionmaker[AsyncSession], AsyncEngine]:
     """A fresh engine + session factory over the file — one 'process'."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    _pending_engines.append(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     return async_sessionmaker(engine, expire_on_commit=False), engine
@@ -262,6 +287,17 @@ class TestPostgresSagaStore:
 
 
 class TestNativeShapedRemote:
+    async def test_the_reference_remote_satisfies_the_effect_interface(self):
+        """#295 adapter-compat: the in-process reference implements the
+        effect Protocol the native adapters (``saga_native``) also satisfy —
+        one seam, reference and live spellings."""
+        from forge.adaptive.publication_saga import PublicationProvider
+        from forge.adaptive.saga_native import SagaEffectSurface
+
+        remote = NativeShapedRemote()
+        assert isinstance(remote, SagaEffectSurface)
+        assert isinstance(remote, PublicationProvider)
+
     async def test_a_repeated_identical_commit_creates_a_second_commit(self):
         remote = _seeded_remote()
         first = await remote.commit(PRODUCER, "main", "forge-saga:m1")
@@ -823,6 +859,7 @@ class TestRealPostgresDurability:
         no test inherits another's rows."""
         url = os.environ["FORGE_PG_TEST_URL"]
         setup = create_async_engine(url)
+        _pending_engines.append(setup)
         async with setup.begin() as conn:
             if reset:
                 from sqlalchemy import text
@@ -841,6 +878,7 @@ class TestRealPostgresDurability:
             await conn.run_sync(Base.metadata.create_all)
         await setup.dispose()
         engine = create_async_engine(url)
+        _pending_engines.append(engine)
         return async_sessionmaker(engine, expire_on_commit=False), engine
 
     async def test_the_saga_survives_its_process_on_real_postgres(self, tmp_path):

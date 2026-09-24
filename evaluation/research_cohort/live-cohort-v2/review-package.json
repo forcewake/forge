@@ -1,0 +1,1541 @@
+{
+  "schema": "forge.research.blind_review/1",
+  "package_id": "research-cohort-live-v2-blind-review",
+  "cohort_id": "research-cohort-live-v2",
+  "ordering": {
+    "seed": 20260925,
+    "counterbalanced": true,
+    "note": "task blocks are seeded-shuffled; unit positions rotate by task index so no position correlates with an arm"
+  },
+  "reviewer_instructions": {
+    "blinding": "plans are anonymized and counterbalanced; grade each on its own merits and record correction minutes under the ONE pre-registered procedure",
+    "evidence_checker": "the mechanical evidence checker is a consistency check only \u2014 token overlap is not semantic entailment"
+  },
+  "units": [
+    {
+      "review_id": "BR-001",
+      "position": 1,
+      "task": {
+        "statement": "Route refund requests that need the manual approval step to whoever performs approvals for orders-api. The routing and its owner are not stated in this issue, and no repository the planner may read names the approver for orders-api \u2014 decide nothing silently.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Run discovery over orders-api, billing-policy, and docs-site at the frozen OIDs looking for any file or doc that names a refund-approval owner or a routing destination for requests needing manual approval."
+          },
+          {
+            "step_id": "S2",
+            "objective": "Ask the issue author to supply the approver (person/team/alias) for orders-api and the exact routing destination; block all implementation on this answer."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Once the owner and destination are confirmed, apply the minimal routing change for refund requests requiring manual approval in the repo and path the answer specifies."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Verify the wiring (smallest test or doc note) against the confirmed target; if no target is confirmed, S3/S4 remain blocked and nothing is guessed."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "No discovery evidence exists in this pass, so no factual claims can be cited and none are made."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "Per the issue's stated premise, the approver for orders-api cannot be derived from the three frozen snapshots, so implementation must not proceed on a guessed target."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Who exactly performs manual refund approvals for orders-api (person, team, or alias)?"
+          },
+          {
+            "question_id": "q2",
+            "text": "What is the exact routing destination these refund requests must go to (queue name, address, webhook, label, or other identifier)?"
+          },
+          {
+            "question_id": "q3",
+            "text": "In which repository, path, and config format should this routing be implemented?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the approver/routing decision for orders-api \u2014 an invented default (auto-approval, approval-skipping) fails the criterion"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-002",
+      "position": 2,
+      "task": {
+        "statement": "Route refund requests that need the manual approval step to whoever performs approvals for orders-api. The routing and its owner are not stated in this issue, and no repository the planner may read names the approver for orders-api \u2014 decide nothing silently.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Inspect orders-api to locate where refund requests enter the manual approval step and how that step is routed today; no routing decision is made in this pass."
+          },
+          {
+            "step_id": "S2",
+            "objective": "BLOCKING: ask the requester/maintainers to name whoever performs approvals for orders-api and the target to route them; do not proceed to S3 without an answer."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Route refund requests that reach the manual approval step to the approver confirmed in S2, introducing no approver defaults or silent fallbacks."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Verify the routing reconciles with the current billing-policy revision F-2024-11 (final revision block of src/policy/refunds.py) and document the approver's source of authority."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing-policy",
+            "path": "README.md",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "C1",
+            "text": "The current refund approval policy is revision F-2024-11.",
+            "repo": "billing-policy",
+            "path": "README.md",
+            "line": 7,
+            "asserted_content": "The CURRENT refund approval policy (revision F-2024-11) lives in the"
+          },
+          {
+            "claim_id": "C2",
+            "text": "The current refund approval policy lives in the final revision block of src/policy/refunds.py.",
+            "repo": "billing-policy",
+            "path": "README.md",
+            "line": 8,
+            "asserted_content": "final revision block of `src/policy/refunds.py`; the F-2023/F-2024-02"
+          },
+          {
+            "claim_id": "C3",
+            "text": "billing-policy documents read-only access to its refund policy decisions via refund_status; the shown bytes name no approver.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 9,
+            "asserted_content": "\"\"\"Read-only access to Billing's refund policy decisions.\"\"\""
+          }
+        ],
+        "assumptions": [],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Who performs the manual approval step for orders-api refund requests (person, team, or role)?"
+          },
+          {
+            "question_id": "q2",
+            "text": "What routing target (queue, address, or assignment field) should receive manual-approval refund requests once the approver is named?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Where in orders-api is the manual-approval branch for refunds and its routing configured?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the approver/routing decision for orders-api \u2014 an invented default (auto-approval, approval-skipping) fails the criterion"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "C1",
+            "grade": null
+          },
+          {
+            "claim_id": "C2",
+            "grade": null
+          },
+          {
+            "claim_id": "C3",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-003",
+      "position": 3,
+      "task": {
+        "statement": "Route refund requests that need the manual approval step to whoever performs approvals for orders-api. The routing and its owner are not stated in this issue, and no repository the planner may read names the approver for orders-api \u2014 decide nothing silently.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "Block the routing decision: record that the approver and routing owner for orders-api manual refund approvals is unresolved, and make no silent choice of target."
+          },
+          {
+            "step_id": "s2",
+            "objective": "Ask the orders-api maintainers/requester to explicitly name the person or team performing the manual approval step for refund requests, the routing mechanism, and the repository owning that routing."
+          },
+          {
+            "step_id": "s3",
+            "objective": "Only after the approver/owner is explicitly named: implement the routing in the owner-designated repository and update the refund help-center page; keep change scope empty until then."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders-api",
+            "path": "src/orders/handlers/refunds.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          },
+          {
+            "repo": "docs-site",
+            "path": "content/refunds.md",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "orders-api's public refund surface is this handlers module; its visible docstring names no approver and no routing owner.",
+            "repo": "orders-api",
+            "path": "src/orders/handlers/refunds.py",
+            "line": 1,
+            "asserted_content": "\"\"\"HTTP handlers for refund requests (Orders' public surface.\"\"\""
+          },
+          {
+            "claim_id": "c2",
+            "text": "billing-policy exposes a client for other services; the visible bytes name no approver for orders-api refund requests.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 1,
+            "asserted_content": "\"\"\"The billing-policy client other servi"
+          },
+          {
+            "claim_id": "c3",
+            "text": "The help-center refund page exists but its visible bytes name no approver or routing target.",
+            "repo": "docs-site",
+            "path": "content/refunds.md",
+            "line": 1,
+            "asserted_content": "# Requesting a refund"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "No approver identity, team, routing mechanism, or owning repo is assumed; the plan blocks on an explicit answer."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "Only the three listed repositories at their given source OIDs are readable evidence."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Who (person or team) performs the manual approval step for orders-api refund requests?"
+          },
+          {
+            "question_id": "q2",
+            "text": "What mechanism should route approval-needed refunds to that approver (queue, label, config entry), and in which repository does that routing live?"
+          },
+          {
+            "question_id": "q3",
+            "text": "What do the approval-matched but unshown lines say (orders-api:src/checkout.py:4,6; billing-policy:src/policy/refunds.py:9,196; billing-policy:README.md:7; docs-site:content/refunds.md:11) \u2014 do any of them name the approver or the routing?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the approver/routing decision for orders-api \u2014 an invented default (auto-approval, approval-skipping) fails the criterion"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          },
+          {
+            "claim_id": "c3",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-004",
+      "position": 4,
+      "task": {
+        "statement": "Confirm the manual-approval threshold that applies to refunds today. The refunds policy file opens with superseded F-2023 and F-2024-02 revisions \u2014 the CURRENT rule is the F-2024-11 finance revision; cite its exact window, not the superseded history near the file head.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "In billing-policy src/policy/refunds.py, locate the F-2024-11 finance revision block (below the superseded F-2023/F-2024-02 head) and quote its exact approval window verbatim with line numbers."
+          },
+          {
+            "step_id": "S2",
+            "objective": "Resolve REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS to its F-2024-11 value and confirm the boundary operator at src/policy/refunds.py:230 (int(amount_cents) >= threshold)."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Verify src/policy/client.py maps the CURRENT revision's decision onto manual_review/auto_capture wire statuses without exposing the numeric threshold (lines 14-21)."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Confirm orders-api src/checkout.py consumes only the manual_review status and defers threshold/approver to policy (lines 38-42)."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          },
+          {
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "C1",
+            "text": "Manual approval is triggered by comparing the refund amount against the REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS constant; approval applies when amount_cents >= threshold.",
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "line": 228,
+            "asserted_content": "def requires_manual_approval(amount_cents: int) -> bool:\n    \"\"\"True when a refund of this amount needs the human approval step.\"\"\"\n    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS"
+          },
+          {
+            "claim_id": "C2",
+            "text": "The policy client maps the CURRENT policy revision's decision onto wire statuses; the threshold value never leaves the service as a number.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 14,
+            "asserted_content": "Maps the CURRENT policy revision's decision onto the wire\n        statuses consumers route on: ``manual_review`` or\n        ``auto_capture``. The threshold itself never leaves this\n        service as a number \u2014 consumers route on the status."
+          },
+          {
+            "claim_id": "C3",
+            "text": "Decision-to-status mapping: manual_approval maps to manual_review; any other decision falls back to auto_capture.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 19,
+            "asserted_content": "decision = refunds.decide(amount_cents)\n        return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\n            decision.decision, \"auto_capture\"\n        )"
+          },
+          {
+            "claim_id": "C4",
+            "text": "orders-api checkout routes on the manual_review status only; the amount threshold and approver are not decided in checkout.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 40,
+            "asserted_content": "if status == \"manual_review\":\n            # Finance requires an approval step for large refunds, but the\n            # amount threshold and the approver are NOT decided in this"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "Snapshots are frozen at the provided source OIDs for billing-policy and orders-api; docs-site is out of scope for this confirmation."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "The threshold constant is resolved entirely within billing-policy src/policy/refunds.py, consistent with client.py stating the threshold never leaves the service as a number."
+          },
+          {
+            "assumption_id": "a3",
+            "text": "The effective numeric threshold cannot be cited from the evidence shown in this pass and must be sourced from the F-2024-11 revision text before any threshold value is asserted."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "What exact amount_cents window does the F-2024-11 finance revision set for REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS, and at which line of src/policy/refunds.py is it defined?"
+          },
+          {
+            "question_id": "q2",
+            "text": "Which line ranges of src/policy/refunds.py contain the superseded F-2023 and F-2024-02 revisions versus the current F-2024-11 revision, so citations exclude the superseded head?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Does F-2024-11 alter the boundary semantics (>= vs >) or the approver routing relative to the superseded F-2024-02 revision?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep F-2024-11 window, not the superseded revisions near the file head"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "C1",
+            "grade": null
+          },
+          {
+            "claim_id": "C2",
+            "grade": null
+          },
+          {
+            "claim_id": "C3",
+            "grade": null
+          },
+          {
+            "claim_id": "C4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a3",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-005",
+      "position": 5,
+      "task": {
+        "statement": "Confirm the manual-approval threshold that applies to refunds today. The refunds policy file opens with superseded F-2023 and F-2024-02 revisions \u2014 the CURRENT rule is the F-2024-11 finance revision; cite its exact window, not the superseded history near the file head.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "step-1",
+            "objective": "Read billing-policy:src/policy/refunds.py final block (lines ~205-230) to byte-verify the F-2024-11 CURRENT rule: header with effective date, threshold constant, version string, and the inclusive >= comparison."
+          },
+          {
+            "step_id": "step-2",
+            "objective": "Read billing-policy:README.md lines 5-9 to byte-verify the currency note marking F-2024-11 as CURRENT and the head sections as superseded history kept only for reconciliation."
+          },
+          {
+            "step_id": "step-3",
+            "objective": "Check billing-policy:src/policy/client.py threshold references so the approval/capture flow consumes the refunds constant rather than a hardcoded value."
+          },
+          {
+            "step_id": "step-4",
+            "objective": "Report the confirmed threshold and window from the byte-verified F-2024-11 block only; explicitly exclude the superseded F-2023/F-2024-02 history near the file head (lines 1-12 matches ev-4/ev-8/ev-9/ev-11)."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "text": "The refunds policy module docstring states that services must import its definitions, so the approval threshold is defined in src/policy/refunds.py for consumers to import.",
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "line": 5,
+            "asserted_content": "Services must IMPORT these"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "Only the frozen billing-policy snapshot 964a4c46dc66596f09d22a63f1bd5acef120d7c7 is in scope."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "Threshold values are denominated in cents, so a confirmed constant is reported as cents/100 in dollars."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "ev-14/ev-16 (billing-policy:src/policy/refunds.py:205): do the bytes read exactly '# CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).'?"
+          },
+          {
+            "question_id": "q2",
+            "text": "ev-15 (billing-policy:src/policy/refunds.py:207ff): do the bytes show 'REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000', an '>= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS' comparison, and 'REFUND_POLICY_VERSION = \"F-2024-11\"'?"
+          },
+          {
+            "question_id": "q3",
+            "text": "ev-1 (billing-policy:README.md:7): does the line read 'The CURRENT refund approval policy (revision F-2024-11)'?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep F-2024-11 window, not the superseded revisions near the file head"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "claim-1",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-006",
+      "position": 6,
+      "task": {
+        "statement": "Confirm the manual-approval threshold that applies to refunds today. The refunds policy file opens with superseded F-2023 and F-2024-02 revisions \u2014 the CURRENT rule is the F-2024-11 finance revision; cite its exact window, not the superseded history near the file head.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Locate the refunds policy file in gitlab:billing-policy at snapshot 964a4c46dc66596f09d22a63f1bd5acef120d7c7 (path unverified; confirm by searching for the refund policy file containing F-2024-11)."
+          },
+          {
+            "step_id": "S2",
+            "objective": "Read past the superseded F-2023 and F-2024-02 revisions near the file head and isolate the F-2024-11 finance revision block with its line numbers."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Extract the exact manual-approval threshold window from the F-2024-11 revision text (verbatim bytes plus the line numbers shown beside them) as the only citable evidence."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Answer the issue with the F-2024-11 window, citing only the captured line-numbered bytes; record superseded-history findings as context only, never as the current rule."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "Per the issue statement only: F-2024-11 is the currently effective finance revision and the F-2023 / F-2024-02 revisions at the file head are superseded."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "Per the issue statement only: no discovery evidence exists yet, so no claims can be asserted in this pass."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "What is the exact path of the refunds policy file, and is it in gitlab:billing-policy?"
+          },
+          {
+            "question_id": "q2",
+            "text": "What exact threshold/window (amount bounds, comparison operators, currency) does the F-2024-11 finance revision state for manual refund approval?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Which line range does the F-2024-11 revision occupy, and does any revision after it supersede it?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep F-2024-11 window, not the superseded revisions near the file head"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-007",
+      "position": 7,
+      "task": {
+        "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago, wiring the request through to Billing's policy client. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "step-1",
+            "objective": "No code change: confirm orders-api checkout already gates refund requests on the 30-day order-side window and routes them through the policy client in request_refund (src/checkout.py)."
+          },
+          {
+            "step_id": "step-2",
+            "objective": "No code change: confirm billing-policy's PolicyClient.refund_status exposes the manual_review/auto_capture wire statuses Orders routes on (src/policy/client.py)."
+          },
+          {
+            "step_id": "step-3",
+            "objective": "No code change: confirm the large-refund approval threshold (5000 cents, revision F-2024-11) is owned by billing-policy src/policy/refunds.py and must NOT be re-decided or copied into orders-api (policy-fork rule)."
+          },
+          {
+            "step_id": "step-4",
+            "objective": "Close the issue's open point: the unspecified approval amount is answered by billing-policy's REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS=5000; orders-api stays threshold-free and routes only on the returned status."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "text": "Orders' checkout defines the 30-day order-side refund request window.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 23,
+            "asserted_content": "ORDER_SIDE_REQUEST_WINDOW_DAYS = 30"
+          },
+          {
+            "claim_id": "claim-2",
+            "text": "Checkout wires refund requests through the billing policy client and routes on its returned status.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 39,
+            "asserted_content": "status = self._policy.refund_status(order.id, amount_cents)"
+          },
+          {
+            "claim_id": "claim-3",
+            "text": "Billing's policy client exposes refund_status mapping policy decisions onto the manual_review/auto_capture routing statuses.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 11,
+            "asserted_content": "def refund_status(self, order_id: str, amount_cents: int) -> str:"
+          },
+          {
+            "claim_id": "claim-4",
+            "text": "The manual-approval threshold is owned by billing-policy: refunds at or above 5000 cents require a human approval step before capture (F-2024-11).",
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "line": 218,
+            "asserted_content": "REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "The pipeline run for this issue is verification-only: the observed snapshots already contain the 30-day gate, policy-client wiring, and status-based approval routing, so no edits are planned."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "The threshold question left open by the issue is resolved by billing-policy evidence and must not be re-encoded in orders-api."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Does _assert_within_request_window implement strictly 'less than 30 days' (its body was not read; only the constant ORDER_SIDE_REQUEST_WINDOW_DAYS = 30 was observed)?"
+          },
+          {
+            "question_id": "q2",
+            "text": "Do Order and RefundRequest in orders-api src/orders/models.py match checkout.py's usage (models.py bytes were not read)?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Does the approvals-service routing (APPROVALS_OWNERSHIP = \"approvals-service\") require any orders-api-side integration beyond returning state \"pending_approval\"?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the neighbor policy module's CURRENT threshold window at its actual bytes (a non-initial window of the file)",
+          "the plan keeps the approval policy OWNED by Billing (consumed over the policy client, never redefined in Orders)"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "claim-1",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-2",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-3",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-008",
+      "position": 8,
+      "task": {
+        "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago, wiring the request through to Billing's policy client. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Discovery: locate the Orders checkout payment/refund extension point and the order-expiry timestamp semantics in orders-api; locate Billing's refund policy client interface in billing-policy."
+          },
+          {
+            "step_id": "S2",
+            "objective": "In orders-api, add refund-request support to checkout, eligible only for orders that expired less than 30 days ago."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Wire the refund request from orders-api through to billing-policy's policy client and surface any approval-required outcome it returns."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Once the Finance threshold is answered, implement the extra pre-capture approval gate for refunds at or above that amount, with tests for in-window eligibility and the approval path."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "Code changes are scoped to orders-api and billing-policy; docs-site is touched only if documentation updates are requested."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "No discovery evidence exists in this pass, so the plan asserts zero code claims; all structure is established in S1 before any implementation."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "What amount is the threshold for a 'large' refund that requires the extra approval step before capture? Finance's criterion is not stated in the issue."
+          },
+          {
+            "question_id": "q2",
+            "text": "Which orders-api field defines order expiry, and is the 30-day window meant to be measured from that timestamp at request time?"
+          },
+          {
+            "question_id": "q3",
+            "text": "What is Billing's policy client interface (endpoint/method/payload) for refund checks, and does it already return an approval-required signal?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the neighbor policy module's CURRENT threshold window at its actual bytes (a non-initial window of the file)",
+          "the plan keeps the approval policy OWNED by Billing (consumed over the policy client, never redefined in Orders)"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-009",
+      "position": 9,
+      "task": {
+        "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago, wiring the request through to Billing's policy client. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Read the final revision block (F-2024-11) of billing-policy src/policy/refunds.py and src/policy/client.py to confirm the refund_status contract and whether the large-refund approval threshold is encoded there; if absent, escalate to Finance."
+          },
+          {
+            "step_id": "S2",
+            "objective": "In orders-api checkout, add a refund-request path for orders expired less than 30 days ago, rejecting non-positive amounts before calling billing-policy's refund_status(order_id, amount_cents)."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Act on the returned policy status in orders-api: capture approved refunds, and hold refunds above the (config-supplied, Finance-confirmed) threshold for the extra approval step before capture."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "README.md",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "C1",
+            "text": "Billing exposes a refund decision API Orders' checkout can call: refund_status(order_id, amount_cents) -> str.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 11,
+            "asserted_content": "def refund_status(self, order_id: str, amount_cents: int) -> str:"
+          },
+          {
+            "claim_id": "C2",
+            "text": "The current refund approval policy is revision F-2024-11 and lives in the final revision block of src/policy/refunds.py; earlier F-2023/F-2024-02 sections are superseded history.",
+            "repo": "billing-policy",
+            "path": "README.md",
+            "line": 7,
+            "asserted_content": "The CURRENT refund approval policy (revision F-2024-11) lives in the\nfinal revision block of `src/policy/refunds.py`; the F-2023/F-2024-02"
+          },
+          {
+            "claim_id": "C3",
+            "text": "The policy client is read-only access to refund policy decisions, so orders-api must not re-decide approval locally.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 9,
+            "asserted_content": "\"\"\"Read-only access to Billing's refund policy decisions.\"\"\""
+          },
+          {
+            "claim_id": "C4",
+            "text": "Zero or negative refund amounts are no-ops per billing-policy, so checkout should reject them as invalid before invoking the policy client.",
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "line": 62,
+            "asserted_content": "return int(amount_cents) > 0"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "All work targets the frozen snapshots at the listed source OIDs."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "docs-site is out of scope for this pass."
+          },
+          {
+            "assumption_id": "a3",
+            "text": "The approval threshold will be injected as configuration so S3 is not hard-blocked on Finance's answer."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "From what amount (in cents) does Finance's extra approval step for large refunds apply before capture? The issue omits it and no observed evidence byte states a threshold."
+          },
+          {
+            "question_id": "q2",
+            "text": "Which orders-api field records order expiry, and against what clock/timezone is 'expired less than 30 days ago' evaluated?"
+          },
+          {
+            "question_id": "q3",
+            "text": "What are the possible return values of billing-policy's refund_status, and does one of them represent 'needs extra approval before capture'?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the neighbor policy module's CURRENT threshold window at its actual bytes (a non-initial window of the file)",
+          "the plan keeps the approval policy OWNED by Billing (consumed over the policy client, never redefined in Orders)"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "C1",
+            "grade": null
+          },
+          {
+            "claim_id": "C2",
+            "grade": null
+          },
+          {
+            "claim_id": "C3",
+            "grade": null
+          },
+          {
+            "claim_id": "C4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a3",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-010",
+      "position": 10,
+      "task": {
+        "statement": "Surface Billing's manual-review decision verbatim in Orders' refund handlers. The authorized repository set also contains a docs site with a help-center refunds page; it is marketing content and holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Locate in billing-policy where the manual-review decision is produced and how it is serialized/emitted (field name, transport, schema) toward Orders."
+          },
+          {
+            "step_id": "S2",
+            "objective": "Locate orders-api refund handlers and their ingestion path for Billing's decision (webhook/event consumer) to identify the pass-through point."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Implement pass-through of the manual-review decision verbatim into Orders' refund handler outputs, with no reformatting, truncation, or re-escaping."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Add/extend tests covering verbatim propagation (present, empty, missing, special-character decision values); confirm docs-site is untouched."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "Only billing-policy and orders-api are in scope for code changes; docs-site is explicitly excluded per the issue statement."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "The decision string must be surfaced without modification, per 'verbatim' in the issue statement."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Which field/key in Billing's payload or events carries the manual-review decision, and over what transport does it reach orders-api?"
+          },
+          {
+            "question_id": "q2",
+            "text": "Where exactly in orders-api should the verbatim decision be surfaced (refund API response, persisted refund record, logs)?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Does 'verbatim' mean byte-identical storage, or is transport-escaping (e.g., JSON string encoding) acceptable?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders-api/billing-policy; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-011",
+      "position": 11,
+      "task": {
+        "statement": "Surface Billing's manual-review decision verbatim in Orders' refund handlers. The authorized repository set also contains a docs site with a help-center refunds page; it is marketing content and holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "S1",
+            "objective": "Locate Orders' refund handlers in orders-api and their current use of the policy client (no orders-api bytes were shown in this pass)."
+          },
+          {
+            "step_id": "S2",
+            "objective": "Pin down the billing-policy read path that returns the manual-review decision verbatim (refund_status vs a read method over requires_manual_approval); no billing-policy behavior change."
+          },
+          {
+            "step_id": "S3",
+            "objective": "Modify Orders' refund handlers to surface the policy decision verbatim via the policy client and remove any local re-decision."
+          },
+          {
+            "step_id": "S4",
+            "objective": "Verify orders-api tests assert verbatim surfacing of the manual-review decision; confirm docs-site is untouched."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing-policy",
+            "path": "README.md",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "why": "claim"
+          },
+          {
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "why": "claim"
+          },
+          {
+            "repo": "docs-site",
+            "path": "content/refunds.md",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "C1",
+            "text": "Orders must never re-decide Billing's policy decisions locally; it surfaces them as given.",
+            "repo": "billing-policy",
+            "path": "README.md",
+            "line": 5,
+            "asserted_content": "and must never re-decide them locally."
+          },
+          {
+            "claim_id": "C2",
+            "text": "The read path into Billing's decisions is PolicyClient, which exposes refund_status(order_id, amount_cents) -> str.",
+            "repo": "billing-policy",
+            "path": "src/policy/client.py",
+            "line": 11,
+            "asserted_content": "    def refund_status(self, order_id: str, amount_cents: int) -> str:"
+          },
+          {
+            "claim_id": "C3",
+            "text": "Billing's manual-review decision is computed by requires_manual_approval, comparing amount_cents against REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS in src/policy/refunds.py.",
+            "repo": "billing-policy",
+            "path": "src/policy/refunds.py",
+            "line": 230,
+            "asserted_content": "    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS"
+          },
+          {
+            "claim_id": "C4",
+            "text": "The docs-site refunds page shows only navigation links in the shown bytes, supporting its exclusion from this change.",
+            "repo": "docs-site",
+            "path": "content/refunds.md",
+            "line": 26,
+            "asserted_content": "- [Order lifecycle](/content/lifecycle.md)"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "billing-policy behavior is unchanged anywhere; Orders only reads decisions via the policy client."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "docs-site is out of scope (shown bytes are navigation links only; the issue states it is marketing content nothing reads)."
+          },
+          {
+            "assumption_id": "a3",
+            "text": "'Verbatim' means the policy decision is passed through unchanged \u2014 no reformatting and no local boolean re-evaluation in Orders."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Where are Orders' refund handlers in orders-api, and what do they currently return for manual-review cases? (No orders-api bytes were shown in this pass.)"
+          },
+          {
+            "question_id": "q2",
+            "text": "Does orders-api already call PolicyClient.refund_status in its refund handlers, or does it currently re-decide the decision locally?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Does PolicyClient.refund_status return the manual-review decision verbatim, or does billing-policy need to expose a read method wrapping requires_manual_approval?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders-api/billing-policy; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "C1",
+            "grade": null
+          },
+          {
+            "claim_id": "C2",
+            "grade": null
+          },
+          {
+            "claim_id": "C3",
+            "grade": null
+          },
+          {
+            "claim_id": "C4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a3",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-012",
+      "position": 12,
+      "task": {
+        "statement": "Surface Billing's manual-review decision verbatim in Orders' refund handlers. The authorized repository set also contains a docs site with a help-center refunds page; it is marketing content and holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "step-1",
+            "objective": "Capture the verbatim manual-review decision bytes from billing-policy: src/policy/client.py lines 15/20 and src/policy/refunds.py line 9 (plus the reads at client.py:2 and refunds.py:141) \u2014 matches were reported but the bytes were never shown."
+          },
+          {
+            "step_id": "step-2",
+            "objective": "Read orders-api's refund handlers (src/orders/handlers/refunds.py) to locate where the policy status is consumed and where the decision must be surfaced verbatim."
+          },
+          {
+            "step_id": "step-3",
+            "objective": "Edit only orders-api: surface the policy client's manual-review decision verbatim in src/orders/handlers/refunds.py instead of collapsing it to a local state literal; add no local threshold/approval logic."
+          },
+          {
+            "step_id": "step-4",
+            "objective": "Verify no policy fork was reintroduced in orders-api (checkout.py's own warning forbids local threshold/approver decisions) and leave docs-site's marketing refunds page untouched."
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "why": "claim"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "text": "Orders obtains the refund decision from billing-policy's client, not locally.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 39,
+            "asserted_content": "status = self._policy.refund_status(order.id, amount_cents)"
+          },
+          {
+            "claim_id": "claim-2",
+            "text": "A manual_review branch already exists on the checkout refund path.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 40,
+            "asserted_content": "if status == \"manual_review\":"
+          },
+          {
+            "claim_id": "claim-3",
+            "text": "orders-api must not decide the amount threshold or approver locally \u2014 the policy service owns them.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 43,
+            "asserted_content": "# repository \u2014 the policy service owns them. Do not guess."
+          },
+          {
+            "claim_id": "claim-4",
+            "text": "Today the manual-review path collapses the decision into a local literal state instead of surfacing it verbatim.",
+            "repo": "orders-api",
+            "path": "src/checkout.py",
+            "line": 44,
+            "asserted_content": "return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")"
+          }
+        ],
+        "assumptions": [
+          {
+            "assumption_id": "a1",
+            "text": "docs-site's help-center refunds page is out of scope per the issue: marketing content that neither service reads."
+          },
+          {
+            "assumption_id": "a2",
+            "text": "The surfacing change is confined to orders-api's refund handlers; billing-policy is only read unless the answer to question 3 forces otherwise."
+          },
+          {
+            "assumption_id": "a3",
+            "text": "The decision travels over the same billing_policy_client policy client checkout already uses (src/checkout.py line 15 import, line 39 call)."
+          }
+        ],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "What are the exact bytes of billing-policy src/policy/client.py lines 15/20 and src/policy/refunds.py line 9 (ev-1..ev-3 matched 'manual' but the tool observations never displayed those bytes \u2014 'verbatim' requires them)?"
+          },
+          {
+            "question_id": "q2",
+            "text": "What does orders-api src/orders/handlers/refunds.py currently contain (ev-6/ev-7 recorded reads at line 2 but displayed no bytes)?"
+          },
+          {
+            "question_id": "q3",
+            "text": "Does policy_client.refund_status already return the decision string verbatim, or must billing-policy change to expose it?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders-api/billing-policy; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "claim-1",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-2",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-3",
+            "grade": null
+          },
+          {
+            "claim_id": "claim-4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [
+          {
+            "assumption_id": "a1",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a2",
+            "severity": null,
+            "invented_default": null
+          },
+          {
+            "assumption_id": "a3",
+            "severity": null,
+            "invented_default": null
+          }
+        ],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          },
+          {
+            "question_id": "q2",
+            "specific": null
+          },
+          {
+            "question_id": "q3",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    }
+  ],
+  "review_status": "pending-human",
+  "review_procedure": {
+    "blind": true,
+    "counterbalanced": true,
+    "ordering_seed": 20260925,
+    "correction_effort_procedure": "the reviewer edits each plan to acceptance and records wall-clock minutes; the procedure is identical for every arm; a missing reviewer leaves correction unknown, never estimated",
+    "rubric_forms": "task-specific acceptance criteria frozen in this preregistration",
+    "evidence_checker_role": "consistency check only \u2014 token overlap is not semantic entailment",
+    "reviewer_identity_required": "filled forms carry the reviewer's identity and timestamp; the shipped package is review_status=pending-human with every form unfilled \u2014 no fixture grades exist"
+  }
+}

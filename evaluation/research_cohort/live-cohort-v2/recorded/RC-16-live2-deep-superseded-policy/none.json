@@ -1,0 +1,150 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-16-live2-deep-superseded-policy",
+  "mode": "none",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 510,
+          "output_lower_bound": 2372,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.019996,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 510,
+            "output_tokens": 2372,
+            "charged_input_tokens": 510,
+            "charged_output_tokens": 2372,
+            "usage_known": true,
+            "usd_estimated": 0.019996,
+            "running_usd_estimated": 0.449186
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Locate the refunds policy file in gitlab:billing-policy at snapshot 964a4c46dc66596f09d22a63f1bd5acef120d7c7 (path unverified; confirm by searching for the refund policy file containing F-2024-11)."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Read past the superseded F-2023 and F-2024-02 revisions near the file head and isolate the F-2024-11 finance revision block with its line numbers."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Extract the exact manual-approval threshold window from the F-2024-11 revision text (verbatim bytes plus the line numbers shown beside them) as the only citable evidence."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Answer the issue with the F-2024-11 window, citing only the captured line-numbered bytes; record superseded-history findings as context only, never as the current rule."
+      }
+    ],
+    "surface": [],
+    "claims": [],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "What is the exact path of the refunds policy file, and is it in gitlab:billing-policy?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What exact threshold/window (amount bounds, comparison operators, currency) does the F-2024-11 finance revision state for manual refund approval?"
+      },
+      {
+        "question_id": "q3",
+        "text": "Which line range does the F-2024-11 revision occupy, and does any revision after it supersede it?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Per the issue statement only: F-2024-11 is the currently effective finance revision and the F-2023 / F-2024-02 revisions at the file head are superseded."
+      },
+      {
+        "text": "Per the issue statement only: no discovery evidence exists yet, so no claims can be asserted in this pass."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 510,
+        "output_lower_bound": 2372,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.019996,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 510,
+          "output_tokens": 2372,
+          "charged_input_tokens": 510,
+          "charged_output_tokens": 2372,
+          "usage_known": true,
+          "usd_estimated": 0.019996,
+          "running_usd_estimated": 0.449186
+        }
+      ]
+    },
+    "harness": "planner-input construction + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.019996,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

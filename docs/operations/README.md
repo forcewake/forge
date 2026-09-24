@@ -12,6 +12,8 @@ Runbooks for running forge against a GitLab CE instance. Start with
 | [Audit and log retention](audit-retention.md) | What is kept where, retention defaults, pruning commands, no-secrets rule | Written (v0.1.0) |
 | [Delivery evaluation cohort](delivery-cohort.md) | The 14 bounded tasks (A17), the runner, receipt exports, per-ACCEPTED-unit economics and the honesty rules | Written (v0.11.0) |
 | [Adaptive runbook](adaptive-runbook.md) | The adaptive workflow: supported recipes, control commands, recovery, credentials, the Postgres-controller decision record | Written (v0.19.0) |
+| [Operator view](operator-view.md) | The read-only operator console: the projection/state vocabulary, recovery-action matrix, bounded drill-down and typed blocked-reason diagnostics (R37-16), the support-bundle export bounds and the pilot failure-case runbook slice | Written (v0.36.0) |
+| [Lab alignment runbook](lab-alignment-runbook.md) | R37-06: the read-only lab inventory (`scripts/inventory_lab.py`), the observed-vs-pinned compatibility verdict, the podman alignment procedure, the numerical budget caps and the refusal-resolution matrix | Written (v0.36.0) |
 
 ## Qualified profile: `gitlab-ce-v1` (#268 / R36-09)
 

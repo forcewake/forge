@@ -54,6 +54,31 @@ R36-02 (issue #261) tightens the three evidence edges this module trusted:
   attempt, the native command/event identity, the evidence schema version
   and who authorized a discard — so reuse is auditable, not just
   boolean-equal.
+
+R37-01 (issue #282) separates the decision LOOKUP KEY from the evidence
+CONTENT digest. The old reuse rule — "equal objective digest ⇒ the same
+decision" — let a NEW recovery event for a LATER dead attempt re-use (and
+graft) the FIRST attempt's decision whenever the four objective booleans
+happened to line up: attempt 1 → checkpoint A → retry E1 approves
+continuing from A; attempt 2 → checkpoint B → dies → retry E2 (a NEW
+delivery, a NEW source attempt) matched the unchanged booleans and was
+handed attempt 1's decision and checkpoint A. The same-command replay
+protection was right; treating a new command as that replay was the
+defect. Reuse is now keyed on the decision IDENTITY
+(:func:`decision_identity` — canonical subject + source attempt + native
+command/event id):
+
+- SAME identity + SAME objective digest → an EXACT REPLAY: the frozen
+  payload/checkpoint loads (a newer checkpoint landing later changes
+  nothing — the graft semantics, correct for a replay);
+- SAME identity + a DIFFERENT objective digest → the typed
+  :class:`ContinuationConflictError` (surfaced as
+  ``continuation.conflicting_recovery_event``), never a silent reuse;
+- a NEW identity (a new ``native_command_id`` or ``source_attempt``) NEVER
+  matches the old document — the caller decides fresh, and the persisted
+  document carries every decision in an identity-keyed ``decisions`` map
+  (the latest stays at the top level for pre-R37-01 readers; documents
+  without an ``event`` block are read through the legacy adapter).
 """
 
 from __future__ import annotations
@@ -72,7 +97,10 @@ if TYPE_CHECKING:  # pragma: no cover — typing only, keeps the module import-l
 
 __all__ = [
     "CONTINUATION_EVIDENCE_KEY",
+    "DECISION_HISTORY_KEY",
+    "DECISION_HISTORY_LIMIT",
     "CheckpointLookup",
+    "ContinuationConflictError",
     "ContinuationDecision",
     "ContinuationEvidence",
     "ContinuationMode",
@@ -83,12 +111,17 @@ __all__ = [
     "NATIVE_START_UNKNOWN",
     "RecoveryRequest",
     "decide_continuation",
+    "decision_history",
+    "decision_identity",
     "durable_checkpoint_lookup",
     "evidence_from_record",
+    "find_decision_by_event",
+    "legacy_decision",
     "matching_decision",
     "normalize_checkpoint_result",
     "operator_discard_requested",
     "parse_recovery_request",
+    "persisted_document",
     "retry_ack_line",
     "uncertain_retry_note",
 ]
@@ -96,12 +129,25 @@ __all__ = [
 #: The evidence key the persisted decision lives under on the run row.
 CONTINUATION_EVIDENCE_KEY: str = "continuation"
 
-#: The evidence SCHEMA version this build writes (R36-02: 2 — the
-#: vendor-start certainty now derives from the persisted native-start
-#: intent, and the document carries decision lineage). Purely informational
-#: for readers: reuse is governed by the objective evidence DIGEST, which
-#: moves by itself whenever the classification semantics change.
-EVIDENCE_VERSION: int = 2
+#: The key of the identity-keyed decision HISTORY map inside the persisted
+#: ``evidence["continuation"]`` document (R37-01): every decision the run
+#: minted, keyed by :func:`decision_identity` — the latest decision ALSO
+#: stays at the document's top level so pre-R37-01 readers (the compat
+#: fixtures, ``_advance_harness``'s pinned-digest read) are unaffected.
+DECISION_HISTORY_KEY: str = "decisions"
+
+#: How many decisions the history map retains (the oldest are dropped
+#: first; the active pin set keeps the pinned checkpoints themselves
+#: auditable regardless).
+DECISION_HISTORY_LIMIT: int = 16
+
+#: The evidence SCHEMA version this build writes (R37-01: 3 — reuse is
+#: keyed on the decision IDENTITY, the document carries its own ``event``
+#: block and the identity-keyed ``decisions`` map). Purely informational
+#: for readers: reuse is governed by the event identity (with the objective
+#: digest as a consistency guard), which moves by itself whenever the
+#: classification semantics change.
+EVIDENCE_VERSION: int = 3
 
 #: An injectable checkpoint-presence provider (ASYNC — R36-03): work id
 #: → a :class:`~forge.adaptive.checkpoint_repository.
@@ -225,6 +271,11 @@ class ContinuationEvidence:
     #: checkpoint is not a changed recoverable STATE, it is newer bytes
     #: for the same "a checkpoint exists" fact.
     checkpoint_digest: str | None = None
+    #: R37-01 identity: the canonical subject (the run id) the decision
+    #: was minted for — the first input of :func:`decision_identity`.
+    #: Lineage, deliberately excluded from :meth:`digest`: the document
+    #: lives ON the run row, so the subject is context, not evidence.
+    subject: str | None = None
 
     def digest(self) -> str:
         """A stable digest over the OBJECTIVE fields (prior mode excluded)."""
@@ -241,14 +292,91 @@ class ContinuationEvidence:
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
+#: A sha256 content-address shape — the only digest spelling a persisted
+#: decision document may carry for its ``evidence_digest`` to be treated
+#: as a REAL recorded digest (anything else marks the document corrupt,
+#: never a conflict: a conflict is genuine recorded evidence that moved,
+#: not an unreadable one).
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _is_hex64(value: Any) -> bool:
+    return isinstance(value, str) and bool(_HEX64.fullmatch(value))
+
+
+def decision_identity(
+    subject: str | None, source_attempt: int | None, native_command_id: str | None
+) -> str:
+    """The deterministic DECISION IDENTITY (R37-01): sha256 over the
+    canonical subject (the run id), the originating source attempt and the
+    native recovery-event identity (the webhook delivery id; ``None`` for
+    a decision that is not event-driven, e.g. the recovery scan's own
+    re-drive).
+
+    Deterministic by construction: the same ``(subject, source_attempt,
+    native_command_id)`` triple yields the same id in every process, so a
+    restart between decision persistence and dispatch RECONSTRUCTS the
+    identical decision BY ID — and a new event (a new delivery id) or a
+    new source attempt never collides with the old decision's identity.
+    """
+    payload = json.dumps(
+        {
+            "subject": str(subject or ""),
+            "source_attempt": (int(source_attempt) if source_attempt is not None else None),
+            "native_command_id": (str(native_command_id) if native_command_id else None),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+class ContinuationConflictError(Exception):
+    """The SAME recovery-event identity arrived with a DIFFERENT objective
+    evidence snapshot (R37-01) — the recorded decision names this exact
+    event/attempt, but the booleans it was decided over have moved.
+
+    Raised by :func:`matching_decision`. This is
+    ``continuation.conflicting_recovery_event``: the caller surfaces the
+    conflict (observability) and re-decides; it NEVER silently reuses the
+    frozen payload over evidence that no longer supports it.
+    """
+
+    #: The decision identity whose recorded evidence disagrees with the
+    #: delivered snapshot.
+    decision_id: str
+    #: The digest the persisted decision recorded.
+    recorded_digest: str
+    #: The digest the delivered evidence snapshot computed.
+    delivered_digest: str
+
+    def __init__(self, *, decision_id: str, recorded_digest: str, delivered_digest: str) -> None:
+        self.decision_id = str(decision_id)
+        self.recorded_digest = str(recorded_digest)
+        self.delivered_digest = str(delivered_digest)
+        super().__init__(
+            "continuation.conflicting_recovery_event: the recovery event behind "
+            f"decision {self.decision_id[:12]} returned with a changed objective "
+            f"evidence snapshot (recorded {self.recorded_digest[:12]}, delivered "
+            f"{self.delivered_digest[:12]}) — the decision is re-made, never "
+            "silently reused"
+        )
+
+
 @dataclass(frozen=True)
 class ContinuationDecision:
     """The selected continuation source, with the reason it was selected.
 
     Frozen by construction: built only by :func:`decide_continuation` or
     re-materialized from the persisted document by
-    :func:`matching_decision` (*reused=True* — one decision per evidence
-    snapshot, repeated retry events do not re-decide).
+    :func:`matching_decision` (*reused=True* — one decision per recovery
+    EVENT, a repeated event does not re-decide).
+
+    R37-01: every decision carries its deterministic :attr:`decision_id`
+    (:func:`decision_identity` over the subject, the source attempt and
+    the native command/event id) — the identity the persisted document is
+    looked up BY, and the identity a restart between decision commit and
+    dispatch reconstructs.
     """
 
     mode: ContinuationMode
@@ -256,6 +384,16 @@ class ContinuationDecision:
     evidence: ContinuationEvidence
     decided_at: str
     reused: bool = False
+    #: ``continuation.decision_id`` — the deterministic decision identity.
+    decision_id: str = ""
+    #: ``reestablished`` when the decision was minted because the caller's
+    #: lineage to a prior decision could not be established (the versioned
+    #: legacy adapter path) — reconciliation, never guessed equality.
+    lineage: str | None = None
+    #: The decision id of the LIVE in-flight revival this command's
+    #: decision stands behind (same-attempt competing commands collapse
+    #: into the existing revival uniqueness; this records the collapse).
+    superseded_by: str | None = None
 
     @property
     def mode_selected(self) -> str:
@@ -284,14 +422,14 @@ class ContinuationDecision:
 
     def as_document(self) -> dict[str, Any]:
         """The persisted ``evidence["continuation"]`` document."""
-        return {
+        document: dict[str, Any] = {
             "mode": self.mode.value,
             "mode_selected": self.mode.value,
             "reason": self.reason,
             "decided_at": self.decided_at,
             "evidence_digest": self.evidence.digest(),
             # R36-02: the evidence SCHEMA generation this document was
-            # written under (informational — the digest governs reuse).
+            # written under (informational — the identity governs reuse).
             "evidence_version": EVIDENCE_VERSION,
             "uncertain": self.uncertain,
             "vendor_started": self.evidence.vendor_started,
@@ -319,7 +457,20 @@ class ContinuationDecision:
                 self.mode is ContinuationMode.COMMITTED_BASELINE
                 and self.evidence.checkpoint_committed is not True
             ),
+            # R37-01: the decision IDENTITY and the event block as recorded
+            # AT DECISION TIME — reuse looks decisions up BY this identity,
+            # never by the content digest alone.
+            "decision_id": self.decision_id,
+            "event": {
+                "source_attempt": self.evidence.source_attempt,
+                "native_command_id": self.evidence.native_command_id,
+            },
         }
+        if self.lineage:
+            document["lineage"] = self.lineage
+        if self.superseded_by and self.superseded_by != self.decision_id:
+            document["superseded_by"] = self.superseded_by
+        return document
 
 
 # ----------------------------------------------------------------------
@@ -328,7 +479,10 @@ class ContinuationDecision:
 
 
 def decide_continuation(
-    evidence: ContinuationEvidence, *, now: datetime | None = None
+    evidence: ContinuationEvidence,
+    *,
+    now: datetime | None = None,
+    lineage: str | None = None,
 ) -> ContinuationDecision:
     """Select the continuation source for one retry event, from evidence.
 
@@ -347,117 +501,322 @@ def decide_continuation(
        ``candidate_published`` is True the reason is terminal guidance (the
        work is already delivered — point at the candidate, do not resume);
        otherwise the operator must choose an explicit restart or reconcile.
+
+    R37-01: the minted decision carries its deterministic identity
+    (:func:`decision_identity` over ``evidence.subject``, the source
+    attempt and the native command id) and the *lineage* label the caller
+    passes (``reestablished`` when the decision had to be re-made because
+    no prior decision's lineage was establishable).
     """
     decided_at = (now or datetime.now(timezone.utc)).isoformat()
-    if evidence.operator_discard_requested:
+    identity = decision_identity(
+        evidence.subject, evidence.source_attempt, evidence.native_command_id
+    )
+
+    def _decision(mode: ContinuationMode, reason: str) -> ContinuationDecision:
         return ContinuationDecision(
-            mode=ContinuationMode.EXPLICIT_RESTART,
-            reason=(
-                "operator explicitly discarded the WIP — re-implementing from the "
-                "committed baseline; no preservation is promised"
-            ),
+            mode=mode,
+            reason=reason,
             evidence=evidence,
             decided_at=decided_at,
+            decision_id=identity,
+            lineage=lineage,
+        )
+
+    if evidence.operator_discard_requested:
+        return _decision(
+            ContinuationMode.EXPLICIT_RESTART,
+            "operator explicitly discarded the WIP — re-implementing from the "
+            "committed baseline; no preservation is promised",
         )
     if evidence.checkpoint_committed is True:
-        return ContinuationDecision(
-            mode=ContinuationMode.EXACT_WIP,
-            reason=(
-                "a committed checkpoint exists — the exact WIP checkpoint is the "
-                "authorized continuation (the lane's required restore)"
-            ),
-            evidence=evidence,
-            decided_at=decided_at,
+        return _decision(
+            ContinuationMode.EXACT_WIP,
+            "a committed checkpoint exists — the exact WIP checkpoint is the "
+            "authorized continuation (the lane's required restore)",
         )
     if evidence.vendor_started is False:
-        return ContinuationDecision(
-            mode=ContinuationMode.COMMITTED_BASELINE,
-            reason=(
-                "no vendor session ever started (recorded bootstrap classification) — "
-                "no WIP can exist, so the retry continues from the committed baseline"
-            ),
-            evidence=evidence,
-            decided_at=decided_at,
+        return _decision(
+            ContinuationMode.COMMITTED_BASELINE,
+            "no vendor session ever started (recorded bootstrap classification) — "
+            "no WIP can exist, so the retry continues from the committed baseline",
         )
     if evidence.candidate_published:
-        return ContinuationDecision(
-            mode=ContinuationMode.UNCERTAIN,
-            reason=(
-                "the dead attempt's work is already delivered — this is terminal "
-                "guidance, not a resume: reconcile the publication or start a new "
-                "implement request instead of re-executing"
-            ),
-            evidence=evidence,
-            decided_at=decided_at,
+        return _decision(
+            ContinuationMode.UNCERTAIN,
+            "the dead attempt's work is already delivered — this is terminal "
+            "guidance, not a resume: reconcile the publication or start a new "
+            "implement request instead of re-executing",
         )
     started = (
         "a vendor session had started"
         if evidence.vendor_started is True
         else "no proof whether a vendor session started"
     )
-    return ContinuationDecision(
-        mode=ContinuationMode.UNCERTAIN,
-        reason=(
-            f"{started} and no committed checkpoint is held — the recoverable state "
-            "is unknown (absence of a checkpoint never proves there was no WIP)"
-        ),
-        evidence=evidence,
-        decided_at=decided_at,
+    return _decision(
+        ContinuationMode.UNCERTAIN,
+        f"{started} and no committed checkpoint is held — the recoverable state "
+        "is unknown (absence of a checkpoint never proves there was no WIP)",
     )
+
+
+def _entry_identity(entry: Mapping[str, Any]) -> tuple[int | None, str | None] | None:
+    """One decision document's EVENT IDENTITY ``(source_attempt,
+    native_command_id)``, or ``None`` when it cannot be established.
+
+    R37-01 documents carry an explicit ``event`` block; pre-R37-01
+    (legacy) documents are read through the versioned adapter — their
+    top-level ``source_attempt``/``native_command_id`` fields form the
+    synthetic event identity.
+    """
+    event = entry.get("event")
+    if isinstance(event, Mapping):
+        attempt = event.get("source_attempt")
+        command = event.get("native_command_id")
+    else:
+        attempt = entry.get("source_attempt")
+        command = entry.get("native_command_id")
+    if attempt is None:
+        normalized_attempt: int | None = None
+    elif isinstance(attempt, bool) or not isinstance(attempt, int):
+        try:
+            normalized_attempt = int(attempt)
+        except (TypeError, ValueError):
+            return None
+    else:
+        normalized_attempt = attempt
+    normalized_command = str(command) if command else None
+    return (normalized_attempt, normalized_command)
+
+
+def _valid_core(entry: Mapping[str, Any]) -> tuple[ContinuationMode, str, str] | None:
+    """The decision core ``(mode, reason, decided_at)`` — ``None`` when the
+    entry is corrupt (an invalid mode, a missing reason or stamp): a
+    corrupt document is refused, never guessed."""
+    try:
+        mode = ContinuationMode(str(entry.get("mode") or ""))
+    except ValueError:
+        return None
+    reason = str(entry.get("reason") or "")
+    decided_at = str(entry.get("decided_at") or "")
+    if not reason or not decided_at:
+        return None
+    return (mode, reason, decided_at)
+
+
+def _candidate_entries(document: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The persisted decision documents to match against: the LATEST
+    (top-level) document first, then the identity-keyed history entries."""
+    entries: list[Mapping[str, Any]] = [document]
+    carried = document.get(DECISION_HISTORY_KEY)
+    if isinstance(carried, Mapping):
+        entries.extend(entry for entry in carried.values() if isinstance(entry, Mapping))
+    return entries
 
 
 def matching_decision(
     document: Mapping[str, Any] | None, evidence: ContinuationEvidence
 ) -> ContinuationDecision | None:
-    """The persisted decision a NEW retry event must reuse, or ``None``.
+    """The persisted decision this recovery EVENT must reuse, or ``None``.
 
-    Reuse is keyed on the objective evidence digest: a repeated retry event
-    over an unchanged recoverable state re-materializes the SAME decision
-    (*reused=True*, original ``decided_at`` preserved) instead of
-    re-deciding. A materially changed snapshot (a checkpoint appeared or
-    vanished, the operator asked to discard, …) re-decides. A corrupt or
-    unrecognized document is refused — never guessed.
+    R37-01: reuse is keyed on the EVENT IDENTITY — a decision is reused
+    ONLY when the caller's ``source_attempt`` AND ``native_command_id``
+    BOTH equal the persisted decision's recorded event identity. The
+    objective evidence digest remains as a CONSISTENCY GUARD:
 
-    R36-02: the ORIGINAL decision's lineage (originating attempt, native
-    command/event identity, intent verdict, discard authority) is grafted
-    back onto the re-materialized decision — a reused decision keeps naming
-    the event that originated it, not the event that happened to repeat it.
-    R36-03 grafts the ORIGINAL pinned ``checkpoint_digest`` the same way:
-    a newer checkpoint landing after the decision is not a changed
-    recoverable STATE (the objective digest is blind to it on purpose),
-    and the reused decision keeps binding the bytes the request approved.
+    - equal identity + equal digest → an EXACT REPLAY: the frozen decision
+      re-materializes (*reused=True*, original ``decided_at`` and
+      ``decision_id`` preserved, the ORIGINAL pinned ``checkpoint_digest``
+      grafted back — a newer checkpoint landing after the decision changes
+      nothing about a decision that already holds one);
+    - equal identity + a DIFFERENT digest → the typed
+      :class:`ContinuationConflictError`
+      (``continuation.conflicting_recovery_event``) — never a silent
+      reuse, never a silent re-decide;
+    - a DIFFERENT identity (a new delivery id, a new source attempt) →
+      ``None``: the caller decides fresh, however equal the booleans are.
+
+    Documents without an ``event`` block are LEGACY and read through the
+    versioned adapter (their top-level lineage fields form the synthetic
+    identity); a corrupt or unrecognized document is refused — never
+    guessed.
     """
     if not isinstance(document, Mapping):
         return None
-    try:
-        if str(document.get("evidence_digest") or "") != evidence.digest():
-            return None
-        mode = ContinuationMode(str(document.get("mode") or ""))
-        reason = str(document.get("reason") or "")
-        decided_at = str(document.get("decided_at") or "")
-        if not reason or not decided_at:
-            return None
-    except ValueError:
+    caller_identity = (evidence.source_attempt, evidence.native_command_id)
+    for entry in _candidate_entries(document):
+        core = _valid_core(entry)
+        if core is None:
+            continue  # a corrupt entry is skipped, never guessed
+        entry_identity = _entry_identity(entry)
+        if entry_identity is None or entry_identity != caller_identity:
+            continue
+        recorded_digest = str(entry.get("evidence_digest") or "")
+        if not recorded_digest:
+            continue  # no recorded digest — corrupt, never authority
+        if recorded_digest != evidence.digest():
+            if _is_hex64(recorded_digest):
+                raise ContinuationConflictError(
+                    decision_id=str(entry.get("decision_id") or ""),
+                    recorded_digest=recorded_digest,
+                    delivered_digest=evidence.digest(),
+                )
+            continue  # not a digest shape — corrupt, not a conflict
+        mode, reason, decided_at = core
+        attempt, command = entry_identity
+        decision_id = str(entry.get("decision_id") or "")
+        if not _is_hex64(decision_id):
+            # A legacy (pre-R37-01) document carries no recorded identity —
+            # derive it from the caller's subject and the entry's own event.
+            decision_id = decision_identity(evidence.subject, attempt, command)
+
+        def _graft(key: str, current: Any) -> Any:
+            value = entry.get(key)
+            return current if value is None else value
+
+        return ContinuationDecision(
+            mode=mode,
+            reason=reason,
+            evidence=replace(
+                evidence,
+                native_command_id=_graft("native_command_id", evidence.native_command_id),
+                source_attempt=_graft("source_attempt", evidence.source_attempt),
+                native_start_verdict=_graft("native_start_verdict", evidence.native_start_verdict),
+                discard_authorized_by=_graft(
+                    "discard_authorized_by", evidence.discard_authorized_by
+                ),
+                checkpoint_digest=_graft("checkpoint_digest", evidence.checkpoint_digest),
+            ),
+            decided_at=decided_at,
+            reused=True,
+            decision_id=decision_id,
+        )
+    return None
+
+
+def find_decision_by_event(
+    document: Mapping[str, Any] | None, native_command_id: str | None
+) -> dict[str, Any] | None:
+    """The persisted decision document whose event names *native_command_id*.
+
+    R37-01: the identity the revival recovery re-drive resolves its
+    stranded delivery through — the caller establishes the event identity
+    from the ``retry_delivery_key`` history (the open revival attempt's
+    idempotency key) and looks the committed decision up BY that identity.
+    """
+    if not native_command_id or not isinstance(document, Mapping):
         return None
+    for entry in _candidate_entries(document):
+        if _valid_core(entry) is None:
+            continue
+        identity = _entry_identity(entry)
+        if identity is not None and identity[1] == native_command_id:
+            return dict(entry)
+    return None
 
-    def _graft(key: str, current: Any) -> Any:
-        value = document.get(key)
-        return current if value is None else value
 
-    return ContinuationDecision(
-        mode=mode,
-        reason=reason,
-        evidence=replace(
-            evidence,
-            native_command_id=_graft("native_command_id", evidence.native_command_id),
-            source_attempt=_graft("source_attempt", evidence.source_attempt),
-            native_start_verdict=_graft("native_start_verdict", evidence.native_start_verdict),
-            discard_authorized_by=_graft("discard_authorized_by", evidence.discard_authorized_by),
-            checkpoint_digest=_graft("checkpoint_digest", evidence.checkpoint_digest),
-        ),
-        decided_at=decided_at,
-        reused=True,
+def legacy_decision(document: Mapping[str, Any] | None) -> bool:
+    """Whether *document* is a pre-R37-01 single-decision document: a valid
+    decision core with NO ``event`` block and NO identity-keyed history —
+    the shape the versioned adapter reads (its top-level lineage fields
+    form the synthetic identity, and a caller that cannot tie to it
+    re-decides with ``lineage: reestablished``)."""
+    if not isinstance(document, Mapping):
+        return False
+    return (
+        "event" not in document
+        and DECISION_HISTORY_KEY not in document
+        and _valid_core(document) is not None
     )
+
+
+def decision_history(document: Mapping[str, Any] | None, *, subject: str = "") -> dict[str, dict]:
+    """The identity-keyed decision history carried forward from *document*.
+
+    Pre-R37-01 single documents (no ``decisions`` map) are read through the
+    versioned adapter: the legacy decision — when its core is intact — is
+    adapted into the map under its DERIVED identity, so the old decision
+    and its pin survive audit after the run starts minting identity-keyed
+    decisions.
+    """
+    history: dict[str, dict] = {}
+    if not isinstance(document, Mapping):
+        return history
+    carried = document.get(DECISION_HISTORY_KEY)
+    if isinstance(carried, Mapping):
+        for key, entry in carried.items():
+            if isinstance(entry, Mapping) and _valid_core(entry) is not None:
+                record = dict(entry)
+                record.setdefault("decision_id", str(key))
+                history[str(key)] = record
+    if history or _valid_core(document) is None:
+        return history
+    # The legacy single-document shape: adapt it under its derived identity.
+    identity = _entry_identity(document)
+    if identity is None:
+        return history
+    attempt, command = identity
+    decision_id = str(document.get("decision_id") or "")
+    if not _is_hex64(decision_id):
+        decision_id = decision_identity(subject, attempt, command)
+    record: dict[str, Any] = {
+        "decision_id": decision_id,
+        "event": {"source_attempt": attempt, "native_command_id": command},
+    }
+    for field in (
+        "mode",
+        "mode_selected",
+        "reason",
+        "decided_at",
+        "evidence_digest",
+        "evidence_version",
+        "uncertain",
+        "checkpoint_digest",
+        "source_attempt",
+        "native_command_id",
+        "native_start_verdict",
+        "discard_authorized_by",
+        "no_checkpoint_baseline",
+        "refusal_code",
+    ):
+        if field in document:
+            record[field] = document[field]
+    history[decision_id] = record
+    return history
+
+
+def _history_entry(decision: ContinuationDecision) -> dict[str, Any]:
+    """The frozen record one decision contributes to the history map."""
+    entry = decision.as_document()
+    entry.pop(DECISION_HISTORY_KEY, None)
+    return entry
+
+
+def persisted_document(
+    decision: ContinuationDecision,
+    prior: Mapping[str, Any] | None = None,
+    *,
+    superseded_by: str | None = None,
+    history_limit: int = DECISION_HISTORY_LIMIT,
+) -> dict[str, Any]:
+    """The full ``evidence["continuation"]`` document for *decision*.
+
+    The decision's own document stays at the TOP level (the latest — the
+    spelling pre-R37-01 readers consume), and the identity-keyed
+    ``decisions`` map carries EVERY decision the run minted (the prior
+    entries adapted forward, the newest added under its identity, the
+    oldest dropped beyond *history_limit*). The old decisions and their
+    pins survive audit; reuse looks entries up BY identity.
+    """
+    document = decision.as_document()
+    history = decision_history(prior, subject=decision.evidence.subject or "")
+    history[decision.decision_id] = _history_entry(decision)
+    while len(history) > max(1, history_limit):
+        history.pop(next(iter(history)))
+    document[DECISION_HISTORY_KEY] = history
+    if superseded_by and superseded_by != decision.decision_id:
+        document["superseded_by"] = superseded_by
+    return document
 
 
 # ----------------------------------------------------------------------
@@ -602,6 +961,9 @@ async def evidence_from_record(
     normalizes), and *checkpoint_digest* carries the exact checkpoint's
     content address when the lookup answered ``exact`` — the pinned
     ``continuation.checkpoint_digest`` lineage.
+
+    R37-01: the snapshot's *subject* is the *run_id* — the first input of
+    the decision identity (:func:`decision_identity`).
     """
     record = evidence if isinstance(evidence, Mapping) else {}
     reason = (death_reason or "").strip()
@@ -635,6 +997,7 @@ async def evidence_from_record(
         native_command_id=native_command_id,
         source_attempt=source_attempt,
         checkpoint_digest=checkpoint_digest,
+        subject=run_id or None,
     )
 
 

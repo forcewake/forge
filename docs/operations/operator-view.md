@@ -4,9 +4,15 @@ This document covers the persistent operator view: the versioned
 projection over a run's durable rows (`forge.adaptive.operator_view`), the
 state vocabulary and what proves each state, the replay protection on
 updates, the recovery-action validity matrix, the exportable support
-bundle (`forge.adaptive.support_bundle`), and — since R36-15 — the
-authorized snapshot reader (`forge.adaptive.operator_snapshot`) and the
-authenticated read API (`forge.api_operator`) that surface them live.
+bundle (`forge.adaptive.support_bundle`), the authorized snapshot reader
+(`forge.adaptive.operator_snapshot`) and the authenticated read API
+(`forge.api_operator`) that surface them live — including the R37-02
+canonical repository subjects that scope every operator read, the
+R37-03 current-state projection rules (exact activation receipts,
+per-attempt generations, current-candidate binding, the source-version
+fence) and the R37-16 bounded operator experience (bounded drill-down,
+typed blocked-reason diagnostics, pending-command/occupancy surfaces,
+bounded bundle export, time-to-diagnose observability).
 
 For the control commands themselves, see
 [operator-commands.md](operator-commands.md) and
@@ -45,8 +51,13 @@ questions. It is not a second truth store:
   proves the evidence EXISTS and where to drill in; it never inlines
   payloads, prompts or logs.
 - **Identity is exact.** `render()` shows the source sha, the candidate
-  shas, the checkpoint id and digest, the plan digest, the attempt id and
-  the generation — never "the latest build".
+  shas, the CURRENT candidate (`identity.active_candidate` — the run
+  row's `active_candidate_sha` pointer when recorded, else the LAST
+  `candidate_shas` member, R37-03), the checkpoint id and digest, the
+  plan digest, the attempt id and the generation — never "the latest
+  build". A `verification_history` section carries older green verdicts
+  as `historical_pass` entries: visible as history, never as current
+  readiness.
 
 ## 3. The state vocabulary
 
@@ -64,7 +75,7 @@ what it overlaid).
 | `safely_paused` | A checkpoint is committed and the fence is held | A committed checkpoint row (+ fence word `held`, or a checkpointed pause — the router raises the fence with the booking) |
 | `resumed` | A resume was accepted AND the checkpoint bytes were ACTIVATED | A resume command (not refused) + a checkpoint row with an activation time |
 | `unverified` | A candidate exists; independent verification has not passed | The run's `candidate_shas` with no `passed` verification row |
-| `verified_ready` | Independent verification passed for the candidate | A verification row with result `passed` bound to the CURRENT candidate (its `candidate_sha` is one of the run's `candidate_shas`; a passed row naming no candidate binds to whatever the run holds) |
+| `verified_ready` | Independent verification passed for the candidate | A verification row with result `passed` bound to the CURRENT candidate (its `candidate_sha` equals the active pointer or the last `candidate_shas` member — a pass naming a NON-current member is a `historical_pass`, and a row naming no candidate binds to whatever the run holds) |
 | `wedged` | Executing but no SEMANTIC transition within the threshold — the looked-launched-but-stalled failure | Latest attempt `executing` + the newest transition timestamp (timeline rows, attempt updates, checkpoints, verifications) older than the threshold (default 30 minutes, a parameter of `derive_state`) |
 | `stale` | The stored projection predates the source rows | `stored.source_digest` ≠ the current rows' digest |
 | `dead` | Terminal-failed/cancelled with external effects never reconciled | A failed/cancelled terminal + publication intents in `requested`/`dispatched`/`probing`/`unknown` |
@@ -75,9 +86,12 @@ what it overlaid).
 Two distinctions the ladder enforces on purpose:
 
 - **A resume request is not a restoration.** `/resume` recorded — even
-  drained and `applied` — stays `safely_paused` until the checkpoint row
-  carries an activation. The displayed state never gets ahead of the
-  bytes.
+  drained and `applied` — stays `safely_paused` until a checkpoint row
+  carries an activation receipt: an applied resume whose recorded
+  `checkpoint_ref` names THAT checkpoint (R37-03). An applied ACK that
+  named a different checkpoint — or recorded no reference at all — is
+  `activation: "unmatched-command"` with `activated_at: None`; command
+  application alone is never filesystem-restoration proof.
 - **A succeeded attempt is not an acceptance.** A succeeded attempt
   yields a candidate (`unverified`/`verified_ready`); acceptance is a
   decision, and only a decision row proves `accepted`.
@@ -202,41 +216,74 @@ blocked/waiting, unresolved effects, last transition) are derived from
 the SAME projection the API renders — a test pins that both surfaces
 agree on state and identity for the same snapshot.
 
-## 8. The authorized snapshot reader (R36-15)
+## 8. The authorized snapshot reader (R36-15, R37-02/R37-03)
 
 `OperatorSnapshotReader` (`forge.adaptive.operator_snapshot`) is the ONE
 subject-scoped async reader that assembles the projection inputs from
 the durable authorities: the run row (`FlowRun`, with `status_reason` as
-`blocked_reason`), the revival-attempt records (`ActionLog` rows with a
+`blocked_reason`), the INITIAL execution synthesized from the run row
+plus the revival-attempt records (`ActionLog` rows with a
 `retryability`), the control commands and deliveries (`control_commands`
-/ `control_command_deliveries`), the ACTIVE checkpoint (through the
-injected `CheckpointRepository`), the pause fence (`pause_fences`), the
-verification verdict (`evidence["verification"]`, the unified R02 shape),
-the publication intents, the gate approvals and the admission leases.
+/ `control_command_deliveries`, a resume carrying its recorded
+`checkpoint_ref`), the ACTIVE checkpoint (through the injected
+`CheckpointRepository`), the pause fence (`pause_fences`), the
+verification verdict (`evidence["verification"]`, the unified R02
+shape), the publication intents, the gate approvals and the admission
+leases.
 
-Two rules pin its contract:
+Four rules pin its contract:
 
-- **Subject-scope enforcement.** The reader takes an authorized subject
-  scope (repo full names) and every run query filters by it; a run
-  outside the scope is `None` — indistinguishable from unknown — on the
-  list, detail and support-bundle paths.
+- **Canonical-subject scoping (R37-02).** The reader takes an authorized
+  scope of `CanonicalSubject` values — provider family + connection
+  identity + native repository identity, derived from each family's OWN
+  columns (GitHub rows by full name, GitLab/Azure rows by `project_id`;
+  the connection from the run's recorded `evidence["connection"]`, else
+  the single-connection default `-`). Display names are
+  presentation-only: the same name on two connections or across families
+  is two different subjects, and a grant for one never selects the
+  other's runs. Listing runs through per-provider SQL predicates plus
+  the exact canonical match BEFORE any per-run checkpoint/artifact read,
+  in bounded pages (`limit` + a scope-bound cursor; default 50, max
+  200). A run outside the scope is `None` — indistinguishable from
+  unknown — on the list, detail and support-bundle paths.
 - **Coverage honesty.** The snapshot carries `source_coverage` per
   section (`present | missing | unknown`) and `projection_age` (how old
   the newest observed row is). A source never queried is `unknown` —
   `questions` (no durable authority yet), checkpoints without an
   injected repository, or any section whose authority was unreachable
   (a checkpoint outage is `unknown`, never "no checkpoint"). An observed
-  empty section is `missing`. Neither is ever filled or assumed.
+  empty section is `missing`. Neither is ever filled or assumed. The
+  `attempts` mark describes the revival-record authority; the initial
+  execution row is derived from the run row (whose coverage is `run`).
+- **History is never relabelled (R37-03).** Each revival attempt reads
+  ITS OWN generation from its record (`remote_result`), the initial
+  execution reads `generation: "unknown"` when no creation-time
+  generation is recorded — never the run's CURRENT
+  `cancellation_generation` copied onto history. A checkpoint's
+  `activated_at` attaches only when an applied resume's recorded
+  `checkpoint_ref` names THAT checkpoint; otherwise
+  `activation: "unmatched-command"` with `activated_at: None`.
+- **A consistent read or an honest stale mark.** Every SQL section of
+  one run's assembly runs inside ONE session (a single snapshot on
+  sqlite), fenced by a `source_version` — the per-authority max row
+  versions observed before and after the sections. When the fence moved
+  (a repair committed mid-assembly under READ COMMITTED), the snapshot
+  is `projection_inconsistent` and every surface renders that flag
+  instead of presenting a confident state assembled from mixed
+  versions. The rendered projection is EPHEMERAL — a fresh version-1
+  value over rows just read, never a durable CAS ticket; guarded actions
+  re-read authoritative state.
 
 The derived-state bindings the reader feeds (and tests pin): a `passed`
-verification decorates only the candidate it tested (`tested_oid` must
-be a current `candidate_shas` entry — an old green verdict about another
-candidate reads `unverified`); `safely_paused` stands on the
-repository's real ACTIVE entry plus the durable fence word; a resume's
-activation proof is the resume command that reached
-`applied`/`checkpointed`.
+verification decorates only the CURRENT candidate (`tested_oid` equals
+the active pointer or the last `candidate_shas` member — an old green
+verdict about an earlier member renders `historical_pass` and reads
+`unverified`; a verdict about something outside the run's candidates
+decorates nothing); `safely_paused` stands on the repository's real
+ACTIVE entry plus the durable fence word; a resume's activation proof
+is the applied resume command that named THAT checkpoint.
 
-## 9. The read API (R36-15)
+## 9. The read API (R36-15, R37-02/R37-03)
 
 `forge.api_operator` mounts three GET routes, read-only by construction
 (zero write endpoints; rendering performs no provider writes, no model
@@ -244,21 +291,37 @@ calls, no state transitions):
 
 | Route | Returns |
 |---|---|
-| `GET /operator/runs?repo=owner/a&repo=owner/b` | Thin summaries per run: state, underlying state, blocked/waiting line, `updated_at`, `projection_age_seconds`, unresolved-effect count |
-| `GET /operator/runs/{run_id}?repo=owner/a` | The full `render()` document plus `subject`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice) and `actions` — the ADVISORY hints |
-| `GET /operator/runs/{run_id}/support-bundle?repo=owner/a` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on |
+| `GET /operator/runs?subject=<family>/<connection>/<native>&limit=&cursor=` | A bounded page of thin summaries per run: state, underlying state, blocked/waiting line, `updated_at`, `projection_age_seconds`, `projection_inconsistent`, unresolved-effect count, plus the page bound and the scope-bound continuation cursor |
+| `GET /operator/runs/{run_id}?subject=…&limit=&sections=` | The full `render()` document plus `subject`, `subject_id`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice), `source_version` / `projection_inconsistent` (the consistency fence), `actions` — the ADVISORY hints — and the R37-16 diagnostics sections: `sections` (the read bounds), `pending_commands`, `occupancy_summary` and `blocked_reasons` |
+| `GET /operator/runs/{run_id}/support-bundle?subject=…&max_bytes=&sections=` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on, with the same `subject_id` and fence marks, plus the `export` block stating its scope and size (see §10) |
 
 **Authentication** is the lane-control credential family, reused: the
 same `HMAC-SHA256` under `FORGE_LANE_CONTROL_SECRET`, presented as a
-bearer token, where the signed material is the SUBJECT SCOPE —
-`operator:` + the declared repo full names, comma-joined sorted
-(`operator_scope_token(secret, repos)` mints it). The caller declares
-the scope it asks about (exactly as a lane declares its `work_id`) and
-the server verifies the token signs exactly that scope. Fail-closed
-ladder: no secret / no session factory → **503**; no bearer → **401**;
-blank declared scope → **400** (no wildcard — least authority); token
-that does not sign the declared scope → **403**; a run outside the
-verified scope → **404**, indistinguishable from unknown.
+bearer token. A **v2 grant** signs the CANONICAL SERIALIZED SUBJECT SET
+— `operator-scope-v2:` + canonical JSON of the sorted subject ids
+(`operator_subject_scope_token(secret, subjects)` mints it). The caller
+declares the scope it asks about (exactly as a lane declares its
+`work_id`) and the server verifies the token signs exactly that set.
+
+**Legacy grants (v1, name-only)** — `operator_scope_token(secret,
+repos)` — keep working ONLY through resolution: every declared name must
+match EXACTLY ONE canonical subject among the CONFIGURED repositories
+(`app.state.operator_subjects`, the deployment's mounted subject list);
+an ambiguous name, an unknown name, or nothing configured fails closed
+with a 403 carrying `operator.legacy_grant_refused` and the reissue
+instruction (reissue as canonical subjects). Never a silent fan-out
+across connections.
+
+Fail-closed ladder: no secret / no session factory → **503**; no bearer
+→ **401**; no declared scope, both grant families declared, a malformed
+subject reference or a cursor from another scope → **400** (no wildcard —
+least authority); a token that does not sign the declared scope, or a
+legacy grant that cannot resolve → **403**; a run outside the verified
+scope → **404**, indistinguishable from unknown. Observability:
+`scope` / `scope_version` / `page_size` in the list document,
+`subject_id` everywhere, `source_version` / `projection_inconsistent`
+on detail and bundle, and the `operator.legacy_grant_refused` refusal
+code.
 
 **Actions are advisory.** The API renders hints for the read-only
 `observer` role (probe only). Execution goes through the EXISTING
@@ -267,9 +330,122 @@ lane-control ack surface — which revalidate authority and the current
 world: a stale action replayed after the rows moved is refused there
 (the lane ack's CTL-04 CAS expires commands written against an old plan
 revision / execution epoch; `RecoveryActions.decide` names the current
-state and the safe next action).
+state and the safe next action). An operator bearer is not a lane token
+and cannot drive the guarded routes at all.
 
 The composition may inject the checkpoint authority by setting
 `app.state.operator_checkpoint_repository` to a `CheckpointRepository`;
 without it the checkpoints section reads `unknown` — never an invented
-empty history.
+empty history. Likewise the configured subject registry
+(`app.state.operator_subjects`) is what legacy name resolution consults.
+
+## 10. The bounded operator experience (R37-16)
+
+The list already pages (R37-02); R37-16 bounds the DRILL-DOWN and the
+EXPORT the same way, and adds the diagnostics an operator actually acts
+on. Nothing here is a second mutation authority — execution stays in the
+guarded command routes.
+
+### Bounded drill-down (`?limit=` / `?sections=`)
+
+The detail endpoint's per-run section reads carry explicit windows:
+
+- **attempts** — the LAST N revival records (default 20, max 100) beside
+  the synthesized initial execution, with the authority `total_count`;
+- **commands** — the PENDING commands whole (up to a hard 200-row cap)
+  plus the LAST N settled ones;
+- **effects (publications)** — the UNRESOLVED intents whole (same hard
+  cap) plus the LAST N resolved ones;
+- **checkpoints** — exactly the ACTIVE entry the authority exposes
+  (there is no unbounded checkpoint history read); `run` and
+  `verifications` are single rows by construction; occupancy reads the
+  open leases whole plus the LAST N released ones.
+
+Every windowed section reports `total_count`, `returned`, `truncated`
+and the served `limit` in the detail's `sections` block — a window is
+never mistaken for the whole journal. `?sections=` (a comma-separated
+subset of `run,attempts,commands,deliveries,checkpoints,verifications,
+publications,approvals,occupancy`) bounds the QUERY itself: unselected
+sections are never read and render coverage `unknown`. No per-run
+artifact BYTES are ever read — checkpoints surface their
+content-addressed digest only. Out-of-range `?limit=` values are
+refused (422), and unknown or empty `?sections=` selections are refused
+with 400.
+
+### Typed blocked reasons (`blocked_reasons`)
+
+`explain_blocked(projection)` renders why a run waits as a closed
+vocabulary of outcome codes — each with a one-line explanation, a THIN
+link to the exact proving row (its id/digest), and the SAFE next action
+naming where it executes (a guarded route or a runbook):
+
+| Code | Meaning | Evidence row | Safe next action | Retry? |
+|---|---|---|---|---|
+| `revoked_authority` | The credential/permission the run depends on was withdrawn (401/403, revoked/expired/suspended) | the run row | `rotate_or_rebind_credential` via [token-rotation.md](token-rotation.md) | **no** |
+| `uncertain_native_effect` | An external effect's landing is unproven (`requested`/`dispatched`/`probing`/`unknown`) | the publication-intent row | `reconcile` via the guarded `/reconcile` | **no** |
+| `required_checkpoint_loss` | The run stands paused (held fence) on a checkpoint the authority reads `missing`/`unknown` | the checkpoint row | `restore_checkpoint_or_retire` via [backup-restore.md](backup-restore.md) | **no** |
+| `capacity_wait` | A lease holds capacity with UNCERTAIN occupancy (`dispatched_unknown`/`draining`), or admission worded a capacity wait | the lease row | `wait_for_reconciler` (probe) | yes |
+| `verification_stale` | The only green verdict names an earlier candidate; the CURRENT one is unverified | the verification row | `verify_current_candidate` | yes |
+
+The non-retryable codes NEVER suggest retry — a revoked credential
+cannot be retried into validity, an uncertain effect cannot be retried
+around, a lost checkpoint cannot be retried into existence (pinned by
+tests). A healthy projection carries no reasons at all.
+
+### Pending commands and native occupancy
+
+The detail renders the actionable slices as their own sections:
+
+- **`pending_commands`** — every command not yet spent (kind, age, the
+  CTL-04 world it must still match: `expected_plan_revision` /
+  `expected_execution_epoch`). A stale hint cannot execute after the
+  world moves — the guarded route expires it.
+- **`occupancy_summary`** — `occupied_vs_limit` (the open-lease count
+  beside the deployment's `max_active_per_project`, mounted as
+  `app.state.operator_admission_policy`; `null` when unmounted — an
+  honest unknown), the per-occupancy-word counts, and the AGES of the
+  leases whose occupancy is uncertain.
+
+### Bounded support-bundle export
+
+The bundle reads FULL history (evidence completeness — windows live on
+the detail route) and is bounded at the EXPORT: the `export` block
+states the scope, the byte size, the cap and the hard maximum
+(`?max_bytes=`, default 1 MiB, hard max 8 MiB). A serialized bundle
+over the cap is REFUSED with the typed `operator.bundle_too_large`
+(413) naming the actual size — never silently truncated; narrow with
+`?sections=` (unselected sections read coverage `unknown`) or raise the
+cap within the hard maximum. Redaction is unchanged: no bearer tokens,
+model keys or raw payloads (pinned by tests on every export shape).
+
+### Time-to-diagnose observability
+
+Every operator response carries two headers — `operator.query_duration`
+(seconds) and `operator.page_payload_bytes` (the serialized body) — and
+a matching structured log line. These are the numbers the pilot reads
+to confirm list latency and payload stay bounded as history
+accumulates; thousands-of-runs paging is pinned by tests (the
+checkpoint authority is consulted once per PAGE MEMBER, never per run
+in scope).
+
+## 11. Diagnosing the pilot failure cases
+
+The runbook slice for the agreed pilot failure cases — each typed
+blocked reason mapped to where the operator looks and the safe next
+action. The pilot records actual time-to-diagnose and manual
+escalations; that second-operator validation is the REMAINING step
+noted here (API availability is not usability proof).
+
+| The failure you see | Where to look first | Safe next action |
+|---|---|---|
+| A run waits with `revoked_authority` | Detail → `blocked_reasons[0].evidence` (the run row), `source_coverage` for which sections were even queried | Rotate/rebind the credential per [token-rotation.md](token-rotation.md), then re-probe — do NOT retry |
+| A terminal run still holds external effects (`uncertain_native_effect`) | Detail → `unresolved_effects` (operation keys, target refs) | Run the guarded `/reconcile` to determine each landing before anything else |
+| A paused run cannot resume (`required_checkpoint_loss`) | Detail → `source_coverage.checkpoints` (`missing`/`unknown`), the checkpoint identity | Restore from backup per [backup-restore.md](backup-restore.md) or retire the run — do NOT retry |
+| Nothing progresses, capacity suspected (`capacity_wait`) | Detail → `occupancy_summary.unknown_ages` (the uncertain leases' ages) and `occupied_vs_limit` | Wait for the reconciler's probe; escalate only when the age grows past the agreed threshold |
+| Green checks but the run reads `unverified` (`verification_stale`) | Detail → `identity.active_candidate` vs `verification_history` | Run independent verification for the CURRENT candidate |
+| The view itself looks wrong | Detail → `projection_age_seconds`, `source_version`, `projection_inconsistent`, `rows_observed` | Refresh (probe); an inconsistent fence means a repair landed mid-read — re-read before acting |
+| You need everything for handoff | Bundle → `export` block (scope + size), `coverage` map | Export whole, or narrow with `?sections=` when the byte cap refuses |
+
+All of this is diagnosable from the supported surfaces without database
+edits; the action verbs route through the guarded command routes and
+runbooks named above.

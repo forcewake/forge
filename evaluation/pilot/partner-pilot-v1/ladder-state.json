@@ -1,0 +1,378 @@
+{
+  "contract": {
+    "acceptance": [
+      "the INDEPENDENT ORACLE decides acceptance: the contracted verification job (smoke) is green ON THE CANDIDATE SHA and the contracted content/outcome check passes against the candidate branch",
+      "customer acceptance is SEPARATE from PR/MR creation, harness success and test success \u2014 a human may reject a green candidate, and the rejection stays in the final denominator",
+      "every task and attempt is recorded, including rejected, abandoned and manually rescued work \u2014 failures and drops stay in the ledger and the budget",
+      "manual rescues are OBSERVED and recorded (what the human did, when), never inferred from success labels"
+    ],
+    "available_data": [
+      "the ONE writable repo granted for the pilot (disposable for the lab stage-1 leg; the partner's repo named at signing for the partner stages)",
+      "read-only evidence from the named neighbor repo(s) the task set declares \u2014 cited at exact OIDs, never written",
+      "CI logs and pipeline status for the candidate sha on the verification contract (FORGE_REQUIRED_JOBS)",
+      "the runbook (docs/operations/) and the qualification profile record for the deployed lab"
+    ],
+    "baseline": {
+      "all_observed": false,
+      "axes": {
+        "assisted_coding_minutes": {
+          "axis": "assisted_coding_minutes",
+          "provenance": "pending",
+          "source": "",
+          "value_minutes": null
+        },
+        "ops_intervention_minutes": {
+          "axis": "ops_intervention_minutes",
+          "provenance": "pending",
+          "source": "",
+          "value_minutes": null
+        },
+        "reviewer_minutes": {
+          "axis": "reviewer_minutes",
+          "provenance": "pending",
+          "source": "",
+          "value_minutes": null
+        },
+        "waiting_minutes": {
+          "axis": "waiting_minutes",
+          "provenance": "pending",
+          "source": "",
+          "value_minutes": null
+        }
+      },
+      "method": "PENDING \u2014 the customer's ACTUAL workflow is measured per axis at signing (assisted coding time, reviewer effort, operations intervention, waiting, measured separately); an authored baseline is refused for this ladder",
+      "note": "the customer's ACTUAL workflow measured per axis; an authored baseline is refused for the partner ladder (provenance vocabulary is observed|pending)",
+      "window": {
+        "end": "",
+        "start": ""
+      }
+    },
+    "contract_id": "partner-pilot-v1",
+    "customer": {
+      "code_owner": "",
+      "name": "pending-recruitment",
+      "organization": "",
+      "state": "pending-recruitment"
+    },
+    "prohibited_operations": [
+      "automatic merge \u2014 the bot never merges, even when every check is green",
+      "automatic deploy or any production deployment",
+      "production secrets \u2014 bounded credentials only, inside the named secrets scope",
+      "repository write scope beyond the one granted writable repo (neighbor repos stay read-only)",
+      "extra data access beyond the declared available data (no scope creep by configuration)",
+      "force-push, branch deletion or any destructive compensation on human-edited branches"
+    ],
+    "schema": "forge.partner-pilot.contract/1",
+    "spend_cap_usd": 40.0,
+    "stage_spend_caps_usd": {
+      "one-observed-task": 1.0,
+      "operational-sample": 33.0,
+      "supervised-batch": 6.0
+    },
+    "stop_rules": [
+      "authority_violation",
+      "budget_overrun",
+      "stop_rule_outcome",
+      "customer_stop"
+    ],
+    "task_eligibility": [
+      "one small, single-purpose change per task inside the ONE writable repo granted by the boundary \u2014 no marathon tasks, no cross-repo refactors",
+      "every task is approved by the named code owner BEFORE it runs (the task-set approval gate; a task the owner did not approve is not eligible)",
+      "the set must include ambiguity, a neighboring-service dependency, one operator intervention and one controlled infrastructure failure, alongside ordinary useful work",
+      "tasks must be completable by the supported workflow on the qualified native profile (gitlab-ce-v1) with bounded credentials \u2014 no task may require production secrets, deploy authority or merge authority"
+    ],
+    "task_set_approval": "pending-code-owner-approval",
+    "window": {
+      "end": "",
+      "start": ""
+    }
+  },
+  "contract_digest": "c293147c760ebd5a4f61106b2a7a7e893c5ad7c80e1c7586baec9e89b0fe9b98",
+  "created_at": "2026-09-24T11:52:04.591989+00:00",
+  "decision_review": null,
+  "ladder_id": "partner-pilot-v1",
+  "observability": {
+    "pilot.abandoned_tasks": 0,
+    "pilot.accepted_tasks": 0,
+    "pilot.continuation_decision": "pending-review",
+    "pilot.customer_review_minutes": null,
+    "pilot.manual_rescue_count": 0,
+    "pilot.stop_reason": ""
+  },
+  "schema": "forge.partner-pilot.ladder-state/1",
+  "spend": {
+    "cap_usd": 40.0,
+    "recorded_usd": 0.0,
+    "remaining_usd": 40.0
+  },
+  "stages": {
+    "contract": {
+      "records": [
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {
+            "accepted": true,
+            "checks": [
+              {
+                "name": "contract-validates",
+                "observed": "digest c293147c760e\u2026",
+                "ok": true
+              },
+              {
+                "name": "customer-state-stated",
+                "observed": "pending-recruitment (honest)",
+                "ok": true
+              }
+            ],
+            "method": "contract-validation",
+            "note": "the contract validates and its digest is frozen; the customer state is stated, never faked"
+          },
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "the learning contract exists and is frozen; no spend, no tasks"
+          ],
+          "recorded_at": "2026-09-24T11:52:04.592805+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "contract",
+          "stage_complete": true,
+          "status": "executed",
+          "task_refs": [],
+          "timings": {},
+          "unmet_preconditions": [],
+          "usage_receipts": []
+        }
+      ],
+      "status": "complete"
+    },
+    "one-observed-task": {
+      "records": [
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {},
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+          ],
+          "recorded_at": "2026-09-24T11:52:38.102032+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "one-observed-task",
+          "stage_complete": false,
+          "status": "pending-lab",
+          "task_refs": [
+            "obs-01"
+          ],
+          "timings": {},
+          "unmet_preconditions": [
+            {
+              "check": "lab-aligned",
+              "met": false,
+              "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'lane template pinned to the promoted release', 'installed lane wheel observable']",
+              "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+            },
+            {
+              "check": "gateway-reachable",
+              "met": false,
+              "reason": "the model gateway at http://localhost:4000/health is unreachable: GET http://localhost:4000/health unreachable: timed out",
+              "resolution": "bring the gateway up (the litellm container) and re-run"
+            }
+          ],
+          "usage_receipts": []
+        },
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {},
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+          ],
+          "recorded_at": "2026-09-24T11:53:33.182296+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "one-observed-task",
+          "stage_complete": false,
+          "status": "pending-lab",
+          "task_refs": [
+            "obs-01"
+          ],
+          "timings": {},
+          "unmet_preconditions": [
+            {
+              "check": "lab-aligned",
+              "met": false,
+              "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'lane template pinned to the promoted release', 'installed lane wheel observable']",
+              "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+            }
+          ],
+          "usage_receipts": []
+        },
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {},
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage one-observed-task"
+          ],
+          "recorded_at": "2026-09-24T12:08:14.781486+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "one-observed-task",
+          "stage_complete": false,
+          "status": "pending-lab",
+          "task_refs": [
+            "obs-01"
+          ],
+          "timings": {},
+          "unmet_preconditions": [
+            {
+              "check": "lab-aligned",
+              "met": false,
+              "reason": "compatibility verdict 'misaligned'; unmet checks: ['control-plane.image_digest == promoted image digest', 'installed lane wheel observable']",
+              "resolution": "resolve each mismatch per docs/operations/lab-alignment-runbook.md, then re-run this stage"
+            }
+          ],
+          "usage_receipts": []
+        }
+      ],
+      "status": "pending-lab"
+    },
+    "operational-sample": {
+      "records": [
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {},
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage operational-sample"
+          ],
+          "recorded_at": "2026-09-24T11:53:49.821374+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "operational-sample",
+          "stage_complete": false,
+          "status": "pending-partner",
+          "task_refs": [
+            "sample-01",
+            "sample-02",
+            "sample-03",
+            "sample-04",
+            "sample-05",
+            "sample-06",
+            "sample-07",
+            "sample-08",
+            "sample-09",
+            "sample-10",
+            "sample-11",
+            "sample-12",
+            "sample-13",
+            "sample-14"
+          ],
+          "timings": {},
+          "unmet_preconditions": [
+            {
+              "check": "stage-one-observed-task-complete",
+              "met": false,
+              "reason": "stage 'one-observed-task' is pending-lab \u2014 the ladder advances in order",
+              "resolution": "complete stage 'one-observed-task' first"
+            },
+            {
+              "check": "stage-supervised-batch-complete",
+              "met": false,
+              "reason": "stage 'supervised-batch' is pending-partner \u2014 the ladder advances in order",
+              "resolution": "complete stage 'supervised-batch' first"
+            },
+            {
+              "check": "customer-named",
+              "met": false,
+              "reason": "the customer is pending-recruitment \u2014 a NAMED external customer is a prerequisite the machinery cannot fabricate",
+              "resolution": "recruit the design partner (maintainer's act), then re-freeze the contract"
+            },
+            {
+              "check": "task-set-approved",
+              "met": false,
+              "reason": "the task set awaits the named code owner's approval",
+              "resolution": "the named code owner approves the task set (an acceptance criterion, not a formality)"
+            },
+            {
+              "check": "baseline-observed",
+              "met": false,
+              "reason": "baseline axes still pending: ['assisted_coding_minutes', 'reviewer_minutes', 'ops_intervention_minutes', 'waiting_minutes']",
+              "resolution": "measure the customer's ACTUAL workflow per axis (assisted coding, review, ops intervention, waiting) \u2014 an authored baseline is refused"
+            }
+          ],
+          "usage_receipts": []
+        }
+      ],
+      "status": "pending-partner"
+    },
+    "supervised-batch": {
+      "records": [
+        {
+          "abandoned_tasks": 0,
+          "acceptance": {},
+          "attempts": [],
+          "manual_rescues": 0,
+          "notes": [
+            "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage supervised-batch"
+          ],
+          "recorded_at": "2026-09-24T11:53:39.938679+00:00",
+          "rescue_notes": [],
+          "schema": "forge.partner-pilot.stage-record/1",
+          "spend_usd": null,
+          "stage": "supervised-batch",
+          "stage_complete": false,
+          "status": "pending-partner",
+          "task_refs": [
+            "batch-01",
+            "batch-02",
+            "batch-03",
+            "batch-04",
+            "batch-05"
+          ],
+          "timings": {},
+          "unmet_preconditions": [
+            {
+              "check": "stage-one-observed-task-complete",
+              "met": false,
+              "reason": "stage 'one-observed-task' is pending-lab \u2014 the ladder advances in order",
+              "resolution": "complete stage 'one-observed-task' first"
+            },
+            {
+              "check": "customer-named",
+              "met": false,
+              "reason": "the customer is pending-recruitment \u2014 a NAMED external customer is a prerequisite the machinery cannot fabricate",
+              "resolution": "recruit the design partner (maintainer's act), then re-freeze the contract"
+            },
+            {
+              "check": "task-set-approved",
+              "met": false,
+              "reason": "the task set awaits the named code owner's approval",
+              "resolution": "the named code owner approves the task set (an acceptance criterion, not a formality)"
+            },
+            {
+              "check": "baseline-observed",
+              "met": false,
+              "reason": "baseline axes still pending: ['assisted_coding_minutes', 'reviewer_minutes', 'ops_intervention_minutes', 'waiting_minutes']",
+              "resolution": "measure the customer's ACTUAL workflow per axis (assisted coding, review, ops intervention, waiting) \u2014 an authored baseline is refused"
+            }
+          ],
+          "usage_receipts": []
+        }
+      ],
+      "status": "pending-partner"
+    }
+  },
+  "stop": null,
+  "updated_at": "2026-09-24T12:08:14.781546+00:00"
+}

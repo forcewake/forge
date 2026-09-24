@@ -1,0 +1,170 @@
+{
+  "schema": "forge.research.cohort/1",
+  "cohort_id": "research-cohort-live-v2",
+  "recorded_at": "2026-09-24T00:00:00+00:00",
+  "promotion": {
+    "owner": "R37 review lead (adaptive)",
+    "hold_expires": "2026-10-22",
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "RC-13-live2-neighbor-refund-approval",
+      "archetype": "neighbor_dependency",
+      "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago, wiring the request through to Billing's policy client. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount.",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "snapshot_ref": "snap-live2-refunds.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.4,
+        "assumptions_weight": 0.2,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "billing-policy",
+          "path": "src/policy/refunds.py"
+        },
+        {
+          "repo": "orders-api",
+          "path": "src/checkout.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-14-live2-ambiguous-approver",
+      "archetype": "ambiguous_requirement",
+      "statement": "Route refund requests that need the manual approval step to whoever performs approvals for orders-api. The routing and its owner are not stated in this issue, and no repository the planner may read names the approver for orders-api \u2014 decide nothing silently.",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "snapshot_ref": "snap-live2-refunds.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.2,
+        "recall_weight": 0.15,
+        "assumptions_weight": 0.3,
+        "questions_weight": 0.35,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders-api",
+          "path": "src/checkout.py"
+        },
+        {
+          "repo": "billing-policy",
+          "path": "src/policy/client.py"
+        }
+      ],
+      "missing_decision": "which approvals queue/owner performs the manual approval step for orders-api refunds",
+      "missing_decision_terms": [
+        "approver",
+        "approves",
+        "approval owner",
+        "approvals queue",
+        "routing"
+      ],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-15-live2-irrelevant-docs-site",
+      "archetype": "irrelevant_repository",
+      "statement": "Surface Billing's manual-review decision verbatim in Orders' refund handlers. The authorized repository set also contains a docs site with a help-center refunds page; it is marketing content and holds nothing either service reads.",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "snapshot_ref": "snap-live2-refunds.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.45,
+        "assumptions_weight": 0.15,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders-api",
+          "path": "src/orders/handlers/refunds.py"
+        },
+        {
+          "repo": "orders-api",
+          "path": "src/checkout.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": [
+        "docs-site"
+      ]
+    },
+    {
+      "task_id": "RC-16-live2-deep-superseded-policy",
+      "archetype": "deep_file_evidence",
+      "statement": "Confirm the manual-approval threshold that applies to refunds today. The refunds policy file opens with superseded F-2023 and F-2024-02 revisions \u2014 the CURRENT rule is the F-2024-11 finance revision; cite its exact window, not the superseded history near the file head.",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "snapshot_ref": "snap-live2-refunds.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.4,
+        "recall_weight": 0.35,
+        "assumptions_weight": 0.15,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "billing-policy",
+          "path": "src/policy/refunds.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+      "archetype": "neighbor_dependency",
+      "statement": "Orders' checkout request gate must apply Billing's contract-tier request window instead of the order-side constant. The tier windows are defined in the neighbor policy module only.",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "snapshot_ref": "snap-live2-refunds.json",
+      "held_back": true,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.4,
+        "assumptions_weight": 0.2,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "billing-policy",
+          "path": "src/policy/refunds.py"
+        },
+        {
+          "repo": "orders-api",
+          "path": "src/checkout.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    }
+  ]
+}

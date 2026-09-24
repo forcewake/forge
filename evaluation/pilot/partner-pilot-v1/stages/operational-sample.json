@@ -1,0 +1,73 @@
+{
+  "records": [
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {},
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage operational-sample"
+      ],
+      "recorded_at": "2026-09-24T11:53:49.821374+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "operational-sample",
+      "stage_complete": false,
+      "status": "pending-partner",
+      "task_refs": [
+        "sample-01",
+        "sample-02",
+        "sample-03",
+        "sample-04",
+        "sample-05",
+        "sample-06",
+        "sample-07",
+        "sample-08",
+        "sample-09",
+        "sample-10",
+        "sample-11",
+        "sample-12",
+        "sample-13",
+        "sample-14"
+      ],
+      "timings": {},
+      "unmet_preconditions": [
+        {
+          "check": "stage-one-observed-task-complete",
+          "met": false,
+          "reason": "stage 'one-observed-task' is pending-lab \u2014 the ladder advances in order",
+          "resolution": "complete stage 'one-observed-task' first"
+        },
+        {
+          "check": "stage-supervised-batch-complete",
+          "met": false,
+          "reason": "stage 'supervised-batch' is pending-partner \u2014 the ladder advances in order",
+          "resolution": "complete stage 'supervised-batch' first"
+        },
+        {
+          "check": "customer-named",
+          "met": false,
+          "reason": "the customer is pending-recruitment \u2014 a NAMED external customer is a prerequisite the machinery cannot fabricate",
+          "resolution": "recruit the design partner (maintainer's act), then re-freeze the contract"
+        },
+        {
+          "check": "task-set-approved",
+          "met": false,
+          "reason": "the task set awaits the named code owner's approval",
+          "resolution": "the named code owner approves the task set (an acceptance criterion, not a formality)"
+        },
+        {
+          "check": "baseline-observed",
+          "met": false,
+          "reason": "baseline axes still pending: ['assisted_coding_minutes', 'reviewer_minutes', 'ops_intervention_minutes', 'waiting_minutes']",
+          "resolution": "measure the customer's ACTUAL workflow per axis (assisted coding, review, ops intervention, waiting) \u2014 an authored baseline is refused"
+        }
+      ],
+      "usage_receipts": []
+    }
+  ],
+  "schema": "forge.partner-pilot.stage-records/1",
+  "stage": "operational-sample",
+  "status": "pending-partner"
+}

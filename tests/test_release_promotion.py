@@ -604,9 +604,12 @@ def test_cli_gaps_joins_the_profile_qualification_records(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
     """R36-22: the gaps query reads the committed profile records too —
-    the gitlab lane's gap names its declared_only record (fixtures executed,
+    the gitlab lane's gap names its limiting record (fixtures executed,
     live evidence absent) instead of a bare 'no evidence' line, and the
-    uncovered providers are named per provider."""
+    uncovered providers are named per provider. R37-08 (#289) landed the
+    LIVE record: gitlab's real-provider-e2e is now COVERED by live-provider
+    evidence (gitlab-ce-v1@live), so the gitlab gap is GONE and only the
+    uncovered providers remain."""
     import contextlib
     import io
 
@@ -616,12 +619,7 @@ def test_cli_gaps_joins_the_profile_qualification_records(
     assert code == 0
     document = json.loads(buf.getvalue())
     reasons = {(gap["capability"], gap["provider"]): gap["reason"] for gap in document["gaps"]}
-    gitlab = reasons[("real-provider-e2e", "gitlab")]
-    # The record naming must track the CURRENT tree version (records are
-    # committed per release; a literal broke at the v0.36.0 bump).
-    from forge import __version__
-
-    assert "declared_only" in gitlab and f"gitlab-ce-v1@{__version__}" in gitlab
+    assert ("real-provider-e2e", "gitlab") not in reasons
     for provider in ("github", "azure"):
         assert "no profile-qualification record covers" in reasons[("real-provider-e2e", provider)]
     # the promotion-side (boot_canary) capabilities keep their pre-R36-22

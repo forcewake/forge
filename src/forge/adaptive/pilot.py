@@ -81,6 +81,7 @@ __all__ = [
     "STAGE_READ_PLAN",
     "STAGE_SMALL_FIXES",
     "VIOLATION_AUTO_MERGE",
+    "VIOLATION_BUDGET_OVERRUN",
     "VIOLATION_PRODUCTION_SECRET",
     "VIOLATION_SCOPE",
     "VIOLATION_KINDS",
@@ -206,10 +207,15 @@ DECISIONS: tuple[str, ...] = (
 VIOLATION_SCOPE = "scope_violation"
 VIOLATION_AUTO_MERGE = "auto_merge_attempt"
 VIOLATION_PRODUCTION_SECRET = "production_secret_used"
+#: R37-12: recorded spend passing the agreed cap — the budget stop rule.
+#: "No next paid batch starts automatically" is enforced by
+#: :func:`evaluate_stop` stopping on it, exactly like a scope violation.
+VIOLATION_BUDGET_OVERRUN = "budget_overrun"
 VIOLATION_KINDS: tuple[str, ...] = (
     VIOLATION_SCOPE,
     VIOLATION_AUTO_MERGE,
     VIOLATION_PRODUCTION_SECRET,
+    VIOLATION_BUDGET_OVERRUN,
 )
 #: The authority violations — an attempted automatic merge or a used
 #: production secret.  These are instant stops with preserved state.
@@ -1274,6 +1280,23 @@ class PilotTracker:
         stamps = [_parse_datetime(record.started_at) for record in self._records]
         return min(stamps) if stamps else None
 
+    @property
+    def spend_total_usd(self) -> float | None:
+        """The ALL-attempt spend fold — ``None`` while ANY spend is unknown.
+
+        R37-12 (#293): the number the partner ladder's budget stop rule
+        runs on.  Same honesty rule as the cost metrics: a missing
+        attempt spend degrades the total to unknown — never zero, and
+        never a silent sum over the known rows alone.
+        """
+        total = 0.0
+        for record in self._records:
+            for attempt in record.attempts:
+                if attempt.spend_usd is None:
+                    return None
+                total += attempt.spend_usd
+        return round(total, 6) if self._records else None
+
     # -- recording ---------------------------------------------------------
 
     def _refuse_if_stopped(self, action: str) -> None:
@@ -1337,6 +1360,23 @@ class PilotTracker:
                 f"{sorted(_AUTHORITY_VIOLATIONS)}; scope violations are recorded by record_task"
             )
         self._violations.append(Violation(kind=kind, detail=detail, task_id=task_id))
+
+    def record_budget_overrun(self, detail: str = "", task_id: str = "") -> None:
+        """Record a budget overrun (R37-12) — the budget stop rule's input.
+
+        Recorded spend passing the agreed cap is a violation exactly like
+        a scope breach: the record lands (dropping it would be the lie),
+        and :func:`evaluate_stop` stops the pilot on it with preserved
+        diagnostics — no next paid batch starts automatically.
+        """
+        self._refuse_if_stopped("record a budget overrun")
+        self._violations.append(
+            Violation(
+                kind=VIOLATION_BUDGET_OVERRUN,
+                detail=detail or "recorded spend passed the agreed cap",
+                task_id=task_id,
+            )
+        )
 
     def grant_extension(self, gap: str) -> None:
         """Grant the extend-once — a named gap, exactly once."""
@@ -1646,12 +1686,12 @@ def tracker_from_snapshot(
     re-preserves its diagnostics over the same state.
 
     Ordering note: scope violations regenerate from each record's
-    touched repos as the records replay; authority violations replay
-    after the tasks.  A live pilot that recorded an authority violation
-    BETWEEN tasks replays it after them — the report content is
-    identical, but that ordering's diagnostics pointer may differ (the
-    runner's shape records violations only at task boundaries, where
-    replay is exact).
+    touched repos as the records replay; authority violations (and
+    budget overruns, R37-12) replay after the tasks.  A live pilot that
+    recorded such a violation BETWEEN tasks replays it after them — the
+    report content is identical, but that ordering's diagnostics pointer
+    may differ (the runner's shape records violations only at task
+    boundaries, where replay is exact).
     """
     if not isinstance(snapshot, Mapping):
         raise PilotError("tracker snapshot is not an object")
@@ -1681,6 +1721,11 @@ def tracker_from_snapshot(
         if not isinstance(violation, Mapping):
             continue
         kind = str(violation.get("kind") or "")
+        if kind == VIOLATION_BUDGET_OVERRUN:
+            tracker.record_budget_overrun(
+                str(violation.get("detail") or ""), str(violation.get("task_id") or "")
+            )
+            continue
         if kind not in _AUTHORITY_VIOLATIONS:
             continue  # scope violations regenerate from touched_repos
         tracker.record_authority_violation(
@@ -1740,10 +1785,13 @@ def evaluate_stop(
        tracker snapshot preserved verbatim.
     2. **Scope violations** (a task touched outside the data boundary)
        → :data:`DECISION_STOP`, diagnostics preserved.
-    3. **Before the named end date** → :data:`DECISION_CONTINUE`.  The
+    3. **Budget overrun** (R37-12: recorded spend passed the agreed
+       cap) → :data:`DECISION_STOP`, diagnostics preserved — no next
+       paid batch starts automatically.
+    4. **Before the named end date** → :data:`DECISION_CONTINUE`.  The
        measurement window was fixed pre-kickoff precisely so the pilot
        is not judged during the adjustment dip (the J-curve).
-    4. **At/after the end date** — the 2-of-3 criteria math:
+    5. **At/after the end date** — the 2-of-3 criteria math:
        ≥ 2 criteria met → :data:`DECISION_EXPAND` (the expand
        candidate); otherwise exactly one extend-once for a NAMED gap
        when the extension is still available →
@@ -1770,6 +1818,18 @@ def evaluate_stop(
         reason = (
             f"scope violation: task {head.task_id or '?'} {head.detail} — the data boundary "
             "is the pilot's edge; the tracker snapshot is preserved verbatim"
+        )
+        diagnostics = tracker.preserve_diagnostics(reason)
+        return StopDecision(
+            decision=DECISION_STOP, reasons=(reason,), diagnostics_pointer=diagnostics.pointer
+        )
+    budget = [v for v in tracker.violations if v.kind == VIOLATION_BUDGET_OVERRUN]
+    if budget:
+        head = budget[0]
+        reason = (
+            f"budget overrun: task {head.task_id or '?'} {head.detail} — the agreed cap is "
+            "the pilot's budget edge; no next paid batch starts automatically and the "
+            "tracker snapshot is preserved verbatim"
         )
         diagnostics = tracker.preserve_diagnostics(reason)
         return StopDecision(

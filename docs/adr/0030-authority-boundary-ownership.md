@@ -276,3 +276,17 @@ graph, which is the registry working as designed).
 - The monorepo, the modular monolith and the coordinated release stay:
   no packaging change ships here; the boundaries are ownership fences,
   not seams for a split.
+
+## Amendment — 2026-09-24, R37-19 (ADR-0031): the owners stay; the scenarios moved out
+
+The six boundaries, owners and negative contracts above are unchanged
+by the R37-19 separation. What changed is where the scenario machinery
+that PROVES the owners lives: the deterministic twin, the native-shaped
+remote and the reactive scripted vendor moved from inside
+`system_verification`, `saga_durable` and `steering_causality` into the
+labelled evaluation package `forge.adaptive.reference`, registered in
+this registry's `allowed_dependents` like any other caller (so the §2
+import-registration fence covers them), with runtime entry points
+barred from importing the package entirely and the compatibility
+re-exports pinned by tests until their callers drain. See ADR-0031 for
+the dependency-direction rules and the residual-duplication audit.

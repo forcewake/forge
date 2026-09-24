@@ -1,0 +1,150 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-14-live2-ambiguous-approver",
+  "mode": "none",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 496,
+          "output_lower_bound": 1861,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.01588,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 496,
+            "output_tokens": 1861,
+            "charged_input_tokens": 496,
+            "charged_output_tokens": 1861,
+            "usage_known": true,
+            "usd_estimated": 0.01588,
+            "running_usd_estimated": 0.149012
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Run discovery over orders-api, billing-policy, and docs-site at the frozen OIDs looking for any file or doc that names a refund-approval owner or a routing destination for requests needing manual approval."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Ask the issue author to supply the approver (person/team/alias) for orders-api and the exact routing destination; block all implementation on this answer."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Once the owner and destination are confirmed, apply the minimal routing change for refund requests requiring manual approval in the repo and path the answer specifies."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Verify the wiring (smallest test or doc note) against the confirmed target; if no target is confirmed, S3/S4 remain blocked and nothing is guessed."
+      }
+    ],
+    "surface": [],
+    "claims": [],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Who exactly performs manual refund approvals for orders-api (person, team, or alias)?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What is the exact routing destination these refund requests must go to (queue name, address, webhook, label, or other identifier)?"
+      },
+      {
+        "question_id": "q3",
+        "text": "In which repository, path, and config format should this routing be implemented?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "No discovery evidence exists in this pass, so no factual claims can be cited and none are made."
+      },
+      {
+        "text": "Per the issue's stated premise, the approver for orders-api cannot be derived from the three frozen snapshots, so implementation must not proceed on a guessed target."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 496,
+        "output_lower_bound": 1861,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.01588,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 496,
+          "output_tokens": 1861,
+          "charged_input_tokens": 496,
+          "charged_output_tokens": 1861,
+          "usage_known": true,
+          "usd_estimated": 0.01588,
+          "running_usd_estimated": 0.149012
+        }
+      ]
+    },
+    "harness": "planner-input construction + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.01588,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

@@ -20,6 +20,31 @@
 # includes several forge templates runs exactly one lane
 # (driver: claude-sdk-lane).
 #
+# Dispatched pipeline variables (R37-07 / issue #288 — the dispatch
+# envelope; GitLab exports every pipeline variable into the job env, so
+# the driver step below consumes them directly):
+#   FORGE_RUN_ID / FORGE_ISSUE_IID / FORGE_PLAN / FORGE_HARNESS_MODEL /
+#   FORGE_HARNESS_DRIVER / FORGE_ATTEMPT_BASE   (the frozen brief)
+#   FORGE_LANE_RESUME ("1" | "restart" | "") + FORGE_LANE_RESUME_MODE —
+#     the WIP-continuity contract the dispatch selected:
+#     "1" (required) makes the pre-turn restore of the held checkpoint a
+#     PRECONDITION (a failed download halts the lane before any vendor
+#     session exists — zero model turns); "restart" discards the WIP by
+#     operator choice; "" (fresh) restores nothing.
+#   FORGE_RESUME_CHECKPOINT — the EXACT checkpoint content address the
+#     persisted continuation decision approved (empty on fresh/restart);
+#     the lane's binding itself comes from the control plane's durable
+#     resume-spec (work_id@checkpoint_id), this is the dispatched pin the
+#     trace reconciles against.
+#   FORGE_ATTEMPT_GENERATION + FORGE_CONTINUATION_DECISION_ID — the
+#     durable attempt identity the credentials are scoped to and the
+#     decision identity this dispatch executes.
+#   FORGE_LANE_CONTROL_URL / FORGE_LANE_CONTROL_TOKEN — the lane-control
+#     dial-out pair (NXT-10: the lane dials OUT; the token is the
+#     attempt-scoped HMAC the dispatch minted — never a control-plane
+#     root secret, never a publication token). Steering stays OFF unless
+#     the project sets FORGE_STEERING_ENABLED (below).
+#
 # Required project CI variables (masked/protected per policy; forge stores
 # none of them — ADR-0015 §4):
 #   ANTHROPIC_AUTH_TOKEN   harness API key (never forge's)
@@ -83,6 +108,12 @@ forge-agent-claude-sdk:
     # runner side records intent, it does not isolate.
     FORGE_LANE_PROFILE: "v1"
     FORGE_EGRESS_ALLOWLIST: ""
+    # NXT-11: the lane-side steering consumer switch, OFF by default. A
+    # project variable (or a dispatched pipeline variable — pipeline
+    # variables BEAT YAML ones) turns it on; lane_driver then attaches the
+    # steering session over the dispatch's FORGE_LANE_CONTROL_URL/TOKEN
+    # pair (R37-07: both ride the dispatch envelope above).
+    FORGE_STEERING_ENABLED: ""
   before_script:
     - |
       for attempt in 1 2 3; do
@@ -122,9 +153,22 @@ forge-agent-claude-sdk:
     - git checkout --detach "$FORGE_ATTEMPT_BASE"
   script:
     # The task brief: approved plan, written into the REPO's control
-    # directory — never /tmp (the sandbox lesson: run context lives with
-    # the run, ephemeral scratch does not).
+    # directory — never /tmp (the sandbox lesson: run context lives with the
+    # run, ephemeral scratch does not).
     - printf '%s\n' "$FORGE_PLAN" > .forge/brief.md
+    # R37-07 (#288): the dispatch envelope journal — the resume/continuity
+    # contract this lane received, recorded BEFORE the driver runs so the
+    # trace and the provenance report can reconcile it against the control
+    # plane's journaled envelope digest (never the token VALUE — only
+    # whether one was dispatched).
+    - |
+      printf '{"resume_mode":"%s","checkpoint":"%s","attempt_generation":"%s","decision_id":"%s","control_url":"%s","token_dispatched":%s}\n' \
+        "${FORGE_LANE_RESUME_MODE:-}" "${FORGE_RESUME_CHECKPOINT:-}" \
+        "${FORGE_ATTEMPT_GENERATION:-}" "${FORGE_CONTINUATION_DECISION_ID:-}" \
+        "${FORGE_LANE_CONTROL_URL:-}" \
+        "$([ -n "${FORGE_LANE_CONTROL_TOKEN:-}" ] && echo true || echo false)" \
+        > .forge/dispatch-envelope.json
+      echo "forge dispatch envelope: resume=${FORGE_LANE_RESUME_MODE:-fresh} checkpoint=${FORGE_RESUME_CHECKPOINT:-none} attempt=${FORGE_ATTEMPT_GENERATION:-0}"
     # The model route: dispatched FORGE_CLAUDE_MODEL > dispatched
     # FORGE_HARNESS_MODEL > the template default.
     - export FORGE_CLAUDE_MODEL="${FORGE_CLAUDE_MODEL:-${FORGE_HARNESS_MODEL:-$ANTHROPIC_MODEL}}"

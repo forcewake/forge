@@ -215,3 +215,17 @@ consolidated the result WITHOUT another extraction wave:
 
 The five names, the matrix and the expand-contract rule are unchanged;
 this amendment adds enforcement and inventory, not new abstractions.
+
+## Amendment — 2026-09-24, R37-19 (ADR-0031): reference scenarios left the contract modules
+
+The §5 import-boundary rule ("core imports no integrations") now has a
+sibling for evaluation material: the deterministic scenario builders
+and provider-shaped reference remotes that previously lived INSIDE
+runtime contract modules (`system_verification`, `saga_durable`,
+`steering_causality`) moved to the labelled package
+`forge.adaptive.reference`, and the runtime entry points are barred
+from importing it (mechanically — see ADR-0031 §2). The owner map
+above is unchanged; the scenarios compose the same owners as ordinary
+registered dependents, through tested compatibility re-exports that
+are removed only when their callers drain (the §3 expand-contract
+discipline applied to import paths instead of document versions).

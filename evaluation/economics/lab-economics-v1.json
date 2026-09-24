@@ -1,0 +1,3559 @@
+{
+  "schema": "forge.delivery.economics/1",
+  "pilot": {
+    "harness_id": "lab-lane-subprocess+shipped-collector",
+    "pilot_id": "lab-pilot-v1",
+    "platform": "lab-offline-seams",
+    "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+    "recipe_id": "forge-recipe/lab-offline/codex-app/scripted-vendor",
+    "agreed_cap_usd": 60.0
+  },
+  "rate_card": {
+    "version": "lab-estimate-v1",
+    "currency": "usd",
+    "rates": [
+      {
+        "provider": "lab-lane/vendor-wire",
+        "model": "",
+        "input_per_mtok_usd": 2.5,
+        "cached_input_per_mtok_usd": null,
+        "cache_write_per_mtok_usd": null,
+        "output_per_mtok_usd": 10.0,
+        "basis": "estimate"
+      },
+      {
+        "provider": "discovery-live/live",
+        "model": "",
+        "input_per_mtok_usd": 2.0,
+        "cached_input_per_mtok_usd": null,
+        "cache_write_per_mtok_usd": null,
+        "output_per_mtok_usd": 8.0,
+        "basis": "estimate"
+      }
+    ],
+    "note": "versioned price assumptions \u2014 every figure priced from this card is an ESTIMATE, never a billing record"
+  },
+  "works": [
+    {
+      "work_id": "t-01-repair",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:41:55.908383+00:00",
+      "acceptance_contract": "verification:candidate-compiles+diff-applies-cleanly",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-01-repair/a1",
+          "work_id": "t-01-repair",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-01-repair",
+              "attempt_id": "t-01-repair/a1",
+              "receipt_id": "lab-pilot-v1:t-01-repair:t-01-repair/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-01-repair/a2",
+          "work_id": "t-01-repair",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-01-repair",
+              "attempt_id": "t-01-repair/a2",
+              "receipt_id": "lab-pilot-v1:t-01-repair:t-01-repair/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-02-cold",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:41:57.993123+00:00",
+      "acceptance_contract": "verification:cold-start-proven+files-present",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-02-cold/a1",
+          "work_id": "t-02-cold",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-02-cold",
+              "attempt_id": "t-02-cold/a1",
+              "receipt_id": "lab-pilot-v1:t-02-cold:t-02-cold/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-03-adaptive",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:41:59.736938+00:00",
+      "acceptance_contract": "verification:edit-landed+steering-attached-idle",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-03-adaptive/a1",
+          "work_id": "t-03-adaptive",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-03-adaptive",
+              "attempt_id": "t-03-adaptive/a1",
+              "receipt_id": "lab-pilot-v1:t-03-adaptive:t-03-adaptive/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-04-ambiguous",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:01.580534+00:00",
+      "acceptance_contract": "verification:answer-durable+question-before-edits+rename-landed",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-04-ambiguous/a1",
+          "work_id": "t-04-ambiguous",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-04-ambiguous",
+              "attempt_id": "t-04-ambiguous/a1",
+              "receipt_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-04-ambiguous/a2",
+          "work_id": "t-04-ambiguous",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-04-ambiguous",
+              "attempt_id": "t-04-ambiguous/a2",
+              "receipt_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-05-missing",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:03.604968+00:00",
+      "acceptance_contract": "verification:answer-durable+blocked-not-defaulted+value-matches-answer",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-05-missing/a1",
+          "work_id": "t-05-missing",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-05-missing",
+              "attempt_id": "t-05-missing/a1",
+              "receipt_id": "lab-pilot-v1:t-05-missing:t-05-missing/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-05-missing/a2",
+          "work_id": "t-05-missing",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-05-missing",
+              "attempt_id": "t-05-missing/a2",
+              "receipt_id": "lab-pilot-v1:t-05-missing:t-05-missing/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-06-neighbor-schema",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:05.727654+00:00",
+      "acceptance_contract": "verification:citations-resolve+neighbor-read-only+value-from-contract",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-06-neighbor-schema/a1",
+          "work_id": "t-06-neighbor-schema",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-06-neighbor-schema",
+              "attempt_id": "t-06-neighbor-schema/a1",
+              "receipt_id": "lab-pilot-v1:t-06-neighbor-schema:t-06-neighbor-schema/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-07-neighbor-changelog",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:07.720946+00:00",
+      "acceptance_contract": "verification:citations-resolve+limit-matches-changelog+neighbor-read-only",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-07-neighbor-changelog/a1",
+          "work_id": "t-07-neighbor-changelog",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-07-neighbor-changelog",
+              "attempt_id": "t-07-neighbor-changelog/a1",
+              "receipt_id": "lab-pilot-v1:t-07-neighbor-changelog:t-07-neighbor-changelog/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-08-steer",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:09.586783+00:00",
+      "acceptance_contract": "verification:journal-names-the-steer+steer-durable+steered-path-landed",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-08-steer/a1",
+          "work_id": "t-08-steer",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-08-steer",
+              "attempt_id": "t-08-steer/a1",
+              "receipt_id": "lab-pilot-v1:t-08-steer:t-08-steer/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-09-pause-resume",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:11.668058+00:00",
+      "acceptance_contract": "verification:both-legs-in-diff+checkpoint-verified+resume-restored-exact-wip",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-09-pause-resume/a1",
+          "work_id": "t-09-pause-resume",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-09-pause-resume",
+              "attempt_id": "t-09-pause-resume/a1",
+              "receipt_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-09-pause-resume/a2",
+          "work_id": "t-09-pause-resume",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-09-pause-resume",
+              "attempt_id": "t-09-pause-resume/a2",
+              "receipt_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-10-runner-loss",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:12.149728+00:00",
+      "acceptance_contract": "verification:client-stayed-on-modeled-surface+decision-evidence-bound+ledger-carries-fresh-retry",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-10-runner-loss/a1",
+          "work_id": "t-10-runner-loss",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-10-runner-loss",
+              "attempt_id": "t-10-runner-loss/a1",
+              "receipt_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-10-runner-loss/a2",
+          "work_id": "t-10-runner-loss",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-10-runner-loss",
+              "attempt_id": "t-10-runner-loss/a2",
+              "receipt_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-11-revoked-blob",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:14.506156+00:00",
+      "acceptance_contract": "verification:fresh-retry-completed+halt-was-loud+zero-vendor-events-after-pause",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-11-revoked-blob/a1",
+          "work_id": "t-11-revoked-blob",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-11-revoked-blob",
+              "attempt_id": "t-11-revoked-blob/a1",
+              "receipt_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-11-revoked-blob/a2",
+          "work_id": "t-11-revoked-blob",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-11-revoked-blob",
+              "attempt_id": "t-11-revoked-blob/a2",
+              "receipt_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    },
+    {
+      "work_id": "t-12-cross-runner",
+      "outcome": "accepted",
+      "ledger_outcome": "accepted",
+      "accepted": true,
+      "decided_by": "human:lab-operator",
+      "decided_at": "2026-09-24T01:42:16.840940+00:00",
+      "acceptance_contract": "verification:both-checkouts-intact+generation-pointer-names-checkpoint+restored-bytes-in-candidate",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "harness_version": "lab-lane-subprocess+shipped-collector",
+      "attempts": [
+        {
+          "attempt_id": "t-12-cross-runner/a1",
+          "work_id": "t-12-cross-runner",
+          "outcome": "rejected",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-12-cross-runner",
+              "attempt_id": "t-12-cross-runner/a1",
+              "receipt_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a1:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": null,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": null,
+              "output_tokens": null
+            }
+          ]
+        },
+        {
+          "attempt_id": "t-12-cross-runner/a2",
+          "work_id": "t-12-cross-runner",
+          "outcome": "accepted",
+          "joined_to_acceptance": true,
+          "receipts": [
+            {
+              "work_id": "t-12-cross-runner",
+              "attempt_id": "t-12-cross-runner/a2",
+              "receipt_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a2:usage",
+              "source": "lab-lane/vendor-wire",
+              "route": "lab-lane/vendor-wire",
+              "evidence_class": "synthetic-vendor-counter",
+              "basis": "estimate",
+              "billed_usd": null,
+              "estimate_usd": 0.003605,
+              "rate_card_version": "lab-estimate-v1",
+              "input_tokens_inclusive": 518,
+              "output_tokens": 231
+            }
+          ]
+        }
+      ],
+      "unobserved_attempt_ids": [],
+      "joined_to_acceptance": true
+    }
+  ],
+  "costs": {
+    "programme": {
+      "works": 12,
+      "attempts": 19,
+      "unobserved_attempts": 0,
+      "receipts": 19,
+      "billed_usd": null,
+      "billed_exact": false,
+      "billed_known_lower_bound_usd": 0.0,
+      "estimate_usd": 0.04326,
+      "estimate_basis": "estimate",
+      "estimate_rate_card_version": "lab-estimate-v1",
+      "receipt_coverage": 1.0
+    },
+    "accepted_items": {
+      "works": 12,
+      "attempts": 19,
+      "unobserved_attempts": 0,
+      "receipts": 19,
+      "billed_usd": null,
+      "billed_exact": false,
+      "billed_known_lower_bound_usd": 0.0,
+      "estimate_usd": 0.04326,
+      "estimate_basis": "estimate",
+      "estimate_rate_card_version": "lab-estimate-v1",
+      "receipt_coverage": 1.0
+    },
+    "programme_per_accepted_item": {
+      "programme_billed_per_accepted_usd": null,
+      "programme_billed_lower_bound_per_accepted_usd": 0.0,
+      "programme_estimate_per_accepted_usd": 0.003605
+    },
+    "accepted_item_totals": {
+      "t-01-repair": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.00721,
+        "receipt_ids": [
+          "lab-pilot-v1:t-01-repair:t-01-repair/a1:usage",
+          "lab-pilot-v1:t-01-repair:t-01-repair/a2:usage"
+        ]
+      },
+      "t-02-cold": {
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-02-cold:t-02-cold/a1:usage"
+        ]
+      },
+      "t-03-adaptive": {
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-03-adaptive:t-03-adaptive/a1:usage"
+        ]
+      },
+      "t-04-ambiguous": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a1:usage",
+          "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a2:usage"
+        ]
+      },
+      "t-05-missing": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-05-missing:t-05-missing/a1:usage",
+          "lab-pilot-v1:t-05-missing:t-05-missing/a2:usage"
+        ]
+      },
+      "t-06-neighbor-schema": {
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-06-neighbor-schema:t-06-neighbor-schema/a1:usage"
+        ]
+      },
+      "t-07-neighbor-changelog": {
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-07-neighbor-changelog:t-07-neighbor-changelog/a1:usage"
+        ]
+      },
+      "t-08-steer": {
+        "attempts": 1,
+        "failed_or_superseded_attempts_kept": 0,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-08-steer:t-08-steer/a1:usage"
+        ]
+      },
+      "t-09-pause-resume": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a1:usage",
+          "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a2:usage"
+        ]
+      },
+      "t-10-runner-loss": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": null,
+        "receipt_ids": [
+          "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a1:usage",
+          "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a2:usage"
+        ]
+      },
+      "t-11-revoked-blob": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a1:usage",
+          "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a2:usage"
+        ]
+      },
+      "t-12-cross-runner": {
+        "attempts": 2,
+        "failed_or_superseded_attempts_kept": 1,
+        "billed_usd": null,
+        "billed_known_lower_bound_usd": 0.0,
+        "estimate_usd": 0.003605,
+        "receipt_ids": [
+          "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a1:usage",
+          "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a2:usage"
+        ]
+      }
+    },
+    "coverage": {
+      "accepted_items": {
+        "attempts": 19,
+        "receipts_expected": 19,
+        "receipts_received": 19,
+        "measured_receipts": 12,
+        "cost_known_receipts": 0,
+        "unknown_cost_receipts": 19,
+        "receipt_coverage": 1.0,
+        "cost_coverage": 0.0,
+        "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+      },
+      "programme": {
+        "attempts": 19,
+        "receipts_expected": 19,
+        "receipts_received": 19,
+        "measured_receipts": 12,
+        "cost_known_receipts": 0,
+        "unknown_cost_receipts": 19,
+        "receipt_coverage": 1.0,
+        "cost_coverage": 0.0,
+        "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+      }
+    }
+  },
+  "evidence": {
+    "classes": {
+      "synthetic-vendor-counter": 19
+    },
+    "synthetic_counters_labelled": 19,
+    "synthetic_excluded_from": [
+      "throughput comparisons",
+      "decode rate labels"
+    ],
+    "note": "scripted-vendor counters are wire observations, not measured inference \u2014 labelled synthetic-vendor-counter and excluded from every throughput comparison (R37-13)"
+  },
+  "latency": {
+    "stage_seconds": {
+      "human_wait": {
+        "measured": true,
+        "populations": {
+          "human_wait:operator": {
+            "spans": 12,
+            "unknown_spans": 0,
+            "total_seconds": 0.846,
+            "lower_bound_seconds": 0.846
+          }
+        },
+        "stage_total_seconds": 0.846,
+        "stage_lower_bound_seconds": 0.846,
+        "note": ""
+      },
+      "model": {
+        "measured": true,
+        "populations": {
+          "model:harness": {
+            "spans": 19,
+            "unknown_spans": 0,
+            "total_seconds": 10.836,
+            "lower_bound_seconds": 10.836
+          }
+        },
+        "stage_total_seconds": 10.836,
+        "stage_lower_bound_seconds": 10.836,
+        "note": ""
+      },
+      "queue": {
+        "measured": false,
+        "populations": {},
+        "stage_total_seconds": null,
+        "stage_lower_bound_seconds": null,
+        "note": "no recorded windows \u2014 unknown, never zero"
+      },
+      "restore_collection": {
+        "measured": false,
+        "populations": {},
+        "stage_total_seconds": null,
+        "stage_lower_bound_seconds": null,
+        "note": "no recorded windows \u2014 unknown, never zero"
+      },
+      "tool": {
+        "measured": false,
+        "populations": {},
+        "stage_total_seconds": null,
+        "stage_lower_bound_seconds": null,
+        "note": "no recorded windows \u2014 unknown, never zero"
+      },
+      "verification": {
+        "measured": false,
+        "populations": {},
+        "stage_total_seconds": null,
+        "stage_lower_bound_seconds": null,
+        "note": "no recorded windows \u2014 unknown, never zero"
+      }
+    },
+    "decode_label_guard": "no decode label rides a request-latency population: decode throughput requires live-model receipts over a model-span population (RATE_LABEL_SPACE, extended by R37-13)"
+  },
+  "cross_joins": [],
+  "conflicts": [],
+  "notes": [
+    "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
+    "discovery-live estimates are priced from the same versioned card (which carries the capture's own recorded cap-enforcement prices) \u2014 never billing",
+    "discovery-live: 4 captured attempts joined as their OWN population under populations.discovery_live \u2014 the captures carry mechanical grades, not acceptance decisions, so no accepted items are claimed and their spend never enters the pilot's aggregates",
+    "setup_minutes and completion_latency_minutes are whole-task windows over mixed populations \u2014 excluded from stage_seconds by construction, never re-typed",
+    "the vendor is scripted: token counters are real wire observations, spend is unknown by construction and every cost figure here is a labelled estimate or an honest unknown",
+    "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend"
+  ],
+  "observability": {
+    "usage.receipt_coverage": 1.0,
+    "cost.lower_bound": 0.0,
+    "cost.accepted_item_total": {
+      "t-01-repair": null,
+      "t-02-cold": null,
+      "t-03-adaptive": null,
+      "t-04-ambiguous": null,
+      "t-05-missing": null,
+      "t-06-neighbor-schema": null,
+      "t-07-neighbor-changelog": null,
+      "t-08-steer": null,
+      "t-09-pause-resume": null,
+      "t-10-runner-loss": null,
+      "t-11-revoked-blob": null,
+      "t-12-cross-runner": null
+    },
+    "cost.programme_per_accepted_item": null,
+    "latency.stage_seconds": {
+      "human_wait": 0.846,
+      "model": 10.836,
+      "queue": null,
+      "restore_collection": null,
+      "tool": null,
+      "verification": null
+    }
+  },
+  "budget_reconciliation": {
+    "schema": "forge.delivery.economics/1",
+    "currency": "usd",
+    "cap_usd": 60.0,
+    "lines": [
+      {
+        "scope": "programme.billed",
+        "basis": "billing",
+        "cap_usd": 60.0,
+        "reported_usd": null,
+        "delta_usd": null,
+        "status": "unreconcilable",
+        "reason": "billed spend unknown (receipt coverage 1.0) \u2014 unknown spend cannot certify the cap, never zero"
+      },
+      {
+        "scope": "programme.lower_bound",
+        "basis": "billing",
+        "cap_usd": 60.0,
+        "reported_usd": 0.0,
+        "delta_usd": 60.0,
+        "status": "unreconcilable",
+        "reason": "lower bounds bound from below only \u2014 stated beside the cap, never reconciled against it"
+      },
+      {
+        "scope": "programme.estimate",
+        "basis": "estimate",
+        "cap_usd": 60.0,
+        "reported_usd": 0.04326,
+        "delta_usd": 59.95674,
+        "status": "unreconcilable",
+        "reason": "estimate from rate card lab-estimate-v1 \u2014 an assumption, not spend; can inform, never certify"
+      }
+    ],
+    "unreconcilable": 3,
+    "note": "the customer reconciles totals with the agreed budget through this shape \u2014 ids, numbers and reasons only; no code, prompts or secrets"
+  },
+  "operator_summary": {
+    "schema": "forge.delivery.economics/1",
+    "pilot": {
+      "harness_id": "lab-lane-subprocess+shipped-collector",
+      "pilot_id": "lab-pilot-v1",
+      "platform": "lab-offline-seams",
+      "profile_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+      "recipe_id": "forge-recipe/lab-offline/codex-app/scripted-vendor",
+      "agreed_cap_usd": 60.0
+    },
+    "join": {
+      "works": 12,
+      "attempts": 19,
+      "accepted_items": 12,
+      "unobserved_attempts": 0,
+      "cross_run_joins_refused": 0
+    },
+    "costs": {
+      "programme_billed_usd": null,
+      "programme_billed_lower_bound_usd": 0.0,
+      "programme_estimate_usd": 0.04326,
+      "estimate_rate_card_version": "lab-estimate-v1",
+      "per_accepted_item": {
+        "programme_billed_per_accepted_usd": null,
+        "programme_billed_lower_bound_per_accepted_usd": 0.0,
+        "programme_estimate_per_accepted_usd": 0.003605
+      },
+      "repeated_work_attempts": 7
+    },
+    "coverage": {
+      "accepted_items": {
+        "receipt_coverage": 1.0,
+        "unknown_cost_receipts": 19
+      },
+      "programme": {
+        "receipt_coverage": 1.0,
+        "unknown_cost_receipts": 19
+      }
+    },
+    "latency_stage_seconds": {
+      "human_wait": {
+        "total": 0.846,
+        "lower_bound": 0.846
+      },
+      "model": {
+        "total": 10.836,
+        "lower_bound": 10.836
+      },
+      "queue": {
+        "total": null,
+        "lower_bound": null
+      },
+      "restore_collection": {
+        "total": null,
+        "lower_bound": null
+      },
+      "tool": "[redacted]",
+      "verification": {
+        "total": null,
+        "lower_bound": null
+      }
+    },
+    "evidence_classes": {
+      "synthetic-vendor-counter": 19
+    },
+    "bottleneck_hint": "compare model stage seconds against queue/verification/human_wait lower bounds and repeated_work_attempts \u2014 each names a different bottleneck; unknown stages are gaps, not zeros"
+  },
+  "measurement_ledger": {
+    "schema": "forge.delivery.measurement/1",
+    "works": [
+      {
+        "work_id": "t-01-repair",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-01-repair/a1",
+            "work_id": "t-01-repair",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-01-repair:t-01-repair/a1:usage",
+                "work_id": "t-01-repair",
+                "attempt_id": "t-01-repair/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-01-repair:t-01-repair/a1:model",
+                "work_id": "t-01-repair",
+                "attempt_id": "t-01-repair/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.832
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-01-repair/a2",
+            "work_id": "t-01-repair",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-01-repair:t-01-repair/a2:usage",
+                "work_id": "t-01-repair",
+                "attempt_id": "t-01-repair/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-01-repair:review",
+                "work_id": "t-01-repair",
+                "attempt_id": "t-01-repair/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.06
+              },
+              {
+                "span_id": "lab-pilot-v1:t-01-repair:t-01-repair/a2:model",
+                "work_id": "t-01-repair",
+                "attempt_id": "t-01-repair/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.849
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 1036,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 462,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:candidate-compiles+diff-applies-cleanly",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-02-cold",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-02-cold/a1",
+            "work_id": "t-02-cold",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-02-cold:t-02-cold/a1:usage",
+                "work_id": "t-02-cold",
+                "attempt_id": "t-02-cold/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-02-cold:review",
+                "work_id": "t-02-cold",
+                "attempt_id": "t-02-cold/a1",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.096
+              },
+              {
+                "span_id": "lab-pilot-v1:t-02-cold:t-02-cold/a1:model",
+                "work_id": "t-02-cold",
+                "attempt_id": "t-02-cold/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.806
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:cold-start-proven+files-present",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-03-adaptive",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-03-adaptive/a1",
+            "work_id": "t-03-adaptive",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-03-adaptive:t-03-adaptive/a1:usage",
+                "work_id": "t-03-adaptive",
+                "attempt_id": "t-03-adaptive/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-03-adaptive:review",
+                "work_id": "t-03-adaptive",
+                "attempt_id": "t-03-adaptive/a1",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.054
+              },
+              {
+                "span_id": "lab-pilot-v1:t-03-adaptive:t-03-adaptive/a1:model",
+                "work_id": "t-03-adaptive",
+                "attempt_id": "t-03-adaptive/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.817
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:edit-landed+steering-attached-idle",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-04-ambiguous",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-04-ambiguous/a1",
+            "work_id": "t-04-ambiguous",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a1:usage",
+                "work_id": "t-04-ambiguous",
+                "attempt_id": "t-04-ambiguous/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a1:model",
+                "work_id": "t-04-ambiguous",
+                "attempt_id": "t-04-ambiguous/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.0
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-04-ambiguous/a2",
+            "work_id": "t-04-ambiguous",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a2:usage",
+                "work_id": "t-04-ambiguous",
+                "attempt_id": "t-04-ambiguous/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-04-ambiguous:review",
+                "work_id": "t-04-ambiguous",
+                "attempt_id": "t-04-ambiguous/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.06
+              },
+              {
+                "span_id": "lab-pilot-v1:t-04-ambiguous:t-04-ambiguous/a2:model",
+                "work_id": "t-04-ambiguous",
+                "attempt_id": "t-04-ambiguous/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.857
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:answer-durable+question-before-edits+rename-landed",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-05-missing",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-05-missing/a1",
+            "work_id": "t-05-missing",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-05-missing:t-05-missing/a1:usage",
+                "work_id": "t-05-missing",
+                "attempt_id": "t-05-missing/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-05-missing:t-05-missing/a1:model",
+                "work_id": "t-05-missing",
+                "attempt_id": "t-05-missing/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.0
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-05-missing/a2",
+            "work_id": "t-05-missing",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-05-missing:t-05-missing/a2:usage",
+                "work_id": "t-05-missing",
+                "attempt_id": "t-05-missing/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-05-missing:review",
+                "work_id": "t-05-missing",
+                "attempt_id": "t-05-missing/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.132
+              },
+              {
+                "span_id": "lab-pilot-v1:t-05-missing:t-05-missing/a2:model",
+                "work_id": "t-05-missing",
+                "attempt_id": "t-05-missing/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.892
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:answer-durable+blocked-not-defaulted+value-matches-answer",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-06-neighbor-schema",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-06-neighbor-schema/a1",
+            "work_id": "t-06-neighbor-schema",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-06-neighbor-schema:t-06-neighbor-schema/a1:usage",
+                "work_id": "t-06-neighbor-schema",
+                "attempt_id": "t-06-neighbor-schema/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-06-neighbor-schema:review",
+                "work_id": "t-06-neighbor-schema",
+                "attempt_id": "t-06-neighbor-schema/a1",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.0
+              },
+              {
+                "span_id": "lab-pilot-v1:t-06-neighbor-schema:t-06-neighbor-schema/a1:model",
+                "work_id": "t-06-neighbor-schema",
+                "attempt_id": "t-06-neighbor-schema/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.846
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:citations-resolve+neighbor-read-only+value-from-contract",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-07-neighbor-changelog",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-07-neighbor-changelog/a1",
+            "work_id": "t-07-neighbor-changelog",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-07-neighbor-changelog:t-07-neighbor-changelog/a1:usage",
+                "work_id": "t-07-neighbor-changelog",
+                "attempt_id": "t-07-neighbor-changelog/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-07-neighbor-changelog:review",
+                "work_id": "t-07-neighbor-changelog",
+                "attempt_id": "t-07-neighbor-changelog/a1",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.0
+              },
+              {
+                "span_id": "lab-pilot-v1:t-07-neighbor-changelog:t-07-neighbor-changelog/a1:model",
+                "work_id": "t-07-neighbor-changelog",
+                "attempt_id": "t-07-neighbor-changelog/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.809
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:citations-resolve+limit-matches-changelog+neighbor-read-only",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-08-steer",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-08-steer/a1",
+            "work_id": "t-08-steer",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-08-steer:t-08-steer/a1:usage",
+                "work_id": "t-08-steer",
+                "attempt_id": "t-08-steer/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-08-steer:review",
+                "work_id": "t-08-steer",
+                "attempt_id": "t-08-steer/a1",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.078
+              },
+              {
+                "span_id": "lab-pilot-v1:t-08-steer:t-08-steer/a1:model",
+                "work_id": "t-08-steer",
+                "attempt_id": "t-08-steer/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.915
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 1,
+          "receipts_expected": 1,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:journal-names-the-steer+steer-durable+steered-path-landed",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-09-pause-resume",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-09-pause-resume/a1",
+            "work_id": "t-09-pause-resume",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a1:usage",
+                "work_id": "t-09-pause-resume",
+                "attempt_id": "t-09-pause-resume/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a1:model",
+                "work_id": "t-09-pause-resume",
+                "attempt_id": "t-09-pause-resume/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.151
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-09-pause-resume/a2",
+            "work_id": "t-09-pause-resume",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a2:usage",
+                "work_id": "t-09-pause-resume",
+                "attempt_id": "t-09-pause-resume/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-09-pause-resume:review",
+                "work_id": "t-09-pause-resume",
+                "attempt_id": "t-09-pause-resume/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.084
+              },
+              {
+                "span_id": "lab-pilot-v1:t-09-pause-resume:t-09-pause-resume/a2:model",
+                "work_id": "t-09-pause-resume",
+                "attempt_id": "t-09-pause-resume/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.839
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:both-legs-in-diff+checkpoint-verified+resume-restored-exact-wip",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-10-runner-loss",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-10-runner-loss/a1",
+            "work_id": "t-10-runner-loss",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a1:usage",
+                "work_id": "t-10-runner-loss",
+                "attempt_id": "t-10-runner-loss/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a1:model",
+                "work_id": "t-10-runner-loss",
+                "attempt_id": "t-10-runner-loss/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.0
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-10-runner-loss/a2",
+            "work_id": "t-10-runner-loss",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a2:usage",
+                "work_id": "t-10-runner-loss",
+                "attempt_id": "t-10-runner-loss/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-10-runner-loss:review",
+                "work_id": "t-10-runner-loss",
+                "attempt_id": "t-10-runner-loss/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.0
+              },
+              {
+                "span_id": "lab-pilot-v1:t-10-runner-loss:t-10-runner-loss/a2:model",
+                "work_id": "t-10-runner-loss",
+                "attempt_id": "t-10-runner-loss/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.0
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:client-stayed-on-modeled-surface+decision-evidence-bound+ledger-carries-fresh-retry",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-11-revoked-blob",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-11-revoked-blob/a1",
+            "work_id": "t-11-revoked-blob",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a1:usage",
+                "work_id": "t-11-revoked-blob",
+                "attempt_id": "t-11-revoked-blob/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a1:model",
+                "work_id": "t-11-revoked-blob",
+                "attempt_id": "t-11-revoked-blob/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.516
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-11-revoked-blob/a2",
+            "work_id": "t-11-revoked-blob",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a2:usage",
+                "work_id": "t-11-revoked-blob",
+                "attempt_id": "t-11-revoked-blob/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-11-revoked-blob:review",
+                "work_id": "t-11-revoked-blob",
+                "attempt_id": "t-11-revoked-blob/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.066
+              },
+              {
+                "span_id": "lab-pilot-v1:t-11-revoked-blob:t-11-revoked-blob/a2:model",
+                "work_id": "t-11-revoked-blob",
+                "attempt_id": "t-11-revoked-blob/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.803
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:fresh-retry-completed+halt-was-loud+zero-vendor-events-after-pause",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      },
+      {
+        "work_id": "t-12-cross-runner",
+        "outcome": "accepted",
+        "attempts": [
+          {
+            "attempt_id": "t-12-cross-runner/a1",
+            "work_id": "t-12-cross-runner",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a1:usage",
+                "work_id": "t-12-cross-runner",
+                "attempt_id": "t-12-cross-runner/a1",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": null,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "unknown"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a1:model",
+                "work_id": "t-12-cross-runner",
+                "attempt_id": "t-12-cross-runner/a1",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.082
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          },
+          {
+            "attempt_id": "t-12-cross-runner/a2",
+            "work_id": "t-12-cross-runner",
+            "outcome": "",
+            "sources": [
+              "lab-lane/vendor-wire"
+            ],
+            "routes": [
+              {
+                "provider": "lab-lane/vendor-wire",
+                "model": ""
+              }
+            ],
+            "receipts": [
+              {
+                "receipt_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a2:usage",
+                "work_id": "t-12-cross-runner",
+                "attempt_id": "t-12-cross-runner/a2",
+                "source": "lab-lane/vendor-wire",
+                "route": {
+                  "provider": "lab-lane/vendor-wire",
+                  "model": ""
+                },
+                "input_tokens": 518,
+                "cached_input_tokens": null,
+                "cache_write_tokens": null,
+                "output_tokens": 231,
+                "reasoning_tokens": null,
+                "cost_usd": null,
+                "completeness": "aggregate"
+              }
+            ],
+            "call_ids": [],
+            "spans": [
+              {
+                "span_id": "lab-pilot-v1:t-12-cross-runner:review",
+                "work_id": "t-12-cross-runner",
+                "attempt_id": "t-12-cross-runner/a2",
+                "span_type": "human_wait",
+                "origin": "operator",
+                "seconds": 0.216
+              },
+              {
+                "span_id": "lab-pilot-v1:t-12-cross-runner:t-12-cross-runner/a2:model",
+                "work_id": "t-12-cross-runner",
+                "attempt_id": "t-12-cross-runner/a2",
+                "span_type": "model",
+                "origin": "harness",
+                "seconds": 0.822
+              }
+            ],
+            "usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": true,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": 518,
+              "input_tokens_inclusive_lower_bound": 518,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": 231,
+              "output_tokens_lower_bound": 231,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            }
+          }
+        ],
+        "planner_call_ids": [],
+        "planner_usage": {
+          "receipts_received": 0,
+          "receipts_expected": 0,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 0,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 0,
+          "reasoning_tokens": null,
+          "completeness": "unknown",
+          "call_derived": false,
+          "coverage": null,
+          "notes": []
+        },
+        "own_usage": {
+          "receipts_received": 2,
+          "receipts_expected": 2,
+          "exact": false,
+          "cost_usd": null,
+          "known_cost_lower_bound_usd": 0.0,
+          "input_tokens_inclusive": null,
+          "input_tokens_inclusive_lower_bound": 518,
+          "cached_input_tokens": null,
+          "cache_write_tokens": null,
+          "output_tokens": null,
+          "output_tokens_lower_bound": 231,
+          "reasoning_tokens": null,
+          "completeness": "aggregate",
+          "call_derived": false,
+          "coverage": 1.0,
+          "notes": []
+        },
+        "model_version": "forge-recipe/lab-offline/codex-app/scripted-vendor@4116f29b069d",
+        "harness_version": "lab-lane-subprocess+shipped-collector",
+        "acceptance_contract": "verification:both-checkouts-intact+generation-pointer-names-checkpoint+restored-bytes-in-candidate",
+        "orphan_receipt_ids": [],
+        "fully_linked": false,
+        "notes": []
+      }
+    ],
+    "conflicts": [],
+    "duplicate_calls": [],
+    "counter_resets": [],
+    "notes": []
+  },
+  "populations": {
+    "discovery_live": {
+      "schema": "forge.delivery.economics/1",
+      "pilot": {
+        "issue": "R37-09 / #290 (sibling capture, read-only join)",
+        "population": "discovery_live",
+        "recorded_cap_usd": 1.0
+      },
+      "rate_card": {
+        "version": "lab-estimate-v1",
+        "currency": "usd",
+        "rates": [
+          {
+            "provider": "lab-lane/vendor-wire",
+            "model": "",
+            "input_per_mtok_usd": 2.5,
+            "cached_input_per_mtok_usd": null,
+            "cache_write_per_mtok_usd": null,
+            "output_per_mtok_usd": 10.0,
+            "basis": "estimate"
+          },
+          {
+            "provider": "discovery-live/live",
+            "model": "",
+            "input_per_mtok_usd": 2.0,
+            "cached_input_per_mtok_usd": null,
+            "cache_write_per_mtok_usd": null,
+            "output_per_mtok_usd": 8.0,
+            "basis": "estimate"
+          }
+        ],
+        "note": "versioned price assumptions \u2014 every figure priced from this card is an ESTIMATE, never a billing record"
+      },
+      "works": [
+        {
+          "work_id": "DL-01-refund-approval-neighbor-live",
+          "outcome": "",
+          "ledger_outcome": "",
+          "accepted": null,
+          "decided_by": "",
+          "decided_at": "",
+          "acceptance_contract": "",
+          "profile_version": "live:fast",
+          "harness_version": "run_research_pass + plan synthesis",
+          "attempts": [
+            {
+              "attempt_id": "live",
+              "work_id": "DL-01-refund-approval-neighbor-live",
+              "outcome": "",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "DL-01-refund-approval-neighbor-live",
+                  "attempt_id": "live",
+                  "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live:usage",
+                  "source": "discovery-live/live",
+                  "route": "discovery-live/live/live:fast",
+                  "evidence_class": "live-model",
+                  "basis": "estimate",
+                  "billed_usd": null,
+                  "estimate_usd": 0.113852,
+                  "rate_card_version": "lab-estimate-v1",
+                  "input_tokens_inclusive": 12154,
+                  "output_tokens": 11193
+                }
+              ]
+            },
+            {
+              "attempt_id": "live-attempt1-truncated",
+              "work_id": "DL-01-refund-approval-neighbor-live",
+              "outcome": "",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "DL-01-refund-approval-neighbor-live",
+                  "attempt_id": "live-attempt1-truncated",
+                  "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live-attempt1-truncated:usage",
+                  "source": "discovery-live/live",
+                  "route": "discovery-live/live/live:fast",
+                  "evidence_class": "live-model",
+                  "basis": "estimate",
+                  "billed_usd": null,
+                  "estimate_usd": 0.070568,
+                  "rate_card_version": "lab-estimate-v1",
+                  "input_tokens_inclusive": 6148,
+                  "output_tokens": 7284
+                }
+              ]
+            },
+            {
+              "attempt_id": "live-attempt2-capped",
+              "work_id": "DL-01-refund-approval-neighbor-live",
+              "outcome": "",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "DL-01-refund-approval-neighbor-live",
+                  "attempt_id": "live-attempt2-capped",
+                  "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live-attempt2-capped:usage",
+                  "source": "discovery-live/live",
+                  "route": "discovery-live/live/live:fast",
+                  "evidence_class": "live-model",
+                  "basis": "estimate",
+                  "billed_usd": null,
+                  "estimate_usd": 0.13192,
+                  "rate_card_version": "lab-estimate-v1",
+                  "input_tokens_inclusive": 11376,
+                  "output_tokens": 13646
+                }
+              ]
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "joined_to_acceptance": false
+        },
+        {
+          "work_id": "DL-01-refund-approval-neighbor-scripted",
+          "outcome": "",
+          "ledger_outcome": "",
+          "accepted": null,
+          "decided_by": "",
+          "decided_at": "",
+          "acceptance_contract": "",
+          "profile_version": "scripted:reactive-investigation/v1",
+          "harness_version": "run_research_pass + plan synthesis",
+          "attempts": [
+            {
+              "attempt_id": "scripted",
+              "work_id": "DL-01-refund-approval-neighbor-scripted",
+              "outcome": "",
+              "joined_to_acceptance": false,
+              "receipts": [
+                {
+                  "work_id": "DL-01-refund-approval-neighbor-scripted",
+                  "attempt_id": "scripted",
+                  "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-scripted:scripted:usage",
+                  "source": "discovery-live/scripted",
+                  "route": "discovery-live/scripted/scripted:reactive-investigation/v1",
+                  "evidence_class": "synthetic-vendor-counter",
+                  "basis": "estimate",
+                  "billed_usd": null,
+                  "estimate_usd": null,
+                  "rate_card_version": "lab-estimate-v1",
+                  "input_tokens_inclusive": 6200,
+                  "output_tokens": 560
+                }
+              ]
+            }
+          ],
+          "unobserved_attempt_ids": [],
+          "joined_to_acceptance": false
+        }
+      ],
+      "costs": {
+        "programme": {
+          "works": 2,
+          "attempts": 4,
+          "unobserved_attempts": 0,
+          "receipts": 4,
+          "billed_usd": null,
+          "billed_exact": false,
+          "billed_known_lower_bound_usd": 0.0,
+          "estimate_usd": 0.31634,
+          "estimate_basis": "estimate",
+          "estimate_rate_card_version": "lab-estimate-v1",
+          "receipt_coverage": 1.0
+        },
+        "accepted_items": {
+          "works": 0,
+          "attempts": 0,
+          "unobserved_attempts": 0,
+          "receipts": 0,
+          "billed_usd": null,
+          "billed_exact": false,
+          "billed_known_lower_bound_usd": 0.0,
+          "estimate_usd": null,
+          "estimate_basis": "estimate",
+          "estimate_rate_card_version": "lab-estimate-v1",
+          "receipt_coverage": null
+        },
+        "programme_per_accepted_item": {
+          "programme_billed_per_accepted_usd": null,
+          "programme_billed_lower_bound_per_accepted_usd": null,
+          "programme_estimate_per_accepted_usd": null
+        },
+        "accepted_item_totals": {},
+        "coverage": {
+          "accepted_items": {
+            "attempts": 0,
+            "receipts_expected": 0,
+            "receipts_received": 0,
+            "measured_receipts": 0,
+            "cost_known_receipts": 0,
+            "unknown_cost_receipts": 0,
+            "receipt_coverage": null,
+            "cost_coverage": null,
+            "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+          },
+          "programme": {
+            "attempts": 4,
+            "receipts_expected": 4,
+            "receipts_received": 4,
+            "measured_receipts": 4,
+            "cost_known_receipts": 0,
+            "unknown_cost_receipts": 4,
+            "receipt_coverage": 1.0,
+            "cost_coverage": 0.0,
+            "unknown_costs_rendered_as": "known-lower-bound + coverage, never zero"
+          }
+        }
+      },
+      "evidence": {
+        "classes": {
+          "live-model": 3,
+          "synthetic-vendor-counter": 1
+        },
+        "synthetic_counters_labelled": 1,
+        "synthetic_excluded_from": [
+          "throughput comparisons",
+          "decode rate labels"
+        ],
+        "note": "scripted-vendor counters are wire observations, not measured inference \u2014 labelled synthetic-vendor-counter and excluded from every throughput comparison (R37-13)"
+      },
+      "latency": {
+        "stage_seconds": {
+          "human_wait": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "model": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "queue": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "restore_collection": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "tool": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          },
+          "verification": {
+            "measured": false,
+            "populations": {},
+            "stage_total_seconds": null,
+            "stage_lower_bound_seconds": null,
+            "note": "no recorded windows \u2014 unknown, never zero"
+          }
+        },
+        "decode_label_guard": "no decode label rides a request-latency population: decode throughput requires live-model receipts over a model-span population (RATE_LABEL_SPACE, extended by R37-13)"
+      },
+      "cross_joins": [],
+      "conflicts": [],
+      "notes": [
+        "cost columns never mix: billed figures come from receipts that carry them; every other figure is a rate-card ESTIMATE labelled with the card version",
+        "no accepted items \u2014 per-accepted economics are undefined, never zero",
+        "unknown costs render as known lower bound + coverage \u2014 an unobserved attempt or receipt is never zero and never estimated as spend",
+        "work DL-01-refund-approval-neighbor-live: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit",
+        "work DL-01-refund-approval-neighbor-scripted: no acceptance record \u2014 outcome stays the ledger's, spend stays in the programme, never an accepted unit"
+      ],
+      "observability": {
+        "usage.receipt_coverage": 1.0,
+        "cost.lower_bound": 0.0,
+        "cost.accepted_item_total": {},
+        "cost.programme_per_accepted_item": null,
+        "latency.stage_seconds": {
+          "human_wait": null,
+          "model": null,
+          "queue": null,
+          "restore_collection": null,
+          "tool": null,
+          "verification": null
+        }
+      },
+      "budget_reconciliation": {
+        "schema": "forge.delivery.economics/1",
+        "currency": "usd",
+        "cap_usd": 1.0,
+        "lines": [
+          {
+            "scope": "programme.billed",
+            "basis": "billing",
+            "cap_usd": 1.0,
+            "reported_usd": null,
+            "delta_usd": null,
+            "status": "unreconcilable",
+            "reason": "billed spend unknown (receipt coverage 1.0) \u2014 unknown spend cannot certify the cap, never zero"
+          },
+          {
+            "scope": "programme.lower_bound",
+            "basis": "billing",
+            "cap_usd": 1.0,
+            "reported_usd": 0.0,
+            "delta_usd": 1.0,
+            "status": "unreconcilable",
+            "reason": "lower bounds bound from below only \u2014 stated beside the cap, never reconciled against it"
+          },
+          {
+            "scope": "programme.estimate",
+            "basis": "estimate",
+            "cap_usd": 1.0,
+            "reported_usd": 0.31634,
+            "delta_usd": 0.68366,
+            "status": "unreconcilable",
+            "reason": "estimate from rate card lab-estimate-v1 \u2014 an assumption, not spend; can inform, never certify"
+          }
+        ],
+        "unreconcilable": 3,
+        "note": "the customer reconciles totals with the agreed budget through this shape \u2014 ids, numbers and reasons only; no code, prompts or secrets"
+      },
+      "measurement_ledger": {
+        "schema": "forge.delivery.measurement/1",
+        "works": [
+          {
+            "work_id": "DL-01-refund-approval-neighbor-live",
+            "outcome": "",
+            "attempts": [
+              {
+                "attempt_id": "live",
+                "work_id": "DL-01-refund-approval-neighbor-live",
+                "outcome": "",
+                "sources": [
+                  "discovery-live/live"
+                ],
+                "routes": [
+                  {
+                    "provider": "discovery-live/live",
+                    "model": "live:fast"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live:usage",
+                    "work_id": "DL-01-refund-approval-neighbor-live",
+                    "attempt_id": "live",
+                    "source": "discovery-live/live",
+                    "route": {
+                      "provider": "discovery-live/live",
+                      "model": "live:fast"
+                    },
+                    "input_tokens": 12154,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": 11193,
+                    "reasoning_tokens": null,
+                    "cost_usd": null,
+                    "completeness": "aggregate"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": null,
+                  "known_cost_lower_bound_usd": 0.0,
+                  "input_tokens_inclusive": 12154,
+                  "input_tokens_inclusive_lower_bound": 12154,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": 11193,
+                  "output_tokens_lower_bound": 11193,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              },
+              {
+                "attempt_id": "live-attempt1-truncated",
+                "work_id": "DL-01-refund-approval-neighbor-live",
+                "outcome": "",
+                "sources": [
+                  "discovery-live/live"
+                ],
+                "routes": [
+                  {
+                    "provider": "discovery-live/live",
+                    "model": "live:fast"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live-attempt1-truncated:usage",
+                    "work_id": "DL-01-refund-approval-neighbor-live",
+                    "attempt_id": "live-attempt1-truncated",
+                    "source": "discovery-live/live",
+                    "route": {
+                      "provider": "discovery-live/live",
+                      "model": "live:fast"
+                    },
+                    "input_tokens": 6148,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": 7284,
+                    "reasoning_tokens": null,
+                    "cost_usd": null,
+                    "completeness": "aggregate"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": null,
+                  "known_cost_lower_bound_usd": 0.0,
+                  "input_tokens_inclusive": 6148,
+                  "input_tokens_inclusive_lower_bound": 6148,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": 7284,
+                  "output_tokens_lower_bound": 7284,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              },
+              {
+                "attempt_id": "live-attempt2-capped",
+                "work_id": "DL-01-refund-approval-neighbor-live",
+                "outcome": "",
+                "sources": [
+                  "discovery-live/live"
+                ],
+                "routes": [
+                  {
+                    "provider": "discovery-live/live",
+                    "model": "live:fast"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-live:live-attempt2-capped:usage",
+                    "work_id": "DL-01-refund-approval-neighbor-live",
+                    "attempt_id": "live-attempt2-capped",
+                    "source": "discovery-live/live",
+                    "route": {
+                      "provider": "discovery-live/live",
+                      "model": "live:fast"
+                    },
+                    "input_tokens": 11376,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": 13646,
+                    "reasoning_tokens": null,
+                    "cost_usd": null,
+                    "completeness": "aggregate"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": null,
+                  "known_cost_lower_bound_usd": 0.0,
+                  "input_tokens_inclusive": 11376,
+                  "input_tokens_inclusive_lower_bound": 11376,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": 13646,
+                  "output_tokens_lower_bound": 13646,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              }
+            ],
+            "planner_call_ids": [],
+            "planner_usage": {
+              "receipts_received": 0,
+              "receipts_expected": 0,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "unknown",
+              "call_derived": false,
+              "coverage": null,
+              "notes": []
+            },
+            "own_usage": {
+              "receipts_received": 3,
+              "receipts_expected": 3,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 29678,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 32123,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            },
+            "model_version": "live:fast",
+            "harness_version": "run_research_pass + plan synthesis",
+            "acceptance_contract": "",
+            "orphan_receipt_ids": [],
+            "fully_linked": false,
+            "notes": [
+              "outcome unknown \u2014 programme spend yes, accepted unit no"
+            ]
+          },
+          {
+            "work_id": "DL-01-refund-approval-neighbor-scripted",
+            "outcome": "",
+            "attempts": [
+              {
+                "attempt_id": "scripted",
+                "work_id": "DL-01-refund-approval-neighbor-scripted",
+                "outcome": "",
+                "sources": [
+                  "discovery-live/scripted"
+                ],
+                "routes": [
+                  {
+                    "provider": "discovery-live/scripted",
+                    "model": "scripted:reactive-investigation/v1"
+                  }
+                ],
+                "receipts": [
+                  {
+                    "receipt_id": "discovery-live:DL-01-refund-approval-neighbor-scripted:scripted:usage",
+                    "work_id": "DL-01-refund-approval-neighbor-scripted",
+                    "attempt_id": "scripted",
+                    "source": "discovery-live/scripted",
+                    "route": {
+                      "provider": "discovery-live/scripted",
+                      "model": "scripted:reactive-investigation/v1"
+                    },
+                    "input_tokens": 6200,
+                    "cached_input_tokens": null,
+                    "cache_write_tokens": null,
+                    "output_tokens": 560,
+                    "reasoning_tokens": null,
+                    "cost_usd": null,
+                    "completeness": "aggregate"
+                  }
+                ],
+                "call_ids": [],
+                "spans": [],
+                "usage": {
+                  "receipts_received": 1,
+                  "receipts_expected": 1,
+                  "exact": true,
+                  "cost_usd": null,
+                  "known_cost_lower_bound_usd": 0.0,
+                  "input_tokens_inclusive": 6200,
+                  "input_tokens_inclusive_lower_bound": 6200,
+                  "cached_input_tokens": null,
+                  "cache_write_tokens": null,
+                  "output_tokens": 560,
+                  "output_tokens_lower_bound": 560,
+                  "reasoning_tokens": null,
+                  "completeness": "aggregate",
+                  "call_derived": false,
+                  "coverage": 1.0,
+                  "notes": []
+                }
+              }
+            ],
+            "planner_call_ids": [],
+            "planner_usage": {
+              "receipts_received": 0,
+              "receipts_expected": 0,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 0,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 0,
+              "reasoning_tokens": null,
+              "completeness": "unknown",
+              "call_derived": false,
+              "coverage": null,
+              "notes": []
+            },
+            "own_usage": {
+              "receipts_received": 1,
+              "receipts_expected": 1,
+              "exact": false,
+              "cost_usd": null,
+              "known_cost_lower_bound_usd": 0.0,
+              "input_tokens_inclusive": null,
+              "input_tokens_inclusive_lower_bound": 6200,
+              "cached_input_tokens": null,
+              "cache_write_tokens": null,
+              "output_tokens": null,
+              "output_tokens_lower_bound": 560,
+              "reasoning_tokens": null,
+              "completeness": "aggregate",
+              "call_derived": false,
+              "coverage": 1.0,
+              "notes": []
+            },
+            "model_version": "scripted:reactive-investigation/v1",
+            "harness_version": "run_research_pass + plan synthesis",
+            "acceptance_contract": "",
+            "orphan_receipt_ids": [],
+            "fully_linked": false,
+            "notes": [
+              "outcome unknown \u2014 programme spend yes, accepted unit no"
+            ]
+          }
+        ],
+        "conflicts": [],
+        "duplicate_calls": [],
+        "counter_resets": [],
+        "notes": []
+      }
+    }
+  }
+}

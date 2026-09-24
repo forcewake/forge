@@ -1,0 +1,313 @@
+{
+  "schema": "forge.discovery.live.report/1",
+  "issue": "R37-09 / #290",
+  "task": {
+    "task_id": "DL-01-refund-approval-neighbor",
+    "statement": "Support refund requests in Orders' checkout for orders that expired less than 30 days ago, wiring the request through to Billing's policy client. Finance said large refunds need an extra approval step before capture, but the issue does not say from which amount, and it does not say who performs that approval for orders-api.",
+    "decisive": {
+      "repo_key": "gitlab:billing-policy",
+      "path": "src/policy/refunds.py",
+      "marker": "REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS",
+      "min_line": 200,
+      "marker_line": 218,
+      "window": {
+        "start": 210,
+        "end": 232
+      },
+      "note": "the refund manual-approval threshold (finance revision F-2024-11) exists ONLY in the authorized neighbor, beyond the first file window; the file's earlier F-2023/F-2024-02 values are superseded decoys-within-the-file"
+    }
+  },
+  "manifest_digest": "e0852924583167b53b19e90520e6241bc4de62519dc3038e17eb689e3ad0cebe",
+  "runs": {
+    "live": {
+      "mode": "live",
+      "run_id": "DL-01-refund-approval-neighbor-live",
+      "provenance": "live-model",
+      "cost": {
+        "receipts": [
+          {
+            "input_tokens": 794,
+            "output_tokens": 738,
+            "charged_input_tokens": 794,
+            "charged_output_tokens": 738,
+            "usage_known": true,
+            "usd_estimated": 0.007492,
+            "running_usd_estimated": 0.007492
+          },
+          {
+            "input_tokens": 1793,
+            "output_tokens": 1262,
+            "charged_input_tokens": 1793,
+            "charged_output_tokens": 1262,
+            "usage_known": true,
+            "usd_estimated": 0.013682,
+            "running_usd_estimated": 0.021174
+          },
+          {
+            "input_tokens": 2080,
+            "output_tokens": 1217,
+            "charged_input_tokens": 2080,
+            "charged_output_tokens": 1217,
+            "usage_known": true,
+            "usd_estimated": 0.013896,
+            "running_usd_estimated": 0.03507
+          },
+          {
+            "input_tokens": 2459,
+            "output_tokens": 1750,
+            "charged_input_tokens": 2459,
+            "charged_output_tokens": 1750,
+            "usage_known": true,
+            "usd_estimated": 0.018918,
+            "running_usd_estimated": 0.053988
+          },
+          {
+            "input_tokens": 2289,
+            "output_tokens": 1367,
+            "charged_input_tokens": 2289,
+            "charged_output_tokens": 1367,
+            "usage_known": true,
+            "usd_estimated": 0.015514,
+            "running_usd_estimated": 0.069502
+          },
+          {
+            "input_tokens": 2739,
+            "output_tokens": 4859,
+            "charged_input_tokens": 2739,
+            "charged_output_tokens": 4859,
+            "usage_known": true,
+            "usd_estimated": 0.04435,
+            "running_usd_estimated": 0.113852
+          }
+        ],
+        "usd_estimated": 0.113852,
+        "cap_usd": 1.0,
+        "cap_exhausted": false,
+        "prices_usd_per_mtok": {
+          "fast": {
+            "input": 2.0,
+            "output": 8.0
+          },
+          "openai/glm-5.3-flash": {
+            "input": 2.0,
+            "output": 8.0
+          }
+        },
+        "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported",
+        "usage_note": "usage from the gateway receipts; unknown usage charged at the worst case"
+      },
+      "artifact": "runs/live.json",
+      "grade": {
+        "plan_present": true,
+        "decisive_constraint_found": true,
+        "decisive_evidence": [
+          {
+            "claim_id": "C2",
+            "repo": "gitlab:billing-policy",
+            "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+            "path": "src/policy/refunds.py",
+            "line_start": 216,
+            "line_end": 218,
+            "non_initial_window": true,
+            "cited_the_marker": true
+          }
+        ],
+        "citations_reproduce": true,
+        "citation_mismatches": [],
+        "decoy_excluded": true,
+        "decoy_references": [],
+        "question_raised": true,
+        "invented_default": false,
+        "invented_default_evidence": [],
+        "write_scope_untouched": true,
+        "publication_targets": [
+          "gitlab:orders-api"
+        ],
+        "expansion_requests": [],
+        "authority_refusal_typed": true,
+        "authority_refusal_code": "outside_authorized_set",
+        "passed": true,
+        "failed_checks": []
+      },
+      "grade_at_capture": {
+        "plan_present": true,
+        "decisive_constraint_found": true,
+        "decisive_evidence": [
+          {
+            "claim_id": "C2",
+            "repo": "gitlab:billing-policy",
+            "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+            "path": "src/policy/refunds.py",
+            "line_start": 216,
+            "line_end": 218,
+            "non_initial_window": true,
+            "cited_the_marker": true
+          }
+        ],
+        "citations_reproduce": false,
+        "citation_mismatches": [
+          "claim 2: asserted bytes differ from gitlab:billing-policy/src/policy/refunds.py:216..218"
+        ],
+        "decoy_excluded": true,
+        "decoy_references": [],
+        "question_raised": true,
+        "invented_default": false,
+        "invented_default_evidence": [],
+        "write_scope_untouched": true,
+        "publication_targets": [
+          "gitlab:orders-api"
+        ],
+        "expansion_requests": [],
+        "authority_refusal_typed": true,
+        "authority_refusal_code": "outside_authorized_set",
+        "passed": false,
+        "failed_checks": [
+          "citations_reproduce"
+        ]
+      }
+    },
+    "scripted": {
+      "mode": "scripted",
+      "run_id": "DL-01-refund-approval-neighbor-scripted",
+      "provenance": "offline-scripted-model",
+      "cost": {
+        "receipts": [
+          {
+            "input_tokens": 2100,
+            "output_tokens": 180,
+            "usage_known": true,
+            "usd_estimated": 0.0,
+            "note": "scripted turn \u2014 recorded token counts, zero vendor spend"
+          },
+          {
+            "input_tokens": 2600,
+            "output_tokens": 60,
+            "usage_known": true,
+            "usd_estimated": 0.0,
+            "note": "scripted turn \u2014 recorded token counts, zero vendor spend"
+          },
+          {
+            "input_tokens": 1500,
+            "output_tokens": 320,
+            "usage_known": true,
+            "usd_estimated": 0.0,
+            "note": "scripted turn \u2014 recorded token counts, zero vendor spend"
+          }
+        ],
+        "usd_estimated": 0.0,
+        "cap_usd": 1.0,
+        "cap_exhausted": false,
+        "prices_usd_per_mtok": {
+          "fast": {
+            "input": 2.0,
+            "output": 8.0
+          },
+          "openai/glm-5.3-flash": {
+            "input": 2.0,
+            "output": 8.0
+          }
+        },
+        "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported",
+        "usage_note": "offline scripted model: token counts are the recorded script values"
+      },
+      "artifact": "runs/scripted.json",
+      "grade": {
+        "plan_present": true,
+        "decisive_constraint_found": true,
+        "decisive_evidence": [
+          {
+            "claim_id": "c3",
+            "repo": "gitlab:billing-policy",
+            "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+            "path": "src/policy/refunds.py",
+            "line_start": 215,
+            "line_end": 225,
+            "non_initial_window": true,
+            "cited_the_marker": true
+          }
+        ],
+        "citations_reproduce": true,
+        "citation_mismatches": [],
+        "decoy_excluded": true,
+        "decoy_references": [],
+        "question_raised": true,
+        "invented_default": false,
+        "invented_default_evidence": [],
+        "write_scope_untouched": true,
+        "publication_targets": [
+          "gitlab:orders-api"
+        ],
+        "expansion_requests": [],
+        "authority_refusal_typed": true,
+        "authority_refusal_code": "outside_authorized_set",
+        "passed": true,
+        "failed_checks": []
+      },
+      "grade_at_capture": {
+        "plan_present": true,
+        "decisive_constraint_found": true,
+        "decisive_evidence": [
+          {
+            "claim_id": "c3",
+            "repo": "gitlab:billing-policy",
+            "source_oid": "964a4c46dc66596f09d22a63f1bd5acef120d7c7",
+            "path": "src/policy/refunds.py",
+            "line_start": 215,
+            "line_end": 225,
+            "non_initial_window": true,
+            "cited_the_marker": true
+          }
+        ],
+        "citations_reproduce": true,
+        "citation_mismatches": [],
+        "decoy_excluded": true,
+        "decoy_references": [],
+        "question_raised": true,
+        "invented_default": false,
+        "invented_default_evidence": [],
+        "write_scope_untouched": true,
+        "publication_targets": [
+          "gitlab:orders-api"
+        ],
+        "expansion_requests": [],
+        "authority_refusal_typed": true,
+        "authority_refusal_code": "outside_authorized_set",
+        "passed": true,
+        "failed_checks": []
+      }
+    }
+  },
+  "acceptance_mapping": [
+    {
+      "criterion": ">=1 real model run identifies the neighbor-only constraint",
+      "grade_field": "decisive_constraint_found"
+    },
+    {
+      "criterion": "the irrelevant repository is not dragged in",
+      "grade_field": "decoy_excluded"
+    },
+    {
+      "criterion": "a disallowed reader cannot be introduced (typed refusal, zero content)",
+      "grade_field": "authority_refusal_typed"
+    },
+    {
+      "criterion": "citations reproduce the exact repository/OID/byte range incl. noninitial windows",
+      "grade_field": "citations_reproduce"
+    },
+    {
+      "criterion": "the published candidate changes only the authorized target",
+      "grade_field": "write_scope_untouched"
+    },
+    {
+      "criterion": "unknowns become actionable questions, not invented defaults",
+      "grade_field": "question_raised"
+    }
+  ],
+  "never_pooled": true,
+  "limitations": [
+    "the repositories are FIXTURE service repos, not customer repositories",
+    "one task (a single neighbor-dependency scenario); no sample statistics",
+    "the grader is mechanical \u2014 semantic plan quality is NOT judged here",
+    "the scripted arm proves the capture path, not model performance; the live arm is the only performance-bearing run and is reported separately"
+  ]
+}

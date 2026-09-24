@@ -329,11 +329,18 @@ class TestDecisionReuse:
         assert again.mode is ContinuationMode.EXACT_WIP
 
     def test_matching_decision_refuses_a_changed_snapshot(self):
+        """R37-01: the SAME identity returning with MOVED objective evidence
+        is the TYPED conflict — surfaced, never a silent reuse and never a
+        silent re-decide."""
         doc = decide_continuation(ContinuationEvidence(checkpoint_committed=True))
-        changed = matching_decision(
-            doc.as_document(), ContinuationEvidence(checkpoint_committed=False)
+        with pytest.raises(continuation.ContinuationConflictError) as caught:
+            matching_decision(doc.as_document(), ContinuationEvidence(checkpoint_committed=False))
+        assert caught.value.decision_id == doc.decision_id
+        assert caught.value.recorded_digest == doc.as_document()["evidence_digest"]
+        assert (
+            caught.value.delivered_digest
+            == ContinuationEvidence(checkpoint_committed=False).digest()
         )
-        assert changed is None  # the checkpoint vanished — re-decide
 
     def test_matching_decision_refuses_corrupt_documents(self):
         evidence = ContinuationEvidence()
@@ -465,10 +472,11 @@ class TestDecisionLineage:
             )
         )
         doc = decision.as_document()
-        assert doc["evidence_version"] == 2
+        assert doc["evidence_version"] == 3  # R37-01: the identity-keyed document
         assert doc["source_attempt"] == 2
         assert doc["native_command_id"] == "delivery-7"
         assert doc["discard_authorized_by"] == "operator:@alice"
+        assert doc["event"] == {"source_attempt": 2, "native_command_id": "delivery-7"}
 
     def test_no_discard_authority_is_recorded_without_a_discard(self):
         doc = decide_continuation(ContinuationEvidence(vendor_started=False)).as_document()
@@ -481,18 +489,50 @@ class TestDecisionLineage:
         assert doc["discard_authorized_by"] == "operator"
 
     def test_reuse_keeps_the_originating_command_identity(self):
+        """R37-01: only the SAME event identity replays — and the replay
+        keeps the ORIGINATING command identity and decision id (a caller
+        presenting a DIFFERENT identity never matches, even with equal
+        booleans)."""
         decision = decide_continuation(
             ContinuationEvidence(
-                vendor_started=False, native_command_id="delivery-1", source_attempt=1
+                vendor_started=False,
+                native_command_id="delivery-1",
+                source_attempt=1,
+                subject="run-1",
             )
         )
         doc = decision.as_document()
-        # a NEW event over the unchanged snapshot reuses the SAME decision —
-        # the ORIGINAL command identity survives, not the repeating event's.
-        again = matching_decision(doc, ContinuationEvidence(vendor_started=False))
+        # The SAME event re-delivered: the frozen decision replays.
+        again = matching_decision(
+            doc,
+            ContinuationEvidence(
+                vendor_started=False, native_command_id="delivery-1", source_attempt=1
+            ),
+        )
         assert again is not None and again.reused is True
         assert again.evidence.native_command_id == "delivery-1"
         assert again.evidence.source_attempt == 1
+        assert again.decision_id == decision.decision_id
+        # A NEW event (different delivery id) or a LATER attempt never
+        # matches the old decision — however equal the booleans are.
+        assert (
+            matching_decision(
+                doc,
+                ContinuationEvidence(
+                    vendor_started=False, native_command_id="delivery-2", source_attempt=1
+                ),
+            )
+            is None
+        )
+        assert (
+            matching_decision(
+                doc,
+                ContinuationEvidence(
+                    vendor_started=False, native_command_id="delivery-1", source_attempt=2
+                ),
+            )
+            is None
+        )
 
     def test_the_lineage_fields_do_not_move_the_reuse_digest(self):
         base = ContinuationEvidence(vendor_started=None, checkpoint_committed=False)
@@ -507,6 +547,206 @@ class TestDecisionLineage:
                 native_start_verdict="dispatched",
             ).digest()
         )
+
+
+class TestDecisionIdentity:
+    """R37-01: the decision identity — deterministic, event-scoped, and the
+    ONLY reuse key (the objective digest is a consistency guard)."""
+
+    def test_the_identity_is_deterministic(self):
+        first = continuation.decision_identity("run-1", 1, "delivery-1")
+        assert first == continuation.decision_identity("run-1", 1, "delivery-1")
+        assert first != continuation.decision_identity("run-2", 1, "delivery-1")
+        assert first != continuation.decision_identity("run-1", 2, "delivery-1")
+        assert first != continuation.decision_identity("run-1", 1, "delivery-2")
+        # the no-event identity is its own (the recovery scan's re-drive)
+        assert continuation.decision_identity("run-1", 3, None) == continuation.decision_identity(
+            "run-1", 3, None
+        )
+
+    def test_a_fresh_decision_carries_its_identity(self):
+        evidence = ContinuationEvidence(
+            checkpoint_committed=True,
+            subject="run-1",
+            source_attempt=2,
+            native_command_id="E2",
+        )
+        decision = decide_continuation(evidence)
+        assert decision.decision_id == continuation.decision_identity("run-1", 2, "E2")
+        doc = decision.as_document()
+        assert doc["decision_id"] == decision.decision_id
+        assert doc["event"] == {"source_attempt": 2, "native_command_id": "E2"}
+
+    def test_a_new_event_never_matches_the_old_decision(self):
+        """THE R37-01 defect: equal objective booleans, a DIFFERENT event —
+        the old code grafted attempt 1's decision onto attempt 2's retry."""
+        doc = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="a" * 64,
+            )
+        ).as_document()
+        attempt_two = ContinuationEvidence(
+            checkpoint_committed=True,
+            subject="run-1",
+            source_attempt=2,
+            native_command_id="E2",
+            checkpoint_digest="b" * 64,
+        )
+        assert (
+            attempt_two.digest()
+            == ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="a" * 64,
+            ).digest()
+        )  # the premise: the booleans line up
+        assert matching_decision(doc, attempt_two) is None  # …and still no reuse
+
+    def test_the_same_event_replays_the_frozen_checkpoint_after_a_newer_one(self):
+        doc = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="a" * 64,
+            )
+        ).as_document()
+        replay = matching_decision(
+            doc,
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="b" * 64,  # a NEWER checkpoint
+            ),
+        )
+        assert replay is not None and replay.reused is True
+        assert replay.evidence.checkpoint_digest == "a" * 64  # the FROZEN bytes
+        assert replay.decision_id == doc["decision_id"]
+
+    def test_a_history_entry_replays_even_when_it_is_not_the_latest(self):
+        """The identity-keyed ``decisions`` map: an OLDER decision replays
+        for its own event even after a newer decision became the latest."""
+        first = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="a" * 64,
+            )
+        )
+        second = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=2,
+                native_command_id="E2",
+                checkpoint_digest="b" * 64,
+            )
+        )
+        document = continuation.persisted_document(first, None)
+        document = continuation.persisted_document(second, document)
+        assert document["decision_id"] == second.decision_id  # the latest is E2's
+        replay = matching_decision(
+            document,
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+            ),
+        )
+        assert replay is not None and replay.reused is True
+        assert replay.decision_id == first.decision_id
+        assert replay.evidence.checkpoint_digest == "a" * 64
+
+    def test_a_legacy_document_replays_only_for_its_own_event(self):
+        """The versioned adapter: a pre-R37-01 document (no ``event`` block,
+        no ``decision_id``) is read through its top-level lineage fields."""
+        legacy = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="a" * 64,
+            )
+        ).as_document()
+        for key in ("event", "decision_id", "decisions"):
+            legacy.pop(key, None)
+        legacy["evidence_version"] = 2
+        # the SAME event: replay through the adapter
+        replay = matching_decision(
+            legacy,
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                subject="run-1",
+                source_attempt=1,
+                native_command_id="E1",
+                checkpoint_digest="b" * 64,
+            ),
+        )
+        assert replay is not None and replay.reused is True
+        assert replay.evidence.checkpoint_digest == "a" * 64
+        assert replay.decision_id == continuation.decision_identity("run-1", 1, "E1")
+        # a DIFFERENT event: no match — the caller decides fresh
+        assert (
+            matching_decision(
+                legacy,
+                ContinuationEvidence(
+                    checkpoint_committed=True,
+                    subject="run-1",
+                    source_attempt=2,
+                    native_command_id="E2",
+                ),
+            )
+            is None
+        )
+
+    def test_persisted_document_keeps_the_history_and_the_supersession(self):
+        first = decide_continuation(
+            ContinuationEvidence(
+                vendor_started=False, subject="run-1", source_attempt=0, native_command_id="E1"
+            )
+        )
+        document = continuation.persisted_document(first, None)
+        second = decide_continuation(
+            ContinuationEvidence(
+                vendor_started=False, subject="run-1", source_attempt=0, native_command_id="E3"
+            )
+        )
+        document = continuation.persisted_document(
+            second, document, superseded_by=first.decision_id
+        )
+        assert set(document["decisions"]) == {first.decision_id, second.decision_id}
+        assert document["decision_id"] == second.decision_id  # the latest stays on top
+        assert document["superseded_by"] == first.decision_id
+        # the history is bounded — the oldest decisions drop first
+        crowded = document
+        for index in range(continuation.DECISION_HISTORY_LIMIT + 2):
+            decision = decide_continuation(
+                ContinuationEvidence(
+                    vendor_started=False,
+                    subject="run-1",
+                    source_attempt=index,
+                    native_command_id=f"E-{index}",
+                )
+            )
+            crowded = continuation.persisted_document(decision, crowded)
+        assert len(crowded["decisions"]) == continuation.DECISION_HISTORY_LIMIT
+
+    async def test_the_snapshot_records_its_subject(self):
+        snap = await evidence_from_record(death_reason=DEATH_PLAIN_TIMEOUT, run_id="run-9")
+        assert snap.subject == "run-9"
 
 
 class TestOperatorWording:
@@ -1216,9 +1456,9 @@ class TestRepeatedRetryEvents:
     async def test_a_repeated_restart_event_is_one_decision_and_one_attempt_per_event(
         self, db, fake
     ):
-        """R36-02: repeated delivery of the same command reuses the decision
-        (one ``decided_at``) and never double-increments attempts — each NEW
-        event dispatches once, a redelivered event not at all."""
+        """R36-02 + R37-01: repeated delivery of the SAME command is a no-op
+        (A11); each NEW event mints its OWN decision naming its own identity
+        — one decision per event, one dispatch per event."""
         service = make_service(db, fake)
         run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=[])
         before = dispatch_calls(fake)
@@ -1239,7 +1479,8 @@ class TestRepeatedRetryEvents:
         assert int((await get_run(db, run_id)).commit_cycle or 0) == cycle_after_first
 
         # The restarted attempt dies the SAME way and is restarted again: a
-        # NEW event over an unchanged snapshot REUSES the decision.
+        # NEW event mints its OWN decision (R37-01) — the first decision
+        # stays in the identity-keyed history, never grafted onto E2.
         async with db() as session:
             run = await session.get(FlowRun, run_id)
             run.status = FlowStatus.FAILED.value
@@ -1250,25 +1491,33 @@ class TestRepeatedRetryEvents:
             service, run_id, note=f"/retry {run_id} restart", delivery_id="retry-rerestart-2"
         )
         second = dict((await get_run(db, run_id)).evidence["continuation"])
-        assert second["decided_at"] == first["decided_at"]  # ONE decision, reused
+        assert second["decided_at"] != first["decided_at"]  # a NEW decision for a NEW event
         assert second["mode_selected"] == "restart"
-        assert second["native_command_id"] == "retry-rerestart-1"  # the ORIGINATING event
+        assert second["native_command_id"] == "retry-rerestart-2"  # ITS OWN event
+        assert second["source_attempt"] == 1  # the attempt IT continues from
+        assert second["decision_id"] != first["decision_id"]
+        assert set(second["decisions"]) == {first["decision_id"], second["decision_id"]}
         assert dispatch_calls(fake) == before + 2  # one dispatch per NEW event
 
-    async def test_an_unchanged_snapshot_reuses_the_persisted_decision(
+    async def test_an_unchanged_snapshot_never_reuses_another_events_decision(
         self, db, fake, with_checkpoint
     ):
-        """A repeated retry (a NEW delivery id, the run died again in the
-        same shape) re-materializes the SAME decision — decided_at and all
-        — instead of re-deciding."""
+        """R37-01 (the defect's exact shape): attempt 1 → retry E1; the
+        retried attempt dies in the SAME shape (equal objective booleans);
+        retry E2 (a NEW delivery, a LATER source attempt) — E2 mints its
+        OWN decision; E1's is never grafted onto it, however equal the
+        digest is."""
         service = make_service(db, fake)
         run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
         await retry(service, run_id, delivery_id="retry-reuse-1")
         first = dict((await get_run(db, run_id)).evidence["continuation"])
         assert first["mode_selected"] == "required"
+        assert first["native_command_id"] == "retry-reuse-1"
+        assert first["source_attempt"] == 0
 
         # The retried attempt dies the SAME way (same recorded reason, same
-        # recoverable state) and is retried again.
+        # recoverable state — the objective digest is UNCHANGED) and is
+        # retried with a NEW event.
         async with db() as session:
             run = await session.get(FlowRun, run_id)
             run.status = FlowStatus.FAILED.value
@@ -1279,8 +1528,13 @@ class TestRepeatedRetryEvents:
         await retry(service, run_id, delivery_id="retry-reuse-2")
 
         second = dict((await get_run(db, run_id)).evidence["continuation"])
-        assert second["decided_at"] == first["decided_at"]  # ONE decision, reused
+        assert second["decided_at"] != first["decided_at"]  # E2's OWN decision
         assert second["mode_selected"] == "required"
+        assert second["native_command_id"] == "retry-reuse-2"
+        assert second["source_attempt"] == 1  # attempt 2, not attempt 1
+        assert second["decision_id"] != first["decision_id"]
+        # BOTH decisions survive on the record (the old one for audit).
+        assert set(second["decisions"]) == {first["decision_id"], second["decision_id"]}
         (dispatch,) = fake.dispatch_inputs
         assert dispatch["inputs"]["lane_resume_mode"] == "required"
 
@@ -1305,6 +1559,193 @@ class TestRepeatedRetryEvents:
         fresh = dict((await get_run(db, run_id)).evidence["continuation"])
         assert fresh["mode_selected"] == "fresh"
         assert fresh["decided_at"] != uncertain["decided_at"]
+
+
+class TestDecisionIdentityAtTheService:
+    """R37-01 at the service wiring: conflicts surfaced, supersessions
+    recorded, pins owned by the decision, legacy documents adapted."""
+
+    async def test_the_same_event_with_moved_booleans_surfaces_the_typed_conflict(
+        self, db, fake, monkeypatch
+    ):
+        """The digest consistency guard: the SAME identity returning with a
+        changed objective snapshot records
+        ``continuation.conflicting_recovery_event`` and re-decides — never a
+        silent reuse."""
+        service = make_service(db, fake)
+        run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
+        patch_checkpoint(monkeypatch, exact=True)
+        committed = await service._select_continuation(
+            run_id,
+            death_reason=DEATH_PLAIN_TIMEOUT,
+            evidence=dict((await get_run(db, run_id)).evidence or {}),
+            candidate_shas=["c1"],
+            native_command_id="conflict-1",
+            source_attempt=0,
+        )
+        assert committed.mode_selected == "required"
+
+        # The SAME event re-presented after the checkpoint VANISHED.
+        patch_checkpoint(monkeypatch, exact=False)
+        redecided = await service._select_continuation(
+            run_id,
+            death_reason=DEATH_PLAIN_TIMEOUT,
+            evidence=dict((await get_run(db, run_id)).evidence or {}),
+            candidate_shas=["c1"],
+            native_command_id="conflict-1",
+            source_attempt=0,
+        )
+        assert redecided.reused is False
+        assert redecided.mode_selected == "uncertain"  # the moved evidence governs
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        conflict = doc["conflicting_recovery_event"]
+        assert conflict["decision_id"] == committed.decision_id
+        assert conflict["recorded_digest"] == committed.evidence.digest()
+        assert conflict["delivered_digest"] == redecided.evidence.digest()
+
+    async def test_a_competing_command_records_superseded_by_the_live_decision(
+        self, db, fake, with_checkpoint
+    ):
+        """Two commands for the same dead attempt collapse into the existing
+        revival uniqueness: the second command's decision records
+        ``superseded_by`` the live one — never a parallel start."""
+        service = make_service(db, fake)
+        run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
+        await retry(service, run_id, delivery_id="supersede-1")
+        first = dict((await get_run(db, run_id)).evidence["continuation"])
+        assert first["native_command_id"] == "supersede-1"
+
+        # The live revival's attempt row is still OPEN (the dispatch leg is
+        # in flight) — re-open what a stranded/claimed attempt looks like.
+        from forge.durable.models import ActionLog
+        from forge.runs.revival import REVIVAL_ACTION_KINDS
+
+        async with db() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(ActionLog)
+                        .where(
+                            ActionLog.flow_run_id == run_id,
+                            ActionLog.action_kind.in_(REVIVAL_ACTION_KINDS),
+                        )
+                        .order_by(ActionLog.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            row.status = "requested"
+            row.dispatch_state = "pending"
+            await session.commit()
+        before = dispatch_calls(fake)
+
+        # A DIFFERENT command for the same dead attempt: refused (one
+        # in-flight revival), and its decision names the live one.
+        await retry(service, run_id, delivery_id="supersede-2")
+
+        assert dispatch_calls(fake) == before  # never a parallel start
+        run = await get_run(db, run_id)
+        doc = run.evidence["continuation"]
+        assert doc["native_command_id"] == "supersede-2"
+        assert doc["superseded_by"] == first["decision_id"]
+        assert any("revival in flight" in body for body in comment_bodies(fake))
+
+    async def test_the_pin_is_owned_by_the_decision(self, db, fake, tmp_path, monkeypatch):
+        """R37-01: the checkpoint pin key is ``decision:<decision id>`` (the
+        pre-R37-01 ``retry-continuation:<command id>`` pins stay readable)."""
+        from forge.adaptive.checkpoint_repository import FilesystemCheckpointRepository
+
+        root = tmp_path / "authority-store"
+        repository = FilesystemCheckpointRepository(root)
+        monkeypatch.setenv("FORGE_CHECKPOINT_STORE_DIR", str(root))
+        service = make_service(db, fake)
+        run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=[])
+        manifest, blobs, checkpoint_id = _checkpoint_payload(run_id, {"a.txt": b"pinned\n"}, 1)
+        await repository.put(run_id, checkpoint_id, manifest, blobs)
+        patch_checkpoint(monkeypatch, exact=True, checkpoint_id=checkpoint_id)
+        fake.dispatch_inputs.clear()
+
+        await retry(service, run_id, delivery_id="pin-owner-1")
+
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        pins = await repository.pins(run_id)
+        assert len(pins) == 1
+        assert pins[0]["checkpoint_id"] == checkpoint_id
+        assert pins[0]["reason"] == f"decision:{doc['decision_id']}"
+
+    async def test_a_legacy_document_is_adapted_not_reused_across_events(
+        self, db, fake, with_checkpoint
+    ):
+        """A run carrying a pre-R37-01 single decision document: the same
+        event replays through the adapter; a NEW event re-decides with
+        ``lineage: reestablished`` and keeps the legacy decision for audit."""
+        from forge.adaptive.continuation import CONTINUATION_EVIDENCE_KEY
+
+        service = make_service(db, fake)
+        run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
+        legacy = decide_continuation(
+            ContinuationEvidence(
+                checkpoint_committed=True,
+                vendor_started=None,
+                candidate_published=False,
+                operator_discard_requested=False,
+                native_command_id="legacy-1",
+                source_attempt=0,
+                checkpoint_digest="e" * 64,
+            )
+        ).as_document()
+        for key in ("event", "decision_id", "decisions"):
+            legacy.pop(key, None)
+        legacy["evidence_version"] = 2
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.evidence = {**dict(run.evidence or {}), CONTINUATION_EVIDENCE_KEY: legacy}
+            await session.commit()
+
+        # A NEW event on a LATER attempt: re-decide, lineage reestablished.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancellation_generation = 1
+            await session.commit()
+        fake.dispatch_inputs.clear()
+        await retry(service, run_id, delivery_id="after-legacy-1")
+
+        doc = (await get_run(db, run_id)).evidence[CONTINUATION_EVIDENCE_KEY]
+        assert doc["native_command_id"] == "after-legacy-1"
+        assert doc["source_attempt"] == 1
+        assert doc["lineage"] == "reestablished"
+        legacy_id = continuation.decision_identity(run_id, 0, "legacy-1")
+        assert set(doc["decisions"]) == {legacy_id, doc["decision_id"]}
+        assert doc["decisions"][legacy_id]["native_command_id"] == "legacy-1"
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "required"
+
+
+def _checkpoint_payload(work_id: str, files: dict[str, bytes], sequence: int):
+    """A minimal ``forge.wip.manifest/2`` payload the store verifies."""
+    import hashlib
+    import json
+
+    def digest(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    manifest = json.dumps(
+        {
+            "schema": "forge.wip.manifest/2",
+            "work_id": work_id,
+            "sequence": sequence,
+            "source_oids": {"attempt_base": "e" * 40},
+            "files": {
+                name: {"digest": digest(data), "mode": 0o644, "role": "new"}
+                for name, data in sorted(files.items())
+            },
+            "deletions": [],
+        }
+    ).encode()
+    blobs = {entry["digest"]: files[name] for name, entry in json.loads(manifest)["files"].items()}
+    return manifest, blobs, digest(manifest)
 
 
 class TestRevivalRedispatch:
@@ -1351,32 +1792,51 @@ class TestRevivalRedispatch:
         assert fake.dispatch_inputs == []
         assert dispatch_calls(fake) == before
 
-    async def test_a_restart_after_decision_commit_before_dispatch_reuses_it(
-        self, db, fake, with_checkpoint
+    async def test_a_restart_after_decision_commit_before_dispatch_reconstructs_by_identity(
+        self, db, fake, with_checkpoint, monkeypatch
     ):
-        """Issue negative test 2: the worker died between the decision commit
-        and the dispatch. The recovery scan's re-drive (``_redispatch_revival``)
-        reuses the PERSISTED decision — the actual workflow inputs carry the
-        mode that was selected, not a re-derived one."""
+        """AT-02 (R37-01): the worker died between the /retry's decision
+        commit and its dispatch. The recovery scan's re-drive establishes
+        the stranded delivery from the attempt row's ``retry_delivery_key``
+        and RECONSTRUCTS the identical decision BY ID — same decision_id,
+        same ``decided_at``, same pinned checkpoint — even after a NEWER
+        checkpoint landed in between."""
+        from forge.durable.controller import Controller
+        from forge.runs.revival import begin_revival_attempt, classify_retryability
+
         service = make_service(db, fake)
         run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
-        # The decision commits (what handle_retry does before its dispatch).
+        # What handle_retry does BEFORE its dispatch leg: the decision
+        # commits, then the revival attempt row (keyed by the delivery).
+        evidence = dict((await get_run(db, run_id)).evidence or {})
         committed = await service._select_continuation(
             run_id,
             death_reason=DEATH_PLAIN_TIMEOUT,
-            evidence=dict((await get_run(db, run_id)).evidence or {}),
+            evidence=evidence,
             candidate_shas=["c1"],
+            native_command_id="at02-delivery-1",
+            source_attempt=0,
+            dispatches=True,
         )
         assert committed.mode_selected == "required"
-        # The stranded dispatch is recovered — the walk already happened.
-        from forge.durable.controller import Controller
-
         async with db() as session:
             controller = Controller(session)
+            await begin_revival_attempt(
+                session,
+                run_id=run_id,
+                kind="retry_requested",
+                idempotency_key="delivery:at02-delivery-1",
+                retryability=classify_retryability("retry_requested"),
+            )
             await controller.revive_transition(
                 run_id, reason="retry requested by @alice", authorized_by="operator:alice"
             )
+            run = await session.get(FlowRun, run_id)
+            run.cancellation_generation = 1
             await session.commit()
+        # A NEWER checkpoint lands between the decision commit and the
+        # re-drive — the frozen decision must not consult it.
+        patch_checkpoint(monkeypatch, exact=True, checkpoint_id="f" * 64)
         fake.dispatch_inputs.clear()
 
         await service._redispatch_revival(run_id)
@@ -1385,6 +1845,11 @@ class TestRevivalRedispatch:
         assert dispatch["inputs"]["lane_resume_mode"] == "required"
         doc = (await get_run(db, run_id)).evidence["continuation"]
         assert doc["decided_at"] == committed.decided_at  # the SAME decision
+        assert doc["decision_id"] == committed.decision_id  # reconstructed BY ID
+        assert doc["native_command_id"] == "at02-delivery-1"
+        assert doc["source_attempt"] == 0
+        assert doc["checkpoint_digest"] == committed.evidence.checkpoint_digest  # frozen
+        assert doc["continuation_decision_id"] == committed.decision_id
 
 
 class TestCheckpointBoundInversion:

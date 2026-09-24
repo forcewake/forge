@@ -24,7 +24,13 @@ The registry is consumed by ``tests/test_architecture_boundaries.py``:
   an instruction to register (or route through the owner);
 - the symbol-confinement allow-sets below are the single source the
   AST checks iterate — changing an allow-set is a reviewed registry
-  edit, never a silent code drift.
+  edit, never a silent code drift;
+- since R37-19 (#300) the same registration covers the labelled
+  evaluation package ``forge.adaptive.reference``: its scenario modules
+  compose owner CONTRACTS (registered like any caller) while the
+  runtime entry points are barred from importing the package at all —
+  the dependency-direction rules live in
+  ``tests/test_reference_separation.py``.
 
 This module is deliberately IMPORT-LIGHT (pure stdlib data, no forge
 imports): the registry must be loadable by tooling and tests without
@@ -116,6 +122,7 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.main",
             "forge.runs.github_service",
             "forge.runs.revival",
+            "forge.runs.service",
         ),
         enforcement=(
             "resolve_repository(...) may be CALLED only from "
@@ -146,6 +153,7 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
         allowed_dependents=(
             "forge.adaptive.compat_fixtures",
             "forge.runs.github_service",
+            "forge.runs.service",
         ),
         enforcement=(
             "Only continuation.decide_continuation / parse_recovery_"
@@ -154,7 +162,11 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "may be referenced there only as the documented initial-"
             "dispatch default and vocabulary validation — never to "
             "re-derive a mode a decision should select; ContinuationMode "
-            "construction stays inside the owner."
+            "construction stays inside the owner. The GitLab lane "
+            "(runs.service, R37-07/#288) consumes the SAME owner: it "
+            "selects decisions via the owner's table and dispatches "
+            "decision.resume_mode() through its pipeline-variable "
+            "envelope, never a mode of its own derivation."
         ),
         negative_contract=(
             "No service may select a resume mode from its own reading "
@@ -163,11 +175,14 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "decision — the decision is owned, persisted and reused."
         ),
         honest_gaps=(
-            "The lane-resume dispatch contract is GitHub-only (R32-04; "
-            "the GitLab CE qualification #268 and the lab pilot #275 "
-            "record the seam's absence). GitLab/Azure share the retry "
-            "REFUSAL semantics through runs.revival.retry_rejection — "
-            "the honest state, not fabricated parity."
+            "The lane-resume dispatch contract is wired on GitHub "
+            "(R32-04) and GitLab CE (R37-07/#288 — pipeline-variable "
+            "envelope, attempt-scoped credentials, proven offline at "
+            "production-entry discipline; the LIVE cross-runner drill "
+            "is the R37-08 step). Azure remains the honest gap: it "
+            "carries no resume-mode selection (nothing to pass it to). "
+            "All three lanes share the retry REFUSAL semantics through "
+            "runs.revival.retry_rejection."
         ),
     ),
     AuthorityBoundary(
@@ -214,12 +229,32 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.adaptive.publication_saga",
             "forge.adaptive.saga_durable",
         ),
-        allowed_dependents=("forge.adaptive.two_writer_qualification",),
+        allowed_dependents=(
+            "forge.adaptive.two_writer_qualification",
+            # #295 / R37-14: the NATIVE effect adapters (GitLab/GitHub
+            # clients behind the saga's effect interface) compose the
+            # durable saga's PublicationProvider seam with each provider's
+            # REAL preconditions — client-side CAS on GitLab, native CAS on
+            # GitHub, correlation by listed native identity only.
+            "forge.adaptive.saga_native",
+            # R37-19 / #300: the in-process reference remote (the
+            # provider-shaped evaluation object extracted from saga_
+            # durable) composes the SAME owner contracts — the typed
+            # provider errors and the NativeCommit identity record —
+            # from the labelled evaluation package. It decides nothing
+            # a provider would; registration keeps its dependency on
+            # the owner visible like any other caller's.
+            "forge.adaptive.reference.native_shaped_remote",
+        ),
         enforcement=(
             "Import-registration only: the publication write boundary "
             "itself is ADR-0016/0026's (mr_reservations + the one "
             "validated write path through runs.publisher policy); the "
-            "registry pins WHO may compose sagas."
+            "registry pins WHO may compose sagas. The reference "
+            "remote's import of the owner is a CONTRACT composition "
+            "(typed errors + NativeCommit), never a runtime default — "
+            "saga_durable's compat re-export is lazy so production "
+            "imports stay reference-free."
         ),
         negative_contract=(
             "No orchestration path may create a provider effect "
@@ -245,6 +280,18 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.adaptive.independent_checks",
             "forge.adaptive.system_verification",
             "forge.adaptive.two_writer_qualification",
+            # R37-15 (#296): the trusted verification executor ROUTES every
+            # applicability decision through the owner (freeze_tested_world,
+            # record_evidence, EvidenceLedger.applicable_to) — it never
+            # re-derives binding/freshness itself; same reason as the twin.
+            "forge.adaptive.verification_executor",
+            # R37-19 (#300): the deterministic-reference twin (the scenario
+            # machinery extracted from system_verification into the
+            # labelled evaluation package) freezes its worlds and derives
+            # its test bundles through the SAME owner entries — the
+            # scenario composes the contracts, it never re-decides
+            # applicability.
+            "forge.adaptive.reference.system_twin",
             "forge.adaptive.workpackage",
             "forge.runs.azure_service",
             "forge.runs.github_service",

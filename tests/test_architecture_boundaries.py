@@ -92,6 +92,44 @@ _MODE_CONSTANTS = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# R37-19 (#300) — the contracts-vs-reference separation constants. The
+# labelled evaluation package ``forge.adaptive.reference`` holds the
+# deterministic scenario builders and provider-shaped reference remotes;
+# the runtime composition must reach them only through the registered
+# compat homes (the modules the scenarios were extracted from).
+# ---------------------------------------------------------------------------
+
+#: The runtime entry points — the modules a customer's request enters
+#: forge through. NONE of them may import the reference package: an
+#: evaluation scenario beside a runtime contract must never become a
+#: deployed guarantee by import.
+REFERENCE_ENTRY_POINTS: tuple[str, ...] = (
+    "forge.main",
+    "forge.lane_driver",
+    "forge.adaptive.wiring",
+    "forge.runs.service",
+    "forge.runs.github_service",
+    "forge.runs.azure_service",
+)
+
+#: The ONLY non-reference modules that may import
+#: ``forge.adaptive.reference.*``: the compat homes the scenarios were
+#: extracted from (ADR-0031's migration policy — a compat import is
+#: removed only when its callers are drained to the reference path).
+REFERENCE_COMPAT_HOMES: frozenset[str] = frozenset(
+    {
+        "forge.adaptive.system_verification",
+        "forge.adaptive.saga_durable",
+        "forge.adaptive.steering_causality",
+    }
+)
+
+#: What the reference package may never import — the provider services,
+#: the wiring, ``main`` and the lane entry (it composes runtime
+#: contracts only; ADR-0031 §2).
+REFERENCE_FORBIDDEN_IMPORTS: frozenset[str] = frozenset(REFERENCE_ENTRY_POINTS)
+
 
 # ---------------------------------------------------------------------------
 # The AST scan substrate
@@ -589,6 +627,86 @@ def _check_boundary_registration(modules: dict[str, _ModuleIndex]) -> list[str]:
     return violations
 
 
+# ---------------------------------------------------------------------------
+# Rule 7 — the contracts-vs-reference separation (R37-19 / #300)
+# ---------------------------------------------------------------------------
+
+
+def _reference_hits(index: _ModuleIndex) -> set[str]:
+    """The reference-package imports of *index* (module-level AND lazy)."""
+    return {
+        name for name in index.imported_modules() if name.startswith("forge.adaptive.reference")
+    }
+
+
+def _check_reference_separation(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """`architecture.owner_violations` (the reference axis): the runtime
+    composition must not reach the labelled evaluation package except
+    through the registered compat homes.
+
+    - a RUNTIME ENTRY POINT importing the reference package is the
+      review's defect class outright (a scenario's assumptions becoming
+      a deployed guarantee by import);
+    - any OTHER non-reference module importing it must be a registered
+      compat home (the extraction's compatibility surface, pinned by
+      ``tests/test_reference_separation.py``);
+    - a registered compat home importing NOTHING from the package is a
+      drained surface — remove the registration with the re-export.
+    """
+    violations: list[str] = []
+    for index in modules.values():
+        if index.module.startswith("forge.adaptive.reference"):
+            continue  # the package's own imports are the purity rule below
+        hits = _reference_hits(index)
+        if not hits:
+            continue
+        if index.module in REFERENCE_ENTRY_POINTS:
+            violations.append(
+                f"{index.module} imports the reference package ({sorted(hits)}) — "
+                "a runtime entry point never pulls an evaluation scenario in; "
+                "compose the runtime contract the scenario fakes instead"
+            )
+        elif index.module not in REFERENCE_COMPAT_HOMES:
+            violations.append(
+                f"{index.module} imports the reference package ({sorted(hits)}) — "
+                "only the registered compat homes may; route the decision "
+                "through the runtime contract, or register the extraction "
+                "home in REFERENCE_COMPAT_HOMES with a reviewed reason"
+            )
+    for home in sorted(REFERENCE_COMPAT_HOMES):
+        index = modules.get(home)
+        if index is None:
+            violations.append(
+                f"the registered reference compat home {home} does not exist "
+                "under src/forge — a stale registration; remove it"
+            )
+        elif not _reference_hits(index):
+            violations.append(
+                f"{home} is registered as a reference compat home but imports "
+                "nothing from the package — the compatibility surface has "
+                "drained; remove the registration and the re-export together"
+            )
+    return violations
+
+
+def _check_reference_purity(modules: dict[str, _ModuleIndex]) -> list[str]:
+    """The reference package composes runtime CONTRACTS only: it never
+    imports a provider service, the wiring, ``main`` or the lane entry,
+    and adds no orchestration of its own."""
+    violations: list[str] = []
+    for index in modules.values():
+        if not index.module.startswith("forge.adaptive.reference"):
+            continue
+        hits = index.imported_modules() & REFERENCE_FORBIDDEN_IMPORTS
+        if hits:
+            violations.append(
+                f"{index.module} imports {sorted(hits)} — the reference "
+                "package composes runtime contracts only; it must not reach "
+                "a provider service, the wiring, main or the lane entry"
+            )
+    return violations
+
+
 ALL_CHECKS = (
     ("legacy lookup confinement", _check_legacy_lookup_confinement),
     ("resolve_repository monopoly", _check_resolve_repository_monopoly),
@@ -596,6 +714,8 @@ ALL_CHECKS = (
     ("GC unlink confinement", _check_gc_unlink_confinement),
     ("continuation mode selection", _check_continuation_mode_selection),
     ("boundary registration", _check_boundary_registration),
+    ("reference separation", _check_reference_separation),
+    ("reference purity", _check_reference_purity),
 )
 
 
@@ -780,6 +900,62 @@ class TestIntentionalViolationTraps:
         # or missing — the continuation boundary's dependent flags either way.
         assert any("stale registration" in text or "does not exist" in text for text in violations)
 
+    def test_a_runtime_entry_point_importing_the_reference_package_is_caught(self) -> None:
+        modules = _synthetic(
+            "forge.runs.service",
+            "from forge.adaptive.reference.native_shaped_remote import NativeShapedRemote\n"
+            "\n"
+            "\n"
+            "def build():\n"
+            "    return NativeShapedRemote()\n",
+        )
+        violations = _check_reference_separation(modules)
+        assert any(
+            "runtime entry point" in text and "reference package" in text for text in violations
+        )
+
+    def test_an_unregistered_module_importing_the_reference_package_is_caught(self) -> None:
+        modules = _synthetic(
+            "forge.orchestrator.new_leg",
+            "from forge.adaptive.reference.system_twin import default_twin_scenario\n"
+            "\n"
+            "\n"
+            "def scenario():\n"
+            "    return default_twin_scenario()\n",
+        )
+        violations = _check_reference_separation(modules)
+        assert any("compat home" in text and "new_leg" in text for text in violations)
+
+    def test_a_lazy_compat_import_is_still_an_import(self) -> None:
+        """The confinement counts FUNCTION-LEVEL imports too — the lazy
+        re-export pattern must stay registered, not hide."""
+        modules = _synthetic(
+            "forge.gateway.hidden_leg",
+            "def build():\n"
+            "    from forge.adaptive.reference.system_twin import TwinScenario\n"
+            "\n"
+            "    return TwinScenario\n",
+        )
+        violations = _check_reference_separation(modules)
+        assert any("hidden_leg" in text for text in violations)
+
+    def test_a_drained_compat_home_registration_is_caught(self) -> None:
+        modules = _synthetic("forge.adaptive.saga_durable", "X = 1\n")
+        violations = _check_reference_separation(modules)
+        assert any("drained" in text or "does not exist" in text for text in violations)
+
+    def test_a_reference_module_importing_the_wiring_is_caught(self) -> None:
+        modules = _synthetic(
+            "forge.adaptive.reference.new_scenario",
+            "from forge.adaptive.wiring import compose_runtime\n"
+            "\n"
+            "\n"
+            "def build():\n"
+            "    return compose_runtime()\n",
+        )
+        violations = _check_reference_purity(modules)
+        assert any("composes runtime contracts only" in text for text in violations)
+
 
 # ---------------------------------------------------------------------------
 # Provider conformance — `contract.provider_conformance`
@@ -918,27 +1094,48 @@ class TestProviderConformance:
                     callee.endswith("RetryRejection") and index.module != "forge.runs.revival"
                 ), f"{index.module} constructs RetryRejection — the table is runs.revival's"
 
-    def test_the_gitlab_and_azure_lane_resume_gap_is_the_documented_honest_state(self) -> None:
-        """#268's finding, asserted as fact: the lane-resume dispatch
-        contract is GitHub-only. GitLab/Azure carry NO resume-mode
-        selection (nothing to pass it to) — fabricating parity would be
-        worse than the gap; the registry records it and this pins it."""
+    def test_the_gitlab_lane_resume_seam_and_the_azure_gap_are_the_documented_state(self) -> None:
+        """#268's finding, updated by R37-07 (#288): the lane-resume dispatch
+        contract is now wired on GitHub AND the GitLab CE lane (the
+        pipeline-variable envelope; the decision still comes from the ONE
+        owner — runs.service references the vocabulary and passes
+        ``resume_mode=decision.resume_mode()``, never a mode of its own
+        derivation). Azure remains the honest gap — fabricating parity
+        would be worse than the gap; the registry records it and this
+        pins it."""
         modules = _src_modules()
-        for service in ("forge.runs.service", "forge.runs.azure_service"):
+        gitlab = modules["forge.runs.service"]
+        resume_mode_passes = [
+            keyword
+            for node in ast.walk(gitlab.tree)
+            if isinstance(node, ast.Call)
+            for keyword in node.keywords
+            if keyword.arg == "resume_mode"
+        ]
+        assert resume_mode_passes, "the GitLab lane must dispatch the resume contract (R37-07)"
+        for keyword in resume_mode_passes:
+            value = ast.unparse(keyword.value)
+            assert value.endswith(".resume_mode()") or value == "resume_mode", (
+                f"runs.service passes resume_mode={value} — a dispatch carries the "
+                "decision's selected mode, never a fresh expression"
+            )
+        vocabulary = {node.id for node in ast.walk(gitlab.tree) if isinstance(node, ast.Name)}
+        assert any("RESUME_MODE" in name for name in vocabulary)
+        for service in ("forge.runs.azure_service",):
             for node in ast.walk(modules[service].tree):
                 if isinstance(node, ast.Name) and "RESUME_MODE" in node.id:
                     raise AssertionError(
                         f"{service} references {node.id} — the lane-resume contract "
-                        "is GitHub-only (#268); wire the seam or record the gap"
+                        "is not wired on Azure; wire the seam or record the gap"
                     )
                 if isinstance(node, ast.Call):
                     for keyword in node.keywords:
                         assert keyword.arg != "resume_mode", (
                             f"{service}:{keyword.lineno} passes a resume mode — "
-                            "the lane-resume dispatch contract is GitHub-only"
+                            "the lane-resume dispatch contract is not wired on Azure"
                         )
         gap = boundary_registry.boundary_by_name("continuation_authorization").honest_gaps
-        assert "GitHub-only" in gap or "GitHub only" in gap
+        assert "Azure remains the honest gap" in gap
 
 
 class TestStaleEpochConformance:

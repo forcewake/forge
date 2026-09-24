@@ -1,0 +1,2257 @@
+{
+  "schema": "forge.research.cohort.report/1",
+  "cohort_id": "research-cohort-live-v2",
+  "spec_schema": "forge.research.cohort/1",
+  "recorded_at": "2026-09-24T00:00:00+00:00",
+  "replay": {
+    "pure_over_recorded": true,
+    "live_calls": 0
+  },
+  "mode_spellings": {
+    "none": "none",
+    "lexical": "lexical",
+    "research": "research-harness"
+  },
+  "promotion_policy": {
+    "owner": "R37 review lead (adaptive)",
+    "hold_expires": "2026-10-22",
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    }
+  },
+  "provenance_summary": {
+    "none": {
+      "live-model": 4,
+      "offline-scripted-model": 0,
+      "unlabeled": 0,
+      "runs_total": 4
+    },
+    "lexical": {
+      "live-model": 4,
+      "offline-scripted-model": 0,
+      "unlabeled": 0,
+      "runs_total": 4
+    },
+    "research": {
+      "live-model": 4,
+      "offline-scripted-model": 0,
+      "unlabeled": 0,
+      "runs_total": 4
+    }
+  },
+  "rubric_merge_notes": [
+    "citation validity (file:line resolves) is folded INTO evidence_accuracy \u2014 a syntactically valid citation earns nothing unless the cited bytes support the claim, so validity alone is not a separate dimension",
+    "scope precision (references into the task's irrelevant repositories) is folded INTO impacted_surface_recall as the spurious-surface penalty, not accumulated as a sixth dimension",
+    "assumption COUNT and assumption SEVERITY merge into one unjustified_assumptions weight (severity-weighted, invented defaults penalized) \u2014 count-without-severity double-counts the same mistake",
+    "correction minutes stay OUTSIDE the weighted overall: a speed/effort number is only ever published beside its quality counterweight (research topic 4 \u00a74), never blended into it"
+  ],
+  "integrity": {
+    "binding_violations": [],
+    "missing_runs": [],
+    "held_back_missing_runs": [],
+    "cost_coverage_gaps": [],
+    "budget_mismatches": [],
+    "citation_violations": [],
+    "mutation_mismatches": [],
+    "review_pending": [
+      "RC-13-live2-neighbor-refund-approval/none",
+      "RC-13-live2-neighbor-refund-approval/lexical",
+      "RC-13-live2-neighbor-refund-approval/research",
+      "RC-14-live2-ambiguous-approver/none",
+      "RC-14-live2-ambiguous-approver/lexical",
+      "RC-14-live2-ambiguous-approver/research",
+      "RC-15-live2-irrelevant-docs-site/none",
+      "RC-15-live2-irrelevant-docs-site/lexical",
+      "RC-15-live2-irrelevant-docs-site/research",
+      "RC-16-live2-deep-superseded-policy/none",
+      "RC-16-live2-deep-superseded-policy/lexical",
+      "RC-16-live2-deep-superseded-policy/research"
+    ],
+    "provenance_violations": [],
+    "preregistration_violations": []
+  },
+  "tasks": {
+    "RC-13-live2-neighbor-refund-approval": {
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "modes": {
+        "none": {
+          "task_id": "RC-13-live2-neighbor-refund-approval",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 498,
+              "output_lower_bound": 2333,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.01966,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 0,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": []
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              },
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "Code changes are scoped to orders-api and billing-policy; docs-site is touched only if documentation updates are requested.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "No discovery evidence exists in this pass, so the plan asserts zero code claims; all structure is established in S1 before any implementation.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "lexical": {
+          "task_id": "RC-13-live2-neighbor-refund-approval",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 787,
+              "output_lower_bound": 4602,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.03839,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 4,
+            "verdicts": {
+              "semantic_match": 4,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "C1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C3",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C4",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 3,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 3
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "All work targets the frozen snapshots at the listed source OIDs.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "docs-site is out of scope for this pass.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The approval threshold will be injected as configuration so S3 is not hard-blocked on Finance's answer.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "research": {
+          "task_id": "RC-13-live2-neighbor-refund-approval",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": "max_calls"
+            }
+          ],
+          "attempts_stopped": 1,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": false,
+            "stopped_reason": "max_calls",
+            "partial_retained_as_partial": true,
+            "observations": 15,
+            "truncated_observations": 5,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 12,
+            "calls_executed": 12,
+            "wall_seconds_used": 61.442,
+            "tokens": {
+              "input": 8181,
+              "output": 7340,
+              "input_lower_bound": 8181,
+              "output_lower_bound": 7340,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.075082,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 4,
+            "verdicts": {
+              "semantic_match": 4,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "claim-1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-3",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-4",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              },
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "The pipeline run for this issue is verification-only: the observed snapshots already contain the 30-day gate, policy-client wiring, and status-based approval routing, so no edits are planned.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The threshold question left open by the issue is resolved by billing-policy evidence and must not be re-encoded in orders-api.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        }
+      }
+    },
+    "RC-14-live2-ambiguous-approver": {
+      "archetype": "ambiguous_requirement",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "modes": {
+        "none": {
+          "task_id": "RC-14-live2-ambiguous-approver",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 496,
+              "output_lower_bound": 1861,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.01588,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 0,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": []
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/client.py"
+              },
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "No discovery evidence exists in this pass, so no factual claims can be cited and none are made.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "Per the issue's stated premise, the approver for orders-api cannot be derived from the three frozen snapshots, so implementation must not proceed on a guessed target.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "lexical": {
+          "task_id": "RC-14-live2-ambiguous-approver",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 833,
+              "output_lower_bound": 2891,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.024794,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 3,
+            "verdicts": {
+              "semantic_match": 3,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "C1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C3",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/client.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 0,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 0
+            },
+            "invented_defaults": 0,
+            "detail": []
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "research": {
+          "task_id": "RC-14-live2-ambiguous-approver",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": "max_calls"
+            }
+          ],
+          "attempts_stopped": 1,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": false,
+            "stopped_reason": "max_calls",
+            "partial_retained_as_partial": true,
+            "observations": 23,
+            "truncated_observations": 4,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 12,
+            "calls_executed": 12,
+            "wall_seconds_used": 108.866,
+            "tokens": {
+              "input": 5416,
+              "output": 10355,
+              "input_lower_bound": 5416,
+              "output_lower_bound": 10355,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.093672,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 3,
+            "verdicts": {
+              "semantic_match": 3,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "c1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "c2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "c3",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/client.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "No approver identity, team, routing mechanism, or owning repo is assumed; the plan blocks on an explicit answer.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "Only the three listed repositories at their given source OIDs are readable evidence.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        }
+      }
+    },
+    "RC-15-live2-irrelevant-docs-site": {
+      "archetype": "irrelevant_repository",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "modes": {
+        "none": {
+          "task_id": "RC-15-live2-irrelevant-docs-site",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 489,
+              "output_lower_bound": 1658,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.014242,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 0,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": []
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              },
+              {
+                "repo": "orders-api",
+                "path": "src/orders/handlers/refunds.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "Only billing-policy and orders-api are in scope for code changes; docs-site is explicitly excluded per the issue statement.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The decision string must be surfaced without modification, per 'verbatim' in the issue statement.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "lexical": {
+          "task_id": "RC-15-live2-irrelevant-docs-site",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 763,
+              "output_lower_bound": 4832,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.040182,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 4,
+            "verdicts": {
+              "semantic_match": 4,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "C1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C3",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C4",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              },
+              {
+                "repo": "orders-api",
+                "path": "src/orders/handlers/refunds.py"
+              }
+            ],
+            "spurious": [
+              {
+                "repo": "docs-site",
+                "path": "content/refunds.md"
+              }
+            ]
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 3,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 3
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "billing-policy behavior is unchanged anywhere; Orders only reads decisions via the policy client.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "docs-site is out of scope (shown bytes are navigation links only; the issue states it is marketing content nothing reads).",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "'Verbatim' means the policy decision is passed through unchanged \u2014 no reformatting and no local boolean re-evaluation in Orders.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "research": {
+          "task_id": "RC-15-live2-irrelevant-docs-site",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": "max_calls"
+            }
+          ],
+          "attempts_stopped": 1,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": false,
+            "stopped_reason": "max_calls",
+            "partial_retained_as_partial": true,
+            "observations": 16,
+            "truncated_observations": 3,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 12,
+            "calls_executed": 12,
+            "wall_seconds_used": 111.825,
+            "tokens": {
+              "input": 7620,
+              "output": 11506,
+              "input_lower_bound": 7620,
+              "output_lower_bound": 11506,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.107288,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 4,
+            "verdicts": {
+              "semantic_match": 4,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "claim-1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-3",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "claim-4",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 0.5,
+            "recall": 0.5,
+            "found": [
+              {
+                "repo": "orders-api",
+                "path": "src/checkout.py"
+              }
+            ],
+            "missed": [
+              {
+                "repo": "orders-api",
+                "path": "src/orders/handlers/refunds.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 3,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 3
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "docs-site's help-center refunds page is out of scope per the issue: marketing content that neither service reads.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The surfacing change is confined to orders-api's refund handlers; billing-policy is only read unless the answer to question 3 forces otherwise.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The decision travels over the same billing_policy_client policy client checkout already uses (src/checkout.py line 15 import, line 39 call).",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        }
+      }
+    },
+    "RC-16-live2-deep-superseded-policy": {
+      "archetype": "deep_file_evidence",
+      "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+      "modes": {
+        "none": {
+          "task_id": "RC-16-live2-deep-superseded-policy",
+          "mode": "none",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 510,
+              "output_lower_bound": 2372,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.019996,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 0,
+            "verdicts": {
+              "semantic_match": 0,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": []
+          },
+          "impacted_surface_recall": {
+            "score": 0.0,
+            "recall": 0.0,
+            "found": [],
+            "missed": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              }
+            ],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "Per the issue statement only: F-2024-11 is the currently effective finance revision and the F-2023 / F-2024-02 revisions at the file head are superseded.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "Per the issue statement only: no discovery evidence exists yet, so no claims can be asserted in this pass.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "lexical": {
+          "task_id": "RC-16-live2-deep-superseded-policy",
+          "mode": "lexical",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": null,
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 0,
+            "calls_executed": 0,
+            "wall_seconds_used": 0.0,
+            "tokens": {
+              "input": null,
+              "output": null,
+              "input_lower_bound": 848,
+              "output_lower_bound": 2349,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.020488,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 4,
+            "verdicts": {
+              "semantic_match": 4,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "C1",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C2",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C3",
+                "verdict": "semantic_match",
+                "important": false
+              },
+              {
+                "claim_id": "C4",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 3,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 3
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "Snapshots are frozen at the provided source OIDs for billing-policy and orders-api; docs-site is out of scope for this confirmation.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The threshold constant is resolved entirely within billing-policy src/policy/refunds.py, consistent with client.py stating the threshold never leaves the service as a number.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "The effective numeric threshold cannot be cited from the evidence shown in this pass and must be sourced from the F-2024-11 revision text before any threshold value is asserted.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        },
+        "research": {
+          "task_id": "RC-16-live2-deep-superseded-policy",
+          "mode": "research",
+          "outcome": "graded",
+          "attempts": [
+            {
+              "attempt": 1,
+              "stopped_reason": ""
+            }
+          ],
+          "attempts_stopped": 0,
+          "review": {
+            "state": "review_pending",
+            "correction_minutes_recorded": false,
+            "pending_fields": [
+              "claim_importance",
+              "assumption_severity",
+              "correction_minutes"
+            ]
+          },
+          "research": {
+            "present": true,
+            "schema": "forge.discovery.research/1",
+            "complete": true,
+            "stopped_reason": "",
+            "partial_retained_as_partial": false,
+            "observations": 10,
+            "truncated_observations": 0,
+            "failed_observations": 0
+          },
+          "cost": {
+            "coverage": "recorded",
+            "attempts": 1,
+            "calls_proposed": 10,
+            "calls_executed": 10,
+            "wall_seconds_used": 179.662,
+            "tokens": {
+              "input": 11525,
+              "output": 16120,
+              "input_lower_bound": 11525,
+              "output_lower_bound": 16120,
+              "unknown_usage_calls": 0
+            },
+            "usd_estimated": 0.15201,
+            "usd_coverage": "receipted"
+          },
+          "budget": {
+            "agreed": {
+              "max_calls": 12,
+              "wall_seconds": 300.0,
+              "max_tokens_per_call": 3000,
+              "plan_max_tokens": 8000,
+              "max_usd_per_arm": 0.4,
+              "max_usd_total": 3.0
+            },
+            "within": true
+          },
+          "evidence_accuracy": {
+            "score": null,
+            "important_claims": 0,
+            "unreviewed_claims": 1,
+            "verdicts": {
+              "semantic_match": 1,
+              "syntactic_only": 0,
+              "invalid": 0,
+              "unverified": 0
+            },
+            "claims": [
+              {
+                "claim_id": "claim-1",
+                "verdict": "semantic_match",
+                "important": false
+              }
+            ]
+          },
+          "impacted_surface_recall": {
+            "score": 1.0,
+            "recall": 1.0,
+            "found": [
+              {
+                "repo": "billing-policy",
+                "path": "src/policy/refunds.py"
+              }
+            ],
+            "missed": [],
+            "spurious": []
+          },
+          "unjustified_assumptions": {
+            "score": null,
+            "weight": null,
+            "count": 2,
+            "by_severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 2
+            },
+            "invented_defaults": 0,
+            "detail": [
+              {
+                "text": "Only the frozen billing-policy snapshot 964a4c46dc66596f09d22a63f1bd5acef120d7c7 is in scope.",
+                "severity": "low",
+                "invented_default": false
+              },
+              {
+                "text": "Threshold values are denominated in cents, so a confirmed constant is reported as cents/100 in dollars.",
+                "severity": "low",
+                "invented_default": false
+              }
+            ]
+          },
+          "question_quality": {
+            "score": null,
+            "total": 3,
+            "specific": 0,
+            "generic": 3,
+            "missing_decision_addressed": null
+          },
+          "human_plan_correction_effort": {
+            "minutes": 0.0,
+            "severity": "unrecorded",
+            "recorded": false,
+            "state": "review_pending"
+          },
+          "overall": null
+        }
+      }
+    }
+  },
+  "held_back": {
+    "note": "graded but SEPARATE: held-back tasks never enter the aggregates and can never move the promotion verdict",
+    "tasks": {
+      "RC-17-live2-holdout-neighbor-tier-window": {
+        "archetype": "neighbor_dependency",
+        "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+        "modes": {
+          "none": {
+            "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+            "mode": "none",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "review": {
+              "state": "review_pending",
+              "correction_minutes_recorded": false,
+              "pending_fields": [
+                "claim_importance",
+                "assumption_severity",
+                "correction_minutes"
+              ]
+            },
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": null,
+                "output": null,
+                "input_lower_bound": 480,
+                "output_lower_bound": 2432,
+                "unknown_usage_calls": 0
+              },
+              "usd_estimated": 0.020416,
+              "usd_coverage": "receipted"
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 12,
+                "wall_seconds": 300.0,
+                "max_tokens_per_call": 3000,
+                "plan_max_tokens": 8000,
+                "max_usd_per_arm": 0.4,
+                "max_usd_total": 3.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": null,
+              "important_claims": 0,
+              "unreviewed_claims": 0,
+              "verdicts": {
+                "semantic_match": 0,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": []
+            },
+            "impacted_surface_recall": {
+              "score": 0.0,
+              "recall": 0.0,
+              "found": [],
+              "missed": [
+                {
+                  "repo": "billing-policy",
+                  "path": "src/policy/refunds.py"
+                },
+                {
+                  "repo": "orders-api",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": null,
+              "weight": null,
+              "count": 1,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 1
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "Per the issue statement, billing-policy is the sole source of truth for the tier windows and needs no change; the modification is confined to orders-api's checkout request gate, with an optional docs-",
+                  "severity": "low",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": null,
+              "total": 3,
+              "specific": 0,
+              "generic": 3,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 0.0,
+              "severity": "unrecorded",
+              "recorded": false,
+              "state": "review_pending"
+            },
+            "overall": null
+          },
+          "lexical": {
+            "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+            "mode": "lexical",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": ""
+              }
+            ],
+            "attempts_stopped": 0,
+            "review": {
+              "state": "review_pending",
+              "correction_minutes_recorded": false,
+              "pending_fields": [
+                "claim_importance",
+                "assumption_severity",
+                "correction_minutes"
+              ]
+            },
+            "research": null,
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 0,
+              "calls_executed": 0,
+              "wall_seconds_used": 0.0,
+              "tokens": {
+                "input": null,
+                "output": null,
+                "input_lower_bound": 764,
+                "output_lower_bound": 2336,
+                "unknown_usage_calls": 0
+              },
+              "usd_estimated": 0.020216,
+              "usd_coverage": "receipted"
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 12,
+                "wall_seconds": 300.0,
+                "max_tokens_per_call": 3000,
+                "plan_max_tokens": 8000,
+                "max_usd_per_arm": 0.4,
+                "max_usd_total": 3.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": null,
+              "important_claims": 0,
+              "unreviewed_claims": 4,
+              "verdicts": {
+                "semantic_match": 4,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "C1",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "C2",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "C3",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "C4",
+                  "verdict": "semantic_match",
+                  "important": false
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 1.0,
+              "recall": 1.0,
+              "found": [
+                {
+                  "repo": "billing-policy",
+                  "path": "src/policy/refunds.py"
+                },
+                {
+                  "repo": "orders-api",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "missed": [],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": null,
+              "weight": null,
+              "count": 2,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 2
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "Only orders-api is modified in this pass; billing-policy and docs-site snapshots stay frozen.",
+                  "severity": "low",
+                  "invented_default": false
+                },
+                {
+                  "text": "Scope is limited to the checkout request gate in orders-api, not other refund handlers.",
+                  "severity": "low",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": null,
+              "total": 3,
+              "specific": 0,
+              "generic": 3,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 0.0,
+              "severity": "unrecorded",
+              "recorded": false,
+              "state": "review_pending"
+            },
+            "overall": null
+          },
+          "research": {
+            "task_id": "RC-17-live2-holdout-neighbor-tier-window",
+            "mode": "research",
+            "outcome": "graded",
+            "attempts": [
+              {
+                "attempt": 1,
+                "stopped_reason": "max_calls"
+              }
+            ],
+            "attempts_stopped": 1,
+            "review": {
+              "state": "review_pending",
+              "correction_minutes_recorded": false,
+              "pending_fields": [
+                "claim_importance",
+                "assumption_severity",
+                "correction_minutes"
+              ]
+            },
+            "research": {
+              "present": true,
+              "schema": "forge.discovery.research/1",
+              "complete": false,
+              "stopped_reason": "max_calls",
+              "partial_retained_as_partial": true,
+              "observations": 16,
+              "truncated_observations": 3,
+              "failed_observations": 0
+            },
+            "cost": {
+              "coverage": "recorded",
+              "attempts": 1,
+              "calls_proposed": 12,
+              "calls_executed": 12,
+              "wall_seconds_used": 141.788,
+              "tokens": {
+                "input": 7898,
+                "output": 11869,
+                "input_lower_bound": 7898,
+                "output_lower_bound": 11869,
+                "unknown_usage_calls": 0
+              },
+              "usd_estimated": 0.110748,
+              "usd_coverage": "receipted"
+            },
+            "budget": {
+              "agreed": {
+                "max_calls": 12,
+                "wall_seconds": 300.0,
+                "max_tokens_per_call": 3000,
+                "plan_max_tokens": 8000,
+                "max_usd_per_arm": 0.4,
+                "max_usd_total": 3.0
+              },
+              "within": true
+            },
+            "evidence_accuracy": {
+              "score": null,
+              "important_claims": 0,
+              "unreviewed_claims": 4,
+              "verdicts": {
+                "semantic_match": 4,
+                "syntactic_only": 0,
+                "invalid": 0,
+                "unverified": 0
+              },
+              "claims": [
+                {
+                  "claim_id": "c1",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "c2",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "c3",
+                  "verdict": "semantic_match",
+                  "important": false
+                },
+                {
+                  "claim_id": "c4",
+                  "verdict": "semantic_match",
+                  "important": false
+                }
+              ]
+            },
+            "impacted_surface_recall": {
+              "score": 0.5,
+              "recall": 0.5,
+              "found": [
+                {
+                  "repo": "billing-policy",
+                  "path": "src/policy/refunds.py"
+                }
+              ],
+              "missed": [
+                {
+                  "repo": "orders-api",
+                  "path": "src/checkout.py"
+                }
+              ],
+              "spurious": []
+            },
+            "unjustified_assumptions": {
+              "score": null,
+              "weight": null,
+              "count": 2,
+              "by_severity": {
+                "high": 0,
+                "medium": 0,
+                "low": 2
+              },
+              "invented_defaults": 0,
+              "detail": [
+                {
+                  "text": "Per the ISSUE, billing-policy's tier windows are the single source of truth and need no changes; only the orders-api checkout gate is modified.",
+                  "severity": "low",
+                  "invented_default": false
+                },
+                {
+                  "text": "Unknown/missing contract tiers should keep request_window_for's built-in fallback behavior rather than adding an orders-api-side default.",
+                  "severity": "low",
+                  "invented_default": false
+                }
+              ]
+            },
+            "question_quality": {
+              "score": null,
+              "total": 3,
+              "specific": 0,
+              "generic": 3,
+              "missing_decision_addressed": null
+            },
+            "human_plan_correction_effort": {
+              "minutes": 0.0,
+              "severity": "unrecorded",
+              "recorded": false,
+              "state": "review_pending"
+            },
+            "overall": null
+          }
+        }
+      }
+    }
+  },
+  "aggregate": {
+    "none": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 0,
+      "evidence_accuracy_mean": null,
+      "impacted_surface_recall_mean": 0.0,
+      "unjustified_assumptions_weight_mean": null,
+      "question_quality_mean": null,
+      "correction_minutes_mean": null,
+      "correction_minutes_known_tasks": 0,
+      "review_pending_tasks": 4,
+      "invented_defaults_total": 0,
+      "overall_mean": null,
+      "research": null,
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 0,
+        "calls_executed_total": 0,
+        "wall_seconds_used_total": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 1993,
+          "output_lower_bound": 8224,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated_total": 0.069778,
+        "usd_coverage": "receipted"
+      },
+      "budget_overruns": []
+    },
+    "lexical": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 0,
+      "evidence_accuracy_mean": null,
+      "impacted_surface_recall_mean": 0.5,
+      "unjustified_assumptions_weight_mean": null,
+      "question_quality_mean": null,
+      "correction_minutes_mean": null,
+      "correction_minutes_known_tasks": 0,
+      "review_pending_tasks": 4,
+      "invented_defaults_total": 0,
+      "overall_mean": null,
+      "research": null,
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 0,
+        "calls_executed_total": 0,
+        "wall_seconds_used_total": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 3231,
+          "output_lower_bound": 14674,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated_total": 0.123854,
+        "usd_coverage": "receipted"
+      },
+      "budget_overruns": []
+    },
+    "research": {
+      "tasks_total": 4,
+      "tasks_graded": 4,
+      "attempts_stopped_total": 3,
+      "evidence_accuracy_mean": null,
+      "impacted_surface_recall_mean": 0.75,
+      "unjustified_assumptions_weight_mean": null,
+      "question_quality_mean": null,
+      "correction_minutes_mean": null,
+      "correction_minutes_known_tasks": 0,
+      "review_pending_tasks": 4,
+      "invented_defaults_total": 0,
+      "overall_mean": null,
+      "research": {
+        "complete": 1,
+        "exhausted": 3,
+        "stopped_reasons": {
+          "max_calls": 3
+        }
+      },
+      "cost": {
+        "coverage": "complete",
+        "tasks_with_cost": 4,
+        "calls_proposed_total": 46,
+        "calls_executed_total": 46,
+        "wall_seconds_used_total": 461.795,
+        "tokens": {
+          "input": 32742,
+          "output": 45321,
+          "input_lower_bound": 32742,
+          "output_lower_bound": 45321,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated_total": 0.428052,
+        "usd_coverage": "receipted"
+      },
+      "budget_overruns": []
+    }
+  },
+  "promotion": {
+    "verdict": "HOLD",
+    "reasons": [
+      "evidence incomplete \u2014 promotion never leans on evidence it cannot bind",
+      "review_pending: RC-13-live2-neighbor-refund-approval/none",
+      "review_pending: RC-13-live2-neighbor-refund-approval/lexical",
+      "review_pending: RC-13-live2-neighbor-refund-approval/research",
+      "review_pending: RC-14-live2-ambiguous-approver/none",
+      "review_pending: RC-14-live2-ambiguous-approver/lexical",
+      "review_pending: RC-14-live2-ambiguous-approver/research",
+      "review_pending: RC-15-live2-irrelevant-docs-site/none",
+      "review_pending: RC-15-live2-irrelevant-docs-site/lexical"
+    ],
+    "candidate_mode": "research",
+    "baseline_mode": "lexical",
+    "evidence_class": "live-cohort:live-model",
+    "human_promotion_decision": {
+      "required": true,
+      "recorded": false,
+      "decision": null,
+      "decided_by": null,
+      "recorded_at": null
+    },
+    "sample": {
+      "lexical": {
+        "tasks_total": 4,
+        "tasks_graded": 4
+      },
+      "research": {
+        "tasks_total": 4,
+        "tasks_graded": 4
+      }
+    },
+    "hold_owner": "R37 review lead (adaptive)",
+    "hold_expires": "2026-10-22",
+    "hold_semantics": "HOLD routes to the named owner and EXPIRES on the recorded date; an expired HOLD without a recorded human decision is a ROLLBACK, never a silent pass",
+    "compared": {
+      "lexical": {
+        "overall_mean": null,
+        "evidence_accuracy_mean": null,
+        "invented_defaults_total": 0
+      },
+      "research": {
+        "overall_mean": null,
+        "evidence_accuracy_mean": null,
+        "invented_defaults_total": 0
+      }
+    }
+  },
+  "notes": [
+    "Held-back tasks are graded and reported SEPARATELY; they never enter the aggregate means and can never move the promotion verdict.",
+    "Exhaustion is never relabeled complete: a research pass stopped on a budget keeps complete=false and its stopped_reason into the report, and its partial findings stay partial.",
+    "Failed and exhausted attempts appear in this report WITH their cost coverage; quality means run over graded plans only, cost totals over every attempt.",
+    "Token totals stay lower bounds while any call's usage is unknown; unknown usage is counted, never silently re-totalled.",
+    "Every cost number is published beside its quality counterweight; the none/lexical columns are the frozen baseline for this cohort, and a re-recorded baseline is a new cohort.",
+    "Goodhart: the rubric grades recorded artifacts; once the cohort drives optimization, expect gaming \u2014 re-record a fresh cohort before a promotion decision that matters.",
+    "J-curve: early candidate-mode runs are expected to dip (tool-call overhead, wider surfaces); judge promotion on the pre-committed window recorded in the spec, not the first week.",
+    "The recorded artifacts this report replayed are EXAMPLES that exercise every grading path \u2014 not a real partner cohort; the verdict demonstrates the machinery, not evidence about production.",
+    "R36-12: a LIVE cohort runs under a pre-registered contract (frozen task set, budget, review procedure, promotion criteria); its report separates live-model from offline-scripted results, keeps review-pending dimensions unknown instead of estimated, and cannot leave HOLD until the human promotion decision is recorded."
+  ],
+  "preregistration": {
+    "schema": "forge.research.preregistration/1",
+    "cohort_id": "research-cohort-live-v1",
+    "generation": 2,
+    "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+    "supersedes": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+    "change_reason": "R37-11: gen-1 captured every arm offline-scripted with deterministic plan synthesis; gen-2 re-captures with the REAL model synthesizing every arm's plan (planner-mode comparison, not model) over the real frozen discovery-live snapshots, under hard dollar/token caps"
+  },
+  "review": {
+    "procedure": {
+      "blind": true,
+      "counterbalanced": true,
+      "ordering_seed": 20260925,
+      "correction_effort_procedure": "the reviewer edits each plan to acceptance and records wall-clock minutes; the procedure is identical for every arm; a missing reviewer leaves correction unknown, never estimated",
+      "rubric_forms": "task-specific acceptance criteria frozen in this preregistration",
+      "evidence_checker_role": "consistency check only \u2014 token overlap is not semantic entailment",
+      "reviewer_identity_required": "filled forms carry the reviewer's identity and timestamp; the shipped package is review_status=pending-human with every form unfilled \u2014 no fixture grades exist"
+    },
+    "pending": [
+      "RC-13-live2-neighbor-refund-approval/none",
+      "RC-13-live2-neighbor-refund-approval/lexical",
+      "RC-13-live2-neighbor-refund-approval/research",
+      "RC-14-live2-ambiguous-approver/none",
+      "RC-14-live2-ambiguous-approver/lexical",
+      "RC-14-live2-ambiguous-approver/research",
+      "RC-15-live2-irrelevant-docs-site/none",
+      "RC-15-live2-irrelevant-docs-site/lexical",
+      "RC-15-live2-irrelevant-docs-site/research",
+      "RC-16-live2-deep-superseded-policy/none",
+      "RC-16-live2-deep-superseded-policy/lexical",
+      "RC-16-live2-deep-superseded-policy/research"
+    ],
+    "note": "reviewer grades land as structured records over the blind package; until they do, the reviewer-graded dimensions stay unknown and the verdict cannot leave HOLD"
+  }
+}

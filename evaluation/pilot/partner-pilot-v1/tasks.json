@@ -1,0 +1,233 @@
+{
+  "schema": "forge.partner-pilot.taskset/1",
+  "task_set_id": "partner-pilot-v1-tasks",
+  "approval": "pending-code-owner-approval",
+  "note": "The staged task set. The one-observed-task task targets the LAB's disposable integration project (the machinery leg, spend bounded at 1.00 USD). The supervised-batch and operational-sample tasks are authored against THE PARTNER'S writable repo — named at signing; the named code owner approves this set before any of them runs (the contract's task-set gate).",
+  "tasks": [
+    {
+      "task_id": "obs-01",
+      "title": "One observed task on the lab (machinery leg)",
+      "stage": "one-observed-task",
+      "kind": "ordinary",
+      "brief": "In the disposable integration project, add a function pilot_stage1_probe() to pilot_probe.py that returns the integer 2026, with a test that asserts it. Keep the change single-purpose.",
+      "target": {
+        "repo": "lab disposable integration project (GitLab project id 68)",
+        "named_at": "lab (disposable, recreated per run)"
+      },
+      "spend_cap_usd": 1.0,
+      "acceptance": {
+        "oracle": [
+          "the contracted verification job (smoke) is green ON THE CANDIDATE SHA",
+          "pilot_probe.py on the candidate branch contains pilot_stage1_probe returning 2026"
+        ],
+        "note": "PR/MR creation is recorded but is NEVER acceptance"
+      }
+    },
+    {
+      "task_id": "batch-01",
+      "title": "Ordinary useful change (1 of 2)",
+      "stage": "supervised-batch",
+      "kind": "ordinary",
+      "brief": "One small, single-purpose change inside the partner's writable repo, chosen from the owner's own backlog at signing.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 1.0,
+      "acceptance": {
+        "oracle": ["the contracted verification is green on the candidate sha", "the owner's stated outcome check passes"]
+      }
+    },
+    {
+      "task_id": "batch-02",
+      "title": "Ordinary useful change (2 of 2)",
+      "stage": "supervised-batch",
+      "kind": "ordinary",
+      "brief": "A second small change from the owner's backlog, run under supervision with the operator observing every intervention.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 1.0,
+      "acceptance": {
+        "oracle": ["the contracted verification is green on the candidate sha", "the owner's stated outcome check passes"]
+      }
+    },
+    {
+      "task_id": "batch-03",
+      "title": "Ambiguous brief (question-first)",
+      "stage": "supervised-batch",
+      "kind": "ambiguity",
+      "brief": "A deliberately ambiguous brief: the correct behavior is asking the named question and waiting, never inventing a default; the owner's answer is recorded, then the task completes.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 1.0,
+      "acceptance": {
+        "oracle": ["the question was raised BEFORE any edit", "the answered task's edit rides the candidate and the verification is green"]
+      }
+    },
+    {
+      "task_id": "batch-04",
+      "title": "Neighbor dependency",
+      "stage": "supervised-batch",
+      "kind": "neighbor",
+      "brief": "The decisive evidence lives only in the read-only neighbor repo: the plan must cite it at the exact OID and the neighbor must stay untouched.",
+      "target": {
+        "repo": "the partner's writable repo (named at signing)",
+        "neighbor": "the partner's neighbor repo (read-only, named at signing)"
+      },
+      "spend_cap_usd": 1.5,
+      "acceptance": {
+        "oracle": ["the neighbor repo is byte-identical after the task", "the landed change equals the cited neighbor value"]
+      }
+    },
+    {
+      "task_id": "batch-05",
+      "title": "Operator intervention",
+      "stage": "supervised-batch",
+      "kind": "intervention",
+      "brief": "One supervised task the operator steers mid-run; the intervention is OBSERVED and recorded (what, when), never inferred.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 1.5,
+      "acceptance": {
+        "oracle": ["the steered deliverable rides the candidate", "the intervention is recorded with its durable command evidence"]
+      }
+    },
+    {
+      "task_id": "sample-01",
+      "title": "Operational sample (01) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 1).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-02",
+      "title": "Operational sample (02) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 2).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-03",
+      "title": "Operational sample (03) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 3).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-04",
+      "title": "Operational sample (04) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 4).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-05",
+      "title": "Operational sample (05) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 5).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-06",
+      "title": "Operational sample (06) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 6).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-07",
+      "title": "Operational sample (07) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 7).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-08",
+      "title": "Operational sample (08) — ordinary",
+      "stage": "operational-sample",
+      "kind": "ordinary",
+      "brief": "Ordinary useful work from the owner's backlog (sample task 8).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the contracted verification is green on the candidate sha"] }
+    },
+    {
+      "task_id": "sample-09",
+      "title": "Operational sample (09) — ambiguity",
+      "stage": "operational-sample",
+      "kind": "ambiguity",
+      "brief": "An ambiguous brief inside the sample: question-first is the correct outcome, counted as such.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the question was raised BEFORE any edit", "the answered task verifies green"] }
+    },
+    {
+      "task_id": "sample-10",
+      "title": "Operational sample (10) — neighbor dependency",
+      "stage": "operational-sample",
+      "kind": "neighbor",
+      "brief": "A neighboring-service dependency: the decisive evidence is in the read-only neighbor, cited at the exact OID.",
+      "target": {
+        "repo": "the partner's writable repo (named at signing)",
+        "neighbor": "the partner's neighbor repo (read-only, named at signing)"
+      },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the neighbor stays untouched", "the landed change equals the cited value"] }
+    },
+    {
+      "task_id": "sample-11",
+      "title": "Operational sample (11) — intervention",
+      "stage": "operational-sample",
+      "kind": "intervention",
+      "brief": "One task needing operator intervention inside the sample; the intervention is observed and recorded.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the intervention is recorded with durable command evidence", "the deliverable verifies green"] }
+    },
+    {
+      "task_id": "sample-12",
+      "title": "Operational sample (12) — controlled infrastructure failure",
+      "stage": "operational-sample",
+      "kind": "infra-failure",
+      "brief": "One CONTROLLED infrastructure failure (operator-scheduled, announced): the run must fail loudly, publish nothing, and recover safely.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the failure was loud (terminal reason recorded)", "nothing was published from the failed leg", "the authorized retry verifies green"] }
+    },
+    {
+      "task_id": "sample-13",
+      "title": "Operational sample (13) — customer runbook recovery",
+      "stage": "operational-sample",
+      "kind": "recovery",
+      "brief": "The CUSTOMER performs one safe recovery from the runbook while the maintainer records every intervention — the customer must understand the blocked reason independently.",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the customer performed the recovery from the documentation", "every intervention the maintainer made is recorded"] }
+    },
+    {
+      "task_id": "sample-14",
+      "title": "Operational sample (14) — human rejection despite green CI",
+      "stage": "operational-sample",
+      "kind": "human-rejection",
+      "brief": "One task the customer REJECTS despite green CI and a passing oracle — the rejection stays in the final denominator (acceptance is not pipeline success).",
+      "target": { "repo": "the partner's writable repo (named at signing)" },
+      "spend_cap_usd": 2.0,
+      "acceptance": { "oracle": ["the candidate verified green", "the customer's rejection is recorded and stays counted"] }
+    }
+  ]
+}

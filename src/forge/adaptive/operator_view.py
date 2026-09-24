@@ -42,18 +42,26 @@ signals, never asserted by workers. This module is that projection:
   thin evidence links. No secrets, no raw prompts — identity and evidence
   are digests by construction, and the whole document passes the redaction
   guard anyway.
+- :func:`explain_blocked` — the typed, evidence-linked diagnostics
+  (R37-16): why a run waits as a closed vocabulary of outcome codes
+  (:data:`BLOCKED_CODES`), each with a one-line explanation, a thin link
+  to the exact proving row and the SAFE next action — never a generic
+  retry suggestion for the non-retryable conditions.
 
 Row shapes (the documented mapping — hand-built fixtures and durable rows
 alike normalize through ``operator_timeline._view_of``, so plain dicts,
 dataclasses and pydantic contracts all read):
 
 - ``run`` — a ``flow_runs``-shaped mapping: ``id``, ``status``,
-  ``base_sha``, ``candidate_shas``, ``plan_digest``, ``evidence``,
+  ``base_sha``, ``candidate_shas`` (a HISTORY list — the CURRENT
+  candidate is the row's ``active_candidate_sha`` pointer when it
+  records one, else the LAST member), ``plan_digest``, ``evidence``,
   ``blocked_reason``, ``cancel_requested``, ``updated_at``;
 - ``attempts`` — attempt rows: ``attempt_id``/``id``, ``status``
   (``executing`` / ``succeeded`` / ``failed`` / ``cancelled`` /
   ``accepted``; absent → unknown, never guessed), ``started_at``,
-  ``updated_at``, ``generation``;
+  ``updated_at``, ``generation`` (the attempt's OWN record's
+  generation — ``"unknown"`` when not recorded, R37-03);
 - ``commands`` — control-command rows (the mailbox/router shapes):
   ``command_id``, ``kind`` (``pause``/``resume``/``steer``/``answer``/…),
   ``status`` (the ladder ``received → authorized → dispatching →
@@ -61,7 +69,9 @@ dataclasses and pydantic contracts all read):
   expired), ``sequence``, ``actor_ref``, ``created_at``;
 - ``checkpoints`` — checkpoint rows: ``checkpoint_id``/``id``,
   ``digest``, ``committed_at``, ``activated_at`` (the resume proof: the
-  bytes were ACTIVATED, not merely requested), ``fence``
+  bytes were ACTIVATED by the resume command that named THIS
+  checkpoint — an applied resume naming a different one leaves it
+  ``None`` with ``activation: "unmatched-command"``, R37-03), ``fence``
   (``held``/``cleared``; empty means the router's pause-booking pairing
   holds it), ``sequence``;
 - ``verifications`` — verification rows: ``verification_id``/``id``,
@@ -69,8 +79,10 @@ dataclasses and pydantic contracts all read):
   A ``passed`` row binds to the CURRENT candidate: when it names a
   ``candidate_sha`` that is not among the run's ``candidate_shas`` it is
   an OLD green verdict about a DIFFERENT candidate and decorates nothing
-  (R36-15 — the binding is asserted by tests); a row naming no candidate
-  binds to whatever candidate the run holds;
+  (R36-15 — the binding is asserted by tests); a row naming the CURRENT
+  candidate (or naming none) is current readiness; a row naming a
+  NON-current member renders ``historical_pass`` in the history section,
+  never current readiness (R37-03);
 - ``publications`` — publication-intent rows: ``operation_key``/``id``,
   ``status``, ``operation``, ``target_ref``, ``at``;
 - ``approvals`` — gate-approval rows: ``approved_by``, ``at``,
@@ -87,7 +99,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal
@@ -102,6 +115,9 @@ __all__ = [
     "ACTOR_ROLES",
     "ACTIONS",
     "ActionDecision",
+    "BLOCKED_CODES",
+    "BlockedReason",
+    "NON_RETRYABLE_CODES",
     "OperatorAction",
     "OperatorProjection",
     "OPERATOR_STATES",
@@ -113,11 +129,14 @@ __all__ = [
     "UNRESOLVED_PUBLICATION_STATUSES",
     "WEDGED_AFTER",
     "apply_update",
+    "current_candidate",
     "derive_state",
+    "explain_blocked",
     "initial_projection",
     "render",
     "source_digest",
     "status_note_lines",
+    "verification_binding",
 ]
 
 #: The schema discriminator every rendered projection carries (versioned:
@@ -214,6 +233,56 @@ _VERIFICATION_PASSED: Final[frozenset[str]] = frozenset({"passed", "pass"})
 
 #: Attempt status words that mean "the process is working right now".
 _ATTEMPT_ACTIVE: Final[frozenset[str]] = frozenset({"executing", "running"})
+
+
+def current_candidate(run: Mapping[str, Any], candidate_shas: Sequence[Any]) -> str:
+    """The run's CURRENT candidate (R37-03) — the row's explicit
+    ``active_candidate_sha`` pointer when it records one, else the LAST
+    ``candidate_shas`` member (the append order the services write: each
+    repair cycle appends). NEVER the first member by accident — the list
+    is a HISTORY, and an old member's green verdict is history, not
+    current readiness."""
+    active = run.get("active_candidate_sha")
+    if isinstance(active, str) and active.strip():
+        return active.strip()
+    entries = [str(sha) for sha in candidate_shas if str(sha or "").strip()]
+    return entries[-1] if entries else ""
+
+
+def verification_binding(
+    verifications: Sequence[Mapping[str, Any]],
+    candidate_shas: Sequence[Any],
+    current: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split passed verifications into (current, historical) bindings.
+
+    A ``passed`` row binds to the CURRENT candidate only when it names
+    it (or names no candidate at all — the hand-built fixture shape that
+    binds to whatever the run holds). A pass naming a NON-current
+    ``candidate_shas`` member is an OLD green verdict about an earlier
+    artifact: it renders as ``historical_pass`` (a history entry), never
+    as current readiness. A pass naming something outside the run's
+    candidates entirely decorates nothing at all (the R36-15 pin).
+    """
+    members = {str(sha) for sha in candidate_shas}
+    current_rows: list[dict[str, Any]] = []
+    historical: list[dict[str, Any]] = []
+    for row in verifications:
+        if str(_first(row, "result", "outcome") or "") not in _VERIFICATION_PASSED:
+            continue
+        named = str(row.get("candidate_sha") or "")
+        if named in ("", current):
+            current_rows.append(dict(row))
+        elif named in members:
+            historical.append(
+                {
+                    "verification_id": str(_first(row, "verification_id", "id") or ""),
+                    "candidate_sha": named,
+                    "at": _iso(row.get("at")),
+                    "verdict": "historical_pass",
+                }
+            )
+    return current_rows, historical
 
 
 # ---------------------------------------------------------------------------
@@ -421,17 +490,17 @@ def derive_state(
     run_evidence = run.get("evidence") if isinstance(run.get("evidence"), Mapping) else {}
     if not candidate_shas and isinstance(_first(run_evidence, "candidate_sha"), str):
         candidate_shas = [run_evidence["candidate_sha"]]
-    # R36-15: a passed verification DECORATES only the candidate it tested.
-    # A row whose candidate_sha is not among the run's current candidates is
-    # an old green verdict about a DIFFERENT artifact — it cannot make the
-    # current one verified_ready. A row naming no candidate binds to
-    # whatever candidate the run holds (the hand-built fixture shape).
-    verifying = [
-        v
-        for v in verifications
-        if str(_first(v, "result", "outcome") or "") in _VERIFICATION_PASSED
-        and str(v.get("candidate_sha") or "") in ("", *candidate_shas)
-    ]
+    # R36-15/#274: a passed verification DECORATES only the candidate it
+    # tested. R37-03 tightens the binding to the CURRENT candidate (the
+    # row's active pointer, else the LAST member — the list is history):
+    # a pass naming a NON-current member is an old green verdict about an
+    # earlier artifact — it renders as a historical pass, never current
+    # readiness. A row naming no candidate binds to whatever candidate
+    # the run holds (the hand-built fixture shape).
+    candidate_now = current_candidate(run, candidate_shas)
+    verifying, historical_passes = verification_binding(
+        verifications, candidate_shas, candidate_now
+    )
     verified = bool(verifying)
     accepted_marker = bool(run_evidence.get("accepted") or run_evidence.get("accepted_by"))
 
@@ -496,12 +565,12 @@ def derive_state(
         state = "verified_ready"
         link("verification", _first(verifying[-1], "verification_id", "id"), verifying[-1])
         reasons.append(
-            f"candidate {candidate_shas[0][:12]} exists, verification passed for that candidate"
+            f"candidate {candidate_now[:12]} exists, verification passed for that candidate"
         )
     elif candidate_shas:
         state = "unverified"
         link("run", run_id, run)
-        reasons.append(f"candidate {candidate_shas[0][:12]} exists, no passed verification")
+        reasons.append(f"candidate {candidate_now[:12]} exists, no passed verification")
     elif approvals or any(str(c.get("status") or "") == "authorized" for c in commands):
         state = "authorized"
         if approvals:
@@ -590,15 +659,18 @@ class OperatorProjection:
     computed_at: str
     source_digest: str
     rows_observed: dict[str, str]
+    verification_history: tuple[dict[str, Any], ...] = ()
 
     @property
     def action_digest(self) -> str:
         """The audit four-facts WHAT — the exact artifact a decision about
-        this projection refers to: the candidate sha, else the checkpoint
-        digest, else the plan digest, else the whole source digest."""
-        candidates = self.identity.get("candidate_shas") or []
-        if candidates:
-            return str(candidates[0])
+        this projection refers to: the CURRENT candidate (the active
+        pointer, else the newest list member — never an old member by
+        accident), else the checkpoint digest, else the plan digest, else
+        the whole source digest."""
+        current = self.identity.get("active_candidate")
+        if current:
+            return str(current)
         for key in ("checkpoint_digest", "plan_digest"):
             if self.identity.get(key):
                 return str(self.identity[key])
@@ -684,6 +756,7 @@ def _assemble(
     attempts = [_norm(row) for row in source_rows.get("attempts") or []]
     latest_attempt = attempts[-1] if attempts else None
     publications = [_norm(row) for row in source_rows.get("publications") or []]
+    verifications = [_norm(row) for row in source_rows.get("verifications") or []]
     unresolved = tuple(
         redact(
             {
@@ -696,10 +769,13 @@ def _assemble(
         for pub in publications
         if str(_first(pub, "status") or "") in UNRESOLVED_PUBLICATION_STATUSES
     )
+    candidate_history = list(run.get("candidate_shas") or [])
+    candidate_now = current_candidate(run, candidate_history)
     identity = redact(
         {
             "source_sha": str(run.get("base_sha") or ""),
-            "candidate_shas": list(run.get("candidate_shas") or []),
+            "candidate_shas": candidate_history,
+            "active_candidate": candidate_now,
             "checkpoint_id": str(_first(checkpoint, "checkpoint_id", "id") or "")
             if checkpoint
             else "",
@@ -713,6 +789,7 @@ def _assemble(
             else run.get("commit_cycle"),
         }
     )
+    _, historical_passes = verification_binding(verifications, candidate_history, candidate_now)
     return OperatorProjection(
         schema=OPERATOR_VIEW_SCHEMA,
         run_id=run_id,
@@ -730,6 +807,7 @@ def _assemble(
         computed_at=_iso(now),
         source_digest=source_digest(source_rows),
         rows_observed=_rows_observed(source_rows),
+        verification_history=tuple(redact(entry) for entry in historical_passes),
     )
 
 
@@ -814,6 +892,7 @@ def render(projection: OperatorProjection) -> dict[str, Any]:
             "waiting_on": projection.waiting_on,
             "summary": projection.summary,
             "identity": dict(projection.identity),
+            "verification_history": [dict(entry) for entry in projection.verification_history],
             "unresolved_effects": [dict(effect) for effect in projection.unresolved_effects],
             "evidence": [dict(link) for link in projection.evidence],
             "derivation": list(projection.reasons),
@@ -853,8 +932,11 @@ def status_note_lines(projection: OperatorProjection) -> list[str]:
     if identity.get("generation") is not None:
         detail.append(f"generation {identity['generation']}")
     candidates = identity.get("candidate_shas") or []
-    if candidates:
-        detail.append(f"candidate {_short(candidates[0])}")
+    current = identity.get("active_candidate") or (candidates[-1] if candidates else "")
+    if current:
+        detail.append(f"candidate {_short(current)}")
+    if candidates and len(candidates) > 1:
+        detail.append(f"{len(candidates) - 1} earlier candidate(s) in history")
     if identity.get("checkpoint_id"):
         digest = _short(identity.get("checkpoint_digest"), 12)
         detail.append(
@@ -874,6 +956,295 @@ def status_note_lines(projection: OperatorProjection) -> list[str]:
     if projection.last_transition_at:
         lines.append(f"Last transition: {projection.last_transition_at}")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Blocked-reason explanations (R37-16) — typed, evidence-linked, non-generic
+# ---------------------------------------------------------------------------
+
+#: The typed blocked-reason outcome codes. Every code names an OBSERVED
+#: condition (a durable row or an honesty mark), never a guess, and each
+#: carries its own safe next action — a non-retryable condition NEVER
+#: suggests retry (a revoked credential cannot be retried into validity,
+#: an uncertain effect cannot be retried around, a lost checkpoint
+#: cannot be retried into existence).
+BLOCKED_CODES: Final[tuple[str, ...]] = (
+    "revoked_authority",
+    "uncertain_native_effect",
+    "required_checkpoint_loss",
+    "capacity_wait",
+    "verification_stale",
+)
+
+#: The codes whose safe next action is NEVER retry — retrying these is
+#: exactly the drive-by write the operator console exists to prevent.
+NON_RETRYABLE_CODES: Final[frozenset[str]] = frozenset(
+    {"revoked_authority", "uncertain_native_effect", "required_checkpoint_loss"}
+)
+
+#: The authority-refusal spellings a run's ``blocked_reason`` (the run
+#: row's ``status_reason``) may carry for a revoked/refused authority —
+#: the typed outcome the provider surfaces (401/403 wordings, revoked or
+#: expired credentials, suspended permissions).
+_REVOKED_AUTHORITY_RE: Final[re.Pattern[str]] = re.compile(
+    r"revoked|suspended|unauthori[sz]ed|forbidden|permission(?:s)? denied"
+    r"|(?:credential|token|key|secret)\s+[a-z]*\s*(?:rejected|invalid|expired|revoked)"
+    r"|\b(?:401|403)\b",
+    re.IGNORECASE,
+)
+
+#: The capacity/admission spellings a ``blocked_reason`` may carry while
+#: work waits for a slot (the bounded-admission refusals and provider
+#: throttling wordings).
+_CAPACITY_WAIT_RE: Final[re.Pattern[str]] = re.compile(
+    r"queue|capacity|slot|admission|concurren|throttl|saturation|rate.?limit",
+    re.IGNORECASE,
+)
+
+#: The occupancy words that mean "capacity is held and UNCERTAIN" — the
+#: leases whose release needs evidence (the reconciler's probe), never a
+#: timer. ``native_running`` is healthy occupancy, not a blockage.
+_UNCERTAIN_OCCUPANCY: Final[frozenset[str]] = frozenset({"dispatched_unknown", "draining"})
+
+#: The safe next actions the explanations name — runbook verbs or the
+#: read-only probe, each linking to where it is executed (a guarded
+#: command route or a runbook document, never a new mutation path here).
+_SUGGESTED_VIA: Final[Mapping[str, str]] = {
+    "rotate_or_rebind_credential": "runbook:token-rotation",
+    "reconcile": "operator-commands:/reconcile",
+    "restore_checkpoint_or_retire": "runbook:backup-restore",
+    "wait_for_reconciler": "read-only:/status",
+    "verify_current_candidate": "read-only:/status",
+    "probe": "read-only:/status",
+}
+
+
+@dataclass(frozen=True)
+class BlockedReason:
+    """One typed explanation of why a run waits (R37-16).
+
+    ``code`` is the closed :data:`BLOCKED_CODES` outcome; ``explanation``
+    is the one-line human sentence; ``evidence`` is the THIN link to the
+    exact row that proves it (``{"of", "id", "ref"}`` — which section,
+    which row, its digest — never the payload); ``suggested_action`` is
+    the safe next action with ``via`` naming the guarded route or
+    runbook that executes it; ``retryable`` says whether a retry could
+    ever help (``False`` for the non-retryable conditions — their
+    suggested action is never retry).
+    """
+
+    code: str
+    explanation: str
+    evidence: dict[str, str]
+    suggested_action: str
+    via: str
+    retryable: bool
+
+    def as_document(self) -> dict[str, Any]:
+        """The redacted render of one reason (the diagnostics surface)."""
+        return redact(
+            {
+                "code": self.code,
+                "explanation": self.explanation,
+                "evidence": dict(self.evidence),
+                "suggested_action": self.suggested_action,
+                "via": self.via,
+                "retryable": self.retryable,
+            }
+        )
+
+
+def _age_seconds(at: str, now: str) -> float | None:
+    """Seconds between *now* and the ISO *at* — ``None`` when either
+    carries no readable clock (never a synthesized age)."""
+    moment = _as_datetime(at)
+    reference = _as_datetime(now)
+    if moment is None or reference is None:
+        return None
+    return max(0.0, (reference - moment).total_seconds())
+
+
+def explain_blocked(
+    projection: OperatorProjection,
+    *,
+    coverage: Mapping[str, str] | None = None,
+    occupancy: Sequence[Mapping[str, Any]] | None = None,
+    checkpoints: Sequence[Mapping[str, Any]] | None = None,
+) -> list[BlockedReason]:
+    """The typed, evidence-linked explanations of why *projection* waits.
+
+    Each reason is derived from an OBSERVED fact on the projection — the
+    run row's blocked reason (an authority refusal), an unresolved
+    external effect, a paused run whose checkpoint authority reads
+    ``missing``/``unknown`` (the honesty marks a live snapshot carries;
+    pass them through *coverage*, with the *checkpoints* section rows so
+    a HELD fence is visible), an execution lease holding capacity with
+    uncertain occupancy (*occupancy*, the snapshot's lease slice), or a
+    green verdict that names an earlier candidate — and links to the
+    EXACT evidence row (its id/digest). Non-retryable conditions name
+    their real remediation (rotate the credential, reconcile the effect,
+    restore the checkpoint), never a generic "try retrying".
+
+    Pure: reads the projection (and the optional honesty slices), writes
+    nothing, executes nothing.
+    """
+    reasons: list[BlockedReason] = []
+    run_link = next(
+        (dict(link) for link in projection.evidence if link.get("of") == "run"),
+        {
+            "of": "run",
+            "id": projection.run_id,
+            "ref": _digest_json(
+                {"run_id": projection.run_id, "blocked_reason": projection.blocked_reason}
+            ),
+        },
+    )
+    blocked_reason = str(projection.blocked_reason or "")
+
+    # 1. a revoked / refused authority — the credential or permission the
+    #    run depends on was withdrawn; retrying cannot restore it.
+    if blocked_reason and _REVOKED_AUTHORITY_RE.search(blocked_reason):
+        reasons.append(
+            BlockedReason(
+                code="revoked_authority",
+                explanation=(
+                    "the run is blocked by a revoked or refused authority "
+                    f"({blocked_reason}) — a retry cannot restore withdrawn authority"
+                ),
+                evidence=run_link,
+                suggested_action="rotate_or_rebind_credential",
+                via=_SUGGESTED_VIA["rotate_or_rebind_credential"],
+                retryable=False,
+            )
+        )
+
+    # 2. uncertain external effects — an effect whose landing is unproven
+    #    blocks any safe retry until it is determined.
+    for effect in projection.unresolved_effects:
+        effect_view = dict(effect)
+        reasons.append(
+            BlockedReason(
+                code="uncertain_native_effect",
+                explanation=(
+                    f"external effect {effect_view.get('operation_key', '')} "
+                    f"({effect_view.get('operation', '')} on "
+                    f"{effect_view.get('target_ref', '')}) is "
+                    f"{effect_view.get('status', '')} — its landing is unproven; "
+                    "determine it before any retry"
+                ),
+                evidence={
+                    "of": "publication",
+                    "id": str(effect_view.get("operation_key", "")),
+                    "ref": _digest_json(effect_view),
+                },
+                suggested_action="reconcile",
+                via=_SUGGESTED_VIA["reconcile"],
+                retryable=False,
+            )
+        )
+
+    # 3. required-checkpoint loss — the run stands paused (a held fence or
+    #    a safely_paused derivation) on a checkpoint the authority no
+    #    longer holds (the coverage honesty marks from the snapshot).
+    fence_held = any(str(row.get("fence") or "") == "held" for row in checkpoints or ())
+    if (
+        coverage is not None
+        and str(coverage.get("checkpoints", "")) in ("missing", "unknown")
+        and (projection.underlying_state == "safely_paused" or fence_held)
+    ):
+        checkpoint_id = str(projection.identity.get("checkpoint_id") or "")
+        reasons.append(
+            BlockedReason(
+                code="required_checkpoint_loss",
+                explanation=(
+                    f"the run is paused on checkpoint {checkpoint_id or '(none named)'} "
+                    f"but the checkpoint authority reads "
+                    f"{coverage.get('checkpoints')!r} — a resume has no bytes to restore"
+                ),
+                evidence={
+                    "of": "checkpoint",
+                    "id": checkpoint_id,
+                    "ref": str(projection.identity.get("checkpoint_digest") or "")
+                    or _digest_json({"coverage": coverage.get("checkpoints")}),
+                },
+                suggested_action="restore_checkpoint_or_retire",
+                via=_SUGGESTED_VIA["restore_checkpoint_or_retire"],
+                retryable=False,
+            )
+        )
+
+    # 4. capacity wait — a lease holds capacity with UNCERTAIN occupancy
+    #    (the reconciler must prove it free), or the blocked reason names
+    #    the bounded-admission wait.
+    for row in occupancy or ():
+        word = str(row.get("occupancy") or "")
+        if word not in _UNCERTAIN_OCCUPANCY:
+            continue
+        age = _age_seconds(str(row.get("acquired_at") or ""), projection.computed_at)
+        lease_link = {
+            "of": "lease",
+            "id": str(row.get("lease_id", "")),
+            "ref": _digest_json(dict(row)),
+        }
+        reasons.append(
+            BlockedReason(
+                code="capacity_wait",
+                explanation=(
+                    f"execution capacity is held by lease {row.get('lease_id', '')} in "
+                    f"state {word}"
+                    + (f" for {int(age)}s" if age is not None else "")
+                    + " — the slot frees only from evidence (the reconciler's probe)"
+                ),
+                evidence=lease_link,
+                suggested_action="wait_for_reconciler",
+                via=_SUGGESTED_VIA["wait_for_reconciler"],
+                retryable=True,
+            )
+        )
+    if (
+        blocked_reason
+        and _CAPACITY_WAIT_RE.search(blocked_reason)
+        and not any(reason.code == "capacity_wait" for reason in reasons)
+    ):
+        reasons.append(
+            BlockedReason(
+                code="capacity_wait",
+                explanation=(
+                    f"the run waits for execution capacity ({blocked_reason}) — "
+                    "admission is bounded by policy, not stuck"
+                ),
+                evidence=run_link,
+                suggested_action="wait_for_reconciler",
+                via=_SUGGESTED_VIA["wait_for_reconciler"],
+                retryable=True,
+            )
+        )
+
+    # 5. verification stale — the only green verdict names an earlier
+    #    candidate; the CURRENT candidate is unverified.
+    if projection.state == "unverified" and projection.verification_history:
+        current = str(projection.identity.get("active_candidate") or "")
+        for entry in projection.verification_history:
+            named = str(entry.get("candidate_sha") or "")
+            reasons.append(
+                BlockedReason(
+                    code="verification_stale",
+                    explanation=(
+                        f"the passing verification covers candidate {named[:12]}, not the "
+                        f"current {current[:12]} — the current candidate is unverified"
+                    ),
+                    evidence={
+                        "of": "verification",
+                        "id": str(entry.get("verification_id", "")),
+                        "ref": _digest_json(dict(entry)),
+                    },
+                    suggested_action="verify_current_candidate",
+                    via=_SUGGESTED_VIA["verify_current_candidate"],
+                    retryable=True,
+                )
+            )
+
+    return reasons
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,58 @@
+{
+  "records": [
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {},
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "re-check by re-running: uv run python scripts/run_pilot_stage.py --stage supervised-batch"
+      ],
+      "recorded_at": "2026-09-24T11:53:39.938679+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "supervised-batch",
+      "stage_complete": false,
+      "status": "pending-partner",
+      "task_refs": [
+        "batch-01",
+        "batch-02",
+        "batch-03",
+        "batch-04",
+        "batch-05"
+      ],
+      "timings": {},
+      "unmet_preconditions": [
+        {
+          "check": "stage-one-observed-task-complete",
+          "met": false,
+          "reason": "stage 'one-observed-task' is pending-lab \u2014 the ladder advances in order",
+          "resolution": "complete stage 'one-observed-task' first"
+        },
+        {
+          "check": "customer-named",
+          "met": false,
+          "reason": "the customer is pending-recruitment \u2014 a NAMED external customer is a prerequisite the machinery cannot fabricate",
+          "resolution": "recruit the design partner (maintainer's act), then re-freeze the contract"
+        },
+        {
+          "check": "task-set-approved",
+          "met": false,
+          "reason": "the task set awaits the named code owner's approval",
+          "resolution": "the named code owner approves the task set (an acceptance criterion, not a formality)"
+        },
+        {
+          "check": "baseline-observed",
+          "met": false,
+          "reason": "baseline axes still pending: ['assisted_coding_minutes', 'reviewer_minutes', 'ops_intervention_minutes', 'waiting_minutes']",
+          "resolution": "measure the customer's ACTUAL workflow per axis (assisted coding, review, ops intervention, waiting) \u2014 an authored baseline is refused"
+        }
+      ],
+      "usage_receipts": []
+    }
+  ],
+  "schema": "forge.partner-pilot.stage-records/1",
+  "stage": "supervised-batch",
+  "status": "pending-partner"
+}

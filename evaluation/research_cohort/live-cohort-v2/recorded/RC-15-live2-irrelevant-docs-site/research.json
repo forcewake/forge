@@ -1,0 +1,583 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-15-live2-irrelevant-docs-site",
+  "mode": "research",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "max_calls",
+      "cost": {
+        "calls_proposed": 12,
+        "calls_executed": 12,
+        "wall_seconds_used": 111.825,
+        "tokens": {
+          "input": 7620,
+          "output": 11506,
+          "input_lower_bound": 7620,
+          "output_lower_bound": 11506,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.107288,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 458,
+            "output_tokens": 394,
+            "charged_input_tokens": 458,
+            "charged_output_tokens": 394,
+            "usage_known": true,
+            "usd_estimated": 0.004068,
+            "running_usd_estimated": 0.32597
+          },
+          {
+            "input_tokens": 873,
+            "output_tokens": 483,
+            "charged_input_tokens": 873,
+            "charged_output_tokens": 483,
+            "usage_known": true,
+            "usd_estimated": 0.00561,
+            "running_usd_estimated": 0.33158
+          },
+          {
+            "input_tokens": 1152,
+            "output_tokens": 2207,
+            "charged_input_tokens": 1152,
+            "charged_output_tokens": 2207,
+            "usage_known": true,
+            "usd_estimated": 0.01996,
+            "running_usd_estimated": 0.35154
+          },
+          {
+            "input_tokens": 2160,
+            "output_tokens": 1509,
+            "charged_input_tokens": 2160,
+            "charged_output_tokens": 1509,
+            "usage_known": true,
+            "usd_estimated": 0.016392,
+            "running_usd_estimated": 0.367932
+          },
+          {
+            "input_tokens": 2977,
+            "output_tokens": 6913,
+            "charged_input_tokens": 2977,
+            "charged_output_tokens": 6913,
+            "usage_known": true,
+            "usd_estimated": 0.061258,
+            "running_usd_estimated": 0.42919
+          }
+        ]
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": false,
+    "stopped_reason": "max_calls",
+    "iterations": 4,
+    "calls_proposed": 12,
+    "calls_executed": 12,
+    "observations": {
+      "count": 12,
+      "truncated": 2,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0
+    },
+    "wall_seconds_used": 111.825,
+    "tokens": {
+      "input": 4643,
+      "output": 4593,
+      "input_lower_bound": 4643,
+      "output_lower_bound": 4593,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing-policy",
+      "orders-api"
+    ],
+    "repos_authorized": [
+      "billing-policy",
+      "docs-site",
+      "orders-api"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 15,
+        "kind": "research_match",
+        "detail": "manual"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 20,
+        "kind": "research_match",
+        "detail": "manual"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 9,
+        "kind": "research_match",
+        "detail": "manual"
+      },
+      {
+        "evidence_id": "ev-4",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 141,
+        "kind": "research_read",
+        "detail": "read 160 chars from offset 140"
+      },
+      {
+        "evidence_id": "ev-5",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 60 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-6",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 200 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-7",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/orders/handlers/refunds.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 744 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-8",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 883 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-9",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 141,
+        "kind": "research_read",
+        "detail": "read 4000 chars from offset 140"
+      },
+      {
+        "evidence_id": "ev-10",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 2300 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-11",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/orders/models.py",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 825 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-12",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "README.md",
+        "line": 7,
+        "kind": "research_match",
+        "detail": "policy|manual_review|decision|refund_status"
+      },
+      {
+        "evidence_id": "ev-13",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "README.md",
+        "line": 8,
+        "kind": "research_match",
+        "detail": "policy|manual_review|decision|refund_status"
+      },
+      {
+        "evidence_id": "ev-14",
+        "repo_key": "orders-api",
+        "repository_id": "gitlab:orders-api",
+        "path": "src/checkout.py",
+        "line": 3,
+        "kind": "research_match",
+        "detail": "policy|manual_review|decision|refund_status"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "list_paths",
+      "repo_key": "billing-policy",
+      "call": "prefix",
+      "content": "README.md\nsrc/policy/client.py\nsrc/policy/refunds.py",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "list_paths",
+      "repo_key": "orders-api",
+      "call": "prefix",
+      "content": "README.md\nsrc/checkout.py\nsrc/orders/handlers/refunds.py\nsrc/orders/models.py",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern manual",
+      "content": "src/policy/client.py:15:         statuses consumers route on: ``manual_review`` or\nsrc/policy/client.py:20:         return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\nsrc/policy/refunds.py:9: Layout note: the CURRENT manual-approval policy lives near the END of\nsrc/policy/refunds.py:155:         return \"manual_review\"\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:223: #: Who owns approval routing for manual-review refunds (the approvals\nsrc/policy/refunds.py:228: def requires_manual_approval(amount_cents: int) -> bool:\nsrc/policy/refunds.py:238:     return \"manual_approval\" if requires_manual_approval(amount_cents) else \"auto_capture\"\nsrc/policy/refunds.py:252:         return self.decision == \"manual_approval\"\nsrc/policy/refunds.py:295:     \"requires_manual_approval\",",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern refund",
+      "content": "README.md:3: The Orders service. The writable target of the refund-request task:\nREADME.md:4: refund request handling lives in `src/checkout.py` and\nREADME.md:5: `src/orders/handlers/refunds.py`.\nREADME.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nsrc/checkout.py:1: \"\"\"Orders' checkout \u2014 where refund requests enter this service.\nsrc/checkout.py:3: The refund-request flow deliberately OWNS no policy of its own: every\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/checkout.py:8: reintroduce local refund thresholds here.\nsrc/checkout.py:21: #: refund. This is the ORDER-SIDE request gate; the money-side decision\nsrc/checkout.py:27:     \"\"\"The checkout surface: place orders, request refunds.\"\"\"\nsrc/checkout.py:32:     def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\nsrc/checkout.py:33:         \"\"\"Accept a refund request for an expired order.\nsrc/checkout.py:39:         status = self._policy.refund_status(order.id, amount_cents)\nsrc/checkout.py:41:             # Finance requires an approval step for large refunds, but the\nsrc/checkout.py:52:             raise ValueError(\"refund request window has closed\")\nsrc/orders/handlers/refunds.py:1: \"\"\"HTTP handlers for refund requests (Orders' public surface).\"\"\"\nsrc/orders/handlers/refunds.py:11: def handle_refund_request(\nsrc/orders/handlers/refunds.py:14:     \"\"\"POST /orders/{id}/refunds \u2014 accept and route a refund request.\"\"\"\nsrc/orders/handlers/refunds.py:16:         request: RefundRequest = checkout.request_refund(\nsrc/orders/models.py:1: \"\"\"Order and refund-request models.\"\"\"\nsrc/orders/models.py:9: ORDER_STATUSES = (\"pending\", \"paid\", \"expired\", \"refunded\", \"cancelled\")\nsrc/orders/models.py:25:     \"\"\"One refund request against an expired order.\"\"\"\nsrc/orders/models.py:36:     \"\"\"What a captured refund actually settled for.\"\"\"",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 140 length 160",
+      "content": "that Orders' checkout and other services consume over the policy client.\nServices must IMPORT these decisions and must never re-decide them\nlocally: a local cop",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/client.py offset 1 length 60",
+      "content": "\"\"The billing-policy client other services consume.\"\"\"\n\nfrom",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/handlers/refunds.py offset 1 length 200",
+      "content": "\"\"HTTP handlers for refund requests (Orders' public surface).\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\n\nfrom src.checkout import CheckoutService\nfrom src.orders.models import Orde",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/handlers/refunds.py offset 1 length 4000",
+      "content": "\"\"HTTP handlers for refund requests (Orders' public surface).\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\n\nfrom src.checkout import CheckoutService\nfrom src.orders.models import Order, RefundRequest\n\n\ndef handle_refund_request(\n    checkout: CheckoutService, order: Order, amount_cents: int\n) -> dict[str, str | int]:\n    \"\"\"POST /orders/{id}/refunds \u2014 accept and route a refund request.\"\"\"\n    try:\n        request: RefundRequest = checkout.request_refund(\n            order, amount_cents, now=dt.datetime.now(tz=dt.timezone.utc)\n        )\n    except ValueError as exc:\n        return {\"status\": \"rejected\", \"reason\": str(exc)}\n    return {\"status\": request.state, \"order_id\": order.id, \"amount_cents\": request.amount_cents}\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/client.py offset 1 length 1500",
+      "content": "\"\"The billing-policy client other services consume.\"\"\"\n\nfrom __future__ import annotations\n\nfrom src.policy import refunds\n\n\nclass PolicyClient:\n    \"\"\"Read-only access to Billing's refund policy decisions.\"\"\"\n\n    def refund_status(self, order_id: str, amount_cents: int) -> str:\n        \"\"\"The policy status for a refund of this amount.\n\n        Maps the CURRENT policy revision's decision onto the wire\n        statuses consumers route on: ``manual_review`` or\n        ``auto_capture``. The threshold itself never leaves this\n        service as a number \u2014 consumers route on the status.\n        \"\"\"\n        decision = refunds.decide(amount_cents)\n        return {\"manual_approval\": \"manual_review\", \"auto_capture\": \"auto_capture\"}.get(\n            decision.decision, \"auto_capture\"\n        )\n\n\ndef default() -> PolicyClient:  # pragma: no cover - wiring\n    return PolicyClient()\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 140 length 4000",
+      "content": "that Orders' checkout and other services consume over the policy client.\nServices must IMPORT these decisions and must never re-decide them\nlocally: a local copy of a threshold is a policy fork, and policy forks\ndrift.\n\nLayout note: the CURRENT manual-approval policy lives near the END of\nthis file (the F-2024-11 revision block). Everything above it is either\nmachinery or the SUPERSEDED history it replaced; readers paging only the\nfirst window of this file will not find the current thresholds.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport calendar\nimport datetime as dt\nfrom dataclasses import dataclass\n\n\n#: The policy clock policy decisions are expressed against (UTC, and the\n#: accounting day boundary is the calendar day \u2014 not the billing period).\nPOLICY_CLOCK = \"UTC\"\nPOLICY_DAY_BOUNDARY = \"calendar-day\"\n\n\ndef policy_now() -> dt.datetime:\n    \"\"\"The current instant on the policy clock.\"\"\"\n    return dt.datetime.now(tz=dt.timezone.utc)\n\n\ndef policy_day(moment: dt.datetime) -> dt.date:\n    \"\"\"The accounting day a moment falls into.\"\"\"\n    return moment.astimezone(dt.timezone.utc).date()\n\n\n# ---------------------------------------------------------------------------\n# Currency plumbing \u2014 everything is integer cents, always.\n# ---------------------------------------------------------------------------\n\n\ndef to_cents(amount: str | float) -> int:\n    \"\"\"Parse a decimal amount into integer cents (no float rounding).\"\"\"\n    text = str(amount).strip().lstrip(\"$\").replace(\",\", \"\")\n    if \".\" not in text:\n        return int(text) * 100\n    whole, _, fraction = text.partition(\".\")\n    fraction = (fraction + \"00\")[:2]\n    return int(whole) * 100 + int(fraction)\n\n\ndef format_cents(amount_cents: int) -> str:\n    \"\"\"Render integer cents as a decimal string for statements.\"\"\"\n    sign = \"-\" if amount_cents < 0 else \"\"\n    magnitude = abs(int(amount_cents))\n    return f\"{sign}${magnitude // 100}.{magnitude % 100:02d}\"\n\n\ndef is_positive_refund_amount(amount_cents: int) -> bool:\n   ",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/checkout.py offset 1 length 3000",
+      "content": "\"\"Orders' checkout \u2014 where refund requests enter this service.\n\nThe refund-request flow deliberately OWNS no policy of its own: every\nrefund decision (windows, thresholds, approval routing) belongs to the\nbilling-policy service and is consumed over the policy client. The old\ncheckout-side auto-approve limit (2000 cents) was REMOVED in PR #4471\nprecisely because a local threshold is a policy fork \u2014 do not\nreintroduce local refund thresholds here.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\n\nfrom billing_policy_client import policy_client\n\nfrom src.orders.models import Order, RefundRequest\n\n\n#: How long after an order's expiry a customer may still request a\n#: refund. This is the ORDER-SIDE request gate; the money-side decision\n#: (fees, approval) is billing-policy's, not ours.\nORDER_SIDE_REQUEST_WINDOW_DAYS = 30\n\n\nclass CheckoutService:\n    \"\"\"The checkout surface: place orders, request refunds.\"\"\"\n\n    def __init__(self, policy: policy_client.PolicyClient | None = None) -> None:\n        self._policy = policy or policy_client.default()\n\n    def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\n        \"\"\"Accept a refund request for an expired order.\n\n        Age gating is ours (ORDER_SIDE_REQUEST_WINDOW_DAYS); the money\n        decision rides the billing policy client's status answer.\n        \"\"\"\n        self._assert_within_request_window(order, now)\n        status = self._policy.refund_status(order.id, amount_cents)\n        if status == \"manual_review\":\n            # Finance requires an approval step for large refunds, but the\n            # amount threshold and the approver are NOT decided in this\n            # repository \u2014 the policy service owns them. Do not guess.\n            return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")\n        if status == \"auto_capture\":\n            return RefundRequest(order=order, amount_cents=amount_cents, state=\"capturing\")\n        raise Val",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/models.py offset 1 length 2000",
+      "content": "\"\"Order and refund-request models.\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\nfrom dataclasses import dataclass, field\n\n\nORDER_STATUSES = (\"pending\", \"paid\", \"expired\", \"refunded\", \"cancelled\")\n\n\n@dataclass(frozen=True)\nclass Order:\n    \"\"\"One customer order.\"\"\"\n\n    id: str\n    customer_id: str\n    total_cents: int\n    status: str\n    expired_at: dt.datetime\n\n\n@dataclass(frozen=True)\nclass RefundRequest:\n    \"\"\"One refund request against an expired order.\"\"\"\n\n    order: Order\n    amount_cents: int\n    state: str = \"received\"\n    requested_at: dt.datetime | None = None\n    events: tuple[str, ...] = field(default=())\n\n\n@dataclass(frozen=True)\nclass RefundReceipt:\n    \"\"\"What a captured refund actually settled for.\"\"\"\n\n    request: RefundRequest\n    settled_cents: int\n    policy_version: str = \"\"\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "docs-site",
+      "call": "pattern refund",
+      "content": "content/index.md:5: - [Requesting a refund](/content/refunds.md)\ncontent/refunds.md:1: # Requesting a refund\ncontent/refunds.md:3: This help-center page explains how CUSTOMERS request a refund. It is\ncontent/refunds.md:6: ## When can I ask for a refund?\ncontent/refunds.md:8: You can request a refund for up to 30 days after your order expires.\ncontent/refunds.md:9: Open the order in your account page and choose **Request refund**.\ncontent/refunds.md:11: ## Do refunds need approval?\ncontent/refunds.md:13: Some refunds are reviewed before the money moves back to your card. If\ncontent/refunds.md:20: After a refund is issued, card refunds take 3-5 business days and bank\ncontent/refunds.md:22: for refunds.",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/checkout.py offset 1 length 4000",
+      "content": "\"\"Orders' checkout \u2014 where refund requests enter this service.\n\nThe refund-request flow deliberately OWNS no policy of its own: every\nrefund decision (windows, thresholds, approval routing) belongs to the\nbilling-policy service and is consumed over the policy client. The old\ncheckout-side auto-approve limit (2000 cents) was REMOVED in PR #4471\nprecisely because a local threshold is a policy fork \u2014 do not\nreintroduce local refund thresholds here.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\n\nfrom billing_policy_client import policy_client\n\nfrom src.orders.models import Order, RefundRequest\n\n\n#: How long after an order's expiry a customer may still request a\n#: refund. This is the ORDER-SIDE request gate; the money-side decision\n#: (fees, approval) is billing-policy's, not ours.\nORDER_SIDE_REQUEST_WINDOW_DAYS = 30\n\n\nclass CheckoutService:\n    \"\"\"The checkout surface: place orders, request refunds.\"\"\"\n\n    def __init__(self, policy: policy_client.PolicyClient | None = None) -> None:\n        self._policy = policy or policy_client.default()\n\n    def request_refund(self, order: Order, amount_cents: int, now: dt.datetime) -> RefundRequest:\n        \"\"\"Accept a refund request for an expired order.\n\n        Age gating is ours (ORDER_SIDE_REQUEST_WINDOW_DAYS); the money\n        decision rides the billing policy client's status answer.\n        \"\"\"\n        self._assert_within_request_window(order, now)\n        status = self._policy.refund_status(order.id, amount_cents)\n        if status == \"manual_review\":\n            # Finance requires an approval step for large refunds, but the\n            # amount threshold and the approver are NOT decided in this\n            # repository \u2014 the policy service owns them. Do not guess.\n            return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")\n        if status == \"auto_capture\":\n            return RefundRequest(order=order, amount_cents=amount_cents, state=\"capturing\")\n        raise Val",
+      "error": "",
+      "truncated": true
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders-api",
+      "call": "src/orders/models.py offset 1 length 3000",
+      "content": "\"\"Order and refund-request models.\"\"\"\n\nfrom __future__ import annotations\n\nimport datetime as dt\nfrom dataclasses import dataclass, field\n\n\nORDER_STATUSES = (\"pending\", \"paid\", \"expired\", \"refunded\", \"cancelled\")\n\n\n@dataclass(frozen=True)\nclass Order:\n    \"\"\"One customer order.\"\"\"\n\n    id: str\n    customer_id: str\n    total_cents: int\n    status: str\n    expired_at: dt.datetime\n\n\n@dataclass(frozen=True)\nclass RefundRequest:\n    \"\"\"One refund request against an expired order.\"\"\"\n\n    order: Order\n    amount_cents: int\n    state: str = \"received\"\n    requested_at: dt.datetime | None = None\n    events: tuple[str, ...] = field(default=())\n\n\n@dataclass(frozen=True)\nclass RefundReceipt:\n    \"\"\"What a captured refund actually settled for.\"\"\"\n\n    request: RefundRequest\n    settled_cents: int\n    policy_version: str = \"\"\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders-api",
+      "call": "pattern policy|manual_review|decision|refund_status",
+      "content": "README.md:7: Money-side refund policy (thresholds, approval routing) is NOT owned\nREADME.md:8: here \u2014 it is consumed from the billing-policy service over the policy\nsrc/checkout.py:3: The refund-request flow deliberately OWNS no policy of its own: every\nsrc/checkout.py:4: refund decision (windows, thresholds, approval routing) belongs to the\nsrc/checkout.py:5: billing-policy service and is consumed over the policy client. The old\nsrc/checkout.py:7: precisely because a local threshold is a policy fork \u2014 do not\nsrc/checkout.py:15: from billing_policy_client import policy_client\nsrc/checkout.py:21: #: refund. This is the ORDER-SIDE request gate; the money-side decision\nsrc/checkout.py:22: #: (fees, approval) is billing-policy's, not ours.\nsrc/checkout.py:29:     def __init__(self, policy: policy_client.PolicyClient | None = None) -> None:\nsrc/checkout.py:30:         self._policy = policy or policy_client.default()\nsrc/checkout.py:36:         decision rides the billing policy client's status answer.\nsrc/checkout.py:39:         status = self._policy.refund_status(order.id, amount_cents)\nsrc/checkout.py:40:         if status == \"manual_review\":\nsrc/checkout.py:43:             # repository \u2014 the policy service owns them. Do not guess.\nsrc/checkout.py:47:         raise ValueError(f\"unknown policy status {status!r}\")\nsrc/orders/models.py:40:     policy_version: str = \"\"",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "step-1",
+        "objective": "Capture the verbatim manual-review decision bytes from billing-policy: src/policy/client.py lines 15/20 and src/policy/refunds.py line 9 (plus the reads at client.py:2 and refunds.py:141) \u2014 matches were reported but the bytes were never shown.",
+        "evidence_refs": [
+          "ev-1",
+          "ev-2",
+          "ev-3",
+          "ev-4",
+          "ev-8",
+          "ev-9"
+        ]
+      },
+      {
+        "step_id": "step-2",
+        "objective": "Read orders-api's refund handlers (src/orders/handlers/refunds.py) to locate where the policy status is consumed and where the decision must be surfaced verbatim.",
+        "evidence_refs": [
+          "ev-6",
+          "ev-7"
+        ]
+      },
+      {
+        "step_id": "step-3",
+        "objective": "Edit only orders-api: surface the policy client's manual-review decision verbatim in src/orders/handlers/refunds.py instead of collapsing it to a local state literal; add no local threshold/approval logic.",
+        "evidence_refs": [
+          "ev-6",
+          "ev-7",
+          "ev-10",
+          "ev-11"
+        ]
+      },
+      {
+        "step_id": "step-4",
+        "objective": "Verify no policy fork was reintroduced in orders-api (checkout.py's own warning forbids local threshold/approver decisions) and leave docs-site's marketing refunds page untouched.",
+        "evidence_refs": [
+          "ev-10"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "claim-1",
+        "text": "Orders obtains the refund decision from billing-policy's client, not locally.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 39,
+        "asserted_content": "status = self._policy.refund_status(order.id, amount_cents)"
+      },
+      {
+        "claim_id": "claim-2",
+        "text": "A manual_review branch already exists on the checkout refund path.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 40,
+        "asserted_content": "if status == \"manual_review\":"
+      },
+      {
+        "claim_id": "claim-3",
+        "text": "orders-api must not decide the amount threshold or approver locally \u2014 the policy service owns them.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 43,
+        "asserted_content": "# repository \u2014 the policy service owns them. Do not guess."
+      },
+      {
+        "claim_id": "claim-4",
+        "text": "Today the manual-review path collapses the decision into a local literal state instead of surfacing it verbatim.",
+        "repo": "orders-api",
+        "path": "src/checkout.py",
+        "line": 44,
+        "asserted_content": "return RefundRequest(order=order, amount_cents=amount_cents, state=\"pending_approval\")"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "What are the exact bytes of billing-policy src/policy/client.py lines 15/20 and src/policy/refunds.py line 9 (ev-1..ev-3 matched 'manual' but the tool observations never displayed those bytes \u2014 'verbatim' requires them)?"
+      },
+      {
+        "question_id": "q2",
+        "text": "What does orders-api src/orders/handlers/refunds.py currently contain (ev-6/ev-7 recorded reads at line 2 but displayed no bytes)?"
+      },
+      {
+        "question_id": "q3",
+        "text": "Does policy_client.refund_status already return the decision string verbatim, or must billing-policy change to expose it?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "docs-site's help-center refunds page is out of scope per the issue: marketing content that neither service reads."
+      },
+      {
+        "text": "The surfacing change is confined to orders-api's refund handlers; billing-policy is only read unless the answer to question 3 forces otherwise."
+      },
+      {
+        "text": "The decision travels over the same billing_policy_client policy client checkout already uses (src/checkout.py line 15 import, line 39 call)."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 12,
+      "calls_executed": 12,
+      "wall_seconds_used": 111.825,
+      "tokens": {
+        "input": 7620,
+        "output": 11506,
+        "input_lower_bound": 7620,
+        "output_lower_bound": 11506,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.107288,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 458,
+          "output_tokens": 394,
+          "charged_input_tokens": 458,
+          "charged_output_tokens": 394,
+          "usage_known": true,
+          "usd_estimated": 0.004068,
+          "running_usd_estimated": 0.32597
+        },
+        {
+          "input_tokens": 873,
+          "output_tokens": 483,
+          "charged_input_tokens": 873,
+          "charged_output_tokens": 483,
+          "usage_known": true,
+          "usd_estimated": 0.00561,
+          "running_usd_estimated": 0.33158
+        },
+        {
+          "input_tokens": 1152,
+          "output_tokens": 2207,
+          "charged_input_tokens": 1152,
+          "charged_output_tokens": 2207,
+          "usage_known": true,
+          "usd_estimated": 0.01996,
+          "running_usd_estimated": 0.35154
+        },
+        {
+          "input_tokens": 2160,
+          "output_tokens": 1509,
+          "charged_input_tokens": 2160,
+          "charged_output_tokens": 1509,
+          "usage_known": true,
+          "usd_estimated": 0.016392,
+          "running_usd_estimated": 0.367932
+        },
+        {
+          "input_tokens": 2977,
+          "output_tokens": 6913,
+          "charged_input_tokens": 2977,
+          "charged_output_tokens": 6913,
+          "usage_known": true,
+          "usd_estimated": 0.061258,
+          "running_usd_estimated": 0.42919
+        }
+      ]
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.107288,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 5,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

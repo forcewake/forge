@@ -1,0 +1,43 @@
+{
+  "records": [
+    {
+      "abandoned_tasks": 0,
+      "acceptance": {
+        "accepted": true,
+        "checks": [
+          {
+            "name": "contract-validates",
+            "observed": "digest c293147c760e\u2026",
+            "ok": true
+          },
+          {
+            "name": "customer-state-stated",
+            "observed": "pending-recruitment (honest)",
+            "ok": true
+          }
+        ],
+        "method": "contract-validation",
+        "note": "the contract validates and its digest is frozen; the customer state is stated, never faked"
+      },
+      "attempts": [],
+      "manual_rescues": 0,
+      "notes": [
+        "the learning contract exists and is frozen; no spend, no tasks"
+      ],
+      "recorded_at": "2026-09-24T11:52:04.592805+00:00",
+      "rescue_notes": [],
+      "schema": "forge.partner-pilot.stage-record/1",
+      "spend_usd": null,
+      "stage": "contract",
+      "stage_complete": true,
+      "status": "executed",
+      "task_refs": [],
+      "timings": {},
+      "unmet_preconditions": [],
+      "usage_receipts": []
+    }
+  ],
+  "schema": "forge.partner-pilot.stage-records/1",
+  "stage": "contract",
+  "status": "complete"
+}

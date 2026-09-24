@@ -36,23 +36,43 @@ from forge.profile_qualification import (
     CAPABILITIES_BEGIN,
     CAPABILITIES_END,
     EVIDENCE_CLASSES,
+    MANIFEST_STAMP,
+    MANIFEST_STATUSES,
+    MANIFEST_TRIGGER_AXES,
     PROFILE_RECORD_STAMP,
+    TESTED_SHA_OBSERVABILITY,
+    TRACE_RECORD_STAMP,
+    UNMET_CAPABILITIES_OBSERVABILITY,
+    WITHDRAWN_OBSERVABILITY,
     EvidenceEntry,
+    ProfileApproval,
     ProfilePromotionRefusal,
     ProfileQualificationRecord,
     ProfileRecordError,
+    ProfileRecordImmutableError,
+    ProfileRecordStore,
+    RefusalResolution,
+    SupportedProfileEntry,
+    TraceRecord,
     UpgradeClaim,
     UpgradeFacts,
+    ValidationFinding,
     archive_reference_gaps,
+    build_supported_profiles,
+    derive_evidence_tier,
     derive_verdict,
     evaluate_record,
     latest_record_per_profile,
+    load_profile_approvals,
     load_profile_records,
+    load_trace_records,
+    manifest_trigger_triggers,
     profile_promotion_refusals,
     requalification_required,
     requalification_triggers,
     render_capabilities,
     upgrade_claim,
+    validate_record,
     write_profile_record,
 )
 from forge.release_promotion import qualification_gaps
@@ -691,12 +711,14 @@ def test_without_profile_records_the_promotion_path_is_unchanged() -> None:
 
 def test_the_committed_capabilities_table_matches_the_records() -> None:
     """The doc's fenced table is what the committed records derive — a
-    hand-strengthened verdict line is the drift this removes."""
+    hand-strengthened verdict line is the drift this removes. The Tiers
+    column is derived from the committed EXECUTED traces
+    (qualification/traces/) exactly as the CLI renders it."""
     content = (ROOT / "docs" / "releases" / "profile-records.md").read_text(encoding="utf-8")
     begin = content.index(CAPABILITIES_BEGIN)
     end = content.index(CAPABILITIES_END)
     fenced = content[begin + len(CAPABILITIES_BEGIN) + 1 : end].rstrip("\n")
-    assert fenced == render_capabilities(load_profile_records(ROOT))
+    assert fenced == render_capabilities(load_profile_records(ROOT), load_trace_records(ROOT))
 
 
 def test_the_capabilities_render_names_verdict_and_limiting_class() -> None:
@@ -737,3 +759,787 @@ def test_profile_promotion_refusal_shape_round_trips() -> None:
         "record_id": "probe@0.35.0",
         "reasons": ["skipped"],
     }
+
+
+# ---------------------------------------------------------------------------
+# R37-06 (#287) — strict record validation (the #298 overlap slice)
+# ---------------------------------------------------------------------------
+
+
+ISO = "2026-09-24T12:00:00+00:00"
+HEX64 = "b" * 64
+
+
+def _strict_entry(
+    evidence_class: str = "live-provider", outcome: str = "pass", capability: str = CAP
+) -> EvidenceEntry:
+    return EvidenceEntry(
+        evidence_class=evidence_class,
+        capability=capability,
+        outcome=outcome,
+        covers=f"trace for {evidence_class} (trace-id-1)",
+        executed_at=ISO,
+        artifact_sha256=HEX64,
+    )
+
+
+def _strict_record(**overrides: object) -> ProfileQualificationRecord:
+    values: dict = dict(
+        record_id="probe@0.36.0",
+        profile="probe",
+        provider="gitlab",
+        release_version="0.36.0",
+        provider_version="GitLab CE 19.3.2 (revision 34042bf7d00)",
+        runtime_recipe="python-3.13",
+        harness_binary="claude-code",
+        harness_version="2.1.273",
+        credential_route="bot PAT / read-only clone PAT / BYOK",
+        verification_contract="required-jobs=smoke",
+        capabilities=(CAP,),
+        evidence=(_strict_entry(),),
+        runtime_dependency_fingerprint="closure-abc123",
+        template_defaults_digest=HEX64,
+        authority_contract_version="checkpoint-authority/1",
+        provider_behavior_fingerprint="GitLab CE 19.3.2 (revision 34042bf7d00)",
+        legacy=False,
+    )
+    values.update(overrides)
+    return ProfileQualificationRecord(**values)
+
+
+def test_a_strict_record_validates_clean_and_round_trips() -> None:
+    record = _strict_record()
+    document = record.to_json()
+    assert validate_record(document) == []
+    assert document["legacy"] is False
+    assert document["evidence"][0]["artifact_sha256"] == HEX64
+    assert ProfileQualificationRecord.from_json(json.loads(json.dumps(document))) == record
+
+
+def test_a_digest_in_a_timestamp_field_is_a_finding_naming_it() -> None:
+    record = _strict_record(
+        evidence=(
+            EvidenceEntry(
+                evidence_class="live-provider",
+                capability=CAP,
+                outcome="pass",
+                covers="trace",
+                executed_at="1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+                artifact_sha256=HEX64,
+            ),
+        )
+    )
+    (finding,) = validate_record(record.to_json())
+    assert finding.kind == "timestamp-not-iso"
+    assert finding.path == "evidence[0].executed_at"
+    assert "1e36561247342" in finding.message  # the offending digest is NAMED
+
+
+def test_non_hex_hash_fields_are_findings() -> None:
+    record = _strict_record(wheel_sha256="not-a-digest", image_digest="sha256:zz")
+    findings = validate_record(record.to_json())
+    by_path = {finding.path for finding in findings}
+    assert by_path == {"wheel_sha256", "image_digest"}
+    assert all(finding.kind == "hash-not-hex64" for finding in findings)
+    # closure_digest is constructor-guarded (never reaches validation); the
+    # validator still checks it when handed a raw document:
+    document = _strict_record().to_json()
+    document["closure_digest"] = "1234"
+    assert any(
+        finding.path == "closure_digest" and finding.kind == "hash-not-hex64"
+        for finding in validate_record(document)
+    )
+
+
+def test_an_artifact_sha_prefix_is_normalized_not_flagged() -> None:
+    document = _strict_record().to_json()
+    document["image_digest"] = f"sha256:{HEX64}"
+    document["evidence"][0]["artifact_sha256"] = f"sha256:{HEX64}"
+    assert validate_record(document) == []
+
+
+def test_non_semantic_version_fields_are_findings() -> None:
+    document = _strict_record().to_json()
+    document["release_version"] = "0.36"
+    findings = validate_record(document)
+    assert findings == [
+        ValidationFinding(
+            path="release_version",
+            kind="version-not-semantic",
+            message=findings[0].message,
+        )
+    ]
+    # a digest pinned into harness_version (the historical canary shape) is
+    # its OWN typed finding — R37-17's sha-in-version-field conflation kind:
+    document = _strict_record().to_json()
+    document["harness_version"] = f"sha256:{HEX64}"
+    (finding,) = validate_record(document)
+    assert finding.kind == "sha-in-version-field"
+    assert finding.path == "harness_version"
+
+
+def test_a_supported_verdict_requires_every_fingerprint_pinned() -> None:
+    pinned = dict(
+        runtime_dependency_fingerprint="closure-abc123",
+        template_defaults_digest=HEX64,
+        authority_contract_version="checkpoint-authority/1",
+        provider_behavior_fingerprint="GitLab CE 19.3.2 (revision 34042bf7d00)",
+    )
+    document = _strict_record(**pinned).to_json()  # live evidence -> supported
+    assert validate_record(document) == []
+    document["template_defaults_digest"] = ""
+    document.pop("provider_behavior_fingerprint")
+    findings = validate_record(document)
+    assert {finding.path for finding in findings} == {
+        "provider_behavior_fingerprint",
+        "template_defaults_digest",
+    }
+    assert all(finding.kind == "fingerprint-empty-for-supported-verdict" for finding in findings)
+    # a declared_only record carries no such requirement:
+    document["evidence"][0]["class"] = "model-fixture"
+    assert validate_record(document) == []
+
+
+def test_every_finding_kind_is_reachable() -> None:
+    document = _strict_record().to_json()
+    document["evidence"][0]["executed_at"] = HEX64  # timestamp-not-iso
+    document["wheel_sha256"] = "short"  # hash-not-hex64
+    document["harness_version"] = "/usr/local/bin/claude"  # version-not-semantic
+    for axis in (
+        "runtime_dependency_fingerprint",
+        "template_defaults_digest",
+        "authority_contract_version",
+        "provider_behavior_fingerprint",
+    ):
+        document[axis] = ""  # live evidence -> supported, axes unpinned
+    kinds = {finding.kind for finding in validate_record(document)}
+    assert kinds == {
+        "timestamp-not-iso",
+        "hash-not-hex64",
+        "version-not-semantic",
+        "fingerprint-empty-for-supported-verdict",
+    }
+
+
+def test_the_finding_kind_vocabulary_is_closed() -> None:
+    with pytest.raises(ProfileRecordError, match="closed"):
+        ValidationFinding(path="x", kind="made-up-rule", message="nope")
+
+
+def test_the_loader_refuses_a_malformed_strict_record(tmp_path: Path) -> None:
+    write_profile_record(tmp_path, _strict_record(wheel_sha256="oops"))
+    with pytest.raises(ProfileRecordError, match="qualification.record_validation") as excinfo:
+        load_profile_records(tmp_path)
+    assert "wheel_sha256 [hash-not-hex64]" in str(excinfo.value)
+
+
+def test_a_legacy_record_loads_as_history_with_its_findings_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The committed v1 store predates the strict schema: its records are
+    legacy by construction, their findings REPORTED (never rewritten)."""
+    import dataclasses
+
+    record = _strict_record(wheel_sha256="oops")  # malformed AND strict-shaped
+    legacy = dataclasses.replace(record, legacy=True)
+    write_profile_record(tmp_path, legacy)
+    with caplog.at_level("WARNING", logger="forge.profile_qualification"):
+        loaded = load_profile_records(tmp_path)
+    assert len(loaded) == 1 and loaded[0].legacy is True
+    assert any("qualification.record_validation" in message for message in caplog.messages)
+    assert any("wheel_sha256 [hash-not-hex64]" in message for message in caplog.messages)
+
+
+def test_the_committed_legacy_gitlab_record_is_reported_malformed() -> None:
+    """gitlab-ce-v1@0.36.0 carries a wheel sha in executed_at — the exact
+    historical defect R37-06 records. Validation REPORTS it (the record is
+    legacy, so it loads as history) instead of rewriting the record."""
+    document = json.loads(
+        (ROOT / "qualification" / "records" / "gitlab-ce-v1@0.36.0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    findings = validate_record(document)
+    kinds = {finding.kind for finding in findings}
+    assert "timestamp-not-iso" in kinds
+    assert any(finding.path.startswith("evidence[") for finding in findings)
+    assert document.get("legacy") is True  # explicitly marked, not rewritten
+
+
+def test_the_committed_preflight_record_is_strict_and_validates_clean() -> None:
+    """The R37-06 record opts INTO the strict schema: distinct executed_at
+    timestamps, artifact hashes, populated observed fingerprints, and the
+    typed refusal-resolution matrix — zero findings, or the load refuses."""
+    records = {record.record_id: record for record in load_profile_records(ROOT)}
+    record = records["gitlab-ce-v1@0.37.0-preflight"]
+    assert record.legacy is False
+    document = json.loads(
+        (ROOT / "qualification" / "records" / "gitlab-ce-v1@0.37.0-preflight.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert validate_record(document) == []
+    for entry in record.evidence:
+        assert entry.artifact_sha256  # the hash identity is a DISTINCT field
+        assert entry.executed_at.endswith(("Z", "+00:00"))  # and the timestamp is one
+    assert record.refusal_resolution  # the refusal matrix is typed record content
+    for resolution in record.refusal_resolution:
+        assert resolution.action.startswith("runbook") or resolution.action.startswith("docs/")
+        assert resolution.owner.strip()
+    # the preflight record is honest: still declared_only (no live evidence
+    # claim) and its note says the live flow remains refused.
+    assert derive_verdict(record) == "declared_only"
+    assert "refused at preflight" in record.note.lower()
+
+
+def test_refusal_resolutions_round_trip_and_refuse_garbage() -> None:
+    resolution = RefusalResolution(
+        refusal="deployed control plane reports 0.28.0",
+        action="runbook §3 — recreate on the promoted digest",
+        owner="lab operator",
+        status="open",
+    )
+    record = _strict_record(refusal_resolution=(resolution,))
+    loaded = ProfileQualificationRecord.from_json(record.to_json())
+    assert loaded.refusal_resolution == (resolution,)
+    with pytest.raises(ProfileRecordError, match="status"):
+        RefusalResolution(refusal="r", action="a", owner="o", status="maybe")
+    with pytest.raises(ProfileRecordError, match="non-empty owner"):
+        RefusalResolution(refusal="r", action="a", owner=" ", status="open")
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — evidence tiers derived from executed trace records
+# ---------------------------------------------------------------------------
+
+
+def _trace(
+    provenance: str = "scripted",
+    *,
+    capability: str = CAP,
+    trace_id: str = "trace-1",
+    record_id: str = "probe@0.36.0",
+    provider: str = "",
+    model_route: str = "",
+    invokes_real_protocol_code: bool = False,
+) -> TraceRecord:
+    return TraceRecord(
+        trace_id=trace_id,
+        capability=capability,
+        provenance=provenance,
+        executed_at=ISO,
+        artifact_sha256=HEX64,
+        record_id=record_id,
+        provider=provider,
+        model_route=model_route,
+        invokes_real_protocol_code=invokes_real_protocol_code,
+    )
+
+
+def test_a_scripted_trace_stays_scripted_even_when_it_invokes_real_protocol_code() -> None:
+    record = _strict_record(evidence=(_strict_entry("model-fixture"),))
+    report = derive_evidence_tier(record, (_trace("scripted", invokes_real_protocol_code=True),))
+    (tier,) = report.per_capability
+    assert tier.tier == "scripted"  # real protocol code, still authored provenance
+    assert tier.trace_ids == ("trace-1",)
+    assert any("invokes_real_protocol_code=True" in reason for reason in tier.reasons)
+    assert any("stays scripted" in reason for reason in tier.reasons)
+
+
+def test_a_live_trace_upgrades_only_its_own_capability() -> None:
+    record = _strict_record(
+        capabilities=("cap-live", "cap-scripted"),
+        evidence=(
+            _strict_entry("live-provider", capability="cap-live"),
+            _strict_entry("model-fixture", capability="cap-scripted"),
+        ),
+    )
+    traces = (
+        _trace("live", capability="cap-live", provider="gitlab", model_route="anthropic/claude"),
+        _trace("scripted", capability="cap-scripted"),
+    )
+    report = derive_evidence_tier(record, traces)
+    tiers = {tier.capability: tier.tier for tier in report.per_capability}
+    assert tiers == {"cap-live": "live", "cap-scripted": "scripted"}
+
+
+def test_a_live_trace_never_upgrades_another_providers_record() -> None:
+    record = _strict_record()  # provider gitlab
+    github_live = _trace("live", provider="github", model_route="anthropic/claude")
+    report = derive_evidence_tier(record, (github_live,))
+    (tier,) = report.per_capability
+    assert tier.tier == "none"
+    assert any("only its own provider" in reason for reason in tier.reasons)
+
+
+def test_refusal_evidence_never_upgrades_anything() -> None:
+    record = _strict_record()
+    report = derive_evidence_tier(record, (_trace("refused"),))
+    (tier,) = report.per_capability
+    assert tier.tier == "none"
+    assert any("REFUSAL" in reason and "never upgrades" in reason for reason in tier.reasons)
+
+
+def test_a_fixture_only_record_with_a_real_provider_label_is_held() -> None:
+    """The R37-17 negative arm: fixture-only evidence carrying the
+    real-provider-e2e label is HELD — the label never upgrades the trace."""
+    record = _strict_record(evidence=(_strict_entry("model-fixture"),))  # CAP is live-required
+    report = derive_evidence_tier(record, (_trace("scripted"),))
+    assert report.holds
+    assert any(UNMET_CAPABILITIES_OBSERVABILITY in hold and "HELD" in hold for hold in report.holds)
+
+
+def test_an_entry_claiming_live_provider_without_a_live_trace_is_a_hold() -> None:
+    """The trace record's provenance is the source of truth: a live-provider
+    LABEL with only scripted traces behind it never stands."""
+    record = _strict_record()  # live-provider entry, tier-3 class claim
+    report = derive_evidence_tier(record, (_trace("scripted"),))
+    assert any("label never upgrades" in hold for hold in report.holds)
+    (tier,) = report.per_capability
+    assert tier.tier == "scripted"
+
+
+def test_no_executed_trace_means_no_tier_fail_closed() -> None:
+    record = _strict_record()
+    report = derive_evidence_tier(record, ())
+    (tier,) = report.per_capability
+    assert tier.tier == "none"
+    assert any("fail-closed" in reason for reason in tier.reasons)
+    # a trace executed for ANOTHER record never leaks into this one:
+    other = _trace("live", provider="gitlab", model_route="anthropic/claude", record_id="other@9")
+    report = derive_evidence_tier(record, (other,))
+    assert report.per_capability[0].tier == "none"
+
+
+def test_trace_records_round_trip_and_refuse_bad_shapes() -> None:
+    trace = _trace("live", provider="gitlab", model_route="anthropic/claude")
+    loaded = TraceRecord.from_json(json.loads(json.dumps(trace.to_json())))
+    assert loaded == trace
+    assert trace.to_json()["stamp"] == TRACE_RECORD_STAMP
+    with pytest.raises(ProfileRecordError, match="stamp"):
+        TraceRecord.from_json({**trace.to_json(), "stamp": "other/1"})
+    with pytest.raises(ProfileRecordError, match="provenance"):
+        _trace("maybe-live")
+    # a digest in a trace's timestamp field refuses (traces have NO legacy lane):
+    with pytest.raises(ProfileRecordError, match="executed_at"):
+        TraceRecord(trace_id="t", capability=CAP, provenance="scripted", executed_at=HEX64)
+    # live provenance MEANS provider + model route:
+    with pytest.raises(ProfileRecordError, match="live provenance"):
+        _trace("live", provider="gitlab", model_route="")
+    # a version string where the artifact identity belongs:
+    with pytest.raises(ProfileRecordError, match="artifact_sha256"):
+        TraceRecord(
+            trace_id="t",
+            capability=CAP,
+            provenance="scripted",
+            executed_at=ISO,
+            artifact_sha256="0.36.0",
+        )
+
+
+def test_trace_files_load_from_the_store_and_bad_ones_refuse(tmp_path: Path) -> None:
+    traces = tmp_path / "qualification" / "traces"
+    traces.mkdir(parents=True)
+    good = _trace("scripted")
+    (traces / "good.json").write_text(json.dumps(good.to_json()), encoding="utf-8")
+    (loaded,) = load_trace_records(tmp_path)
+    assert loaded == good
+    # a missing traces directory is no traces, never an error:
+    assert load_trace_records(tmp_path / "elsewhere") == ()
+    bad = _trace("refused")
+    document = bad.to_json()
+    document["executed_at"] = HEX64  # the legacy conflation, refused for traces
+    (traces / "bad.json").write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ProfileRecordError, match="executed_at"):
+        load_trace_records(tmp_path)
+
+
+def test_the_committed_traces_back_the_preflight_record_honestly() -> None:
+    """The committed executed traces make the current gitlab-ce-v1 tier
+    SCRIPTED (real protocol code, authored responses) — and hold its
+    real-provider-e2e claim; the refusal trace never upgrades anything."""
+    traces = load_trace_records(ROOT)
+    assert len(traces) == 3
+    assert {trace.provenance for trace in traces} == {"scripted", "scripted", "refused"}
+    record = next(
+        r for r in load_profile_records(ROOT) if r.record_id == "gitlab-ce-v1@0.37.0-preflight"
+    )
+    report = derive_evidence_tier(record, traces)
+    (tier,) = report.per_capability
+    assert tier.capability == "real-provider-e2e"
+    assert tier.tier == "scripted"
+    assert any("HELD" in hold for hold in report.holds)
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — the supported-profiles manifest (the human gate)
+# ---------------------------------------------------------------------------
+
+_APPROVAL = ProfileApproval(
+    profile="probe", approved_by="lab operator", approved_at=ISO, note="on live evidence"
+)
+
+
+def _store_root_with(record: ProfileQualificationRecord, tmp_path: Path) -> Path:
+    """A store root under pytest's tmp_path holding one committed record."""
+    root = tmp_path / "store"
+    root.mkdir()
+    write_profile_record(root, record)
+    return root
+
+
+def test_a_supported_verdict_requires_human_approval(tmp_path: Path) -> None:
+    """The human gate: derived supported + no approval → pending-approval,
+    NEVER supported; with a named approver → supported."""
+    record = _strict_record()  # live evidence, every axis pinned -> supported
+    live_trace = _trace("live", provider="gitlab", model_route="anthropic/claude")
+    store_dir = _store_root_with(record, tmp_path)
+    unapproved = build_supported_profiles(store_dir, trace_refs=(live_trace,), approvals={})
+    (entry,) = unapproved.entries
+    assert entry.derived_verdict == "supported"
+    assert entry.status == "pending-approval"
+    assert entry.human_approved_by == ""
+    assert any("human approval absent" in limit for limit in entry.limitations)
+    approved = build_supported_profiles(
+        store_dir, trace_refs=(live_trace,), approvals={"probe": _APPROVAL}
+    )
+    (entry,) = approved.entries
+    assert entry.status == "supported"
+    assert entry.human_approved_by == "lab operator"
+
+
+def test_a_supported_manifest_entry_cannot_be_built_without_an_approver() -> None:
+    """The gate is structural: constructing a supported entry directly,
+    without the approver, refuses."""
+    with pytest.raises(ProfileRecordError, match="human gate"):
+        SupportedProfileEntry(
+            profile="probe",
+            record_id="probe@0.36.0",
+            release_version="0.36.0",
+            provider="gitlab",
+            derived_verdict="supported",
+            status="supported",
+            human_approved_by="",
+            tiers=(),
+            limitations=(),
+            requalification=(),
+            withdrawn=(),
+        )
+
+
+def test_a_held_profile_stays_pending_approval_even_when_approved(tmp_path: Path) -> None:
+    """Holds cap support independently of the human gate: a scripted-only
+    real-provider capability never becomes supported."""
+    record = _strict_record()  # claims live evidence…
+    store_dir = _store_root_with(record, tmp_path)
+    manifest = build_supported_profiles(
+        store_dir,
+        trace_refs=(_trace("scripted"),),  # …but the executed trace is scripted
+        approvals={"probe": _APPROVAL},
+    )
+    (entry,) = manifest.entries
+    assert entry.status == "pending-approval"
+    assert any("held" in limit.lower() for limit in entry.limitations)
+
+
+def test_a_changed_wheel_identity_under_a_constant_version_withdraws_the_claim(
+    tmp_path: Path,
+) -> None:
+    """The R37-17 negative test: a different wheel under the SAME version
+    string is detected — the profile's claim withdraws."""
+    record = _strict_record(wheel_sha256=HEX64)
+    store_dir = _store_root_with(record, tmp_path)
+    manifest = build_supported_profiles(
+        store_dir,
+        changes={"wheel_sha256": "f" * 64},  # same version, different wheel
+        approvals={"probe": _APPROVAL},
+        trace_refs=(_trace("live", provider="gitlab", model_route="anthropic/claude"),),
+    )
+    (entry,) = manifest.entries
+    assert entry.status == "withdrawn"
+    assert entry.release_version == "0.36.0"  # the version string never moved
+    assert any(
+        WITHDRAWN_OBSERVABILITY in reason and "wheel_sha256" in reason for reason in entry.withdrawn
+    )
+    assert any(WITHDRAWN_OBSERVABILITY in limit for limit in entry.limitations)
+
+
+_PINNED_AXES = {
+    "runtime_dependency_fingerprint": "closure-abc123",
+    "template_defaults_digest": HEX64,
+    "authority_contract_version": "checkpoint-authority/1",
+    "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00)",
+    "image_digest": f"sha256:{HEX64}",
+    "wheel_sha256": HEX64,
+}
+
+
+@pytest.mark.parametrize("axis", sorted(_PINNED_AXES))
+def test_every_manifest_axis_change_withdraws_the_claim(axis: str, tmp_path: Path) -> None:
+    """Every withdrawal axis — fingerprints AND artifact identity — withdraws
+    the claim when the current world names a different value; the SAME value
+    never triggers."""
+    record = _strict_record(**_PINNED_AXES)
+    store_dir = _store_root_with(record, tmp_path)
+    changed = {axis: "different-value"}
+    # the trigger fires on the axis BEFORE any manifest is built:
+    (trigger,) = manifest_trigger_triggers(record, changed)
+    assert axis in trigger and "requalification required" in trigger
+    manifest = build_supported_profiles(store_dir, changes=changed, approvals={})
+    (entry,) = manifest.entries
+    assert entry.status == "withdrawn"
+    assert any(axis in reason for reason in entry.withdrawn)
+    # an unchanged world never withdraws anything:
+    same = build_supported_profiles(store_dir, changes=_PINNED_AXES, approvals={})
+    assert same.entries[0].status != "withdrawn"
+    assert same.entries[0].withdrawn == ()
+
+
+def test_the_manifest_names_the_refusal_matrix_and_unpinned_axes_as_limitations(
+    tmp_path: Path,
+) -> None:
+    record = _strict_record(
+        evidence=(_strict_entry("model-fixture"),),  # declared_only: unpinned axes are fine
+        refusal_resolution=(
+            RefusalResolution(
+                refusal="deployed control plane reports 0.28.0",
+                action="runbook §3 — recreate on the promoted digest",
+                owner="lab operator",
+                status="open",
+            ),
+        ),
+        authority_contract_version="",  # unpinned axis
+    )
+    store_dir = _store_root_with(record, tmp_path)
+    manifest = build_supported_profiles(store_dir, approvals={})
+    (entry,) = manifest.entries
+    assert any(
+        "refusal-resolution [open]" in limit and "0.28.0" in limit for limit in entry.limitations
+    )
+    assert any("unpinned authority_contract_version" in limit for limit in entry.limitations)
+    # the requalification block renders every withdrawal axis with its value:
+    assert len(entry.requalification) == len(MANIFEST_TRIGGER_AXES)
+    assert any("wheel_sha256 = UNPINNED" in line for line in entry.requalification)
+
+
+def test_the_manifest_statuses_vocabulary_is_closed() -> None:
+    assert MANIFEST_STATUSES == (
+        "unqualified",
+        "withdrawn",
+        "declared_only",
+        "lab-qualified",
+        "pending-approval",
+        "supported",
+    )
+
+
+def test_the_committed_store_manifest_is_honest() -> None:
+    """Over the REAL store: nothing is supported (no live evidence, no
+    approvals document), the gitlab hold is a named limitation, and the
+    refusal matrix rides along."""
+    manifest = build_supported_profiles(ROOT)
+    assert manifest.to_json()["stamp"] == MANIFEST_STAMP
+    entries = {entry.profile: entry for entry in manifest.entries}
+    assert set(entries) == {"gitlab-ce-v1", "release-artifact-canary"}
+    assert all(entry.status in MANIFEST_STATUSES for entry in manifest.entries)
+    assert all(entry.status != "supported" for entry in manifest.entries)
+    gitlab = entries["gitlab-ce-v1"]
+    # R37-08 (#289) landed the LIVE record: the derived verdict over the
+    # claimed capability (real-provider-e2e, live-provider pass) is
+    # supported — but the #298 human gate + trace-tier hold keep the
+    # manifest entry pending-approval, never supported, and the live trace
+    # join stays owed (no committed live TraceRecord yet).
+    assert gitlab.record_id == "gitlab-ce-v1@live"
+    assert gitlab.status == "pending-approval"
+    assert any(UNMET_CAPABILITIES_OBSERVABILITY in limit for limit in gitlab.limitations)
+    assert any("refusal-resolution" in limit for limit in gitlab.limitations)
+    (tier,) = gitlab.tiers
+    assert (tier.capability, tier.tier) == ("real-provider-e2e", "none")
+
+
+def test_the_manifest_cli_prints_the_stamped_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    from forge import profile_qualification as pq
+
+    write_profile_record(tmp_path, _strict_record())
+    assert pq.main(["manifest", "--root", str(tmp_path)]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["stamp"] == MANIFEST_STAMP
+    assert document["profiles"][0]["status"] == "pending-approval"
+
+
+def test_approvals_load_and_refuse_garbage(tmp_path: Path) -> None:
+    assert load_profile_approvals(tmp_path) == ()  # no document: no approvals
+    document = {
+        "stamp": "forge.profile.approvals/1",
+        "approvals": [_APPROVAL.to_json()],
+    }
+    (tmp_path / "qualification").mkdir()
+    (tmp_path / "qualification" / "profile-approvals.json").write_text(
+        json.dumps(document), encoding="utf-8"
+    )
+    (approval,) = load_profile_approvals(tmp_path)
+    assert approval == _APPROVAL
+    bad = {"stamp": "other/1", "approvals": []}
+    (tmp_path / "qualification" / "profile-approvals.json").write_text(
+        json.dumps(bad), encoding="utf-8"
+    )
+    with pytest.raises(ProfileRecordError, match="stamp"):
+        load_profile_approvals(tmp_path)
+    with pytest.raises(ProfileRecordError, match="approved_at"):
+        ProfileApproval(profile="p", approved_by="o", approved_at=HEX64)
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — upgrade-claim honesty wired into validation
+# ---------------------------------------------------------------------------
+
+
+def _upgrade_document(**overrides: object) -> dict:
+    facts = UpgradeFacts(
+        source_schema="027",
+        target_schema="027",
+        seeded_records=("flow_runs: 1",),
+        preservation_checks=("row counts",),
+        evidence_ref="docs/releases/evidence/v0.35.0/promotion.json",
+    )
+    values: dict = dict(facts.to_json())
+    values.update(overrides)
+    return values
+
+
+def test_a_same_head_run_labelled_a_schema_upgrade_is_a_typed_finding() -> None:
+    document = _strict_record().to_json()
+    document["upgrade"] = _upgrade_document(claim="schema-upgrade")  # 027→027!
+    (finding,) = validate_record(document)
+    assert finding.kind == "upgrade-claim-mislabelled"
+    assert finding.path == "upgrade.claim"
+    assert "never" in finding.message and "same-head-preservation" in finding.message
+
+
+def test_a_seeded_transition_labelled_preservation_is_a_finding() -> None:
+    document = _strict_record().to_json()
+    document["upgrade"] = _upgrade_document(
+        source_schema="026", target_schema="027", claim="same-head-preservation"
+    )
+    (finding,) = validate_record(document)
+    assert finding.kind == "upgrade-claim-mislabelled"
+    assert "transition" in finding.message
+
+
+def test_a_transition_that_seeded_nothing_asserting_any_claim_is_a_finding() -> None:
+    """The v0.33.0 canary shape (024→026, nothing seeded) asserting a
+    schema upgrade mislabels EMPTY facts — it makes no claim at all."""
+    document = _strict_record().to_json()
+    document["upgrade"] = _upgrade_document(
+        source_schema="024", target_schema="026", seeded_records=(), claim="schema-transition"
+    )
+    (finding,) = validate_record(document)
+    assert finding.kind == "upgrade-claim-mislabelled"
+    assert "NO claim" in finding.message
+
+
+def test_an_unknown_upgrade_claim_label_is_a_finding() -> None:
+    document = _strict_record().to_json()
+    document["upgrade"] = _upgrade_document(claim="totally-a-migration")
+    (finding,) = validate_record(document)
+    assert finding.kind == "upgrade-claim-mislabelled"
+    assert "vocabulary" in finding.message
+
+
+def test_honest_upgrade_claim_labels_validate_clean() -> None:
+    for claim, source, target in (
+        ("same-head-preservation", "027", "027"),
+        ("schema-transition", "026", "027"),
+        ("schema-upgrade", "026", "027"),
+    ):
+        document = _strict_record().to_json()
+        document["upgrade"] = _upgrade_document(
+            source_schema=source, target_schema=target, claim=claim
+        )
+        assert validate_record(document) == [], claim
+    # and the assertion round-trips with the facts:
+    facts = UpgradeFacts(
+        "027", "027", ("flow_runs: 1",), ("counts",), "ref", "same-head-preservation"
+    )
+    assert UpgradeFacts.from_json(facts.to_json()) == facts
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — field-shape conflation validators
+# ---------------------------------------------------------------------------
+
+
+def test_a_sha_in_a_version_field_is_its_own_finding() -> None:
+    for field in ("harness_version", "provider_version", "authority_contract_version"):
+        document = _strict_record().to_json()
+        document[field] = f"sha256:{HEX64}"
+        (finding,) = validate_record(document)
+        assert finding.kind == "sha-in-version-field", field
+        assert finding.path == field
+        assert TESTED_SHA_OBSERVABILITY in finding.message
+
+
+def test_a_version_in_a_hash_field_is_its_own_finding() -> None:
+    document = _strict_record().to_json()
+    document["wheel_sha256"] = "0.36.0"  # the version string where the wheel hash belongs
+    document["evidence"][0]["artifact_sha256"] = "v0.36.0"
+    findings = validate_record(document)
+    assert {(finding.path, finding.kind) for finding in findings} == {
+        ("wheel_sha256", "version-in-hash-field"),
+        ("evidence[0].artifact_sha256", "version-in-hash-field"),
+    }
+    assert all("deployed artifact" in finding.message for finding in findings)
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — the typed, queryable, append-only store
+# ---------------------------------------------------------------------------
+
+
+def test_the_store_refuses_overwrites_with_a_typed_error_naming_the_file(
+    tmp_path: Path,
+) -> None:
+    record = _strict_record()
+    write_profile_record(tmp_path, record)
+    changed = _strict_record(evidence=(_strict_entry("model-fixture"),))
+    with pytest.raises(ProfileRecordImmutableError, match="probe@0.36.0.json") as excinfo:
+        write_profile_record(tmp_path, changed)
+    assert "immutable" in str(excinfo.value)
+    assert isinstance(excinfo.value, ProfileRecordError)
+    # the typed store view refuses the same way:
+    store = ProfileRecordStore(tmp_path)
+    with pytest.raises(ProfileRecordImmutableError, match="probe@0.36.0.json"):
+        store.write(changed)
+
+
+def test_historical_records_remain_queryable_after_new_ones(tmp_path: Path) -> None:
+    store = ProfileRecordStore(tmp_path)
+    old = _strict_record(record_id="probe@0.35.0", release_version="0.35.0")
+    new = _strict_record()
+    store.write(old)
+    store.write(new)
+    assert [record.record_id for record in store.history("probe")] == [
+        "probe@0.35.0",
+        "probe@0.36.0",
+    ]
+    assert store.latest("probe").record_id == "probe@0.36.0"
+    assert store.record("probe@0.35.0") == old  # history by id, still loadable
+    assert store.latest("other") is None
+    assert store.record("missing@9") is None
+
+
+# ---------------------------------------------------------------------------
+# R37-17 (#298) — the capabilities render's trace-derived tier column
+# ---------------------------------------------------------------------------
+
+
+def test_the_tiers_column_is_trace_derived() -> None:
+    record = _strict_record()
+    live = _trace("live", provider="gitlab", model_route="anthropic/claude")
+    with_tier = render_capabilities((record,), (live,))
+    row = with_tier.splitlines()[2]
+    assert "real-provider-e2e: live" in row
+    without = render_capabilities((record,))
+    assert "real-provider-e2e: none" in without.splitlines()[2]

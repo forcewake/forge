@@ -1,0 +1,75 @@
+{
+  "schema": "forge.steering.qualification/1",
+  "issue": "R37-10 / #291",
+  "generated_at": "2026-09-24T11:15:58.072229+00:00",
+  "modes": {
+    "scripted": {
+      "status": "graded",
+      "causal": true,
+      "provenance": "scripted-causal",
+      "grade": {
+        "causal": true,
+        "provenance": "scripted-causal",
+        "arms": [
+          {
+            "arm": "ack_precedes_edit",
+            "ok": true,
+            "reason": "command cmd-4a89f0820302 acknowledged at 2026-09-24T11:15:58.918143+00:00, consumed mid-turn at 2026-09-24T11:15:58.924Z, then 1 subsequent edit event(s) in the vendor's own log"
+          },
+          {
+            "arm": "counterfactual_differs",
+            "ok": true,
+            "reason": "the same task without the steer produced a different edit set"
+          },
+          {
+            "arm": "target_matched",
+            "ok": true,
+            "reason": "the edit shows exactly 'refund_limit' renamed to 'approval_threshold' in policy.py, and the unsteered arm did not do it"
+          }
+        ]
+      },
+      "run_file": "scripted-run.json"
+    },
+    "live": {
+      "status": "graded",
+      "causal": true,
+      "provenance": "live-model:fast",
+      "grade": {
+        "causal": true,
+        "provenance": "live-model:fast",
+        "arms": [
+          {
+            "arm": "ack_precedes_edit",
+            "ok": true,
+            "reason": "command live-steer-1790248564 acknowledged at 2026-09-24T11:16:04.351134+00:00, consumed mid-turn at 2026-09-24T11:16:04.401134+00:00, then 1 subsequent edit event(s) in the vendor's own log"
+          },
+          {
+            "arm": "counterfactual_differs",
+            "ok": true,
+            "reason": "the same task without the steer produced a different edit set"
+          },
+          {
+            "arm": "target_matched",
+            "ok": true,
+            "reason": "the edit shows exactly 'refund_limit' renamed to 'approval_threshold' in policy.py, and the unsteered arm did not do it"
+          }
+        ]
+      },
+      "spend": {
+        "calls": 4,
+        "tokens_in": 639,
+        "tokens_out": 755,
+        "estimate_usd": 0.009147,
+        "cost_state": "capped-estimate(lab-estimate-v1)",
+        "capped": false,
+        "spend_cap_usd": 1.0
+      },
+      "run_file": "live-run.json"
+    }
+  },
+  "honesty": {
+    "scripted": "the scripted arm's vendor is the REACTIVE SCRIPT (scripted-causal): it provably reads the durable guidance mid-turn and its next edit depends on what it read \u2014 causal by construction, never a real-model result",
+    "live": "the live arm is ONE capped attempt through the lab gateway; spend figures are estimates against lab-estimate-v1, never billing records",
+    "revision_legs": "the revision / WIP-reuse / old-epoch-replay legs of AT-10 are proven by tests/production_entry/test_causal_steering.py over the real revision lifecycle (three-way digest equality, checkpoint reuse, stale-authority replay) \u2014 this report points there, it does not repeat them"
+  }
+}

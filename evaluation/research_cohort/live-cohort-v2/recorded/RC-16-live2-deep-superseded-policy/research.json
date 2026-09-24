@@ -1,0 +1,591 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-16-live2-deep-superseded-policy",
+  "mode": "research",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 10,
+        "calls_executed": 10,
+        "wall_seconds_used": 179.662,
+        "tokens": {
+          "input": 11525,
+          "output": 16120,
+          "input_lower_bound": 11525,
+          "output_lower_bound": 16120,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.15201,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 479,
+            "output_tokens": 67,
+            "charged_input_tokens": 479,
+            "charged_output_tokens": 67,
+            "usage_known": true,
+            "usd_estimated": 0.001494,
+            "running_usd_estimated": 0.471168
+          },
+          {
+            "input_tokens": 494,
+            "output_tokens": 673,
+            "charged_input_tokens": 494,
+            "charged_output_tokens": 673,
+            "usage_known": true,
+            "usd_estimated": 0.006372,
+            "running_usd_estimated": 0.47754
+          },
+          {
+            "input_tokens": 982,
+            "output_tokens": 200,
+            "charged_input_tokens": 982,
+            "charged_output_tokens": 200,
+            "usage_known": true,
+            "usd_estimated": 0.003564,
+            "running_usd_estimated": 0.481104
+          },
+          {
+            "input_tokens": 1121,
+            "output_tokens": 1795,
+            "charged_input_tokens": 1121,
+            "charged_output_tokens": 1795,
+            "usage_known": true,
+            "usd_estimated": 0.016602,
+            "running_usd_estimated": 0.497706
+          },
+          {
+            "input_tokens": 2167,
+            "output_tokens": 1715,
+            "charged_input_tokens": 2167,
+            "charged_output_tokens": 1715,
+            "usage_known": true,
+            "usd_estimated": 0.018054,
+            "running_usd_estimated": 0.51576
+          },
+          {
+            "input_tokens": 2413,
+            "output_tokens": 1842,
+            "charged_input_tokens": 2413,
+            "charged_output_tokens": 1842,
+            "usage_known": true,
+            "usd_estimated": 0.019562,
+            "running_usd_estimated": 0.535322
+          },
+          {
+            "input_tokens": 2456,
+            "output_tokens": 1843,
+            "charged_input_tokens": 2456,
+            "charged_output_tokens": 1843,
+            "usage_known": true,
+            "usd_estimated": 0.019656,
+            "running_usd_estimated": 0.554978
+          },
+          {
+            "input_tokens": 1413,
+            "output_tokens": 7985,
+            "charged_input_tokens": 1413,
+            "charged_output_tokens": 7985,
+            "usage_known": true,
+            "usd_estimated": 0.066706,
+            "running_usd_estimated": 0.621684
+          }
+        ]
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 7,
+    "calls_proposed": 10,
+    "calls_executed": 10,
+    "observations": {
+      "count": 10,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0
+    },
+    "wall_seconds_used": 179.662,
+    "tokens": {
+      "input": 10112,
+      "output": 8135,
+      "input_lower_bound": 10112,
+      "output_lower_bound": 8135,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing-policy"
+    ],
+    "repos_authorized": [
+      "billing-policy",
+      "docs-site",
+      "orders-api"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 7,
+        "kind": "research_match",
+        "detail": "F-2024-11"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 10,
+        "kind": "research_match",
+        "detail": "F-2024-11"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 138,
+        "kind": "research_match",
+        "detail": "F-2024-11"
+      },
+      {
+        "evidence_id": "ev-4",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 200 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-5",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 201,
+        "kind": "research_read",
+        "detail": "read 60 chars from offset 200"
+      },
+      {
+        "evidence_id": "ev-6",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 2,
+        "kind": "research_read",
+        "detail": "read 20 chars from offset 1"
+      },
+      {
+        "evidence_id": "ev-7",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 16,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL|THRESHOLD|[Tt]hreshold"
+      },
+      {
+        "evidence_id": "ev-8",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 6,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL|THRESHOLD|[Tt]hreshold"
+      },
+      {
+        "evidence_id": "ev-9",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 12,
+        "kind": "research_match",
+        "detail": "MANUAL_APPROVAL|THRESHOLD|[Tt]hreshold"
+      },
+      {
+        "evidence_id": "ev-10",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 9,
+        "kind": "research_match",
+        "detail": "effective|window|supersede|[Ss]uperseded"
+      },
+      {
+        "evidence_id": "ev-11",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 12,
+        "kind": "research_match",
+        "detail": "effective|window|supersede|[Ss]uperseded"
+      },
+      {
+        "evidence_id": "ev-12",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 66,
+        "kind": "research_match",
+        "detail": "effective|window|supersede|[Ss]uperseded"
+      },
+      {
+        "evidence_id": "ev-13",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/client.py",
+        "line": 14,
+        "kind": "research_match",
+        "detail": "CURRENT policy|refunds at or|above this|THRESHOLD_CENTS = |MUST pause"
+      },
+      {
+        "evidence_id": "ev-14",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 205,
+        "kind": "research_match",
+        "detail": "CURRENT policy|refunds at or|above this|THRESHOLD_CENTS = |MUST pause"
+      },
+      {
+        "evidence_id": "ev-15",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 207,
+        "kind": "research_match",
+        "detail": "CURRENT policy|refunds at or|above this|THRESHOLD_CENTS = |MUST pause"
+      },
+      {
+        "evidence_id": "ev-16",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 205,
+        "kind": "research_read",
+        "detail": "read 35 chars from offset 204"
+      },
+      {
+        "evidence_id": "ev-17",
+        "repo_key": "billing-policy",
+        "repository_id": "gitlab:billing-policy",
+        "path": "README.md",
+        "line": 5,
+        "kind": "research_read",
+        "detail": "read 12 chars from offset 4"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Confirmed: the CURRENT manual-approval threshold is defined by finance revision F-2024-11, in the final block of billing-policy/src/policy/refunds.py \u2014 NOT the superseded history at the file head. Exact anchors: line 205 `# CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).`; lines 216-217 `#: The CURRENT manual-approval threshold (F-2024-11): refunds at or above this amount require a human approval step before capture.`; line 218 `REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000` (i.e., $50.00); line 221 `REFUND_POLICY_VERSION = \"F-2024-11\"`; line 230 `return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS` (inclusive 'at or above' comparison). Exact window: effective 2024-03-01, no end date \u2014 currently in force. README.md:7 confirms 'The CURRENT refund approval policy (revision F-2024-11)' and README.md:9 marks the earlier sections as superseded history kept only for statement reconciliation. The superseded revisions were excluded as instructed: F-2023-04 ol",
+    "assumptions": [
+      "5000 cents equals $50.00 USD (module names the constant in cents)",
+      "The threshold is inclusive: refunds 'at or above' 5000 cents require the human approval step, per refunds.py:216-217 and the >= comparison at refunds.py:230",
+      "Effective window '2024-03-01' has no stated end date, so F-2024-11 is the rule in force today"
+    ],
+    "contradictions": [
+      "None. The file-head history (F-2023 / F-2024-02) states different ceilings but is explicitly marked DEPRECATED/SUPERSEDED (refunds.py:144, 168, 176) and README.md:9, so it does not contradict the current F-2024-11 rule."
+    ],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "list_paths",
+      "repo_key": "billing-policy",
+      "call": "prefix",
+      "content": "README.md\nsrc/policy/client.py\nsrc/policy/refunds.py",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern F-2024-11",
+      "content": "README.md:7: The CURRENT refund approval policy (revision F-2024-11) lives in the\nsrc/policy/refunds.py:10: this file (the F-2024-11 revision block). Everything above it is either\nsrc/policy/refunds.py:138: # every F-2023 rule was replaced by the F-2024-11 revision block at the\nsrc/policy/refunds.py:145: #: not use for new decisions; see the F-2024-11 block at the end.\nsrc/policy/refunds.py:168: # SUPERSEDED interim \u2014 F-2024-02 (the two-month bridge before F-2024-11).\nsrc/policy/refunds.py:177: #: single global threshold of the F-2024-11 revision below.\nsrc/policy/refunds.py:205: # CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:221: REFUND_POLICY_VERSION = \"F-2024-11\"",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 0 length 200",
+      "content": "\"\"\"Billing-owned refund policy primitives (finance policy F-series).\n\nThis module is the SINGLE source of truth for refund policy decisions\nthat Orders' checkout and other services consume over the po",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 200 length 60",
+      "content": "licy client.\nServices must IMPORT these decisions and must n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "README.md offset 1 length 20",
+      "content": " billing-policy\n\nBil",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern MANUAL_APPROVAL|THRESHOLD|[Tt]hreshold",
+      "content": "src/policy/client.py:16:         ``auto_capture``. The threshold itself never leaves this\nsrc/policy/refunds.py:6: locally: a local copy of a threshold is a policy fork, and policy forks\nsrc/policy/refunds.py:12: first window of this file will not find the current thresholds.\nsrc/policy/refunds.py:136: # The thresholds below are KEPT ONLY for statement reconciliation of\nsrc/policy/refunds.py:139: # end of this file. A service reading an approval threshold from this\nsrc/policy/refunds.py:177: #: single global threshold of the F-2024-11 revision below.\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:209: # the threshold is FORBIDDEN. Below the threshold, automated capture is\nsrc/policy/refunds.py:211: # service (see APPROVALS_OWNERSHIP); this module owns ONLY the threshold\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:218: REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\nsrc/policy/refunds.py:230:     return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\nsrc/policy/refunds.py:234:     \"\"\"The CURRENT decision rule: capture freely below the threshold,\nsrc/policy/refunds.py:248:     threshold_cents: int\nsrc/policy/refunds.py:261:         threshold_cents=REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS,\nsrc/policy/refunds.py:274:     \"REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS\",",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern effective|window|supersede|[Ss]uperseded",
+      "content": "README.md:9: sections above it are superseded history kept only for statement\nsrc/policy/refunds.py:12: first window of this file will not find the current thresholds.\nsrc/policy/refunds.py:66: # Request-age windows \u2014 how long after an order a customer may still ask.\nsrc/policy/refunds.py:70: #: The default window during which a refund REQUEST is accepted after the\nsrc/policy/refunds.py:77: def request_window_for(contract_tier: str) -> int:\nsrc/policy/refunds.py:78:     \"\"\"The accepted request window (days) for a contract tier.\"\"\"\nsrc/policy/refunds.py:86:     \"\"\"True when the request arrived after the accepted window closed.\"\"\"\nsrc/policy/refunds.py:87:     window_days = REFUND_REQUEST_WINDOW_DAYS\nsrc/policy/refunds.py:88:     deadline = order_expired_at + dt.timedelta(days=window_days)\nsrc/policy/refunds.py:93:     \"\"\"The last calendar day a request is still inside the window.\"\"\"\nsrc/policy/refunds.py:144: #: DEPRECATED (F-2023-04): the old auto-approve ceiling. Superseded \u2014 do\nsrc/policy/refunds.py:176: #: DEPRECATED (F-2024-02): regional interim ceilings, superseded by the\nsrc/policy/refunds.py:205: # CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).\nsrc/policy/refunds.py:294:     \"request_window_for\",",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "billing-policy",
+      "call": "pattern CURRENT policy|refunds at or|above this|THRESHOLD_CENTS = |MUST pause",
+      "content": "src/policy/client.py:14:         Maps the CURRENT policy revision's decision onto the wire\nsrc/policy/refunds.py:205: # CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).\nsrc/policy/refunds.py:207: # Any refund at or above the manual-approval threshold MUST pause for a\nsrc/policy/refunds.py:216: #: The CURRENT manual-approval threshold (F-2024-11): refunds at or\nsrc/policy/refunds.py:217: #: above this amount require a human approval step before capture.\nsrc/policy/refunds.py:218: REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000\nsrc/policy/refunds.py:256:     \"\"\"Evaluate a refund amount under the CURRENT policy revision.\"\"\"",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "src/policy/refunds.py offset 204 length 35",
+      "content": " client.\nServices must IMPORT these",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing-policy",
+      "call": "README.md offset 4 length 12",
+      "content": "lling-policy",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "step-1",
+        "objective": "Read billing-policy:src/policy/refunds.py final block (lines ~205-230) to byte-verify the F-2024-11 CURRENT rule: header with effective date, threshold constant, version string, and the inclusive >= comparison.",
+        "evidence_refs": [
+          "ev-14",
+          "ev-15",
+          "ev-16"
+        ]
+      },
+      {
+        "step_id": "step-2",
+        "objective": "Read billing-policy:README.md lines 5-9 to byte-verify the currency note marking F-2024-11 as CURRENT and the head sections as superseded history kept only for reconciliation.",
+        "evidence_refs": [
+          "ev-1",
+          "ev-10",
+          "ev-17"
+        ]
+      },
+      {
+        "step_id": "step-3",
+        "objective": "Check billing-policy:src/policy/client.py threshold references so the approval/capture flow consumes the refunds constant rather than a hardcoded value.",
+        "evidence_refs": [
+          "ev-7",
+          "ev-13"
+        ]
+      },
+      {
+        "step_id": "step-4",
+        "objective": "Report the confirmed threshold and window from the byte-verified F-2024-11 block only; explicitly exclude the superseded F-2023/F-2024-02 history near the file head (lines 1-12 matches ev-4/ev-8/ev-9/ev-11).",
+        "evidence_refs": [
+          "ev-14",
+          "ev-16"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "claim-1",
+        "text": "The refunds policy module docstring states that services must import its definitions, so the approval threshold is defined in src/policy/refunds.py for consumers to import.",
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 5,
+        "asserted_content": "Services must IMPORT these"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "ev-14/ev-16 (billing-policy:src/policy/refunds.py:205): do the bytes read exactly '# CURRENT policy \u2014 finance revision F-2024-11 (effective 2024-03-01).'?"
+      },
+      {
+        "question_id": "q2",
+        "text": "ev-15 (billing-policy:src/policy/refunds.py:207ff): do the bytes show 'REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS = 5000', an '>= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS' comparison, and 'REFUND_POLICY_VERSION = \"F-2024-11\"'?"
+      },
+      {
+        "question_id": "q3",
+        "text": "ev-1 (billing-policy:README.md:7): does the line read 'The CURRENT refund approval policy (revision F-2024-11)'?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "Only the frozen billing-policy snapshot 964a4c46dc66596f09d22a63f1bd5acef120d7c7 is in scope."
+      },
+      {
+        "text": "Threshold values are denominated in cents, so a confirmed constant is reported as cents/100 in dollars."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 10,
+      "calls_executed": 10,
+      "wall_seconds_used": 179.662,
+      "tokens": {
+        "input": 11525,
+        "output": 16120,
+        "input_lower_bound": 11525,
+        "output_lower_bound": 16120,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.15201,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 479,
+          "output_tokens": 67,
+          "charged_input_tokens": 479,
+          "charged_output_tokens": 67,
+          "usage_known": true,
+          "usd_estimated": 0.001494,
+          "running_usd_estimated": 0.471168
+        },
+        {
+          "input_tokens": 494,
+          "output_tokens": 673,
+          "charged_input_tokens": 494,
+          "charged_output_tokens": 673,
+          "usage_known": true,
+          "usd_estimated": 0.006372,
+          "running_usd_estimated": 0.47754
+        },
+        {
+          "input_tokens": 982,
+          "output_tokens": 200,
+          "charged_input_tokens": 982,
+          "charged_output_tokens": 200,
+          "usage_known": true,
+          "usd_estimated": 0.003564,
+          "running_usd_estimated": 0.481104
+        },
+        {
+          "input_tokens": 1121,
+          "output_tokens": 1795,
+          "charged_input_tokens": 1121,
+          "charged_output_tokens": 1795,
+          "usage_known": true,
+          "usd_estimated": 0.016602,
+          "running_usd_estimated": 0.497706
+        },
+        {
+          "input_tokens": 2167,
+          "output_tokens": 1715,
+          "charged_input_tokens": 2167,
+          "charged_output_tokens": 1715,
+          "usage_known": true,
+          "usd_estimated": 0.018054,
+          "running_usd_estimated": 0.51576
+        },
+        {
+          "input_tokens": 2413,
+          "output_tokens": 1842,
+          "charged_input_tokens": 2413,
+          "charged_output_tokens": 1842,
+          "usage_known": true,
+          "usd_estimated": 0.019562,
+          "running_usd_estimated": 0.535322
+        },
+        {
+          "input_tokens": 2456,
+          "output_tokens": 1843,
+          "charged_input_tokens": 2456,
+          "charged_output_tokens": 1843,
+          "usage_known": true,
+          "usd_estimated": 0.019656,
+          "running_usd_estimated": 0.554978
+        },
+        {
+          "input_tokens": 1413,
+          "output_tokens": 7985,
+          "charged_input_tokens": 1413,
+          "charged_output_tokens": 7985,
+          "usage_known": true,
+          "usd_estimated": 0.066706,
+          "running_usd_estimated": 0.621684
+        }
+      ]
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.15201,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 8,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

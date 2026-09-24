@@ -873,6 +873,31 @@ class Preregistration:
             raise CohortSpecError("preregistration budget.max_calls must be >= 1")
         if float(self.budget.get("wall_seconds") or 0) < 1.0:
             raise CohortSpecError("preregistration budget.wall_seconds must be >= 1.0")
+        # R37-11 (gen-2): a live cohort that declares DOLLAR caps is held to
+        # them structurally — the hard total may never exceed the live-cohort
+        # ceiling, a per-arm slice may never exceed the total, and the
+        # per-call token caps must be positive.  (A gen-1 contract that
+        # declares no dollar caps keeps its recorded shape.)
+        max_usd_total = self.budget.get("max_usd_total")
+        if max_usd_total is not None and not 0 < float(max_usd_total) <= 3.0:
+            raise CohortSpecError(
+                f"preregistration budget.max_usd_total must be in (0, 3.0] USD — the "
+                f"live-cohort hard spend ceiling (got {max_usd_total})"
+            )
+        max_usd_per_arm = self.budget.get("max_usd_per_arm")
+        if max_usd_per_arm is not None:
+            if not 0 < float(max_usd_per_arm) <= 3.0:
+                raise CohortSpecError(
+                    f"preregistration budget.max_usd_per_arm must be in (0, 3.0] USD "
+                    f"(got {max_usd_per_arm})"
+                )
+            if max_usd_total is not None and float(max_usd_per_arm) > float(max_usd_total):
+                raise CohortSpecError(
+                    "preregistration budget.max_usd_per_arm may not exceed max_usd_total"
+                )
+        for token_cap in ("max_tokens_per_call", "plan_max_tokens"):
+            if token_cap in self.budget and int(self.budget[token_cap]) < 1:
+                raise CohortSpecError(f"preregistration budget.{token_cap} must be >= 1")
         criteria = dict(self.promotion_criteria)
         if "margin" not in criteria or float(criteria.get("margin") or 0) < 0:
             raise CohortSpecError("preregistration promotion_criteria.margin must be >= 0")
@@ -1559,6 +1584,10 @@ def _cost_summary(run: RecordedRun) -> dict[str, Any]:
     input_exact = True
     output_exact = True
     unknown_calls = 0
+    usd_known = 0.0
+    usd_exact = True
+    usd_present = False
+    usd_missing = False
     for attempt in run.attempts:
         cost = dict(attempt.get("cost") or {})
         calls_proposed += int(cost.get("calls_proposed") or 0)
@@ -1570,7 +1599,19 @@ def _cost_summary(run: RecordedRun) -> dict[str, Any]:
         input_known += int(tokens.get("input_lower_bound") or tokens.get("input") or 0)
         output_known += int(tokens.get("output_lower_bound") or tokens.get("output") or 0)
         unknown_calls += int(tokens.get("unknown_usage_calls") or 0)
-    return {
+        # R37-11: vendor dollars are aggregated ONLY when receipts were
+        # recorded; a missing receipt stays unknown (usd_estimated None),
+        # never silently zero.  A cohort whose attempts carry no dollar
+        # fields (offline-scripted, pre-gen-2) simply has none to publish.
+        if "usd_estimated" in cost:
+            usd_present = True
+            if cost.get("usd_estimated") is None:
+                usd_exact = False
+            else:
+                usd_known += float(cost.get("usd_estimated") or 0)
+        else:
+            usd_missing = True  # an attempt without its receipt
+    summary: dict[str, Any] = {
         "coverage": "recorded",
         "attempts": len(run.attempts),
         "calls_proposed": calls_proposed,
@@ -1584,6 +1625,11 @@ def _cost_summary(run: RecordedRun) -> dict[str, Any]:
             "unknown_usage_calls": unknown_calls,
         },
     }
+    if usd_present:
+        exact = usd_exact and not usd_missing
+        summary["usd_estimated"] = round(usd_known, 6) if exact else None
+        summary["usd_coverage"] = "receipted" if exact else "unknown"
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1621,6 +1667,10 @@ def aggregate_mode(
     input_exact = True
     output_exact = True
     unknown_calls = 0
+    usd_known = 0.0
+    usd_exact = True
+    usd_present = False
+    usd_missing = False
     budget_overruns: list[str] = []
     for run in runs:
         if run.cost_complete():
@@ -1638,6 +1688,17 @@ def aggregate_mode(
             input_known += int(tokens.get("input_lower_bound") or tokens.get("input") or 0)
             output_known += int(tokens.get("output_lower_bound") or tokens.get("output") or 0)
             unknown_calls += int(tokens.get("unknown_usage_calls") or 0)
+            # R37-11: vendor dollars aggregate ONLY over recorded receipts;
+            # any attempt without one keeps the mode's total UNKNOWN —
+            # a missing receipt never counts as zero spend.
+            if "usd_estimated" in cost:
+                usd_present = True
+                if cost.get("usd_estimated") is None:
+                    usd_exact = False
+                else:
+                    usd_known += float(cost.get("usd_estimated") or 0)
+            else:
+                usd_missing = True  # an attempt without its receipt
         if not run.cost_within(run.budget):
             budget_overruns.append(run.task_id)
     stopped_reasons: dict[str, int] = {}
@@ -1656,6 +1717,26 @@ def aggregate_mode(
                 exhausted += 1
                 reason = str(doc.get("stopped_reason") or "unknown")
                 stopped_reasons[reason] = stopped_reasons.get(reason, 0) + 1
+    cost_entry: dict[str, Any] = {
+        "coverage": "complete"
+        if cost_complete == len(runs) and runs
+        else ("missing" if cost_complete == 0 else "partial"),
+        "tasks_with_cost": cost_complete,
+        "calls_proposed_total": calls_proposed,
+        "calls_executed_total": calls_executed,
+        "wall_seconds_used_total": round(wall, 3),
+        "tokens": {
+            "input": input_known if input_exact else None,
+            "output": output_known if output_exact else None,
+            "input_lower_bound": input_known,
+            "output_lower_bound": output_known,
+            "unknown_usage_calls": unknown_calls,
+        },
+    }
+    if usd_present:
+        exact = usd_exact and not usd_missing
+        cost_entry["usd_estimated_total"] = round(usd_known, 6) if exact else None
+        cost_entry["usd_coverage"] = "receipted" if exact else "unknown"
     return {
         "tasks_total": len(runs),
         "tasks_graded": len(graded),
@@ -1692,22 +1773,7 @@ def aggregate_mode(
             if runs and runs[0].mode == MODE_RESEARCH
             else None
         ),
-        "cost": {
-            "coverage": "complete"
-            if cost_complete == len(runs) and runs
-            else ("missing" if cost_complete == 0 else "partial"),
-            "tasks_with_cost": cost_complete,
-            "calls_proposed_total": calls_proposed,
-            "calls_executed_total": calls_executed,
-            "wall_seconds_used_total": round(wall, 3),
-            "tokens": {
-                "input": input_known if input_exact else None,
-                "output": output_known if output_exact else None,
-                "input_lower_bound": input_known,
-                "output_lower_bound": output_known,
-                "unknown_usage_calls": unknown_calls,
-            },
-        },
+        "cost": cost_entry,
         "budget_overruns": sorted(budget_overruns),
     }
 

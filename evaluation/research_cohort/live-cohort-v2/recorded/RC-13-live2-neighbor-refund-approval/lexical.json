@@ -1,0 +1,198 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-13-live2-neighbor-refund-approval",
+  "mode": "lexical",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 787,
+          "output_lower_bound": 4602,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.03839,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 787,
+            "output_tokens": 4602,
+            "charged_input_tokens": 787,
+            "charged_output_tokens": 4602,
+            "usage_known": true,
+            "usd_estimated": 0.03839,
+            "running_usd_estimated": 0.05805
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Read the final revision block (F-2024-11) of billing-policy src/policy/refunds.py and src/policy/client.py to confirm the refund_status contract and whether the large-refund approval threshold is encoded there; if absent, escalate to Finance."
+      },
+      {
+        "step_id": "S2",
+        "objective": "In orders-api checkout, add a refund-request path for orders expired less than 30 days ago, rejecting non-positive amounts before calling billing-policy's refund_status(order_id, amount_cents)."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Act on the returned policy status in orders-api: capture approved refunds, and hold refunds above the (config-supplied, Finance-confirmed) threshold for the extra approval step before capture."
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "README.md",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "C1",
+        "text": "Billing exposes a refund decision API Orders' checkout can call: refund_status(order_id, amount_cents) -> str.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 11,
+        "asserted_content": "def refund_status(self, order_id: str, amount_cents: int) -> str:"
+      },
+      {
+        "claim_id": "C2",
+        "text": "The current refund approval policy is revision F-2024-11 and lives in the final revision block of src/policy/refunds.py; earlier F-2023/F-2024-02 sections are superseded history.",
+        "repo": "billing-policy",
+        "path": "README.md",
+        "line": 7,
+        "asserted_content": "The CURRENT refund approval policy (revision F-2024-11) lives in the\nfinal revision block of `src/policy/refunds.py`; the F-2023/F-2024-02"
+      },
+      {
+        "claim_id": "C3",
+        "text": "The policy client is read-only access to refund policy decisions, so orders-api must not re-decide approval locally.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 9,
+        "asserted_content": "\"\"\"Read-only access to Billing's refund policy decisions.\"\"\""
+      },
+      {
+        "claim_id": "C4",
+        "text": "Zero or negative refund amounts are no-ops per billing-policy, so checkout should reject them as invalid before invoking the policy client.",
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 62,
+        "asserted_content": "return int(amount_cents) > 0"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "From what amount (in cents) does Finance's extra approval step for large refunds apply before capture? The issue omits it and no observed evidence byte states a threshold."
+      },
+      {
+        "question_id": "q2",
+        "text": "Which orders-api field records order expiry, and against what clock/timezone is 'expired less than 30 days ago' evaluated?"
+      },
+      {
+        "question_id": "q3",
+        "text": "What are the possible return values of billing-policy's refund_status, and does one of them represent 'needs extra approval before capture'?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "All work targets the frozen snapshots at the listed source OIDs."
+      },
+      {
+        "text": "docs-site is out of scope for this pass."
+      },
+      {
+        "text": "The approval threshold will be injected as configuration so S3 is not hard-blocked on Finance's answer."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 787,
+        "output_lower_bound": 4602,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.03839,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 787,
+          "output_tokens": 4602,
+          "charged_input_tokens": 787,
+          "charged_output_tokens": 4602,
+          "usage_known": true,
+          "usd_estimated": 0.03839,
+          "running_usd_estimated": 0.05805
+        }
+      ]
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.03839,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

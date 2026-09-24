@@ -1,0 +1,207 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-15-live2-irrelevant-docs-site",
+  "mode": "lexical",
+  "snapshot_digest": "7d91d543311dd660a1d8b869342513e0dbdaf3c0d5a55da64c312d11bc290ffc",
+  "budget": {
+    "max_calls": 12,
+    "wall_seconds": 300.0,
+    "max_tokens_per_call": 3000,
+    "plan_max_tokens": 8000,
+    "max_usd_per_arm": 0.4,
+    "max_usd_total": 3.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": null,
+          "output": null,
+          "input_lower_bound": 763,
+          "output_lower_bound": 4832,
+          "unknown_usage_calls": 0
+        },
+        "usd_estimated": 0.040182,
+        "usd_coverage": "receipted",
+        "receipts": [
+          {
+            "input_tokens": 763,
+            "output_tokens": 4832,
+            "charged_input_tokens": 763,
+            "charged_output_tokens": 4832,
+            "usage_known": true,
+            "usd_estimated": 0.040182,
+            "running_usd_estimated": 0.321902
+          }
+        ]
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "S1",
+        "objective": "Locate Orders' refund handlers in orders-api and their current use of the policy client (no orders-api bytes were shown in this pass)."
+      },
+      {
+        "step_id": "S2",
+        "objective": "Pin down the billing-policy read path that returns the manual-review decision verbatim (refund_status vs a read method over requires_manual_approval); no billing-policy behavior change."
+      },
+      {
+        "step_id": "S3",
+        "objective": "Modify Orders' refund handlers to surface the policy decision verbatim via the policy client and remove any local re-decision."
+      },
+      {
+        "step_id": "S4",
+        "objective": "Verify orders-api tests assert verbatim surfacing of the manual-review decision; confirm docs-site is untouched."
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing-policy",
+        "path": "README.md",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "why": "claim"
+      },
+      {
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "why": "claim"
+      },
+      {
+        "repo": "docs-site",
+        "path": "content/refunds.md",
+        "why": "claim"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "C1",
+        "text": "Orders must never re-decide Billing's policy decisions locally; it surfaces them as given.",
+        "repo": "billing-policy",
+        "path": "README.md",
+        "line": 5,
+        "asserted_content": "and must never re-decide them locally."
+      },
+      {
+        "claim_id": "C2",
+        "text": "The read path into Billing's decisions is PolicyClient, which exposes refund_status(order_id, amount_cents) -> str.",
+        "repo": "billing-policy",
+        "path": "src/policy/client.py",
+        "line": 11,
+        "asserted_content": "    def refund_status(self, order_id: str, amount_cents: int) -> str:"
+      },
+      {
+        "claim_id": "C3",
+        "text": "Billing's manual-review decision is computed by requires_manual_approval, comparing amount_cents against REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS in src/policy/refunds.py.",
+        "repo": "billing-policy",
+        "path": "src/policy/refunds.py",
+        "line": 230,
+        "asserted_content": "    return int(amount_cents) >= REFUND_MANUAL_APPROVAL_THRESHOLD_CENTS"
+      },
+      {
+        "claim_id": "C4",
+        "text": "The docs-site refunds page shows only navigation links in the shown bytes, supporting its exclusion from this change.",
+        "repo": "docs-site",
+        "path": "content/refunds.md",
+        "line": 26,
+        "asserted_content": "- [Order lifecycle](/content/lifecycle.md)"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Where are Orders' refund handlers in orders-api, and what do they currently return for manual-review cases? (No orders-api bytes were shown in this pass.)"
+      },
+      {
+        "question_id": "q2",
+        "text": "Does orders-api already call PolicyClient.refund_status in its refund handlers, or does it currently re-decide the decision locally?"
+      },
+      {
+        "question_id": "q3",
+        "text": "Does PolicyClient.refund_status return the manual-review decision verbatim, or does billing-policy need to expose a read method wrapping requires_manual_approval?"
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "billing-policy behavior is unchanged anywhere; Orders only reads decisions via the policy client."
+      },
+      {
+        "text": "docs-site is out of scope (shown bytes are navigation links only; the issue states it is marketing content nothing reads)."
+      },
+      {
+        "text": "'Verbatim' means the policy decision is passed through unchanged \u2014 no reformatting and no local boolean re-evaluation in Orders."
+      }
+    ],
+    "synthesis": "live-model/v1"
+  },
+  "reviewer": {
+    "notes": "captured live-model under preregistration a51ffa3a7601\u2026 generation 2; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "live-model",
+    "model_identity": "live:fast",
+    "route": "litellm-gateway:planner",
+    "live_provider": true,
+    "preregistration": {
+      "digest": "a51ffa3a7601f00349f05e00b79cafcfbd50a3bce2971abe982b5c5bcc784e1f",
+      "generation": 2
+    },
+    "budget": {
+      "max_calls": 12,
+      "wall_seconds": 300.0,
+      "max_tokens_per_call": 3000,
+      "plan_max_tokens": 8000,
+      "max_usd_per_arm": 0.4,
+      "max_usd_total": 3.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "input_lower_bound": 763,
+        "output_lower_bound": 4832,
+        "unknown_usage_calls": 0
+      },
+      "usd_estimated": 0.040182,
+      "usd_coverage": "receipted",
+      "receipts": [
+        {
+          "input_tokens": 763,
+          "output_tokens": 4832,
+          "charged_input_tokens": 763,
+          "charged_output_tokens": 4832,
+          "usage_known": true,
+          "usd_estimated": 0.040182,
+          "running_usd_estimated": 0.321902
+        }
+      ]
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes + live plan synthesis",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R37-11 / #292",
+    "plan_synthesis": "live-model-plan-synthesis/v1",
+    "spend": {
+      "usd_estimated": 0.040182,
+      "cap_usd_total": 3.0,
+      "cap_usd_per_arm": 0.4,
+      "cap_exhausted": false,
+      "receipts_count": 1,
+      "price_note": "conservative over-estimate used only to enforce the hard spend cap; actual vendor pricing is not recorded here \u2014 the receipts carry the usage the gateway reported"
+    }
+  }
+}

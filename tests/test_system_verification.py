@@ -1,5 +1,11 @@
 """#278 / R36-19: verify a complete two-service CandidateSet AS A SYSTEM.
 
+These are the DETERMINISTIC REFERENCE twin's pins
+(``TWIN_REFERENCE_LABEL``, retained per R37-15/#296): the in-process
+twin stays the cheap, reproducible semantics pin beside the verified
+executor (``tests/test_verification_executor.py`` — the separate
+subprocess, the BUILT wheel artifacts, the real-socket broker arm).
+
 The pins, in the issue's own order:
 
 - the tested-world identity is COMPLETE — changed AND unchanged

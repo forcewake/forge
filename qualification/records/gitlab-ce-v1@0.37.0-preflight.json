@@ -1,0 +1,101 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "real-provider-e2e"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer"
+  ],
+  "credential_route": "bot PAT for the control plane; read-only PAT for the lane clone (proposal-only, ADR-0016); BYOK env token for the harness model route",
+  "evidence": [
+    {
+      "artifact_sha256": "835b0b3bef8fed13925e0dad25bd5a45ea43546e58bd8b0c857d2b47ce0983e4",
+      "capability": "real-provider-e2e",
+      "class": "model-fixture",
+      "covers": "production-entry offline trace CE-2 re-executed for this record (2026-09-24): env-stripped pytest tests/production_entry/test_gitlab_ce_entry.py, 6 passed — authored scenario against fakes, NO live provider or model (trace: tests/production_entry/test_gitlab_ce_entry.py)",
+      "executed_at": "2026-09-24T09:36:17Z",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "4c0ee10ea973b4dc9ee436261073af0d19186fc9a918f0306d60e99c45f0ce53",
+      "capability": "lab-alignment-preflight",
+      "class": "offline-operational",
+      "covers": "R37-06 read-only inventory of the REAL lab (trace: qualification/inventory-2026-09-24.json, stamp forge.lab.inventory/1): /health reports 0.28.0 on localhost/forge:dev@sha256:a09ad6a0…, schema head 026 (repo 027), .gitlab-ci.yml includes pinned at 2fbc321, budget caps absent, GitLab CE 19.3.2, runner id3 stale / id4 online — verdict misaligned",
+      "executed_at": "2026-09-24T09:36:17Z",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "d983ff4a3943fb936167fbc12e4685d03925641e46e2a01d16bb4424be651386",
+      "capability": "live-flow-preflight",
+      "class": "offline-operational",
+      "covers": "the LIVE flow preflight still REFUSES (observed, not inferred): deployed control plane 0.28.0 vs pinned v0.36.0 artifacts; schema 026 vs 027; no FORGE_BUDGET_PROFILES / FORGE_LANE_BUDGET_SECONDS in the app/worker env; templates at 2fbc321; plus the GitLab lane-resume dispatch gap (#288). A paid flow against another build qualifies nothing — no live evidence claimed",
+      "executed_at": "2026-09-24T09:36:17Z",
+      "outcome": "fail"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.36.0/promotion.json",
+    "qualification/profiles/gitlab-ce-v1-evidence.json",
+    "qualification/profiles/gitlab-ce-v1.md",
+    "qualification/inventory-2026-09-24.json",
+    "docs/operations/lab-alignment-runbook.md"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:d776da71fa6bc7ad9b8d2855394a884a8c3d19fc76808c2fa75945d90324188c",
+  "legacy": false,
+  "note": "R37-06 preflight record: the FIRST strict-schema (legacy: false) profile record — executed_at is an ISO timestamp, artifact identities live in artifact_sha256, and validate_record() reports zero findings. record_id names the 0.37.0 WORK CYCLE; release_version stays 0.36.0 because the pinned artifacts ARE the v0.36.0 promotion (image sha256:d776da71…, wheel 4ecd680a…). The lab is OBSERVED misaligned (qualification/inventory-2026-09-24.json): deployed 0.28.0 dev image, schema 026, templates at 2fbc321, no budget caps. The live flow stage remains REFUSED at preflight — a paid flow against another build qualifies nothing, so no live-provider evidence is claimed and the derived verdict stays declared_only. template_defaults_digest is the OBSERVED installed template content_sha256; closure_digest is empty (wheel-pinned record, R36-10 wheelhouse pending); runtime_dependency_fingerprint and authority_contract_version are unpinned — not observed for the deployed lab (no checkpoint authority marker exists at data/checkpoints/migration/authority.json), and an unpinned axis fails closed on any later change. Resolution of every refusal: the typed refusal_resolution matrix + docs/operations/lab-alignment-runbook.md.",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed read-only via GET /api/v4/version on 2026-09-24",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
+  "record_id": "gitlab-ce-v1@0.37.0-preflight",
+  "refusal_resolution": [
+    {
+      "action": "runbook §3 — pull ghcr.io/forcewake/forge@sha256:d776da71… and recreate forge-app + forge-worker via podman (NOT docker-compose)",
+      "owner": "lab operator",
+      "refusal": "deployed control plane reports 0.28.0 on localhost/forge:dev (sha256:a09ad6a0…) while the profile pins the promoted v0.36.0 artifacts",
+      "status": "open"
+    },
+    {
+      "action": "runbook §3 step 3 — python -m forge.migrate on the new image BEFORE the consumers start",
+      "owner": "lab operator",
+      "refusal": "deployed schema head is 026 while the repo chain head is 027",
+      "status": "open"
+    },
+    {
+      "action": "runbook §4 — append the caps block to .env (numerical max_calls/max_tokens/wallclock_s per class + lane seconds) and recreate",
+      "owner": "lab operator",
+      "refusal": "no numerical budget caps in the app/worker env (FORGE_BUDGET_PROFILES and FORGE_LANE_BUDGET_SECONDS absent on both containers)",
+      "status": "open"
+    },
+    {
+      "action": "runbook §5 — refresh the four remote includes to the v0.36.0 tag refs",
+      "owner": "lab operator",
+      "refusal": "installed .gitlab-ci.yml (project 68, main) pins the lane templates at ref 2fbc321, not the promoted v0.36.0",
+      "status": "open"
+    },
+    {
+      "action": "runbook §6 — observe the wheel on the runner or via scripts/qualify_gitlab_ce.py --stage install-check, then record the identity",
+      "owner": "lab operator",
+      "refusal": "installed lane wheel unobservable from the control host (lane venv /tmp/forge-lane-venv is per-CI-job on the runner)",
+      "status": "open"
+    },
+    {
+      "action": "docs/operations/lab-alignment-runbook.md §7 — the R37-07 (#288) bridge lands the resume contract; until then cross-runner resume stays offline-qualified",
+      "owner": "R37-07 (#288)",
+      "refusal": "the GitLab dispatch seam carries no lane-resume contract (FORGE_LANE_RESUME / lane-control credentials are GitHub-only)",
+      "status": "open"
+    }
+  ],
+  "release_version": "0.36.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "python-3.13 (uv standalone, lane venv at /tmp/forge-lane-venv)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "0231a179a18f36608bc123e42ee38042b9b3b522b91de60a6026088b13e76fbd",
+  "upgrade": null,
+  "verification_contract": "one required job named smoke (FORGE_REQUIRED_JOBS=smoke) on the current candidate sha",
+  "wheel_sha256": "4ecd680afeb7b23301d079ff06386e91dd5c9b5756560ca88c8db8c2941b2005"
+}
