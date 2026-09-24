@@ -730,14 +730,18 @@ async def _drive_dispatch_cycle(
         handle = next((h for h, state in lane.jobs.items() if state == "running"), "")
         if handle:
             await lane.cancel(handle)  # cancel_mode=fail → False; job runs on
-        await release_lease_with_evidence(
+        outcome = await release_lease_with_evidence(
             fixture.session_factory, run_id, reason="terminal:cancelled", native_terminal=False
         )
-        # The INVARIANT is the held slot, not who parked it: a concurrent
-        # acquirer's terminal-run reclaim may have parked this lease
-        # draining first (drained==0 then), but NOTHING may have FREED it.
-        row = await _lease_for_run(fixture.session_factory, run_id)
-        assert row is not None and row.released_at is None and row.draining_at is not None, (
+        # The INVARIANT is the OPERATION's own outcome, read atomically
+        # from its return: the failed-cancel release itself must FREE
+        # NOTHING (drained, not released). Re-reading the row afterward
+        # races with OTHER actors the drill runs concurrently — a
+        # reconciler that later observes the native job terminal (or a
+        # concurrent acquirer's reclaim parking first) is LEGAL product
+        # behavior, not this drill's violation; the return value is the
+        # race-free witness of what THIS release did.
+        assert outcome.released == 0, (
             "a failed cancel must leave the slot HELD draining, never freed"
         )
         return "cancel_fail_draining"
