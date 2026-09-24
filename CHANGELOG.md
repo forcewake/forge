@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0] - 2026-09-24
+
+### Added — the 16339c2 review COMPLETE: all 22 R36 items (#260-#281)
+
+All 4 P1 + 18 P2 closed in one campaign. Suite 5918 → 7015 (+1097).
+
+**M0 — the four P1 correctness boundaries:**
+- **#260 R36-01**: collector ownership hardened — non-following lstat
+  checks, physical containment, checkpoint/attempt binding from the
+  trusted dispatch, TOCTOU stamp rechecks; the P01
+  symlink-to-foreign-repo refused before cleanup.
+- **#261 R36-02**: one typed continuation decision — reason-coded
+  refusals (explicit discard lifts ONLY continuity), `restart` parsed
+  in argument position, vendor-start certainty from the persisted
+  native-start intent, never from discovery absence.
+- **#262 R36-03**: every retry/revival lookup through the configured
+  async authority — typed exact/absent/unavailable/corrupt/unauthorized;
+  the legacy filesystem/HTTP chain confined behind an opt-in flag;
+  AT-04 proven on real PostgreSQL.
+- **#263 R36-04**: CAS reference acquisition serialized with deletion —
+  one volume-wide lock + advisory twin; every unlink through the locked
+  sweep entries; SWEEP=off operator mode; the P04 post-final-scan
+  schedule fixed red-first.
+
+**M1 — composition and gates:**
+- **#264**: cutover fence at the standard composition root (mutations
+  recheck the authority marker; generation-bound verify reports).
+- **#265**: envelope v2 — execution_attempt_id from durable counters,
+  authority epoch inside the digest, publication-identity fail-closed.
+- **#266**: explicit installer routes (dev/wheel/tag/default ladder;
+  conflicts refuse before download; the dev-route regression fixed).
+- **#267**: the required PostgreSQL qualification gate in CI
+  (alembic-provisioned profiles, manifest mutation detector, typed
+  refusals; AT-09 negative arms proven).
+
+**M2 — qualification:**
+- **#268**: GitLab CE entry traces at PE rigor + the staged
+  qualification driver; live preflight honestly REFUSED (control plane
+  0.28.0 vs pinned wheel; no budget caps; the GitLab lane-resume gap
+  recorded) — install-check GREEN on the promoted wheel.
+- **#269**: hash-locked lane closures (88-artifact manifest, tamper
+  arms proven), supply-chain binding, credential isolation receipts.
+- **#270**: discovery authority — connection-identity readers, decoy
+  rejection, authorized-set enforcement, neighbor-write refusal; a real
+  captured neighbor-dependency run (RC-08).
+- **#272**: revision proof through the next executor input (PE-7
+  three-way digest equality; fail-closed WIP reuse decisions).
+- **#273**: verification bound to the exact candidate (subject identity,
+  freshness, frozen report inventory, infra-vs-defect repair budgets).
+
+**M3 — operator, measurement, pilot, records:**
+- **#274**: the operator projection wired to live authorized reads
+  (read-only API, current-candidate binding; closes #213's remainder).
+- **#275**: the pilot EXECUTED — 12/12 lab tasks through the
+  production-entry seams; verdict 2-of-3 → expand at lab scope.
+- **#276**: connected delivery measurement (identity joins, honest
+  unknowns, the decode-label guard).
+- **#280**: six ops drills green incl. the PG variant (capacity under
+  lost responses, upload budgets, responsiveness, degraded faults,
+  backup/restore with mismatch detection, override audit).
+- **#281**: profile qualification records — the evidence-class lattice
+  with DERIVED verdicts; upgrade-claim honesty; the profile gate step
+  in release.yml.
+
+**M4 — two-writer and boundaries:**
+- **#277**: the durable saga over native-shaped remotes — the REAL
+  coordinator in the kill matrix on real PostgreSQL; no marker dedup;
+  lost-response adoption via native correlation.
+- **#278**: complete tested-world verification — full digest over
+  images/bundles/profile; the twin verifier with exactly-once
+  double-delivery; three-distinct-permissions readiness.
+- **#279**: ADR-0030 + the boundary registry + 30 AST enforcement
+  tests — six owning boundaries mechanically confined; the audit found
+  ZERO production violations.
+
+**And #271**: the live research cohort machinery (preregistration,
+provenance-labeled capture, blind review) — the shipped cohort reports
+honestly HOLD pending human review.
+
 ## [0.35.0] - 2026-09-23
 
 ### Fixed — the c7ae8db review M0: the four P1 execution gaps

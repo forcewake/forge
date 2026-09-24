@@ -1,6 +1,6 @@
 [project]
 name = "forge"
-version = "0.35.0"
+version = "0.36.0"
 description = "Agentic software factory for GitLab CE, GitHub, and Azure DevOps — issue to reviewed Draft MR/PR; the bot never merges"
 requires-python = ">=3.13"
 license = "BSD-3-Clause"
