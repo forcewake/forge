@@ -798,6 +798,23 @@ def _wait_for_file(path: Path, *, timeout: float = 10.0) -> None:
         time.sleep(0.005)
 
 
+async def _await_file(path: Path, *, timeout: float = 10.0) -> None:
+    """The async twin: polls on the EVENT LOOP, no executor thread.
+
+    The P04 hooks run while the sweep HOLDS the volume lock; routing the
+    wait through the default ThreadPoolExecutor starved on CI's 2-core
+    runners (the hook stalled inside the locked sweep and the probe
+    coordination collapsed — the repeated 3.14 flake). A loop-level
+    poll cannot starve: the blob write is a plain filesystem call the
+    background task makes without the loop.
+    """
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{path} never appeared — work B never wrote its bytes")
+        await asyncio.sleep(0.005)
+
+
 class TestP04OnUploadCleanup:
     async def test_b_reference_after_the_final_scan_survives_on_upload_cleanup(
         self, tmp_path: Path
@@ -827,9 +844,7 @@ class TestP04OnUploadCleanup:
 
                 nonlocal task
                 task = asyncio.create_task(run_b())
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _wait_for_file, b_manifest_path
-                )
+                await _await_file(b_manifest_path)
 
             sweeping.gc_after_final_scan = start_b_after_the_final_scan
             # A's THIRD landing triggers the on-upload retention inside the
@@ -914,9 +929,7 @@ class TestP04PendingGcRecovery:
 
                 nonlocal task
                 task = asyncio.create_task(run_b())
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _wait_for_file, _cas_path_of(root, b_id)
-                )
+                await _await_file(_cas_path_of(root, b_id))
 
             store.gc_after_final_scan = start_b_after_the_final_scan
             removed = await store.aapply_retention(WORK_A, keep_last=1)
