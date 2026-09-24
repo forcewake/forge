@@ -1,0 +1,1284 @@
+{
+  "entries": [
+    {
+      "backend": "*",
+      "capability": "runs/spec-freeze",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_runs_spec.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "ExecutableRunSpec v3: digest re-verified on every read; legacy v2 refused (R04; A02 wired the same spec to GitHub/Azure builders).",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "runs/verification-contract",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_runs_verification.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "Unified VerificationResult: verified means the required checks RAN and SUCCEEDED (R02); absence of CI is honest unverified.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "runs/verification-gate",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_runs_service.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "/implement parks at waiting_ci on FakeGitLab; required-jobs profile per ADR-0008.",
+      "provider": "gitlab"
+    },
+    {
+      "backend": "*",
+      "capability": "runs/verification-gate",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "waiting_ci + checks correlation on FakeGitHub; required-checks surface still has an un-enforced branch-protection path (github_service.py: 'no required checks are enforced yet') — review A01 not claimed.",
+      "provider": "github"
+    },
+    {
+      "backend": "*",
+      "capability": "runs/verification-gate",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_azure_runs.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "waiting_ci with Builds correlation by candidate sha (R02 parity).",
+      "provider": "azure"
+    },
+    {
+      "backend": "*",
+      "capability": "publication-boundary",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_conformance.py",
+        "tests/test_publication_boundary.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R01: one publication boundary; negative conformance kit attests each lane (attest_conformance) — deny scenarios publish with zero commit-API calls.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "publication-intents",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_publication_intents.py",
+        "tests/test_runs_reconciler.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R11: intent persisted before HTTP; probe-first reconciliation adopts lost pushes.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "execution-claims",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_claims.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R10: ExecutionClaim guarded transitions; cancel fences via generation pin.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "numeric-budgets",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_budgets.py",
+        "tests/test_budget_wiring.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R13: budget profiles frozen into the spec and opened before planning; harness lanes record honest partial enforcement.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "blob-reads",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_blob_reads.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R14: only a provider-confirmed 404 proves absence.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "bounded-steps",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_bounded_steps.py",
+        "tests/test_step_runtime.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R07: checkpoint/replay — a crash never re-calls the model or re-derives published work.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "patch-engine",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_patch_differential.py",
+        "tests/test_repository_changeset.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R08/R09: discriminated representations with digest verification; differential suite against git apply as the oracle.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "durable-liveness",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_liveness.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R17: deadline/cancel evaluated before provider I/O; late callbacks are superseded evidence, never READY.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "provider-namespaces",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_provider_namespaces.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R03: (provider, project_id, issue_iid) identity — numeric ids across providers coexist.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "mcp-authorization",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_mcp_server.py",
+        "tests/test_mcp_runs_tools.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R19: default-deny tool wrapper, repo-target allowlist, denial auditing.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "harness-selection",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_harness_selection.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R31: capability-aware harness selection — manifest + policy-bound planner proposal.",
+      "provider": "*"
+    },
+    {
+      "backend": "harness",
+      "capability": "harness-artifact",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_harness_entry.py",
+        "tests/test_runs_harness_service.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R16: candidate artifact recipe (meta schema, ZIP caps) and the waiting_harness leg.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "project-config-scope",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_config_scope.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "A13: config reads are typed (confirmed_absent/valid/unreadable/invalid); only confirmed_absent earns the default profile — scope never widens on a read failure.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "operator-commands",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_runs_revival.py",
+        "tests/test_slash_routing.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R29: /retry + bounded auto-revive backoff; operator command routing.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "delivery-metrics",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_mcp_runs_tools.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R24: honest delivery metrics via the forge_delivery_ladder MCP tool.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "durable-failure-injection",
+      "ci_jobs": [
+        "integration"
+      ],
+      "evidence": [
+        "tests/test_failure_injection.py"
+      ],
+      "evidence_class": "coroutine_fi",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "ADR-0017 exit bar: in-process workers killed at each checkpoint against REAL Postgres. Self-skips without FORGE_PG_TEST_URL — only the CI / integration job enforces it, not the plain test job.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "os-process-failure-injection",
+      "ci_jobs": [
+        "integration-os"
+      ],
+      "evidence": [
+        "tests/test_failure_injection_os.py"
+      ],
+      "evidence_class": "subprocess_fi",
+      "gating": "nightly",
+      "level": "contract_tested",
+      "note": "Real ``python -m forge.worker`` subprocesses SIGKILLed at each checkpoint against the real Postgres/Redis lab. NIGHTLY ONLY — not on the PR gate (R20).",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "release-artifact-canary",
+      "ci_jobs": [
+        "release-canary",
+        "publish-ghcr"
+      ],
+      "evidence": [
+        "scripts/canary_smoke.py",
+        ".github/workflows/release.yml"
+      ],
+      "evidence_class": "boot_canary",
+      "gating": "nightly",
+      "level": "live_canary_tested",
+      "note": "R30: the IMAGE is smoke-tested — real alembic chain, boot gate at head, /health version, MCP mount fail-closed, doctor; also the tag-gate before publish (Release / publish-ghcr). R32-19: the migrate stage seeds real-shaped rows and asserts the upgrade preserves them; stage outcomes are capability-tagged machine records the promotion gate consumes. Covers boot/migrate ONLY — see the not_run entries below.",
+      "provider": "*"
+    },
+    {
+      "backend": "harness",
+      "capability": "lane-install-contract",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_lane_install_contract.py",
+        "scripts/generate_template_pins.py",
+        ".github/workflows/release.yml"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "Q35-08: the shipped GitHub lane template installs ONLY the promoted release identity — a lane pin generated from the archived promotion record (promoted version + wheel sha256), no hardcoded historical fallback, refuse-unset with an upgrade instruction, source installs gated behind the less-qualified dev override, and the installed identity verified before any model call. A true empty-runner cold install is #246's production-entry suite, not claimed here.",
+      "provider": "github"
+    },
+    {
+      "backend": "*",
+      "capability": "release-promotion-gate",
+      "ci_jobs": [
+        "test",
+        "promotion-gate"
+      ],
+      "evidence": [
+        "src/forge/release_promotion.py",
+        "tests/test_release_promotion.py",
+        ".github/workflows/release.yml"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "release_tag",
+      "level": "contract_tested",
+      "note": "R32-19: mutable tags attach ONLY when the promotion gate qualifies the digest — explicit provenance-bound required CI checks on the tagged sha plus the capability-tagged canary outcomes; a failed (or never-executed) check blocks fail-closed even when the canary passed, and a failed-then-passed retry stays a conditional pass on record. Per-release promotion evidence is archived COMMITTED under docs/releases/evidence/v<version>/ and renders the README pins.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "profile-qualification-records",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "src/forge/profile_qualification.py",
+        "tests/test_profile_qualification.py",
+        "docs/releases/profile-records.md",
+        "qualification/records/release-artifact-canary@0.35.0.json",
+        "qualification/records/gitlab-ce-v1@0.35.0.json"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "R36-22: profile qualification is a SEPARATE committed record store (qualification/records/, stamp forge.profile.qualification/1) binding provider version, runtime recipe, harness binary+version, credential route, control capabilities, verification contract and the R36-10 closure digest. Evidence classes never substitute (model-fixture caps at declared_only, offline-operational/pg-integration at lab-qualified; supported needs live-provider-or-stronger per required capability); verdicts are DERIVED from the evidence, never asserted. Requalification triggers on changed runtime dependencies, template defaults, authority contracts and provider behavior; upgrade claims distinguish same-head preservation from real schema transitions (the v0.35.0 027->027 canary is a preservation claim, never an upgrade proof); a skipped required profile evidence entry refuses the profile's promotion even with core CI green.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "real-provider-e2e",
+      "ci_jobs": [],
+      "evidence": [
+        "docs/reference/dogfooding.md",
+        ".github/workflows/forge-harness.yml",
+        "scripts/gh_live_smoke.py"
+      ],
+      "evidence_class": "real_provider_e2e",
+      "gating": "manual",
+      "level": "live_canary_tested",
+      "note": "The dogfood loop on THIS repo: /implement → plan → /go → Actions agent → Draft PR. Event-driven and maintainer-run — no CI job replays it.",
+      "provider": "github"
+    },
+    {
+      "backend": "*",
+      "capability": "real-provider-e2e",
+      "ci_jobs": [],
+      "evidence": [],
+      "evidence_class": "real_provider_e2e",
+      "gating": "none",
+      "level": "not_run",
+      "note": "Live exercises against the maintainer's real GitLab CE are maintainer-run outside this tree (the README prose claims them); NO CI-reproducible or in-tree evidence exists, so the manifest records not_run — never converted to pass.",
+      "provider": "gitlab"
+    },
+    {
+      "backend": "*",
+      "capability": "real-provider-e2e",
+      "ci_jobs": [],
+      "evidence": [],
+      "evidence_class": "real_provider_e2e",
+      "gating": "none",
+      "level": "not_run",
+      "note": "Live exercises against a real Azure DevOps org are maintainer-run outside this tree (the README prose claims them); NO CI-reproducible or in-tree evidence exists, so the manifest records not_run — never converted to pass.",
+      "provider": "azure"
+    },
+    {
+      "backend": "harness",
+      "capability": "release-canary/target-harness-upload",
+      "ci_jobs": [],
+      "evidence": [],
+      "evidence_class": "none",
+      "gating": "none",
+      "level": "not_run",
+      "note": "The release canary boots and migrates the artifact but NEVER exercises a target-harness upload (review A14 observation) — no CI job covers it. Flip this entry only when a canary stage drives a real harness upload.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "release-canary/previous-release-upgrade",
+      "ci_jobs": [],
+      "evidence": [],
+      "evidence_class": "boot_canary",
+      "gating": "none",
+      "level": "not_run",
+      "note": "The canary's migrate stage (prev → this schema) is CONDITIONAL: it self-skips when the previous image is not pullable (first release, private registry). Recorded as not_run so a skipped stage is never counted as a passed upgrade.",
+      "provider": "*"
+    },
+    {
+      "backend": "*",
+      "capability": "cohort-economics",
+      "ci_jobs": [
+        "test"
+      ],
+      "evidence": [
+        "tests/test_cohort_runner.py"
+      ],
+      "evidence_class": "contract_suite",
+      "gating": "pr_gate",
+      "level": "contract_tested",
+      "note": "B09: unknown stays unknown in the cohort economics (all-unknown durations/repairs are None; a receipt-less attempt makes exact cost unknown with a priced lower bound; rates only over matched populations). B10: the pass-1 ledger/report carry the backfilled profile with honest unknown spend.",
+      "provider": "*"
+    }
+  ],
+  "finding_evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "evidence": [
+        "docs/operations/adaptive-runbook.md"
+      ],
+      "finding": "OPS-08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "release-artifact-canary",
+      "evidence": [
+        "tests/test_adaptive_executed_evidence.py"
+      ],
+      "finding": "OPS-06",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "real-provider-e2e",
+      "evidence": [
+        "docs/evaluation/2026-09-21-adaptive-pilot/pilot-v2-result.json"
+      ],
+      "finding": "OPS-07",
+      "level": "live_canary_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_wiring.py"
+      ],
+      "finding": "WIRING",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "blob-reads",
+      "evidence": [
+        "tests/test_adaptive_read_guards.py"
+      ],
+      "finding": "FND-03",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_adaptive_capability_profiles.py"
+      ],
+      "finding": "FND-04",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-artifact",
+      "evidence": [
+        "tests/test_adaptive_artifact_store.py"
+      ],
+      "finding": "FND-05",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-failure-injection",
+      "evidence": [
+        "tests/test_adaptive_dedup.py"
+      ],
+      "finding": "FND-06",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_compat.py"
+      ],
+      "finding": "FND-07",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-failure-injection",
+      "evidence": [
+        "tests/test_adaptive_compat.py"
+      ],
+      "finding": "FND-08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_snapshots.py",
+        "tests/test_adaptive_discovery_tools.py",
+        "tests/test_adaptive_project_map.py",
+        "tests/test_adaptive_discovery.py",
+        "tests/test_adaptive_system_manifest.py",
+        "tests/test_adaptive_impact.py"
+      ],
+      "finding": "DSC-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_revisions.py"
+      ],
+      "finding": "PLN-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_control.py"
+      ],
+      "finding": "CTL-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_adaptive_runtime.py",
+        "tests/test_adaptive_adapters.py"
+      ],
+      "finding": "EXE-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "tests/test_adaptive_workpackage.py"
+      ],
+      "finding": "MRP-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_adaptive_verification_sets.py",
+        "tests/test_adaptive_benchmark.py"
+      ],
+      "finding": "VER-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "delivery-metrics",
+      "evidence": [
+        "tests/test_adaptive_ops.py"
+      ],
+      "finding": "OPS-EPIC",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "project-config-scope",
+      "evidence": [
+        "tests/test_project_config.py",
+        "src/forge/repository/identity.py"
+      ],
+      "finding": "FND-01",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "FND-02",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_adaptive_contracts.py"
+      ],
+      "finding": "ADAPTIVE-CONTRACTS",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "project-config-scope",
+      "evidence": [
+        "tests/test_project_config.py"
+      ],
+      "finding": "D01",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "project-config-scope",
+      "evidence": [
+        "tests/test_project_config.py"
+      ],
+      "finding": "D02",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "D03",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "D04",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_runs_backends.py"
+      ],
+      "finding": "D05",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_harness_selection.py"
+      ],
+      "finding": "D06",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "cohort-economics",
+      "evidence": [
+        "tests/test_cohort_runner.py"
+      ],
+      "finding": "D07",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "src/forge/harness_entry.py",
+        "tests/test_execution_profile.py"
+      ],
+      "finding": "D08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "D09",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-failure-injection",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "D10",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "src/forge/runs/github_service.py",
+        "tests/test_github_runs.py"
+      ],
+      "finding": "D11",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "release-artifact-canary",
+      "evidence": [
+        "tests/test_release_manifest.py"
+      ],
+      "finding": "D12",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "C01",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "numeric-budgets",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "C02",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_azure_integration_joins.py",
+        "tests/test_harness_selection.py"
+      ],
+      "finding": "C03",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "C04",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_runs_backends.py",
+        "tests/test_runs_service.py"
+      ],
+      "finding": "C05",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_harness_selection.py"
+      ],
+      "finding": "C06",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "cohort-economics",
+      "evidence": [
+        "tests/test_cohort_runner.py"
+      ],
+      "finding": "C07",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-intents",
+      "evidence": [
+        "tests/test_runs_service.py"
+      ],
+      "finding": "C08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-failure-injection",
+      "evidence": [
+        "alembic/versions/019_mr_reservations.py"
+      ],
+      "finding": "C09",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_harness_entry.py",
+        "tests/test_execution_profile.py"
+      ],
+      "finding": "C10",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "C11",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "release-artifact-canary",
+      "evidence": [
+        "tests/test_release_manifest.py"
+      ],
+      "finding": "C12",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py",
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "B01",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "B02",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-intents",
+      "evidence": [
+        "tests/test_runs_service.py",
+        "tests/test_failure_injection.py"
+      ],
+      "finding": "B03",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_harness_entry.py",
+        "tests/test_azure_integration_joins.py"
+      ],
+      "finding": "B04",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_azure_integration_joins.py",
+        "tests/test_azure_pipelines_executor.py"
+      ],
+      "finding": "B05",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py",
+        "tests/test_runs_spec.py"
+      ],
+      "finding": "B06",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_usecases.py",
+        "tests/test_github_runs.py"
+      ],
+      "finding": "B07",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_runs.py"
+      ],
+      "finding": "B08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "cohort-economics",
+      "evidence": [
+        "tests/test_cohort_runner.py"
+      ],
+      "finding": "B09",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "cohort-economics",
+      "evidence": [
+        "docs/evaluation/2026-09-20-pass1/report.json"
+      ],
+      "finding": "B10",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_github_runs.py",
+        "tests/test_runs_service.py"
+      ],
+      "finding": "B11",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_execution_profile.py",
+        "tests/test_harness_entry.py"
+      ],
+      "finding": "B12",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_github_harness.py",
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "B13",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-failure-injection",
+      "evidence": [
+        "tests/test_conformance.py"
+      ],
+      "finding": "B14",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_runs_revival.py",
+        "tests/test_usecases.py"
+      ],
+      "finding": "B15",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-boundary",
+      "evidence": [
+        "tests/test_conformance.py",
+        "tests/test_publication_boundary.py"
+      ],
+      "finding": "R01",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/verification-contract",
+      "evidence": [
+        "tests/test_runs_verification.py",
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "R02",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "provider-namespaces",
+      "evidence": [
+        "tests/test_provider_namespaces.py"
+      ],
+      "finding": "R03",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_runs_spec.py"
+      ],
+      "finding": "R04",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_runs_service.py",
+        "tests/test_github_runs.py",
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "R05",
+      "level": "contract_tested",
+      "note": "Brief binding: the plan comment carries the frozen implementation block on all three providers."
+    },
+    {
+      "capability": "bounded-steps",
+      "evidence": [
+        "tests/test_bounded_steps.py",
+        "tests/test_step_runtime.py"
+      ],
+      "finding": "R07",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "patch-engine",
+      "evidence": [
+        "tests/test_patch_differential.py"
+      ],
+      "finding": "R08",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "patch-engine",
+      "evidence": [
+        "tests/test_patch_differential.py",
+        "tests/test_repository_changeset.py"
+      ],
+      "finding": "R09",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "execution-claims",
+      "evidence": [
+        "tests/test_claims.py"
+      ],
+      "finding": "R10",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "publication-intents",
+      "evidence": [
+        "tests/test_publication_intents.py",
+        "tests/test_runs_reconciler.py"
+      ],
+      "finding": "R11",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "numeric-budgets",
+      "evidence": [
+        "tests/test_budgets.py",
+        "tests/test_budget_wiring.py"
+      ],
+      "finding": "R13",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "blob-reads",
+      "evidence": [
+        "tests/test_blob_reads.py"
+      ],
+      "finding": "R14",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-artifact",
+      "evidence": [
+        "tests/test_harness_entry.py",
+        "tests/test_runs_harness_service.py"
+      ],
+      "finding": "R16",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "durable-liveness",
+      "evidence": [
+        "tests/test_liveness.py"
+      ],
+      "finding": "R17",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "mcp-authorization",
+      "evidence": [
+        "tests/test_mcp_server.py",
+        "tests/test_mcp_runs_tools.py"
+      ],
+      "finding": "R19",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "delivery-metrics",
+      "evidence": [
+        "tests/test_mcp_runs_tools.py"
+      ],
+      "finding": "R24",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "operator-commands",
+      "evidence": [
+        "tests/test_runs_revival.py",
+        "tests/test_slash_routing.py"
+      ],
+      "finding": "R29",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "harness-selection",
+      "evidence": [
+        "tests/test_harness_selection.py",
+        "tests/test_budget_wiring.py"
+      ],
+      "finding": "R31",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "runs/spec-freeze",
+      "evidence": [
+        "tests/test_github_runs.py",
+        "tests/test_azure_runs.py",
+        "tests/test_runs_spec.py"
+      ],
+      "finding": "A02",
+      "level": "contract_tested",
+      "note": "GitHub and Azure builders freeze/consume the SAME executable spec v3 (EXECUTABLE_SPEC_SCHEMA_VERSION) — verified in tree."
+    },
+    {
+      "capability": "harness-artifact",
+      "evidence": [
+        "tests/test_github_harness.py",
+        "tests/test_harness_entry.py"
+      ],
+      "finding": "A03",
+      "level": "contract_tested",
+      "note": "BriefEnvelope landed on the GITHUB lane only — GitLab/Azure legs not verified in tree; a scope-limited fix, NOT a full closure."
+    },
+    {
+      "capability": "project-config-scope",
+      "evidence": [
+        "tests/test_config_scope.py",
+        "tests/test_github_runs.py",
+        "tests/test_azure_runs.py"
+      ],
+      "finding": "A13",
+      "level": "contract_tested",
+      "note": ""
+    },
+    {
+      "capability": "profile-qualification-records",
+      "evidence": [
+        "tests/test_profile_qualification.py"
+      ],
+      "finding": "R36-22",
+      "level": "contract_tested",
+      "note": "Verdict derivation, substitution caps, requalification triggers, upgrade-claim honesty, the gaps join and the skip-refusal hook are held by tests/test_profile_qualification.py."
+    }
+  ],
+  "legend": {
+    "evidence_classes": {
+      "boot_canary": "release-artifact canary: real alembic chain, boot gate, /health, doctor (scripts/canary_smoke.py)",
+      "contract_suite": "pytest contract suite over fakes/stubs on the PR gate",
+      "coroutine_fi": "in-process workers killed at each checkpoint against real Postgres (tests/test_failure_injection.py)",
+      "none": "no evidence class applies (not_run entries)",
+      "real_provider_e2e": "the full /implement → Draft MR/PR loop against a real provider (dogfood loop / live smoke script)",
+      "subprocess_fi": "real ``python -m forge.worker`` subprocesses SIGKILLed at each durable checkpoint (tests/test_failure_injection_os.py)"
+    },
+    "gating": {
+      "manual": "maintainer-run; not CI-reproducible from this tree",
+      "nightly": "scheduled/manual CI job only — NOT on the PR gate",
+      "none": "not run anywhere",
+      "pr_gate": "runs on every push/PR (blocking CI job)",
+      "release_tag": "runs in the tag-triggered release workflow before publish"
+    },
+    "levels": {
+      "contract_tested": "CI suite over fakes/stubs, or a real-runtime failure-injection suite (see evidence_class); the platform/agent is NOT real in the loop",
+      "implemented": "code + unit tests; no CI contract suite yet",
+      "live_canary_tested": "exercised against the real runtime — the built release artifact (boot/migrate canary) or the real provider in the dogfood loop",
+      "not_run": "no in-tree, CI-reproducible evidence; recorded explicitly, NEVER counted as pass"
+    }
+  },
+  "schema_version": 1,
+  "sha": "f916e657845e1321f064e6630227a325996105b5",
+  "version": "0.36.0"
+}
