@@ -1,0 +1,168 @@
+{
+  "canary": [
+    {
+      "capability": "release-artifact-canary",
+      "detail": "migrate, boot gate, /health, /mcp 401, doctor",
+      "outcome": "pass",
+      "stage": "fresh"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "seeded at previous head 027",
+      "outcome": "pass",
+      "stage": "seed-real-data"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "upgrade preserved counts + digests",
+      "outcome": "pass",
+      "stage": "seed-real-data"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "prev head 027 -> 027; gate ok",
+      "outcome": "pass",
+      "stage": "migrate"
+    }
+  ],
+  "ci_run_id": "36024777283",
+  "decision": {
+    "checks": [
+      {
+        "name": "lint",
+        "reason": "required check 'lint' (.github/workflows/ci.yml#jobs.lint) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "typecheck",
+        "reason": "required check 'typecheck' (.github/workflows/ci.yml#jobs.typecheck) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "test (3.13)",
+        "reason": "required check 'test (3.13)' (.github/workflows/ci.yml#jobs.test[3.13]) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+        "verdict": "conditional_pass"
+      },
+      {
+        "name": "test (3.14)",
+        "reason": "required check 'test (3.14)' (.github/workflows/ci.yml#jobs.test[3.14]) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+        "verdict": "conditional_pass"
+      },
+      {
+        "name": "integration",
+        "reason": "required check 'integration' (.github/workflows/ci.yml#jobs.integration) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+        "verdict": "conditional_pass"
+      }
+    ],
+    "reasons": [
+      "required check 'test (3.13)' (.github/workflows/ci.yml#jobs.test[3.13]) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+      "required check 'test (3.14)' (.github/workflows/ci.yml#jobs.test[3.14]) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green",
+      "required check 'integration' (.github/workflows/ci.yml#jobs.integration) did not pass earlier — run 36023085680 (cancelled) — and passed on retry in run 36023085396: conditional pass, the earlier attempt(s) stay on record and are never silently green"
+    ],
+    "verdict": "conditional_promote"
+  },
+  "head_sha": "1ca2656255edf327662e26fc37c5564d2c55c26c",
+  "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+  "image_ref": "ghcr.io/forcewake/forge",
+  "note": "",
+  "promoted_at": "2026-09-24T16:07:06Z",
+  "required_checks": [
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-24T15:50:30Z",
+          "conclusion": "success",
+          "run_id": "36023085680"
+        },
+        {
+          "completed_at": "2026-09-24T15:51:45Z",
+          "conclusion": "success",
+          "run_id": "36023085396"
+        }
+      ],
+      "name": "lint",
+      "provenance": ".github/workflows/ci.yml#jobs.lint"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-24T15:51:14Z",
+          "conclusion": "success",
+          "run_id": "36023085680"
+        },
+        {
+          "completed_at": "2026-09-24T15:52:40Z",
+          "conclusion": "success",
+          "run_id": "36023085396"
+        }
+      ],
+      "name": "typecheck",
+      "provenance": ".github/workflows/ci.yml#jobs.typecheck"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-24T15:51:31Z",
+          "conclusion": "cancelled",
+          "run_id": "36023085680"
+        },
+        {
+          "completed_at": "2026-09-24T16:03:26Z",
+          "conclusion": "success",
+          "run_id": "36023085396"
+        }
+      ],
+      "name": "test (3.13)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.13]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-24T15:51:30Z",
+          "conclusion": "cancelled",
+          "run_id": "36023085680"
+        },
+        {
+          "completed_at": "2026-09-24T16:03:28Z",
+          "conclusion": "success",
+          "run_id": "36023085396"
+        }
+      ],
+      "name": "test (3.14)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.14]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-24T15:51:32Z",
+          "conclusion": "cancelled",
+          "run_id": "36023085680"
+        },
+        {
+          "completed_at": "2026-09-24T15:55:11Z",
+          "conclusion": "success",
+          "run_id": "36023085396"
+        }
+      ],
+      "name": "integration",
+      "provenance": ".github/workflows/ci.yml#jobs.integration"
+    }
+  ],
+  "sdist_sha256": "d5404dbe1e2fefaa953a2a69731500b9dcab2e0b162bf15bd4dc57d2be0f4932",
+  "sdist_url": "https://github.com/forcewake/forge/releases/download/v0.37.0/forge-0.37.0.tar.gz",
+  "stamp": "forge.release.promotion/1",
+  "version": "0.37.0",
+  "wheel": {
+    "note": "",
+    "sdist": {
+      "name": "forge-0.37.0.tar.gz",
+      "sha256": "d5404dbe1e2fefaa953a2a69731500b9dcab2e0b162bf15bd4dc57d2be0f4932"
+    },
+    "wheel": {
+      "name": "forge-0.37.0-py3-none-any.whl",
+      "sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6"
+    }
+  },
+  "wheel_sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6",
+  "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.37.0/forge-0.37.0-py3-none-any.whl"
+}

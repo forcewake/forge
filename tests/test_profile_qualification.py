@@ -1349,7 +1349,11 @@ def test_the_committed_store_manifest_is_honest() -> None:
     # supported — but the #298 human gate + trace-tier hold keep the
     # manifest entry pending-approval, never supported, and the live trace
     # join stays owed (no committed live TraceRecord yet).
-    assert gitlab.record_id == "gitlab-ce-v1@live"
+    # The latest gitlab record tracks the tree version (records are
+    # committed per release; a literal broke at the v0.37.0 bump).
+    from forge import __version__
+
+    assert gitlab.record_id == f"gitlab-ce-v1@{__version__}"
     assert gitlab.status == "pending-approval"
     assert any(UNMET_CAPABILITIES_OBSERVABILITY in limit for limit in gitlab.limitations)
     assert any("refusal-resolution" in limit for limit in gitlab.limitations)
