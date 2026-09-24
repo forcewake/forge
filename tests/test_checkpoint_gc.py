@@ -900,7 +900,12 @@ class TestP04PendingGcRecovery:
     async def test_b_reference_after_the_final_scan_survives_recovery(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine, factory = await _sqlite_factory()
+        # FILE-backed, genuinely separate connections: the recovery's
+        # open session and work B's landing interleave — on the in-memory
+        # StaticPool's ONE shared connection a session closing without
+        # committing rolls back whatever shares it (the fixture's own
+        # documented artifact; the CI-only flake this test carried).
+        engine, factory = await _sqlite_file_factory(tmp_path)
         try:
             root = tmp_path / "cas"
             store = _pg_store(root, factory)
