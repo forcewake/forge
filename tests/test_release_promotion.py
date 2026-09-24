@@ -617,7 +617,11 @@ def test_cli_gaps_joins_the_profile_qualification_records(
     document = json.loads(buf.getvalue())
     reasons = {(gap["capability"], gap["provider"]): gap["reason"] for gap in document["gaps"]}
     gitlab = reasons[("real-provider-e2e", "gitlab")]
-    assert "declared_only" in gitlab and "gitlab-ce-v1@0.35.0" in gitlab
+    # The record naming must track the CURRENT tree version (records are
+    # committed per release; a literal broke at the v0.36.0 bump).
+    from forge import __version__
+
+    assert "declared_only" in gitlab and f"gitlab-ce-v1@{__version__}" in gitlab
     for provider in ("github", "azure"):
         assert "no profile-qualification record covers" in reasons[("real-provider-e2e", provider)]
     # the promotion-side (boot_canary) capabilities keep their pre-R36-22
