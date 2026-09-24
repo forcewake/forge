@@ -57,6 +57,10 @@ from forge.adaptive.qualification import (
     write_closure_manifest_file,
 )
 
+#: The expected forge wheel/version is DERIVED from the tree (a literal
+#: broke on every version bump — the v0.36.0 CI bite).
+from forge import __version__ as _TREE_FORGE_VERSION
+
 ROOT = Path(__file__).resolve().parents[1]
 
 #: A tiny, real, hash-pinned dependency set (six 1.17.0 — the same
@@ -67,7 +71,10 @@ _TINY_REQUIREMENTS = (
     "    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274\n"
 )
 
-_FORGE_WHEEL = "forge-0.35.0-py3-none-any.whl"
+_FORGE_WHEEL = f"forge-{_TREE_FORGE_VERSION}-py3-none-any.whl"
+#: A DIFFERENT version for mutation tests (never the tree version — the
+#: v0.36.0 bump made the old 0.36.0 "future" a no-op).
+_BUMPED_FORGE_VERSION = "999.0.0"
 _SIX_WHEEL = "six-1.17.0-py2.py3-none-any.whl"
 
 
@@ -94,7 +101,7 @@ def _artifact(name: str, payload: bytes = b"wheel-bytes") -> ClosureArtifact:
 def _manifest(**overrides: object) -> LaneClosureManifest:
     fields: dict[str, object] = {
         "forge_wheel": _artifact(_FORGE_WHEEL, b"forge-bytes"),
-        "forge_version": "0.35.0",
+        "forge_version": _TREE_FORGE_VERSION,
         "forge_source": "promotion-record",
         "resolution_command": (
             "uv export --frozen --no-dev --no-emit-project --format requirements-txt "
@@ -129,7 +136,7 @@ def _closure_dir(tmp_path: Path, payloads: dict[str, bytes] | None = None) -> Pa
     forge = next(a for a in artifacts if a.name == _FORGE_WHEEL)
     manifest = LaneClosureManifest(
         forge_wheel=forge,
-        forge_version="0.35.0",
+        forge_version=_TREE_FORGE_VERSION,
         forge_source="promotion-record",
         resolution_command=_manifest().resolution_command,
         artifacts=artifacts,
@@ -154,11 +161,11 @@ class TestLaneClosureManifest:
         assert document["schema"] == CLOSURE_MANIFEST_SCHEMA == "forge.lane.closure/1"
         assert document["forge"] == {
             "wheel": {"name": _FORGE_WHEEL, "sha256": manifest.forge_wheel.sha256},
-            "version": "0.35.0",
+            "version": _TREE_FORGE_VERSION,
             "source": "promotion-record",
         }
         assert [a["name"] for a in document["artifacts"]] == [_FORGE_WHEEL, _SIX_WHEEL]
-        assert manifest.pins == (("forge", "0.35.0"), ("six", "1.17.0"))
+        assert manifest.pins == (("forge", _TREE_FORGE_VERSION), ("six", "1.17.0"))
 
     def test_the_digest_is_deterministic_and_change_sensitive(self):
         baseline = _manifest()
@@ -173,10 +180,10 @@ class TestLaneClosureManifest:
             ),
         )
         assert tampered_artifact.closure_digest != baseline.closure_digest
-        bumped_wheel = _artifact("forge-0.36.0-py3-none-any.whl", b"forge-bytes")
+        bumped_wheel = _artifact(f"forge-{_BUMPED_FORGE_VERSION}-py3-none-any.whl", b"forge-bytes")
         bumped = _manifest(
             forge_wheel=bumped_wheel,
-            forge_version="0.36.0",
+            forge_version=_BUMPED_FORGE_VERSION,
             artifacts=(bumped_wheel, _artifact(_SIX_WHEEL, b"six-bytes")),
         )
         assert bumped.closure_digest != baseline.closure_digest
@@ -246,7 +253,7 @@ class TestVerifyClosureDir:
     def test_a_clean_wheelhouse_verifies_green(self, tmp_path):
         closure = _closure_dir(tmp_path)
         manifest = verify_closure_dir(closure)
-        assert manifest.pins == (("forge", "0.35.0"), ("six", "1.17.0"))
+        assert manifest.pins == (("forge", _TREE_FORGE_VERSION), ("six", "1.17.0"))
 
     def test_a_missing_artifact_refuses(self, tmp_path):
         closure = _closure_dir(tmp_path)
@@ -348,7 +355,7 @@ class TestBuildLaneClosureScript:
         assert (closure / CLOSURE_MANIFEST_FILENAME).is_file()
         assert [a.name for a in manifest.artifacts] == [_FORGE_WHEEL, _SIX_WHEEL]
         assert manifest.forge_source == "local-uv-build"
-        assert manifest.forge_version == "0.35.0"
+        assert manifest.forge_version == _TREE_FORGE_VERSION
         # the canonical, path-free resolution command — reproducible
         assert manifest.resolution_command == script.RESOLUTION_COMMAND
         assert "require-hashes" in manifest.resolution_command
@@ -507,7 +514,7 @@ class TestClosureInstallRoute:
 class TestEnforceClosureInstall:
     def test_the_pinned_closure_with_the_exact_installation_passes(self):
         manifest = _manifest()
-        installed = {"forge": "0.35.0", "six": "1.17.0"}
+        installed = {"forge": _TREE_FORGE_VERSION, "six": "1.17.0"}
         match = enforce_closure_install(manifest.closure_digest, manifest, installed)
         assert match.fingerprints == manifest.pins
 
@@ -526,7 +533,7 @@ class TestEnforceClosureInstall:
         lands is refused here — the target repository's own lockfile
         changed forge out from under the lane."""
         manifest = _manifest()
-        replaced = {"forge": "0.35.0", "six": "1.18.0", "planted": "1.0"}
+        replaced = {"forge": _TREE_FORGE_VERSION, "six": "1.18.0", "planted": "1.0"}
         with pytest.raises(FingerprintMismatch) as excinfo:
             enforce_closure_install(manifest.closure_digest, manifest, replaced)
         assert {(d.kind, d.name) for d in excinfo.value.divergences} == {

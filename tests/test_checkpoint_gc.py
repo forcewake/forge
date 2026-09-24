@@ -924,7 +924,17 @@ class TestP04PendingGcRecovery:
             assert removed == 0  # metadata already converged — recovery only
             assert task is not None
             await asyncio.wait_for(task, 10.0)
-            entry = await store.aentry(WORK_B)
+            # B's put COMPLETED (the await above proves it) — under CI's
+            # slower executor scheduling the row can surface on the
+            # reader connection a beat later (file-backed sqlite, two
+            # connections). A bounded visibility poll for an ALREADY-
+            # committed row; the strict assertions below are unchanged.
+            entry = None
+            for _ in range(40):
+                entry = await store.aentry(WORK_B)
+                if entry is not None:
+                    break
+                await asyncio.sleep(0.05)
             assert entry is not None and entry["checkpoint_id"] == b_id
             served_manifest, served_blobs = store.read_checkpoint(entry)
             assert served_manifest == b_manifest
