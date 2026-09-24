@@ -1,0 +1,39 @@
+[
+  {
+    "run_id": 501,
+    "workflow": "forge-harness.github.yml",
+    "ref": "forge/42/40ad65c2",
+    "inputs": {
+      "run_id": "40ad65c27a7b4b0bba3d92542a830df6",
+      "attempt_base_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "driver": "claude-code",
+      "model": "glm-5.3-flash[1m]",
+      "issue_number": "42",
+      "plan_note_id": "9001",
+      "lane_control_token": "3d0d0734164b590b01d82dce43f51b5267bbcdb47b3b488c62aee3b2d991ad8f",
+      "envelope_digest": "5b51144822bd0feb9fc3c9e4c6c948f44218cb87553d81290c80abcbae8f5368",
+      "spec_digest": "e73afff364dbc820616eed7ff2f8fa7f74dd75d174e7afb9c6b10ee516f75332",
+      "lane_resume_mode": "fresh"
+    },
+    "executor_input_digest": "ef2058ce2f7bb1687241eb554efd33cd0e2d61e7ecc18c10a8d4931641689c03"
+  },
+  {
+    "run_id": 502,
+    "workflow": "forge-harness.github.yml",
+    "ref": "forge/42/40ad65c2",
+    "inputs": {
+      "run_id": "40ad65c27a7b4b0bba3d92542a830df6",
+      "attempt_base_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "driver": "claude-code",
+      "model": "glm-5.3-flash[1m]",
+      "issue_number": "42",
+      "plan_note_id": "9001",
+      "lane_control_token": "a48b2804413aef29b238b820ae5821ac1b5ae3c859db72e64e96f73cb425a6fd",
+      "envelope_digest": "5b51144822bd0feb9fc3c9e4c6c948f44218cb87553d81290c80abcbae8f5368",
+      "spec_digest": "e73afff364dbc820616eed7ff2f8fa7f74dd75d174e7afb9c6b10ee516f75332",
+      "lane_resume_mode": "fresh",
+      "repair_context": "Why the previous attempt stopped: harness_infrastructure: harness_bootstrap_failed (node setup)"
+    },
+    "executor_input_digest": "ef2058ce2f7bb1687241eb554efd33cd0e2d61e7ecc18c10a8d4931641689c03"
+  }
+]

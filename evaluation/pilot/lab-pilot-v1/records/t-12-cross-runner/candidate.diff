@@ -1,0 +1,29 @@
+diff --git a/notes/new-file.md b/notes/new-file.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..854075f89afb5a5d1ba995668de3fd3421db731a
+--- /dev/null
++++ b/notes/new-file.md
+@@ -0,0 +1 @@
++agent edit
+diff --git a/notes/resumed.md b/notes/resumed.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b4f09b5f8ce6418a9fc19c78cdd99f0be230b223
+--- /dev/null
++++ b/notes/resumed.md
+@@ -0,0 +1 @@
++resumed-turn edit
+diff --git a/run.sh b/run.sh
+deleted file mode 100644
+index 039e4d0069c5c26909f86c505b9de66182e6d1f3..0000000000000000000000000000000000000000
+--- a/run.sh
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-exit 0
+diff --git a/src/app.py b/src/app.py
+index 262fc93ffc66da17422a110ce0a2ac7e1850b3b0..0fb48ebe83436352fc6679344353e4a5e186ce47 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-print('base')
++print('resumed turn')

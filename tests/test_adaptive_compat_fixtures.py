@@ -1,19 +1,29 @@
-"""ADR-0029 §4 / R32-24: the versioned compatibility fixtures.
+"""ADR-0029 §4 / R32-24 + ADR-0030 (R36-20): the versioned compatibility fixtures.
 
 Pinned here: every registered fixture LOADS under its supported
 read/recovery semantics; run_spec v1/v2 parse to the legacy
 (non-executable) view with the SpecLegacy recovery; the old checkpoint
 index document recovers under the migration-026 no-backfill contract;
 the old control-command rows read with their labelled fallback / exact
-binding; an UNKNOWN version raises UnsupportedDocumentVersion (never a
-silent best-effort parse); and the inventory lists the complete
-kind×version surface.
+binding; the authority-boundary schemas (attempt_start v1/v2,
+continuation_decision v1/v2, checkpoint_lookup v1/v2 — ADR-0030's
+persisted surfaces) read with their honest recovery semantics; an
+UNKNOWN version raises UnsupportedDocumentVersion (never a silent
+best-effort parse); and the inventory lists the complete kind×version
+surface.
 """
 
 import pytest
 
+from forge.adaptive.checkpoint_repository import (
+    LOOKUP_ABSENT,
+    LOOKUP_UNAVAILABLE,
+    CheckpointLookupOutcome,
+)
 from forge.adaptive.compat_fixtures import (
+    CompatAttemptStartDocument,
     CompatCheckpointIndex,
+    CompatContinuationDocument,
     CompatControlCommand,
     CompatSpecDocument,
     UnsupportedDocumentVersion,
@@ -24,7 +34,13 @@ from forge.adaptive.compat_fixtures import (
 from forge.runs.spec import ExecutableRunSpec
 
 EXPECTED_INVENTORY = [
+    ("attempt_start", 1),
+    ("attempt_start", 2),
+    ("checkpoint_lookup", 1),
+    ("checkpoint_lookup", 2),
     ("checkpoint_metadata", 1),
+    ("continuation_decision", 1),
+    ("continuation_decision", 2),
     ("control_command", 1),
     ("control_command", 2),
     ("run_spec", 1),
@@ -183,6 +199,130 @@ class TestControlCommandDocuments:
         document["payload"] = {}
         with pytest.raises(UnsupportedDocumentVersion, match="checkpoint_ref"):
             load_compat_document("control_command", 2, document)
+
+
+# -- attempt_start v1/v2: the dispatch envelope evidence (ADR-0030) ------------
+
+
+class TestAttemptStartDocuments:
+    def test_v1_reads_audit_only_no_identity_manufactured(self):
+        parsed = load_compat_document("attempt_start", 1, compat_document("attempt_start", 1))
+        assert isinstance(parsed, CompatAttemptStartDocument)
+        assert parsed.execution_attempt_id is None  # never manufactured
+        assert parsed.identity_strength == "source_oid_only"
+        assert parsed.source_base_oid == "e" * 40
+        assert "audit-only" in parsed.recovery
+        assert "never manufactured" in parsed.recovery or "none is manufactured" in parsed.recovery
+
+    def test_v2_carries_the_separated_identity_axes(self):
+        parsed = load_compat_document("attempt_start", 2, compat_document("attempt_start", 2))
+        assert isinstance(parsed, CompatAttemptStartDocument)
+        assert parsed.execution_attempt_id == "b" * 64
+        assert parsed.identity_strength == "execution_id_v2"
+        assert parsed.source_base_oid == parsed.source_base_oid  # own axis
+        assert parsed.authority_epoch == 3
+        assert parsed.continuation_ref_digest == "c" * 64
+
+    def test_a_v1_document_with_an_execution_id_is_refused(self):
+        document = compat_document("attempt_start", 1)
+        document["execution_attempt_id"] = "b" * 64
+        with pytest.raises(UnsupportedDocumentVersion, match="v2"):
+            load_compat_document("attempt_start", 1, document)
+
+    def test_a_v2_document_without_the_derived_identity_is_refused(self):
+        document = compat_document("attempt_start", 2)
+        document["execution_attempt_id"] = ""
+        with pytest.raises(UnsupportedDocumentVersion, match="execution_attempt_id"):
+            load_compat_document("attempt_start", 2, document)
+
+    def test_a_missing_envelope_digest_is_refused(self):
+        document = compat_document("attempt_start", 2)
+        document["envelope_digest"] = "not-a-digest"
+        with pytest.raises(UnsupportedDocumentVersion, match="envelope_digest"):
+            load_compat_document("attempt_start", 2, document)
+
+
+# -- continuation_decision v1/v2: the retry decision evidence (ADR-0030) -------
+
+
+class TestContinuationDecisionDocuments:
+    def test_v1_reads_the_decision_core_without_lineage(self):
+        parsed = load_compat_document(
+            "continuation_decision", 1, compat_document("continuation_decision", 1)
+        )
+        assert isinstance(parsed, CompatContinuationDocument)
+        assert parsed.mode == "uncertain"
+        assert parsed.uncertain is True
+        # pre-R36-02: the lineage keys did not exist — absent, never guessed
+        assert parsed.source_attempt is None
+        assert parsed.native_command_id is None
+        assert parsed.checkpoint_digest is None
+        assert "never guessed" in parsed.recovery
+
+    def test_v2_carries_lineage_and_the_pinned_digest(self):
+        parsed = load_compat_document(
+            "continuation_decision", 2, compat_document("continuation_decision", 2)
+        )
+        assert isinstance(parsed, CompatContinuationDocument)
+        assert parsed.mode == "required"
+        assert parsed.uncertain is False
+        assert parsed.source_attempt == 3
+        assert parsed.native_command_id == "gh-delivery-9f2c1a"
+        assert parsed.native_start_verdict == "dispatched"
+        assert parsed.checkpoint_digest == "c" * 64
+
+    def test_an_unknown_mode_is_refused(self):
+        document = compat_document("continuation_decision", 2)
+        document["mode"] = "maybe"
+        with pytest.raises(UnsupportedDocumentVersion, match="unknown mode"):
+            load_compat_document("continuation_decision", 2, document)
+
+    def test_a_missing_evidence_digest_is_refused(self):
+        document = compat_document("continuation_decision", 1)
+        document["evidence_digest"] = ""
+        with pytest.raises(UnsupportedDocumentVersion, match="malformed"):
+            load_compat_document("continuation_decision", 1, document)
+
+
+# -- checkpoint_lookup v1/v2: the typed lookup outcome (ADR-0030) ---------------
+
+
+class TestCheckpointLookupDocuments:
+    def test_v1_reads_the_lossy_legacy_answer(self):
+        parsed = load_compat_document(
+            "checkpoint_lookup", 1, compat_document("checkpoint_lookup", 1)
+        )
+        assert isinstance(parsed, CheckpointLookupOutcome)
+        assert parsed.state == LOOKUP_ABSENT
+        assert parsed.authority == "legacy-http-opt-in"
+        assert "collapsed" in parsed.detail
+
+    def test_v2_reads_the_typed_five_state_outcome(self):
+        parsed = load_compat_document(
+            "checkpoint_lookup", 2, compat_document("checkpoint_lookup", 2)
+        )
+        assert isinstance(parsed, CheckpointLookupOutcome)
+        assert parsed.state == LOOKUP_UNAVAILABLE
+        assert parsed.authority == "postgres"
+
+    def test_v1_cannot_claim_typed_vocabulary(self):
+        document = compat_document("checkpoint_lookup", 1)
+        document["state"] = "unavailable"
+        with pytest.raises(UnsupportedDocumentVersion, match="v2"):
+            load_compat_document("checkpoint_lookup", 1, document)
+
+    def test_exact_requires_the_content_address(self):
+        document = compat_document("checkpoint_lookup", 2)
+        document["state"] = "exact"
+        document["checkpoint_id"] = "short"
+        with pytest.raises(UnsupportedDocumentVersion, match="content address"):
+            load_compat_document("checkpoint_lookup", 2, document)
+
+    def test_an_unknown_state_is_refused(self):
+        document = compat_document("checkpoint_lookup", 2)
+        document["state"] = "maybe"
+        with pytest.raises(UnsupportedDocumentVersion, match="unknown state"):
+            load_compat_document("checkpoint_lookup", 2, document)
 
 
 # -- unknown versions: never a silent best-effort parse ------------------------

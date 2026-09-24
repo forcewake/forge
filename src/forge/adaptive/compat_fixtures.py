@@ -33,6 +33,34 @@ registry for the composition boundaries' documents:
   the exact ResumeSpec (``checkpoint_ref``/``checkpoint_sequence``/
   ``source_oid``).
 
+R36-20 (issue #279) extends the inventory to the schemas the AUTHORITY
+BOUNDARIES persist (ADR-0030):
+
+- ``attempt_start`` v1 — the Q35-07 envelope evidence document: the
+  attempt axis WAS the source OID (``attempt_base``) and the authority
+  epoch rode BESIDE the envelope digest. Recovery: audit-only — no
+  execution identity exists to recover and none is manufactured;
+  authority-bearing comparisons against it are refused.
+- ``attempt_start`` v2 — the R36-06 envelope: the derived
+  ``execution_attempt_id``, the separated ``source_base_oid``, the
+  epoch INSIDE the digest and the pinned ``continuation_ref_digest``.
+- ``continuation_decision`` v1 — the Q35-02 decision document
+  (mode/reason/decided_at/evidence_digest, no lineage). Recovery:
+  digest-governed reuse still works; the lineage fields simply do not
+  exist (pre-R36-02) — they are read as absent, never guessed.
+- ``continuation_decision`` v2 — the R36-02/R36-03 document: decision
+  lineage (originating attempt, native command id, intent verdict,
+  discard authority), the pinned ``checkpoint_digest`` and the
+  ``refusal_code`` observability key.
+- ``checkpoint_lookup`` v1 — the RETIRED legacy opt-in lookup's lossy
+  answer (``exact``/``absent`` only, authority
+  ``legacy-http-opt-in`` — an outage collapsed to absent, exactly as
+  the pre-R36-03 deployment behaved).
+- ``checkpoint_lookup`` v2 — the typed five-state outcome
+  (``exact``/``absent``/``unavailable``/``corrupt``/``unauthorized``)
+  the configured authority answers; NOTHING collapses one into
+  another.
+
 :func:`load_compat_document` parses a payload under the SUPPORTED
 semantics of its (kind, version) or raises
 :class:`UnsupportedDocumentVersion` — a silent best-effort parse of an
@@ -47,8 +75,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 __all__ = [
+    "CompatAttemptStartDocument",
     "CompatCheckpointIndex",
     "CompatControlCommand",
+    "CompatContinuationDocument",
     "CompatSpecDocument",
     "UnsupportedDocumentVersion",
     "compat_document",
@@ -126,6 +156,64 @@ class CompatControlCommand:
     recovery: str
 
 
+@dataclass(frozen=True)
+class CompatAttemptStartDocument:
+    """The supported read of a persisted ``attempt_start`` envelope document.
+
+    v1 (Q35-07) is AUDIT-ONLY: ``execution_attempt_id`` is ``None``
+    because the weaker identity never existed — never manufactured —
+    and ``identity_strength`` says so. v2 (R36-06) carries the derived
+    durable execution identity, the separated source base, the epoch
+    INSIDE the envelope digest and the pinned continuation reference.
+    """
+
+    kind: str
+    schema_version: int
+    envelope_digest: str
+    context_digest: str
+    subject_key: str
+    resume_mode: str
+    #: v2 only — ``None`` on v1 (the missing fact, never a guess).
+    execution_attempt_id: str | None
+    source_base_oid: str
+    authority_epoch: int | None
+    attempt_ordinal: int | None
+    continuation_ref_digest: str
+    profile_source: str
+    #: ``source_oid_only`` (v1) or ``execution_id_v2`` (v2).
+    identity_strength: str
+    recovery: str
+
+
+@dataclass(frozen=True)
+class CompatContinuationDocument:
+    """The supported read of a persisted continuation decision document.
+
+    v1 (Q35-02) carries the decision core (mode/reason/decided_at plus
+    the objective evidence digest that governs reuse); v2 (R36-02/03)
+    adds the decision lineage and the pinned ``checkpoint_digest``.
+    """
+
+    kind: str
+    schema_version: int
+    mode: str
+    mode_selected: str
+    reason: str
+    decided_at: str
+    evidence_digest: str
+    uncertain: bool
+    #: v2 only — ``None`` on v1 (pre-R36-02 documents carry no lineage;
+    #: the fields are read as absent, never guessed).
+    source_attempt: int | None
+    native_command_id: str | None
+    native_start_verdict: str | None
+    discard_authorized_by: str | None
+    #: v2 only (R36-03): the pinned exact-checkpoint content address.
+    checkpoint_digest: str | None
+    refusal_code: str | None
+    recovery: str
+
+
 _SPEC_LEGACY_RECOVERY = "blocked(spec_legacy: re-approval required)"
 
 _CHECKPOINT_INDEX_RECOVERY = (
@@ -143,6 +231,44 @@ _CONTROL_COMMAND_V1_RECOVERY = (
 _CONTROL_COMMAND_V2_RECOVERY = (
     "exact binding: the payload's checkpoint_ref is the approved resume point — "
     "a newer upload landing later changes nothing"
+)
+
+_ATTEMPT_START_V1_RECOVERY = (
+    "audit-only: the v1 envelope's identity was the source OID alone — no "
+    "execution identity exists to recover and none is manufactured; "
+    "authority-bearing comparisons against it are refused "
+    "(assert_publication_identity), never guessed"
+)
+
+_ATTEMPT_START_V2_RECOVERY = (
+    "full identity: the derived execution id, the separated source base, the "
+    "cancellation epoch and the pinned continuation reference are all inside "
+    "the envelope digest — digest equality is the same authorized EXECUTION"
+)
+
+_CONTINUATION_V1_RECOVERY = (
+    "digest-governed reuse only: the objective evidence digest still governs "
+    "reuse, but the document carries no decision lineage (pre-R36-02) — the "
+    "lineage fields are read as absent, never guessed"
+)
+
+_CONTINUATION_V2_RECOVERY = (
+    "lineage + pinned digest: the originating attempt, the native command "
+    "identity, the intent verdict, the discard authority and the pinned "
+    "checkpoint digest are all on the document — reuse keeps naming the "
+    "event that originated the decision and the bytes it approved"
+)
+
+_CHECKPOINT_LOOKUP_V1_RECOVERY = (
+    "legacy lossy answer: the opt-in chain answered exact/absent only — an "
+    "outage or a refused credential collapsed to absent exactly as the "
+    "pre-R36-03 deployment did (authority legacy-http-opt-in)"
+)
+
+_CHECKPOINT_LOOKUP_V2_RECOVERY = (
+    "typed five-state outcome: exact carries the checkpoint's content "
+    "address; absent/unavailable/corrupt/unauthorized carry their own "
+    "operator-facing detail — NOTHING collapses one into another"
 )
 
 
@@ -309,6 +435,153 @@ def _control_command_v2_document() -> dict:
     }
 
 
+def _attempt_start_v1_document() -> dict:
+    """A Q35-07 envelope: identity WAS the source OID, epoch beside the digest.
+
+    The shape ``compose_attempt_start`` persisted before the R36-06 v2
+    extension — reconstructed from the v1 fields the compat adapter
+    (:func:`forge.adaptive.composition_adoption.legacy_attempt_start_view`)
+    still reads: ``attempt_base`` (the source OID on the attempt axis),
+    ``authority_epoch`` stored BESIDE the envelope digest, no
+    ``execution_attempt_id`` key at all.
+    """
+    return {
+        "version": 1,
+        "envelope_digest": "7" * 64,
+        "context_digest": "8" * 64,
+        "subject_key": "github:acme/widgets#99183",
+        "resume_mode": "required",
+        "attempt_base": "e" * 40,
+        "authority_epoch": 3,
+        "profile_source": "execution_profile",
+        "legacy": True,
+    }
+
+
+def _attempt_start_v2_document() -> dict:
+    """An R36-06 envelope: the separated identity axes, epoch in the digest.
+
+    The shape today's ``compose_attempt_start`` persists on the run's
+    evidence — the derived durable ``execution_attempt_id`` (hex64 over
+    run id + attempt ordinal + source base), the source base on its own
+    axis, the cancellation epoch INSIDE the digest and the pinned
+    ``continuation_ref_digest`` a ``required`` resume approved.
+    """
+    return {
+        "version": 2,
+        "envelope_digest": "9" * 64,
+        "context_digest": "a" * 64,
+        "subject_key": "github:acme/widgets#99183",
+        "resume_mode": "required",
+        "attempt_base": "e" * 40,
+        "execution_attempt_id": "b" * 64,
+        "source_base_oid": "e" * 40,
+        "attempt_ordinal": 3,
+        "authority_epoch": 3,
+        "continuation_ref_digest": "c" * 64,
+        "profile_source": "execution_profile",
+        "legacy": False,
+    }
+
+
+def _continuation_v1_document() -> dict:
+    """A Q35-02 decision: the core decision, no lineage (pre-R36-02).
+
+    The shape ``decide_continuation().as_document()`` wrote before the
+    R36-02 lineage extension — mode/reason/decided_at plus the
+    objective evidence digest that governs reuse; the lineage keys and
+    ``checkpoint_digest`` did not exist yet.
+    """
+    return {
+        "mode": "uncertain",
+        "mode_selected": "uncertain",
+        "reason": (
+            "no proof whether a vendor session started and no committed checkpoint "
+            "is held — the recoverable state is unknown"
+        ),
+        "decided_at": "2026-09-22T09:15:00+00:00",
+        "evidence_digest": "d" * 64,
+        "uncertain": True,
+        "vendor_started": None,
+        "checkpoint_committed": None,
+        "candidate_published": False,
+        "operator_discard_requested": False,
+        "prior_mode_selected": None,
+        "no_checkpoint_baseline": False,
+    }
+
+
+def _continuation_v2_document() -> dict:
+    """An R36-02/R36-03 decision: lineage and the pinned checkpoint digest.
+
+    Today's document — the originating attempt's durable generation,
+    the native command/event identity, the persisted native-start
+    intent verdict, the discard authority, the PINNED exact-checkpoint
+    content address (R36-03) and the typed ``refusal_code`` an R36-02
+    refusal annotation records beside the decision.
+    """
+    return {
+        "mode": "required",
+        "mode_selected": "required",
+        "reason": (
+            "a committed checkpoint exists — the exact WIP checkpoint is the "
+            "authorized continuation (the lane's required restore)"
+        ),
+        "decided_at": "2026-09-23T14:02:00+00:00",
+        "evidence_version": 2,
+        "evidence_digest": "e" * 64,
+        "uncertain": False,
+        "vendor_started": True,
+        "checkpoint_committed": True,
+        "candidate_published": False,
+        "operator_discard_requested": False,
+        "prior_mode_selected": None,
+        "source_attempt": 3,
+        "native_command_id": "gh-delivery-9f2c1a",
+        "native_start_verdict": "dispatched",
+        "checkpoint_digest": "c" * 64,
+        "discard_authorized_by": None,
+        "no_checkpoint_baseline": False,
+        "refusal_code": None,
+    }
+
+
+def _checkpoint_lookup_v1_document() -> dict:
+    """The RETIRED legacy opt-in lookup's answer: exact/absent, nothing else.
+
+    The observable shape ``revival._legacy_http_lookup`` produces — the
+    lossy boolean it always was: an outage, a refused credential or
+    "rotted bytes" ALL collapsed into absent, labeled with the
+    ``legacy-http-opt-in`` authority so nobody mistakes it for the
+    configured one.
+    """
+    return {
+        "state": "absent",
+        "checkpoint_id": None,
+        "digest": None,
+        "authority": "legacy-http-opt-in",
+        "detail": ("the legacy opt-in lookup answered no checkpoint (collapsed, as it always did)"),
+    }
+
+
+def _checkpoint_lookup_v2_document() -> dict:
+    """The typed five-state outcome the configured authority answers.
+
+    The observable shape of
+    :class:`forge.adaptive.checkpoint_repository.CheckpointLookupOutcome`
+    (the ``checkpoint.lookup.outcome`` spelling): ``exact`` carries the
+    checkpoint's content address; every other state carries its own
+    operator-facing detail and the authority that answered.
+    """
+    return {
+        "state": "unavailable",
+        "checkpoint_id": None,
+        "digest": None,
+        "authority": "postgres",
+        "detail": "the checkpoint authority could not be reached (database outage)",
+    }
+
+
 @dataclass(frozen=True)
 class CompatFixture:
     """One registered fixture: a canned document + its supported semantics."""
@@ -364,6 +637,48 @@ _FIXTURES: dict[tuple[str, int], CompatFixture] = {
         description="NEXT-03 resume command — payload carries the exact ResumeSpec",
         factory=_control_command_v2_document,
     ),
+    ("attempt_start", 1): CompatFixture(
+        kind="attempt_start",
+        schema_version=1,
+        description="Q35-07 envelope evidence — identity was the source OID alone "
+        "(audit-only; no execution identity to recover)",
+        factory=_attempt_start_v1_document,
+    ),
+    ("attempt_start", 2): CompatFixture(
+        kind="attempt_start",
+        schema_version=2,
+        description="R36-06 envelope evidence — derived execution id, separated "
+        "source base, epoch and pinned continuation ref inside the digest",
+        factory=_attempt_start_v2_document,
+    ),
+    ("continuation_decision", 1): CompatFixture(
+        kind="continuation_decision",
+        schema_version=1,
+        description="Q35-02 continuation decision — the decision core, no lineage "
+        "(digest-governed reuse only)",
+        factory=_continuation_v1_document,
+    ),
+    ("continuation_decision", 2): CompatFixture(
+        kind="continuation_decision",
+        schema_version=2,
+        description="R36-02/03 continuation decision — lineage, the pinned "
+        "checkpoint digest and the typed refusal observability",
+        factory=_continuation_v2_document,
+    ),
+    ("checkpoint_lookup", 1): CompatFixture(
+        kind="checkpoint_lookup",
+        schema_version=1,
+        description="retired legacy opt-in lookup outcome — exact/absent only, "
+        "failures collapsed to absent (authority legacy-http-opt-in)",
+        factory=_checkpoint_lookup_v1_document,
+    ),
+    ("checkpoint_lookup", 2): CompatFixture(
+        kind="checkpoint_lookup",
+        schema_version=2,
+        description="typed five-state lookup outcome — exact carries the content "
+        "address; unavailable/corrupt/unauthorized never collapse",
+        factory=_checkpoint_lookup_v2_document,
+    ),
 }
 
 
@@ -396,8 +711,12 @@ def load_compat_document(kind: str, version: int, payload: object) -> object:
     """Parse *payload* under the SUPPORTED read/recovery semantics of its version.
 
     Returns the typed view (:class:`CompatSpecDocument`,
-    :class:`CompatCheckpointIndex`, :class:`CompatControlCommand`, or a
-    live :class:`forge.runs.spec.ExecutableRunSpec` for v3). Unknown
+    :class:`CompatCheckpointIndex`, :class:`CompatControlCommand`,
+    :class:`CompatAttemptStartDocument`,
+    :class:`CompatContinuationDocument`, a live
+    :class:`forge.adaptive.checkpoint_repository.CheckpointLookupOutcome`
+    for ``checkpoint_lookup``, or a live
+    :class:`forge.runs.spec.ExecutableRunSpec` for v3). Unknown
     kind or version → :class:`UnsupportedDocumentVersion` — never a
     silent best-effort parse. A KNOWN version with a corrupt payload
     raises the underlying parser's error (``SpecInvalid`` /
@@ -415,6 +734,12 @@ def load_compat_document(kind: str, version: int, payload: object) -> object:
         return _load_spec_document(version, payload)
     if kind == "checkpoint_metadata":
         return _load_checkpoint_index(payload)
+    if kind == "attempt_start":
+        return _load_attempt_start(version, payload)
+    if kind == "continuation_decision":
+        return _load_continuation_decision(version, payload)
+    if kind == "checkpoint_lookup":
+        return _load_checkpoint_lookup(version, payload)
     return _load_control_command(version, payload)
 
 
@@ -529,3 +854,177 @@ def _load_control_command(version: int, payload: dict) -> CompatControlCommand:
         source_oid=source_oid,
         recovery=recovery,
     )
+
+
+_HEX64 = set("0123456789abcdef")
+
+
+def _is_hex64(value: object) -> bool:
+    text = str(value or "")
+    return len(text) == 64 and all(char in _HEX64 for char in text)
+
+
+def _load_attempt_start(version: int, payload: dict) -> CompatAttemptStartDocument:
+    """The supported read of a persisted ``attempt_start`` document.
+
+    v1 is AUDIT-ONLY (``execution_attempt_id`` is ``None`` — the weaker
+    identity never existed and none is manufactured); v2 requires the
+    derived hex64 execution identity and the separated source base. A
+    v1 document carrying an ``execution_attempt_id`` key is refused —
+    that shape never shipped.
+    """
+    envelope_digest = str(payload.get("envelope_digest") or "")
+    source_base = str(payload.get("source_base_oid") or payload.get("attempt_base") or "")
+    if not _is_hex64(envelope_digest):
+        raise UnsupportedDocumentVersion(
+            f"attempt_start v{version} document has no hex64 'envelope_digest'"
+        )
+    if not source_base:
+        raise UnsupportedDocumentVersion(
+            f"attempt_start v{version} document names no source base "
+            "(neither 'source_base_oid' nor the v1 'attempt_base')"
+        )
+    epoch = payload.get("authority_epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int):
+        raise UnsupportedDocumentVersion(
+            f"attempt_start v{version} document's 'authority_epoch' must be an int"
+        )
+    if version == 1:
+        if payload.get("execution_attempt_id") is not None:
+            raise UnsupportedDocumentVersion(
+                "attempt_start v1 (Q35-07) carried no execution identity — a "
+                "document with 'execution_attempt_id' is v2"
+            )
+        return CompatAttemptStartDocument(
+            kind="attempt_start",
+            schema_version=1,
+            envelope_digest=envelope_digest,
+            context_digest=str(payload.get("context_digest") or ""),
+            subject_key=str(payload.get("subject_key") or ""),
+            resume_mode=str(payload.get("resume_mode") or ""),
+            execution_attempt_id=None,  # never manufactured
+            source_base_oid=source_base,
+            authority_epoch=epoch,
+            attempt_ordinal=None,
+            continuation_ref_digest="",
+            profile_source=str(payload.get("profile_source") or ""),
+            identity_strength="source_oid_only",
+            recovery=_ATTEMPT_START_V1_RECOVERY,
+        )
+    execution_id = str(payload.get("execution_attempt_id") or "")
+    if not _is_hex64(execution_id):
+        raise UnsupportedDocumentVersion(
+            "attempt_start v2 requires the hex64 derived 'execution_attempt_id' — "
+            "a document without it is v1 (audit-only), never a guessed identity"
+        )
+    return CompatAttemptStartDocument(
+        kind="attempt_start",
+        schema_version=2,
+        envelope_digest=envelope_digest,
+        context_digest=str(payload.get("context_digest") or ""),
+        subject_key=str(payload.get("subject_key") or ""),
+        resume_mode=str(payload.get("resume_mode") or ""),
+        execution_attempt_id=execution_id,
+        source_base_oid=source_base,
+        authority_epoch=epoch,
+        attempt_ordinal=(
+            int(payload["attempt_ordinal"]) if payload.get("attempt_ordinal") is not None else None
+        ),
+        continuation_ref_digest=str(payload.get("continuation_ref_digest") or ""),
+        profile_source=str(payload.get("profile_source") or ""),
+        identity_strength="execution_id_v2",
+        recovery=_ATTEMPT_START_V2_RECOVERY,
+    )
+
+
+def _load_continuation_decision(version: int, payload: dict) -> CompatContinuationDocument:
+    """The supported read of a persisted continuation decision document.
+
+    The mode vocabulary is the live
+    :class:`forge.adaptive.continuation.ContinuationMode` one (``fresh``/
+    ``required``/``restart``/``uncertain``); an unknown mode is refused.
+    v1 documents carry no lineage — those fields read as ``None``,
+    never guessed.
+    """
+    from forge.adaptive.continuation import ContinuationMode
+
+    mode_text = str(payload.get("mode") or "")
+    try:
+        mode = ContinuationMode(mode_text)
+    except ValueError as exc:
+        raise UnsupportedDocumentVersion(
+            f"continuation_decision v{version} names unknown mode {mode_text!r}"
+        ) from exc
+    evidence_digest = str(payload.get("evidence_digest") or "")
+    reason = str(payload.get("reason") or "")
+    decided_at = str(payload.get("decided_at") or "")
+    if not _is_hex64(evidence_digest) or not reason or not decided_at:
+        raise UnsupportedDocumentVersion(
+            f"continuation_decision v{version} document is malformed "
+            "(needs hex64 'evidence_digest', 'reason', 'decided_at')"
+        )
+
+    def _opt(key: str) -> str | None:
+        value = payload.get(key)
+        return str(value) if value is not None else None
+
+    source_attempt = payload.get("source_attempt")
+    return CompatContinuationDocument(
+        kind="continuation_decision",
+        schema_version=version,
+        mode=mode.value,
+        mode_selected=mode.value,
+        reason=reason,
+        decided_at=decided_at,
+        evidence_digest=evidence_digest,
+        uncertain=mode is ContinuationMode.UNCERTAIN,
+        source_attempt=(
+            int(source_attempt) if version >= 2 and isinstance(source_attempt, int) else None
+        ),
+        native_command_id=_opt("native_command_id") if version >= 2 else None,
+        native_start_verdict=_opt("native_start_verdict") if version >= 2 else None,
+        discard_authorized_by=_opt("discard_authorized_by") if version >= 2 else None,
+        checkpoint_digest=_opt("checkpoint_digest") if version >= 2 else None,
+        refusal_code=_opt("refusal_code"),
+        recovery=_CONTINUATION_V2_RECOVERY if version >= 2 else _CONTINUATION_V1_RECOVERY,
+    )
+
+
+def _load_checkpoint_lookup(version: int, payload: dict) -> object:
+    """The supported read of a checkpoint lookup outcome document.
+
+    v1 (the retired opt-in chain) answers ``exact``/``absent`` ONLY —
+    any typed state beyond those two is v2 vocabulary and a v1 document
+    claiming one is refused (the chain could not produce it). Returns
+    the LIVE :class:`CheckpointLookupOutcome` so consumers branch on
+    the production type, with the fixture's recovery semantics
+    documented here rather than duplicated.
+    """
+    from forge.adaptive.checkpoint_repository import (
+        LOOKUP_ABSENT,
+        LOOKUP_EXACT,
+        CheckpointLookupOutcome,
+    )
+
+    state = str(payload.get("state") or "")
+    detail = str(payload.get("detail") or "")
+    authority = str(payload.get("authority") or "")
+    allowed = (LOOKUP_EXACT, LOOKUP_ABSENT) if version == 1 else None
+    if state not in (LOOKUP_EXACT, LOOKUP_ABSENT, "unavailable", "corrupt", "unauthorized"):
+        raise UnsupportedDocumentVersion(
+            f"checkpoint_lookup v{version} names unknown state {state!r}"
+        )
+    if allowed is not None and state not in allowed:
+        raise UnsupportedDocumentVersion(
+            f"checkpoint_lookup v1 answered exact/absent only — {state!r} is v2 "
+            "typed vocabulary the legacy chain could not produce"
+        )
+    if state == LOOKUP_EXACT:
+        checkpoint_id = str(payload.get("checkpoint_id") or "")
+        if not _is_hex64(checkpoint_id):
+            raise UnsupportedDocumentVersion(
+                "checkpoint_lookup 'exact' requires the checkpoint's hex64 "
+                "content address ('checkpoint_id')"
+            )
+        return CheckpointLookupOutcome.exact(checkpoint_id, authority=authority)
+    return CheckpointLookupOutcome.missing(state, authority=authority, detail=detail)

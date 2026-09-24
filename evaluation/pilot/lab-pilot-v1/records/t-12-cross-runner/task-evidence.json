@@ -1,0 +1,250 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-12-cross-runner/a1",
+      "note": "first runner's pre-pause WIP leg (checkpointed; no usage receipt exists for --once)",
+      "wall_seconds": 0.082
+    },
+    {
+      "attempt_id": "t-12-cross-runner/a2",
+      "note": "second runner: required restore + resumed turn",
+      "wall_seconds": 0.822
+    }
+  ],
+  "brief": "Implement the widget across two runners.",
+  "checkpoint_ids": [
+    "fee7be3525323709008eb5d02704fb9b12fb5398f00c93236e3c9e6a4ad31b85"
+  ],
+  "collector_source": "generation",
+  "diff_digest": "594f304d676c0015138880344526caee128dd95c7f06e74d9098ad21b3decec1",
+  "driver": "cross_runner_resume",
+  "evidence_class": "lab-operational",
+  "interventions": [
+    {
+      "kind": "resume",
+      "note": "cross-runner resume"
+    }
+  ],
+  "meta": {
+    "attempt_base": "43ab5574bcc65eb4a7fe32ef46430eff7a861730",
+    "driver": "codex-sdk-lane",
+    "episode": {
+      "interrupt_grace_s": null,
+      "startup_s": 0.028285,
+      "teardown_s": 0.006509,
+      "turn_s": 0.250454
+    },
+    "exit": "completed",
+    "model": "",
+    "steering_journal": [
+      {
+        "at": "2026-09-24T01:42:15.751067+00:00",
+        "command_id": "cmd-3f6d2e2ca87b",
+        "delivery": "",
+        "detail": {},
+        "kind": "resume",
+        "outcome": "refused",
+        "reason": "the lane is closing \u2014 a resume turn belongs to the next lane epoch or the reconciler, never to teardown",
+        "sequence": 1
+      }
+    ],
+    "terminal_reason": "completed",
+    "usage": {
+      "completeness": "aggregate",
+      "driver": "codex-sdk-lane",
+      "input_tokens": 518,
+      "output_tokens": 231,
+      "source": "codex-app-server"
+    },
+    "workspace_generation": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-t-12-cross-runner-x_9qa__m/.forge-workspace-gen-fee7be352532"
+  },
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:14.954047+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "resume on a second runner",
+      "detail": "checkpoint fee7be3525323709008eb5d02704fb9b12fb5398f00c93236e3c9e6a4ad31b85 admitted the continuation",
+      "point": "cross-runner-continuation",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:16.840907+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:16.840940+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "restored-bytes-in-candidate=ok; resumed-turn-in-candidate=ok; generation-pointer-names-checkpoint=ok; collector-resolved-generation=ok; both-checkouts-intact=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-12-cross-runner/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-12-cross-runner/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0384,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [
+      {
+        "kind": "resume",
+        "note": "cross-runner resume"
+      }
+    ],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0036,
+    "rollbacks": 0,
+    "setup_minutes": 0.0314,
+    "started_at": "2026-09-24T01:42:14.539069+00:00",
+    "task_id": "t-12-cross-runner",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "runner_loss",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "changed, new AND deleted files from the restored WIP ride the diff",
+      "name": "restored-bytes-in-candidate",
+      "observed": "diff_digest=594f304d676c0015138880344526caee128dd95c7f06e74d9098ad21b3decec1",
+      "ok": true
+    },
+    {
+      "expected": "the resumed turn's own edit rides the diff",
+      "name": "resumed-turn-in-candidate",
+      "observed": "source=generation",
+      "ok": true
+    },
+    {
+      "expected": "the resumed checkout's generation pointer names the checkpoint id",
+      "name": "generation-pointer-names-checkpoint",
+      "observed": "pointer={'checkpoint_id': 'fee7be3525323709008eb5d02704fb9b12fb5398f00c93236e3c9e6a4ad31b85', 'generation': '.forge-workspace-gen-fee7be352532', 'generation_path': '/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-t-12-cross-runner-x_9qa__m/.forge-workspace-gen-fee7be352532', 'schema': 'forge.workspace-generation/1', 'work_id': 'lab-t-12-cross-runner'}",
+      "ok": true
+    },
+    {
+      "expected": "the shipped collector resolved the ACTIVE workspace generation (AT-01)",
+      "name": "collector-resolved-generation",
+      "observed": "source=generation zero_change=False",
+      "ok": true
+    },
+    {
+      "expected": "the first checkout keeps its WIP bytes; the resumed checkout is clean at base",
+      "name": "both-checkouts-intact",
+      "observed": "first_intact=True second_clean=True",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the first runner's WIP is checkpointed over real HTTP; a SECOND runner (fresh checkout, fresh lane subprocess, required resume) restores the exact bytes into a new workspace generation and completes its own turn; the shipped collector captures changed, new AND deleted files; both checkouts survive intact (AT-01 seam outcome)",
+    "group": "g4-operations",
+    "non_goals": [
+      "the first runner's checkout must never be mutated by the resume",
+      "no human edits \u2014 the candidate is exactly restored-WIP plus the resumed turn"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "runner_loss",
+    "stage": "gate",
+    "task_id": "t-12-cross-runner",
+    "title": "Cross-runner continuation restores the exact WIP into a new generation",
+    "verification": [
+      {
+        "method": "the collected diff carries the pre-checkpoint edit's exact bytes",
+        "name": "restored-bytes-in-candidate"
+      },
+      {
+        "method": "the resumed checkout's workspace-generation pointer names the checkpoint id",
+        "name": "generation-pointer-names-checkpoint"
+      },
+      {
+        "method": "the first checkout still holds its WIP bytes and the resumed checkout is clean at its base",
+        "name": "both-checkouts-intact"
+      }
+    ]
+  },
+  "task_id": "t-12-cross-runner",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-12-cross-runner/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.082,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": 2
+    },
+    {
+      "attempt_id": "t-12-cross-runner/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.822,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 7
+    }
+  ],
+  "workspace_generation_pointer": {
+    "checkpoint_id": "fee7be3525323709008eb5d02704fb9b12fb5398f00c93236e3c9e6a4ad31b85",
+    "generation": ".forge-workspace-gen-fee7be352532",
+    "generation_path": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-t-12-cross-runner-x_9qa__m/.forge-workspace-gen-fee7be352532",
+    "schema": "forge.workspace-generation/1",
+    "work_id": "lab-t-12-cross-runner"
+  }
+}

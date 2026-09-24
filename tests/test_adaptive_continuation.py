@@ -1,11 +1,16 @@
-"""Q35-02: the continuation decision — retry continues from a recoverable
-state, not from the retry verb.
+"""Q35-02/R36-02: the continuation decision — retry continues from a
+recoverable state, not from the retry verb.
 
-Two layers, tested separately on purpose:
+Three layers, tested separately on purpose:
 
 - the DECISION MODEL (:mod:`forge.adaptive.continuation`) — pure over an
   evidence snapshot; every arm of the table, the reuse digest and the
-  operator-facing wording;
+  operator-facing wording. R36-02: the typed recovery-request parse (the
+  ``restart`` verb only from its documented argument position) and the
+  vendor-start certainty from the persisted native-start intent.
+- the REFUSAL CODES (:func:`forge.runs.revival.retry_rejection`) — every
+  reason code reachable, messages unchanged, and the override matrix
+  (code x decision-mode -> allowed/refused) at the service.
 - the SERVICE WIRING (:class:`forge.runs.github_service.GitHubRunService`)
   — ``/retry`` and the revival re-dispatch select ``lane_resume_mode`` from
   the decision, persist it on the run's evidence, reuse it on repeated
@@ -14,11 +19,15 @@ Two layers, tested separately on purpose:
   continuations.
 """
 
+from typing import Any
+
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from forge.adaptive import continuation
+from forge.adaptive.admission import ExecutionLease
 from forge.adaptive.continuation import (
     ContinuationDecision,
     ContinuationEvidence,
@@ -27,6 +36,7 @@ from forge.adaptive.continuation import (
     evidence_from_record,
     matching_decision,
     operator_discard_requested,
+    parse_recovery_request,
     retry_ack_line,
 )
 from forge.config import ForgeConfig, Settings
@@ -34,6 +44,7 @@ from forge.durable import FlowRun, FlowStatus
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
 from forge.runs.github_service import GitHubRunService
+from forge.runs.revival import RetryRejection, RetryRefusalCode, retry_rejection
 from forge.runs.stubs import StubImplementer, StubPlanner
 from tests.fixtures.fake_github import FakeGitHub
 
@@ -45,6 +56,7 @@ ISSUE_DESC = "Users cannot reset their password."
 BASE_HEAD = "1" * 40
 HARNESS_WORKFLOW = "forge-harness.github.yml"
 HARNESS_MODEL = "glm-5.3-flash[1m]"
+TOKEN = "a1b2c3d4e5f67890a1b2c3d4e5f67890"  # a valid 32-hex run-id token
 
 #: Terminal reasons the four timeout/death stages produce (the shapes the
 #: service actually records — see forge.runs.execution/backends).
@@ -54,6 +66,10 @@ DEATH_BEFORE_BOOTSTRAP = (
 DEATH_AFTER_VENDOR = "harness_code: harness_driver_failed (exit=error)"
 DEATH_PLAIN_TIMEOUT = "harness_infrastructure: harness_timeout"
 DEATH_AFTER_PUBLICATION = "commit_unknown_outcome"
+DEATH_DISPATCH_NOT_OBSERVED = (
+    "harness_infrastructure: dispatch never observed — discovery found no "
+    "workflow_dispatch run after 20 attempts"
+)
 
 
 # ----------------------------------------------------------------------
@@ -159,58 +175,126 @@ class TestDecisionTable:
 class TestEvidenceFromRecord:
     """Vendor/delivery evidence comes ONLY from recorded classifications."""
 
-    def test_bootstrap_failure_classification_proves_no_vendor(self):
-        snap = evidence_from_record(death_reason=DEATH_BEFORE_BOOTSTRAP)
+    async def lookup(self, verdict: str | None):
+        async def _lookup(run_id: str) -> str | None:
+            return verdict
+
+        return _lookup
+
+    async def test_bootstrap_failure_classification_proves_no_vendor(self):
+        snap = await evidence_from_record(death_reason=DEATH_BEFORE_BOOTSTRAP)
         assert snap.vendor_started is False
 
-    def test_dispatch_never_observed_proves_no_vendor(self):
-        snap = evidence_from_record(
-            death_reason=(
-                "harness_infrastructure: dispatch never observed — discovery found no "
-                "workflow_dispatch run after 20 attempts"
-            )
+    async def test_dispatch_never_observed_alone_proves_nothing(self):
+        """R36-02/AT-03: discovery absence is NOT execution proof — the
+        reason alone leaves the vendor start UNKNOWN (the job can have
+        started with the response/discovery lost)."""
+        snap = await evidence_from_record(death_reason=DEATH_DISPATCH_NOT_OBSERVED)
+        assert snap.vendor_started is None
+        assert snap.native_start_verdict is None  # no intent consulted
+
+    async def test_dispatch_never_observed_with_a_never_dispatched_intent_proves_it(self):
+        """The one upgrade path: the persisted native-start intent query
+        says no intent row was ever written on this dead run — the provider
+        call was provably never attempted."""
+        snap = await evidence_from_record(
+            death_reason=DEATH_DISPATCH_NOT_OBSERVED,
+            run_id="r1",
+            intent_lookup=await self.lookup("never_dispatched"),
+        )
+        assert snap.vendor_started is False
+        assert snap.native_start_verdict == "never_dispatched"
+
+    async def test_a_persisted_intent_stays_unknown_despite_empty_discovery(self):
+        """AT-03's core: the intent row IS present (the dispatch call was
+        attempted; the response was lost) — even with the reason saying
+        "dispatch never observed", the vendor start stays UNKNOWN."""
+        snap = await evidence_from_record(
+            death_reason=DEATH_DISPATCH_NOT_OBSERVED,
+            run_id="r1",
+            intent_lookup=await self.lookup("dispatched"),
+        )
+        assert snap.vendor_started is None
+        assert snap.native_start_verdict == "dispatched"
+
+    async def test_an_unreadable_intent_lookup_stays_unknown(self):
+        async def _boom(run_id: str) -> str:
+            raise RuntimeError("lease table unreadable")
+
+        snap = await evidence_from_record(
+            death_reason=DEATH_DISPATCH_NOT_OBSERVED, run_id="r1", intent_lookup=_boom
+        )
+        assert snap.vendor_started is None
+
+    async def test_a_none_intent_verdict_stays_unknown(self):
+        snap = await evidence_from_record(
+            death_reason=DEATH_DISPATCH_NOT_OBSERVED,
+            run_id="r1",
+            intent_lookup=await self.lookup(None),
+        )
+        assert snap.vendor_started is None
+
+    async def test_the_intent_is_not_consulted_for_other_deaths(self):
+        """Only the discovery-exhaustion shape needs the intent — a plain
+        timeout never asks, and an intent verdict never leaks into it."""
+        snap = await evidence_from_record(
+            death_reason=DEATH_PLAIN_TIMEOUT,
+            run_id="r1",
+            intent_lookup=await self.lookup("never_dispatched"),
+        )
+        assert snap.vendor_started is None
+        assert snap.native_start_verdict is None
+
+    async def test_bootstrap_proof_beats_a_dispatched_intent(self):
+        """The bootstrap classification is its own PRE-DISPATCH proof: the
+        dispatched job itself reported dying before any vendor client —
+        independent of what the intent record says."""
+        snap = await evidence_from_record(
+            death_reason=DEATH_BEFORE_BOOTSTRAP,
+            run_id="r1",
+            intent_lookup=await self.lookup("dispatched"),
         )
         assert snap.vendor_started is False
 
-    def test_driver_failure_proves_the_vendor_ran(self):
-        snap = evidence_from_record(death_reason=DEATH_AFTER_VENDOR)
+    async def test_driver_failure_proves_the_vendor_ran(self):
+        snap = await evidence_from_record(death_reason=DEATH_AFTER_VENDOR)
         assert snap.vendor_started is True
 
-    def test_empty_driver_completion_proves_the_vendor_ran(self):
-        snap = evidence_from_record(death_reason="harness_code: harness_no_changes")
+    async def test_empty_driver_completion_proves_the_vendor_ran(self):
+        snap = await evidence_from_record(death_reason="harness_code: harness_no_changes")
         assert snap.vendor_started is True
 
-    def test_plain_timeout_proves_nothing(self):
-        snap = evidence_from_record(death_reason=DEATH_PLAIN_TIMEOUT)
+    async def test_plain_timeout_proves_nothing(self):
+        snap = await evidence_from_record(death_reason=DEATH_PLAIN_TIMEOUT)
         assert snap.vendor_started is None  # unknown stays unknown
 
-    def test_journaled_bootstrap_key_classifies_too(self):
+    async def test_journaled_bootstrap_key_classifies_too(self):
         assert (
-            evidence_from_record(
+            await evidence_from_record(
                 death_reason=DEATH_PLAIN_TIMEOUT, evidence={"bootstrap": "failed"}
-            ).vendor_started
-            is False
-        )
+            )
+        ).vendor_started is False
         assert (
-            evidence_from_record(
+            await evidence_from_record(
                 death_reason=DEATH_PLAIN_TIMEOUT, evidence={"bootstrap": "ok"}
-            ).vendor_started
-            is True
-        )
+            )
+        ).vendor_started is True
 
-    def test_unknown_publication_outcome_marks_delivered_work(self):
-        snap = evidence_from_record(death_reason=DEATH_AFTER_PUBLICATION, candidate_shas=["c1"])
+    async def test_unknown_publication_outcome_marks_delivered_work(self):
+        snap = await evidence_from_record(
+            death_reason=DEATH_AFTER_PUBLICATION, candidate_shas=["c1"]
+        )
         assert snap.candidate_published is True
         assert snap.vendor_started is True
 
-    def test_a_candidate_alone_is_not_delivery(self):
+    async def test_a_candidate_alone_is_not_delivery(self):
         """Candidates accumulate across repair cycles — only a delivery-shaped
         death reason marks the work as already delivered."""
-        snap = evidence_from_record(death_reason=DEATH_PLAIN_TIMEOUT, candidate_shas=["c1"])
+        snap = await evidence_from_record(death_reason=DEATH_PLAIN_TIMEOUT, candidate_shas=["c1"])
         assert snap.candidate_published is False
 
-    def test_superseded_after_edit_with_candidate_is_delivered(self):
-        snap = evidence_from_record(
+    async def test_superseded_after_edit_with_candidate_is_delivered(self):
+        snap = await evidence_from_record(
             death_reason="superseded by issue edit (digest drift)", candidate_shas=["c1"]
         )
         assert snap.candidate_published is True
@@ -273,13 +357,159 @@ class TestDecisionReuse:
         assert uncertain_doc["no_checkpoint_baseline"] is False
 
 
-class TestOperatorWording:
-    def test_the_discard_keyword_parses_off_the_note(self):
-        assert operator_discard_requested("/retry abc restart") is True
-        assert operator_discard_requested("/retry abc RESTART") is True
-        assert operator_discard_requested("/retry abcdef1234567890") is False
-        assert operator_discard_requested("") is False
+class TestRecoveryRequestParsing:
+    """R36-02: the typed /retry command — `restart` only from its
+    documented argument position, never from a mention in the prose."""
 
+    def test_the_documented_position_grants_the_discard(self):
+        request = parse_recovery_request(f"@forge /retry {TOKEN} restart")
+        assert request.requested == TOKEN
+        assert request.restart is True
+        assert operator_discard_requested(f"/retry {TOKEN} restart") is True
+
+    def test_the_verb_is_case_insensitive(self):
+        assert operator_discard_requested(f"/retry {TOKEN} RESTART") is True
+
+    def test_the_bare_command_and_plain_retry_never_discard(self):
+        assert operator_discard_requested("/retry") is False
+        assert operator_discard_requested(f"/retry {TOKEN}") is False
+        assert operator_discard_requested("") is False
+        assert operator_discard_requested(None) is False
+
+    def test_a_verb_without_a_subject_never_grants_the_discard(self):
+        """/retry restart (no run id) is not the documented command — a bare
+        command must never discard the LATEST dead run's WIP."""
+        assert parse_recovery_request("/retry restart").restart is False
+
+    def test_a_negated_mention_never_grants_the_discard(self):
+        assert operator_discard_requested(f"/retry {TOKEN}\nPlease do not restart this.") is False
+        assert operator_discard_requested(f"/retry {TOKEN} do-not-restart") is False
+
+    def test_a_quoted_mention_never_grants_the_discard(self):
+        assert (
+            operator_discard_requested(
+                f"/retry {TOKEN} — the docs say `restart` discards any unrecorded WIP"
+            )
+            is False
+        )
+
+    def test_an_unrelated_mention_never_grants_the_discard(self):
+        assert (
+            operator_discard_requested(
+                f"/retry {TOKEN}\nThe runner may restart the worldcup coverage later."
+            )
+            is False
+        )
+
+    def test_a_later_command_with_the_verb_is_not_the_first_command(self):
+        """Only the FIRST /retry command is acted on; a quoted foreign
+        command's verb cannot graft onto it."""
+        assert (
+            operator_discard_requested(f"/retry\nsee also `/retry {TOKEN} restart` elsewhere")
+            is False
+        )
+
+    def test_a_verb_stuck_to_a_longer_word_is_not_the_verb(self):
+        assert operator_discard_requested(f"/retry {TOKEN} restartable") is False
+
+    def test_an_invalid_id_token_disables_the_verb(self):
+        """`abc` is not a run-id token — the mangled command grants nothing
+        (the OLD substring behavior accepted it)."""
+        assert operator_discard_requested("/retry abc restart") is False
+
+    def test_the_verb_must_address_the_resolved_subject(self):
+        other = "f" * 32
+        assert parse_recovery_request(f"/retry {TOKEN} restart", run_id=TOKEN).restart is True
+        assert parse_recovery_request(f"/retry {TOKEN} restart", run_id=other).restart is False
+        # a PREFIX token still addresses the full subject
+        assert parse_recovery_request(f"/retry {TOKEN[:8]} restart", run_id=TOKEN).restart is True
+
+
+class TestPublicationUncertainty:
+    """Issue scope 4: `commit_unknown_outcome` is uncertainty — never
+    delivery proof, never a resume."""
+
+    async def test_an_unknown_publication_outcome_never_authorizes_a_resume(self):
+        decision = decide_continuation(
+            await evidence_from_record(death_reason=DEATH_AFTER_PUBLICATION, candidate_shas=["c1"])
+        )
+        assert decision.mode is ContinuationMode.UNCERTAIN
+        assert decision.dispatchable is False
+        with pytest.raises(ValueError, match="selects no resume mode"):
+            decision.resume_mode()
+
+    async def test_the_plain_unknown_publication_note_offers_both_exits(self):
+        note = continuation.uncertain_retry_note(
+            "run" * 11,
+            decide_continuation(
+                await evidence_from_record(
+                    death_reason=DEATH_AFTER_PUBLICATION, candidate_shas=["c1"]
+                )
+            ),
+        )
+        assert "/reconcile" in note  # the lost-publication path
+        assert "Nothing was dispatched" in note
+
+
+class TestDecisionLineage:
+    """R36-02: the persisted decision records its originating attempt,
+    evidence version, command identity and discard authority."""
+
+    def test_the_document_carries_the_lineage_keys(self):
+        decision = decide_continuation(
+            ContinuationEvidence(
+                operator_discard_requested=True,
+                discard_authorized_by="operator:@alice",
+                native_command_id="delivery-7",
+                source_attempt=2,
+            )
+        )
+        doc = decision.as_document()
+        assert doc["evidence_version"] == 2
+        assert doc["source_attempt"] == 2
+        assert doc["native_command_id"] == "delivery-7"
+        assert doc["discard_authorized_by"] == "operator:@alice"
+
+    def test_no_discard_authority_is_recorded_without_a_discard(self):
+        doc = decide_continuation(ContinuationEvidence(vendor_started=False)).as_document()
+        assert doc["discard_authorized_by"] is None
+
+    def test_a_discard_without_a_named_author_defaults_to_operator(self):
+        doc = decide_continuation(
+            ContinuationEvidence(operator_discard_requested=True)
+        ).as_document()
+        assert doc["discard_authorized_by"] == "operator"
+
+    def test_reuse_keeps_the_originating_command_identity(self):
+        decision = decide_continuation(
+            ContinuationEvidence(
+                vendor_started=False, native_command_id="delivery-1", source_attempt=1
+            )
+        )
+        doc = decision.as_document()
+        # a NEW event over the unchanged snapshot reuses the SAME decision —
+        # the ORIGINAL command identity survives, not the repeating event's.
+        again = matching_decision(doc, ContinuationEvidence(vendor_started=False))
+        assert again is not None and again.reused is True
+        assert again.evidence.native_command_id == "delivery-1"
+        assert again.evidence.source_attempt == 1
+
+    def test_the_lineage_fields_do_not_move_the_reuse_digest(self):
+        base = ContinuationEvidence(vendor_started=None, checkpoint_committed=False)
+        assert (
+            base.digest()
+            == ContinuationEvidence(
+                vendor_started=None,
+                checkpoint_committed=False,
+                native_command_id="d-2",
+                source_attempt=5,
+                discard_authorized_by="operator:@bob",
+                native_start_verdict="dispatched",
+            ).digest()
+        )
+
+
+class TestOperatorWording:
     def test_the_ack_line_names_the_continuation_source(self):
         assert "committed baseline" in retry_ack_line(
             decide_continuation(ContinuationEvidence(vendor_started=False))
@@ -314,6 +544,142 @@ class TestOperatorWording:
         assert isinstance(decision, ContinuationDecision)
         with pytest.raises(AttributeError):
             decision.mode = ContinuationMode.EXACT_WIP  # type: ignore[misc]
+
+
+# ----------------------------------------------------------------------
+# R36-02: the typed /retry refusals — every code reachable, messages kept
+# ----------------------------------------------------------------------
+
+
+def make_run(**overrides) -> FlowRun:
+    """A dead-run row for the pure retry_rejection table (no DB needed)."""
+    values = dict(
+        id=TOKEN,
+        project_id=PROJECT_ID,
+        provider="github",
+        issue_iid=ISSUE,
+        status=FlowStatus.FAILED.value,
+        status_reason=DEATH_PLAIN_TIMEOUT,
+        candidate_shas=["c1"],
+        cancel_requested=False,
+    )
+    values.update(overrides)
+    return FlowRun(**values)
+
+
+def absent_outcome() -> Any:
+    """A typed PROVEN-absent lookup answer (R36-03)."""
+    from forge.adaptive.checkpoint_repository import (
+        LOOKUP_ABSENT,
+        CheckpointLookupOutcome,
+    )
+
+    return CheckpointLookupOutcome.missing(LOOKUP_ABSENT, authority="test")
+
+
+def exact_outcome(checkpoint_id: str = "e" * 64) -> Any:
+    """A typed exact lookup answer (R36-03)."""
+    from forge.adaptive.checkpoint_repository import CheckpointLookupOutcome
+
+    return CheckpointLookupOutcome.exact(checkpoint_id, authority="test")
+
+
+def patch_checkpoint(monkeypatch, *, exact: bool, checkpoint_id: str = "e" * 64) -> None:
+    """Point the retry lookup chain at a typed fake (R36-03: the async
+    configured authority — sync boolean monkeypatches are gone)."""
+    from forge.runs import revival
+
+    async def _lookup(run_id: str, **_: Any):
+        return exact_outcome(checkpoint_id) if exact else absent_outcome()
+
+    monkeypatch.setattr(revival, "durable_checkpoint_outcome", _lookup)
+
+
+class TestRetryRejectionCodes:
+    @pytest.fixture(autouse=True)
+    def _no_checkpoint(self):
+        """The typed-refusal table tests pass their outcome explicitly."""
+
+    def code_of(self, run: FlowRun | None, **kwargs) -> str:
+        rejection = retry_rejection(run, **kwargs)
+        assert isinstance(rejection, RetryRejection) or rejection == ""
+        return rejection.code if isinstance(rejection, RetryRejection) else ""
+
+    def test_every_reason_code_is_reachable(self):
+        assert self.code_of(None) == RetryRefusalCode.NO_RETRYABLE_RUN.value
+        assert self.code_of(make_run(), other_active=True) == RetryRefusalCode.OTHER_ACTIVE.value
+        assert (
+            self.code_of(make_run(status="completed"))
+            == RetryRefusalCode.NOT_RETRYABLE_STATUS.value
+        )
+        assert (
+            self.code_of(make_run(cancel_requested=True)) == RetryRefusalCode.CANCEL_REQUESTED.value
+        )
+        assert (
+            self.code_of(make_run(candidate_shas=[]), checkpoint=absent_outcome())
+            == RetryRefusalCode.NOTHING_TO_RETRY.value
+        )
+
+    def test_the_operator_messages_are_unchanged(self):
+        """R36-02: the typing must not reword the operator-facing text."""
+        assert retry_rejection(None) == (
+            "`/retry` found no retryable run on this issue. "
+            "Start a fresh run by posting a new implement request."
+        )
+        assert retry_rejection(make_run(candidate_shas=[]), checkpoint=absent_outcome()) == (
+            f"Run `{TOKEN[:8]}` died before it committed a candidate and has no "
+            "stored checkpoint — there is no work to retry in place. Start fresh "
+            "with a new implement request."
+        )
+        assert retry_rejection(make_run(), other_active=True) == (
+            f"Run `{TOKEN[:8]}` cannot be retried: another run is already in flight on this "
+            "subject — forge keeps one active run per subject. Let it finish or cancel it "
+            "first."
+        )
+        assert retry_rejection(make_run(cancel_requested=True)) == (
+            f"Run `{TOKEN[:8]}` was cancelled by an operator — retrying a revoked publication "
+            "grant is not allowed. Start fresh with a new implement request."
+        )
+        assert (
+            retry_rejection(make_run(status="completed"))
+            == f"Run `{TOKEN[:8]}` is `completed`, not `failed`/`blocked` — there is nothing to "
+            "retry. Cancelled runs and fresh work need a new implement request."
+        )
+
+    def test_a_rejection_is_a_plain_string_to_its_callers(self):
+        """The azure/gitlab callers keep posting it verbatim: truthiness and
+        f-string interpolation behave exactly like the old plain strings."""
+        rejection = retry_rejection(make_run(candidate_shas=[]), checkpoint=absent_outcome())
+        assert isinstance(rejection, str)
+        assert bool(rejection) is True
+        assert f"🔁 {rejection}".startswith("🔁 Run")
+        assert retry_rejection(make_run()) == ""  # fine — no refusal
+
+    def test_the_checkpoint_resume_point_still_passes(self):
+        assert retry_rejection(make_run(candidate_shas=[]), checkpoint=exact_outcome()) == ""
+
+    def test_an_unanswerable_authority_is_never_worded_as_absence(self):
+        """R36-03: an outage/refused-credential outcome is its OWN typed
+        refusal — never the "no stored checkpoint" wording (which would
+        send the operator to a fresh run over recoverable work)."""
+        from forge.adaptive.checkpoint_repository import (
+            LOOKUP_UNAVAILABLE,
+            CheckpointLookupOutcome,
+        )
+
+        unavailable = CheckpointLookupOutcome.missing(
+            LOOKUP_UNAVAILABLE, authority="postgres", detail="connection refused"
+        )
+        rejection = retry_rejection(make_run(candidate_shas=[]), checkpoint=unavailable)
+        assert isinstance(rejection, RetryRejection)
+        assert rejection.code == RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE.value
+        assert "no stored checkpoint" not in rejection
+        assert "connection refused" in rejection
+        assert "nothing was dispatched" in rejection
+        # An unconsulted lookup (None) is the same honest refusal.
+        none_rejection = retry_rejection(make_run(candidate_shas=[]))
+        assert isinstance(none_rejection, RetryRejection)
+        assert none_rejection.code == RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE.value
 
 
 # ----------------------------------------------------------------------
@@ -388,9 +754,7 @@ def fake() -> FakeGitHub:
 @pytest.fixture()
 def with_checkpoint(monkeypatch):
     """The control plane holds a committed checkpoint for every run."""
-    from forge.runs import revival
-
-    monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+    patch_checkpoint(monkeypatch, exact=True)
 
 
 async def get_run(db, run_id: str) -> FlowRun:
@@ -576,6 +940,268 @@ class TestRetryDispatchModes:
         assert "/reconcile" in note
 
 
+async def wipe_native_intent(db, run_id: str) -> None:
+    """AT-03 shaping: the run's lease rows carry NO native-start intent —
+    the dispatch leg provably never attempted the provider call."""
+    async with db() as session:
+        rows = (
+            (await session.execute(select(ExecutionLease).where(ExecutionLease.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.native_intent_at = None
+            row.native_intent_ref = None
+        await session.commit()
+
+
+async def lease_intents(db, run_id: str) -> list:
+    """The persisted native-start intent timestamps for the run."""
+    async with db() as session:
+        return list(
+            (
+                await session.execute(
+                    select(ExecutionLease.native_intent_at).where(ExecutionLease.run_id == run_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+class TestExplicitRestartRecovery:
+    """R36-02/AT-02: an authorized ``/retry <run> restart`` with no candidate
+    and no checkpoint reaches exactly ONE restart dispatch; every other
+    refusal code still refuses; prose cannot grant the discard."""
+
+    async def _dead_with_no_work_in_place(self, db, fake, *, reason=DEATH_PLAIN_TIMEOUT) -> str:
+        run_id = await drive_to_dead(db, make_service(db, fake), reason=reason, candidates=[])
+        fake.dispatch_inputs.clear()
+        return run_id
+
+    async def test_the_explicit_restart_dispatches_exactly_once_in_restart_mode(self, db, fake):
+        """The issue's headline defect, fixed: the documented recovery exit
+        works exactly where it is needed — no candidate, no checkpoint, and
+        the operator-authorized discard satisfies the continuity arm."""
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            run_id,
+            note=f"/retry {run_id} restart",
+            delivery_id="retry-restart-nocand-1",
+        )
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "restart"
+        assert dispatch_calls(fake) == before + 1  # exactly ONE native dispatch
+        ack = retry_ack(fake)
+        assert "explicit restart" in ack
+        assert "discarded by operator choice" in ack
+        run = await get_run(db, run_id)
+        doc = run.evidence["continuation"]
+        assert doc["mode_selected"] == "restart"
+        assert doc["discard_authorized_by"] == "operator:@alice"
+        assert doc["native_command_id"] == "retry-restart-nocand-1"
+        assert doc["source_attempt"] == 0  # the dead attempt's generation
+        assert "refusal_code" not in doc  # the override lifted the refusal
+
+    async def test_a_plain_uncertain_retry_with_no_work_in_place_parks(self, db, fake):
+        """The same shape WITHOUT the verb: nothing dispatches and the note
+        is the UNCERTAIN park (the honest explanation + the two ways out),
+        never an inference that the WIP was empty."""
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        before = dispatch_calls(fake)
+
+        await retry(make_service(db, fake), run_id, delivery_id="retry-plain-nocand-1")
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before
+        run = await get_run(db, run_id)
+        doc = run.evidence["continuation"]
+        assert doc["mode_selected"] == "uncertain"
+        assert doc["refusal_code"] == "nothing_to_retry"  # the typed refusal
+        note = next(b for b in comment_bodies(fake) if "operator decision" in b)
+        assert "needs an operator decision" in note
+        assert f"/retry {run_id} restart" in note
+        assert "no work to retry in place" not in note  # not the presuming wording
+
+    @pytest.mark.parametrize(
+        "note",
+        [
+            "/retry {run_id}\nPlease do NOT restart this — the branch has work.",
+            "/retry {run_id} — the docs say `restart` discards unrecorded WIP",
+            "/retry {run_id}\nthe runner may restart mid-race, unrelated",
+        ],
+    )
+    async def test_prose_never_grants_the_discard(self, db, fake, note):
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            run_id,
+            note=note.format(run_id=run_id),
+            delivery_id=f"retry-prose-{abs(hash(note)) % 1000}",
+        )
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before  # zero dispatches, no discard
+        assert (await get_run(db, run_id)).evidence["continuation"]["mode_selected"] == (
+            "uncertain"
+        )
+
+    async def test_a_cancelled_run_still_refuses_the_explicit_restart(self, db, fake):
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.cancel_requested = True
+            await session.commit()
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            run_id,
+            note=f"/retry {run_id} restart",
+            delivery_id="retry-restart-cancelled-1",
+        )
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before
+        note = comment_bodies(fake)[-1]
+        assert "cancelled by an operator" in note
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        assert doc["refusal_code"] == "cancel_requested"
+
+    async def test_a_non_retryable_status_still_refuses_the_explicit_restart(self, db, fake):
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.READY_FOR_HUMAN.value
+            await session.commit()
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            run_id,
+            note=f"/retry {run_id} restart",
+            delivery_id="retry-restart-status-1",
+        )
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before
+        note = comment_bodies(fake)[-1]
+        assert "not `failed`/`blocked`" in note
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        assert doc["refusal_code"] == "not_retryable_status"
+
+    async def test_another_active_run_still_refuses_the_explicit_restart(self, db, fake):
+        service = make_service(db, fake)
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        await start(service)  # a second, LIVE run on the same subject
+        fake.dispatch_inputs.clear()
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            run_id,
+            note=f"/retry {run_id} restart",
+            delivery_id="retry-restart-active-1",
+        )
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before
+        note = comment_bodies(fake)[-1]
+        assert "another run is already in flight" in note
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        assert doc["refusal_code"] == "other_active"
+
+    async def test_a_foreign_subject_retry_is_ignored(self, db, fake):
+        """A run id that does not resolve on THIS subject is not a command
+        here: no dispatch, no note, no decision."""
+        run_id = await self._dead_with_no_work_in_place(db, fake)
+        foreign = "f" * 32
+        before = dispatch_calls(fake)
+
+        await retry(
+            make_service(db, fake),
+            foreign,
+            note=f"/retry {foreign} restart",
+            delivery_id="retry-restart-foreign-1",
+        )
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before
+        assert not any("retried by" in b for b in comment_bodies(fake))
+        assert "continuation" not in ((await get_run(db, run_id)).evidence or {})
+
+
+class TestNativeStartIntentEvidence:
+    """R36-02/AT-03: vendor-start certainty from the persisted native-start
+    intent — an undiscovered remote execution stays UNKNOWN; only a missing
+    intent on a dead run proves the never-dispatched baseline."""
+
+    async def _dead_after_a_lost_dispatch_response(self, db, fake) -> str:
+        """The AT-03 shape: the dispatch call was ATTEMPTED (the intent is
+        durable), the response/discovery was lost, the run died with the
+        bounded-discovery reason — no candidate, no checkpoint."""
+        run_id = await drive_to_dead(
+            db, make_service(db, fake), reason=DEATH_DISPATCH_NOT_OBSERVED, candidates=[]
+        )
+        fake.dispatch_inputs.clear()
+        intents = await lease_intents(db, run_id)
+        assert intents and all(value is not None for value in intents)
+        return run_id
+
+    async def test_a_persisted_intent_keeps_the_outcome_uncertain(self, db, fake):
+        run_id = await self._dead_after_a_lost_dispatch_response(db, fake)
+        before = dispatch_calls(fake)
+
+        await retry(make_service(db, fake), run_id, delivery_id="retry-intent-1")
+
+        assert fake.dispatch_inputs == []
+        assert dispatch_calls(fake) == before  # NO never_started proof, NO fresh restart
+        run = await get_run(db, run_id)
+        doc = run.evidence["continuation"]
+        assert doc["mode_selected"] == "uncertain"
+        assert doc["vendor_started"] is None
+        assert doc["native_start_verdict"] == "dispatched"
+        assert doc["refusal_code"] == "nothing_to_retry"
+
+    async def test_a_missing_intent_proves_the_never_dispatched_baseline(self, db, fake):
+        """The inverse: no intent row was ever persisted — the provider call
+        provably never happened, so the committed baseline IS the retry."""
+        run_id = await self._dead_after_a_lost_dispatch_response(db, fake)
+        await wipe_native_intent(db, run_id)
+
+        await retry(make_service(db, fake), run_id, delivery_id="retry-nointent-1")
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "fresh"
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        assert doc["vendor_started"] is False
+        assert doc["native_start_verdict"] == "never_dispatched"
+
+    async def test_the_true_before_dispatch_failure_is_the_positive_control(self, db, fake):
+        """The bootstrap-classification proof (the job itself reported dying
+        before any vendor client) allows the fresh retry without any
+        intent consultation."""
+        run_id = await drive_to_dead(
+            db, make_service(db, fake), reason=DEATH_BEFORE_BOOTSTRAP, candidates=[]
+        )
+        await wipe_native_intent(db, run_id)
+        fake.dispatch_inputs.clear()
+
+        await retry(make_service(db, fake), run_id, delivery_id="retry-bootstrap-nointent-1")
+
+        (dispatch,) = fake.dispatch_inputs
+        assert dispatch["inputs"]["lane_resume_mode"] == "fresh"
+        doc = (await get_run(db, run_id)).evidence["continuation"]
+        assert doc["vendor_started"] is False
+        assert doc["native_start_verdict"] is None  # never consulted
+
+
 class TestRepeatedRetryEvents:
     async def test_a_redelivered_event_is_a_no_op(self, db, fake, with_checkpoint):
         service = make_service(db, fake)
@@ -586,6 +1212,48 @@ class TestRepeatedRetryEvents:
         await retry(service, run_id, delivery_id="retry-once-1")  # same delivery id
 
         assert fake.dispatch_inputs == []  # A11: one logical attempt
+
+    async def test_a_repeated_restart_event_is_one_decision_and_one_attempt_per_event(
+        self, db, fake
+    ):
+        """R36-02: repeated delivery of the same command reuses the decision
+        (one ``decided_at``) and never double-increments attempts — each NEW
+        event dispatches once, a redelivered event not at all."""
+        service = make_service(db, fake)
+        run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=[])
+        before = dispatch_calls(fake)
+
+        await retry(
+            service, run_id, note=f"/retry {run_id} restart", delivery_id="retry-rerestart-1"
+        )
+        first = dict((await get_run(db, run_id)).evidence["continuation"])
+        assert first["mode_selected"] == "restart"
+        cycle_after_first = int((await get_run(db, run_id)).commit_cycle or 0)
+        assert dispatch_calls(fake) == before + 1
+
+        # The same delivery redelivered: a NO-OP (A11 idempotency).
+        await retry(
+            service, run_id, note=f"/retry {run_id} restart", delivery_id="retry-rerestart-1"
+        )
+        assert dispatch_calls(fake) == before + 1
+        assert int((await get_run(db, run_id)).commit_cycle or 0) == cycle_after_first
+
+        # The restarted attempt dies the SAME way and is restarted again: a
+        # NEW event over an unchanged snapshot REUSES the decision.
+        async with db() as session:
+            run = await session.get(FlowRun, run_id)
+            run.status = FlowStatus.FAILED.value
+            run.status_reason = DEATH_PLAIN_TIMEOUT
+            run.candidate_shas = []
+            await session.commit()
+        await retry(
+            service, run_id, note=f"/retry {run_id} restart", delivery_id="retry-rerestart-2"
+        )
+        second = dict((await get_run(db, run_id)).evidence["continuation"])
+        assert second["decided_at"] == first["decided_at"]  # ONE decision, reused
+        assert second["mode_selected"] == "restart"
+        assert second["native_command_id"] == "retry-rerestart-1"  # the ORIGINATING event
+        assert dispatch_calls(fake) == before + 2  # one dispatch per NEW event
 
     async def test_an_unchanged_snapshot_reuses_the_persisted_decision(
         self, db, fake, with_checkpoint
@@ -726,14 +1394,13 @@ class TestCheckpointBoundInversion:
     async def test_a_checkpoint_bound_retry_that_lost_its_checkpoint_stops(
         self, db, fake, monkeypatch
     ):
-        from forge.runs import revival
 
         service = make_service(db, fake)
         run_id = await drive_to_dead(db, service, reason=DEATH_PLAIN_TIMEOUT, candidates=["c1"])
         fake.dispatch_inputs.clear()
 
         # First retry: the checkpoint is held — exact WIP, required mode.
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        patch_checkpoint(monkeypatch, exact=True)
         await retry(service, run_id, delivery_id="retry-inversion-1")
         (first,) = fake.dispatch_inputs
         assert first["inputs"]["lane_resume_mode"] == "required"
@@ -749,7 +1416,7 @@ class TestCheckpointBoundInversion:
             run.status = FlowStatus.FAILED.value
             run.status_reason = DEATH_PLAIN_TIMEOUT
             await session.commit()
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: False)
+        patch_checkpoint(monkeypatch, exact=False)
         fake.dispatch_inputs.clear()
         before = dispatch_calls(fake)
 
@@ -768,9 +1435,8 @@ class TestTimeoutStages:
     async def _stage(
         self, db, fake, monkeypatch, *, reason: str, candidates: list[str], checkpoint: bool
     ) -> tuple[FakeGitHub, FlowRun]:
-        from forge.runs import revival
 
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: bool(checkpoint))
+        patch_checkpoint(monkeypatch, exact=bool(checkpoint))
         service = make_service(db, fake)
         run_id = await drive_to_dead(db, service, reason=reason, candidates=candidates)
         fake.dispatch_inputs.clear()

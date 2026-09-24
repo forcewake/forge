@@ -40,6 +40,36 @@ async def lifespan(app: FastAPI):
     await init_db(db_url)
     app.state.session_factory = get_session_factory(db_url)
 
+    # R36-05 (issue #264): the checkpoint authority marker's state is
+    # observable at startup — one line naming the CONFIGURED checkpoint
+    # authority (FORGE_CHECKPOINT_DURABILITY), the authority the
+    # deployment's marker declares ACTIVE, and the marker's generation.
+    # Observability only: the composition's fail-closed refusals live in
+    # resolve_repository, and this line never breaks startup.
+    try:
+        from forge.adaptive.checkpoint_repository import authority_state_report
+
+        state = authority_state_report()
+        logger.info(
+            "migration.configured_vs_active_authority: state=%s configured=%s "
+            "active=%s generation=%s",
+            state["state"],
+            state["configured_authority"],
+            state["active_authority"],
+            state["marker_generation"],
+        )
+        if state["state"] == "mismatch":
+            logger.warning(
+                "the checkpoint authority marker names %s but this process is "
+                "configured for %s — its checkpoint mutations will be refused "
+                "with MutationsFencedError until it restarts on the configured "
+                "authority or the marker is rolled back",
+                state["active_authority"],
+                state["configured_authority"],
+            )
+    except Exception:  # noqa: BLE001 — a startup log line never blocks the app
+        logger.debug("checkpoint authority state unavailable at startup", exc_info=True)
+
     # Load agent definitions
     registry = AgentRegistry(settings.FORGE_AGENTS_DIR)
     registry.load()
@@ -157,6 +187,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from forge.api_checkpoint_channel import checkpoint_channel_router
 
     application.include_router(checkpoint_channel_router)
+
+    # The operator read API (R36-15) — the authenticated, subject-scoped
+    # projection reads (list / detail / support-bundle). Same fail-closed
+    # posture as the lane-control surface: mounted unconditionally, every
+    # route answers 503 unless FORGE_LANE_CONTROL_SECRET is configured, and
+    # the router is read-only by construction (no write endpoints).
+    from forge.api_operator import operator_router
+
+    application.include_router(operator_router)
 
     # Mount MCP server at /mcp — fail closed: only with an auth key, since
     # an unauthenticated endpoint is never exposed. Scoped principals

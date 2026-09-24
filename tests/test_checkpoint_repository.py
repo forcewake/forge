@@ -48,6 +48,9 @@ from forge.adaptive.checkpoint_channel import work_scoped_token
 from forge.adaptive.checkpoint_repository import (
     AUTHORITY_FILESYSTEM,
     AUTHORITY_POSTGRES,
+    LOOKUP_ABSENT,
+    LOOKUP_UNAVAILABLE,
+    CheckpointLookupOutcome,
     CheckpointRepository,
     CheckpointRepositoryMisconfigured,
     CheckpointRepositoryUnavailable,
@@ -157,6 +160,23 @@ class _FakeRepository:
 
     async def pins(self, work_id: str | None = None) -> list[dict[str, Any]]:
         return []
+
+    async def lookup_outcome(self, work_id: str) -> Any:
+        # R36-03: the protocol grew the typed presence lookup; the fake
+        # answers from its configured entry so it keeps satisfying the
+        # runtime-checkable protocol (and the resume paths that consult
+        # the outcome see the same fixture the entry/read fakes serve).
+        if self.error is not None:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE, authority=AUTHORITY_POSTGRES, detail=str(self.error)
+            )
+        if self.entry_dict is None:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_ABSENT, authority=AUTHORITY_POSTGRES, detail="the fake holds nothing"
+            )
+        return CheckpointLookupOutcome.exact(
+            str(self.entry_dict.get("checkpoint_id") or ""), authority=AUTHORITY_POSTGRES
+        )
 
     async def authority(self) -> str:
         return AUTHORITY_POSTGRES
@@ -467,6 +487,32 @@ class TestHttpRoutesDelegateToTheRepository:
 
     def _bearer(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {work_scoped_token(SECRET, WORK_ID)}"}
+
+    def test_a_volume_lock_timeout_answers_503_retryable_never_500(self, monkeypatch):
+        """R36-04: a sweep holding the CAS volume lock past the landing's
+        budget surfaces as the typed, retryable :class:`GCLockTimeout`
+        and the route maps it to 503 — never an untyped 500, never a
+        partial landing."""
+        from forge.api_checkpoint_channel import GCLockTimeout
+
+        class _SweepContended(_FakeRepository):
+            async def put_checkpoint(self, **kwargs: Any) -> Any:
+                raise GCLockTimeout(0.25)
+
+        client = self._client(monkeypatch, _SweepContended())
+        manifest, blobs, _checkpoint_id = _checkpoint(WORK_ID, {"a.txt": b"one\n"}, 1)
+        payload = {
+            "manifest": base64.b64encode(manifest).decode("ascii"),
+            "blobs": {
+                digest: base64.b64encode(data).decode("ascii") for digest, data in blobs.items()
+            },
+            "sequence": 1,
+        }
+
+        response = client.put(f"/lane/checkpoints/{WORK_ID}", json=payload, headers=self._bearer())
+
+        assert response.status_code == 503
+        assert "reference/delete lock" in response.json()["detail"]
 
     def test_a_database_outage_answers_503_never_404_or_a_fs_fallback(self, monkeypatch):
         client = self._client(

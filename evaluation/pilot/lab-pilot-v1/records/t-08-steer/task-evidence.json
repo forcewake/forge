@@ -1,0 +1,202 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-08-steer/a1",
+      "note": "",
+      "wall_seconds": 0.915
+    }
+  ],
+  "brief": "Write the rollout notes for the widget.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "fe3e54e9cce6078c3b0c4fef1b7f332c5e64e5cddf700223fae9432d0e1a91db",
+  "driver": "intervention_steer",
+  "evidence_class": "lab-operational",
+  "interventions": [
+    {
+      "kind": "steer",
+      "note": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore."
+    }
+  ],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:08.012336+00:00",
+      "point": "mid-run-steer",
+      "question": "Should the lane be steered mid-run: 'Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore.'?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:08.016684+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "steered",
+      "detail": "durable command cmd-f6a4c6701519",
+      "point": "mid-run-steer",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:09.586764+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:09.586783+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "steer-durable=ok; journal-names-the-steer=ok; steered-path-landed=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": true,
+        "attempt_id": "t-08-steer/a1",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0309,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [
+      {
+        "kind": "steer",
+        "note": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore."
+      }
+    ],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0013,
+    "rollbacks": 0,
+    "setup_minutes": 0.0264,
+    "started_at": "2026-09-24T01:42:07.731960+00:00",
+    "task_id": "t-08-steer",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "human_intervention",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "the steer exists as a control_commands row",
+      "name": "steer-durable",
+      "observed": "rows=[{'command_id': 'cmd-f6a4c6701519', 'work_id': 'lab-t-08-steer', 'kind': 'steer', 'status': 'received', 'actor_ref': 'human:lab-operator', 'payload': {'text': 'Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore.'}}]",
+      "ok": true
+    },
+    {
+      "expected": "the lane meta's steering journal holds an entry of kind steer",
+      "name": "journal-names-the-steer",
+      "observed": "journal=[{'at': '2026-09-24T01:42:08.846441+00:00', 'command_id': 'cmd-f6a4c6701519', 'delivery': 'dispatching', 'detail': {}, 'kind': 'steer', 'outcome': 'error', 'reason': \"vendor effect failed: no active turn on thread 'vendor-thread-28538' to steer \u2014 the decision table routes new work through turn/interrupt + turn/start\", 'sequence': 1}]",
+      "ok": true
+    },
+    {
+      "expected": "the steered artifact (docs/rollout.md) rides the candidate",
+      "name": "steered-path-landed",
+      "observed": "diff_digest=fe3e54e9cce6078c3b0c4fef1b7f332c5e64e5cddf700223fae9432d0e1a91db",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "steer_command": {
+    "classification": "steer",
+    "command_id": "cmd-f6a4c6701519",
+    "created": true,
+    "status": "accepted"
+  },
+  "steer_delivery_state": {
+    "journal_outcome": "error",
+    "journal_reason": "vendor effect failed: no active turn on thread 'vendor-thread-28538' to steer \u2014 the decision table routes new work through turn/interrupt + turn/start",
+    "note": "the scripted vendor's turn completes faster than any poll cadence, so a mid-turn delivery LANDING is not demonstrable at lab scope \u2014 what is real and recorded: the durable steer row, the drain over real HTTP, and the journal's honest delivery state (an error outcome is recorded, never faked)",
+    "vendor_saw_turn_steered": false
+  },
+  "steer_text": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore.",
+  "steering_journal": [
+    {
+      "at": "2026-09-24T01:42:08.846441+00:00",
+      "command_id": "cmd-f6a4c6701519",
+      "delivery": "dispatching",
+      "detail": {},
+      "kind": "steer",
+      "outcome": "error",
+      "reason": "vendor effect failed: no active turn on thread 'vendor-thread-28538' to steer \u2014 the decision table routes new work through turn/interrupt + turn/start",
+      "sequence": 1
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 1,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the operator's guidance is a durable control_commands row (kind steer) recorded before the lane runs; the lane runs with its steering bridge attached over real HTTP and carries a steering journal naming the steer; the deliverable reflects the steered path",
+    "group": "g4-operations",
+    "non_goals": [
+      "no acceptance-policy changes (a steer never grants authority)",
+      "no human edits to the candidate \u2014 the steer is guidance only"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "human_intervention",
+    "stage": "gate",
+    "task_id": "t-08-steer",
+    "title": "Operator steer reaches the running lane over the durable control plane",
+    "verification": [
+      {
+        "method": "the steer exists as a control_commands row in the control-plane database",
+        "name": "steer-durable"
+      },
+      {
+        "method": "the lane meta's steering journal holds an entry of kind steer",
+        "name": "journal-names-the-steer"
+      },
+      {
+        "method": "the candidate carries the steered artifact (the guidance's named file)",
+        "name": "steered-path-landed"
+      }
+    ]
+  },
+  "task_id": "t-08-steer",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-08-steer/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.915,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

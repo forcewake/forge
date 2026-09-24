@@ -27,6 +27,12 @@ import pytest
 from forge.adaptive.capability_profiles import CAPABILITIES
 from forge.adaptive.qualification import (
     ACCEPTANCE_MAX_SHARE,
+    BOUNDARY_OUTSIDE,
+    BOUNDARY_WITHIN,
+    CLOSURE_BOUND,
+    CLOSURE_MISMATCH,
+    CLOSURE_UNPINNED,
+    CREDENTIAL_ISOLATED,
     EGRESS_DENIED_BY_POLICY,
     EGRESS_DENIED_UNEXPECTED,
     EGRESS_PERMITTED_BLOCKED,
@@ -34,6 +40,7 @@ from forge.adaptive.qualification import (
     EGRESS_POLICY_ABSENT,
     EGRESS_POLICY_NOT_ENFORCED,
     EGRESS_PROBE_INDETERMINATE,
+    RUNTIME_BOUNDARY_SCHEMA,
     EgressPolicy,
     ExpectedReport,
     ExpectedReports,
@@ -41,24 +48,34 @@ from forge.adaptive.qualification import (
     FingerprintMismatch,
     HarnessFeatureSupport,
     LAYER_ORDER,
+    LaneClosureManifest,
     LayerBinding,
+    ClosureArtifact,
+    CredentialIsolationViolation,
+    CredentialScopeReceipt,
     ProbeDestination,
     QualificationLayer,
     QualificationProfile,
     QualificationTrace,
     ReportVerdict,
+    RuntimeBoundaryReport,
+    SupplyChainVerificationError,
     TRACE_SCHEMA,
     acceptance_within_budget,
     assemble_qualification_trace,
-    profile_staleness,
     probe_egress_pair,
+    profile_staleness,
     reconcile_reports,
     recipe_document_digest,
+    runtime_boundary_report,
+    verify_artifact_supply_chain,
+    verify_credential_isolation,
     verify_installed_fingerprints,
 )
 from forge.runs.execution_profile import RUNTIME_RECIPES
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "qualification"
+ROOT = Path(__file__).resolve().parents[1]
 
 #: The identity of the CURRENT qualification run the fixtures encode.
 CANDIDATE_ID = "cand-e2e-226"
@@ -897,3 +914,347 @@ class TestQualificationTrace:
     def test_a_status_outside_the_vocabulary_is_refused(self):
         with pytest.raises(ValueError, match="fingerprint status"):
             QualificationTrace(schema=TRACE_SCHEMA, profile_digest="x", fingerprint_status="vibes")
+
+
+# ---------------------------------------------------------------------------
+# R36-10: the dependency closure digest on the profile
+# ---------------------------------------------------------------------------
+
+_CLOSURE_DIGEST = "a" * 64
+
+
+class TestProfileDependencyClosureDigest:
+    def test_the_field_defaults_to_empty_and_keeps_the_old_digest(self):
+        # a pre-R36-10 record and its digest are unchanged by the field
+        legacy = _profile()
+        assert legacy.dependency_closure_digest == ""
+        assert legacy.qualification_digest == _profile().qualification_digest
+
+    def test_a_pre_r36_10_document_round_trips_to_the_empty_field(self):
+        document = _profile(dependency_closure_digest=_CLOSURE_DIGEST).to_document()
+        del document["dependency_closure_digest"]  # the archived shape
+        thawed = QualificationProfile.from_document(document)
+        assert thawed.dependency_closure_digest == ""
+        assert thawed == _profile()
+
+    def test_the_field_round_trips_and_moves_the_digest(self):
+        pinned = _profile(dependency_closure_digest=_CLOSURE_DIGEST)
+        assert pinned.dependency_closure_digest == _CLOSURE_DIGEST
+        frozen = json.loads(json.dumps(pinned.to_document()))
+        assert QualificationProfile.from_document(frozen) == pinned
+        assert pinned.qualification_digest != _profile().qualification_digest
+        assert (
+            _profile(dependency_closure_digest="b" * 64).qualification_digest
+            != pinned.qualification_digest
+        )
+
+    def test_a_foreign_digest_shape_is_refused(self):
+        with pytest.raises(ValueError, match="dependency_closure_digest"):
+            _profile(dependency_closure_digest="wheel-pinned")
+
+
+# ---------------------------------------------------------------------------
+# R36-10: credential scope receipts (names only, never values)
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialScopeReceipt:
+    def test_a_clean_isolation_is_a_freezable_receipt(self):
+        receipt = verify_credential_isolation(
+            staged_names=("ANTHROPIC_AUTH_TOKEN", "GITHUB_TOKEN", " ANTHROPIC_AUTH_TOKEN "),
+            forbidden_names=("FORGE_BOT_TOKEN", "GITLAB_TOKEN"),
+        )
+        assert receipt.verdict == CREDENTIAL_ISOLATED == "isolated"
+        assert receipt.staged_names == ("ANTHROPIC_AUTH_TOKEN", "GITHUB_TOKEN")
+        assert receipt.to_document() == {
+            "schema": "forge.qualification.credential-scope/1",
+            "verdict": "isolated",
+            "staged_names": ["ANTHROPIC_AUTH_TOKEN", "GITHUB_TOKEN"],
+            "forbidden_names": ["FORGE_BOT_TOKEN", "GITLAB_TOKEN"],
+        }
+
+    def test_a_forbidden_name_staged_is_a_typed_violation_without_values(self):
+        with pytest.raises(CredentialIsolationViolation) as excinfo:
+            verify_credential_isolation(
+                staged_names=("ANTHROPIC_AUTH_TOKEN", "FORGE_BOT_TOKEN", "GITLAB_TOKEN"),
+                forbidden_names=("FORGE_BOT_TOKEN", "PUBLISHER_PAT"),
+            )
+        error = excinfo.value
+        assert error.leaked == ("FORGE_BOT_TOKEN",)
+        # NAMES only — the message can never quote a secret value
+        assert "FORGE_BOT_TOKEN" in str(error)
+        assert "ANTHROPIC_AUTH_TOKEN" not in str(error)
+
+    def test_every_leaked_name_is_listed(self):
+        with pytest.raises(CredentialIsolationViolation) as excinfo:
+            verify_credential_isolation(
+                staged_names=("A_PAT", "B_PAT", "C_KEY"),
+                forbidden_names=("A_PAT", "B_PAT", "D_PAT"),
+            )
+        assert excinfo.value.leaked == ("A_PAT", "B_PAT")
+
+    def test_an_assertion_about_nothing_proves_nothing(self):
+        with pytest.raises(ValueError, match="proves nothing"):
+            verify_credential_isolation(staged_names=("X",), forbidden_names=())
+
+    def test_a_self_declared_receipt_with_duplicates_is_refused(self):
+        with pytest.raises(ValueError, match="duplicates"):
+            CredentialScopeReceipt(staged_names=("A", "A"), forbidden_names=("FORGE_BOT_TOKEN",))
+
+
+# ---------------------------------------------------------------------------
+# R36-10: the supply-chain binding to the promotion record
+# ---------------------------------------------------------------------------
+
+
+def _closure_manifest(forge_sha: str = "e" * 64) -> LaneClosureManifest:
+    wheel = ClosureArtifact(name="forge-0.35.0-py3-none-any.whl", sha256=forge_sha)
+    return LaneClosureManifest(
+        forge_wheel=wheel,
+        forge_version="0.35.0",
+        forge_source="promotion-record",
+        resolution_command="uv export --frozen … && pip download --require-hashes …",
+        artifacts=(
+            wheel,
+            ClosureArtifact(name="six-1.17.0-py2.py3-none-any.whl", sha256="f" * 64),
+        ),
+    )
+
+
+_PROMOTION_RECORD = {
+    "version": "0.35.0",
+    "wheel_sha256": "e" * 64,
+    "wheel_url": "https://github.com/forcewake/forge/releases/download/"
+    "v0.35.0/forge-0.35.0-py3-none-any.whl",
+    "wheel": {
+        "sdist": None,
+        "wheel": {"name": "forge-0.35.0-py3-none-any.whl", "sha256": "e" * 64},
+    },
+}
+
+
+class TestSupplyChainBinding:
+    def test_a_matching_record_binds_green(self):
+        binding = verify_artifact_supply_chain(_closure_manifest(), _PROMOTION_RECORD)
+        assert binding.verdict == "bound"
+        assert binding.to_document() == {
+            "verdict": "bound",
+            "record_version": "0.35.0",
+            "record_wheel_sha256": "e" * 64,
+            "manifest_wheel_sha256": "e" * 64,
+        }
+
+    def test_the_archived_v0350_record_binds_the_real_wheel_identity(self):
+        """The REAL archived record (the shape the check must read, not
+        a paraphrase): its wheel sha is the promoted pin the lane
+        profile documents."""
+        record = json.loads(
+            (ROOT / "docs" / "releases" / "evidence" / "v0.35.0" / "promotion.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        manifest = _closure_manifest(forge_sha=record["wheel_sha256"])
+        binding = verify_artifact_supply_chain(manifest, record)
+        assert binding.verdict == "bound" and binding.record_version == "0.35.0"
+
+    def test_an_image_only_record_refuses_wheel_claims_honestly(self):
+        record = {
+            "version": "0.34.0",
+            "wheel": {"sdist": None, "wheel": None, "note": "image-only release"},
+        }
+        with pytest.raises(SupplyChainVerificationError) as excinfo:
+            verify_artifact_supply_chain(_closure_manifest(), record)
+        assert excinfo.value.reason == "not_built"
+        assert "image-only" in str(excinfo.value)
+
+    def test_a_mismatched_sha_refuses_before_execution(self):
+        record = dict(_PROMOTION_RECORD, wheel_sha256="9" * 64)
+        with pytest.raises(SupplyChainVerificationError) as excinfo:
+            verify_artifact_supply_chain(_closure_manifest(), record)
+        assert excinfo.value.reason == "digest_mismatch"
+        assert "the release never qualified" in str(excinfo.value)
+
+    def test_a_name_disagreement_is_an_identity_mismatch(self):
+        record = {
+            "version": "0.35.0",
+            "wheel_sha256": "e" * 64,
+            "wheel": {"wheel": {"name": "forge-9.9.9-py3-none-any.whl", "sha256": "e" * 64}},
+        }
+        with pytest.raises(SupplyChainVerificationError) as excinfo:
+            verify_artifact_supply_chain(_closure_manifest(), record)
+        assert excinfo.value.reason == "identity_mismatch"
+
+    def test_a_versionless_record_is_unreadable(self):
+        with pytest.raises(SupplyChainVerificationError) as excinfo:
+            verify_artifact_supply_chain(_closure_manifest(), {"decision": {}})
+        assert excinfo.value.reason == "unreadable_record"
+
+    def test_the_promotionrecord_object_shape_binds_too(self):
+        from forge.release_promotion import (
+            FileIdentity,
+            PromotionDecision,
+            PromotionRecord,
+            WheelIdentity,
+        )
+
+        record = PromotionRecord(
+            version="0.35.0",
+            image_ref="ghcr.io/forcewake/forge",
+            image_digest="sha256:" + "a" * 64,
+            wheel=WheelIdentity(
+                sdist=FileIdentity("forge-0.35.0.tar.gz", "f" * 64),
+                wheel=FileIdentity("forge-0.35.0-py3-none-any.whl", "e" * 64),
+            ),
+            wheel_sha256="e" * 64,
+            decision=PromotionDecision(verdict="promote"),
+        )
+        assert verify_artifact_supply_chain(_closure_manifest(), record).verdict == "bound"
+
+
+# ---------------------------------------------------------------------------
+# R36-10: the composite runtime boundary report
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimeBoundaryReport:
+    def _manifest(self, digest_axis: str = "e" * 64) -> LaneClosureManifest:
+        return _closure_manifest(forge_sha=digest_axis)
+
+    def _egress(self, consistent: bool = True):
+        reachable = {"api.z.ai"} | (set() if consistent else {"example.com"})
+        return probe_egress_pair(
+            _POLICY,
+            _PERMITTED,
+            _DENIED,
+            env=_ENV_HOOK,
+            connector=_connectors(reachable),
+        )
+
+    def _receipt(self) -> CredentialScopeReceipt:
+        return verify_credential_isolation(
+            staged_names=("ANTHROPIC_AUTH_TOKEN",),
+            forbidden_names=("FORGE_BOT_TOKEN", "GITLAB_TOKEN"),
+        )
+
+    def test_every_leg_complete_and_passing_is_within_the_boundary(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile,
+            self._egress(),
+            manifest,
+            installed=dict(manifest.pins),
+            credential_receipt=self._receipt(),
+        )
+        assert report.schema == RUNTIME_BOUNDARY_SCHEMA == "forge.qualification.boundary/1"
+        assert report.verdict == BOUNDARY_WITHIN == "within_boundary"
+        assert report.problems == ()
+        document = report.to_document()
+        # the R36-10 observability keys, one leg each
+        assert document["runtime.installed_fingerprint"] == {"status": "match", "divergences": []}
+        assert document["security.egress_probe_results"]["permitted_status"] == (
+            EGRESS_PERMITTED_REACHABLE
+        )
+        assert document["security.egress_probe_results"]["denied_status"] == EGRESS_DENIED_BY_POLICY
+        assert document["credential.staged_scope_receipt"] == {
+            "status": "isolated",
+            "staged_names": ["ANTHROPIC_AUTH_TOKEN"],
+        }
+        assert document["dependency.closure"]["binding"] == CLOSURE_BOUND
+        assert document["dependency.closure"]["closure_digest"] == manifest.closure_digest
+        assert document["profile_digest"] == profile.qualification_digest
+
+    def test_a_wheel_pinned_profile_is_honestly_unpinned(self):
+        report = runtime_boundary_report(_profile(), self._egress(), self._manifest())
+        assert report.closure_binding == CLOSURE_UNPINNED
+        assert report.verdict == BOUNDARY_OUTSIDE
+        assert any("wheel-pinned, not closure-pinned" in p for p in report.problems)
+
+    def test_a_closure_the_profile_never_pinned_is_a_mismatch(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest="7" * 64)
+        report = runtime_boundary_report(profile, self._egress(), manifest)
+        assert report.closure_binding == CLOSURE_MISMATCH
+        assert any("not the one the profile qualified" in p for p in report.problems)
+
+    def test_an_unprobed_egress_leg_is_an_unknown_boundary(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile,
+            None,
+            manifest,
+            installed=dict(manifest.pins),
+            credential_receipt=self._receipt(),
+        )
+        assert report.verdict == BOUNDARY_OUTSIDE
+        assert any("unprobed boundary" in p for p in report.problems)
+
+    def test_an_unenforced_egress_policy_lands_in_the_problems(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile,
+            self._egress(consistent=False),  # the filter disabled, hook retained
+            manifest,
+            installed=dict(manifest.pins),
+            credential_receipt=self._receipt(),
+        )
+        assert report.verdict == BOUNDARY_OUTSIDE
+        assert any(EGRESS_POLICY_NOT_ENFORCED in p for p in report.problems)
+
+    def test_an_installed_divergence_is_recorded_not_swallowed(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile,
+            self._egress(),
+            manifest,
+            installed=dict(manifest.pins, **{"six": "1.18.0"}),
+            credential_receipt=self._receipt(),
+        )
+        assert report.fingerprint_status == "mismatch"
+        diverged = report.to_document()["runtime.installed_fingerprint"]["divergences"]
+        assert diverged == [
+            {
+                "kind": "version_mismatch",
+                "name": "six",
+                "declared": "1.17.0",
+                "installed": "1.18.0",
+            }
+        ]
+        assert report.verdict == BOUNDARY_OUTSIDE
+
+    def test_a_missing_credential_receipt_is_unstated_not_isolated(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile, self._egress(), manifest, installed=dict(manifest.pins)
+        )
+        assert report.verdict == BOUNDARY_OUTSIDE
+        assert any("unstated is not isolated" in p for p in report.problems)
+
+    def test_no_installed_set_is_an_unchecked_installation(self):
+        manifest = self._manifest()
+        profile = _profile(dependency_closure_digest=manifest.closure_digest)
+        report = runtime_boundary_report(
+            profile, self._egress(), manifest, credential_receipt=self._receipt()
+        )
+        assert report.fingerprint_status == "not_checked"
+        assert any("unchecked installation" in p for p in report.problems)
+
+    def test_every_partial_leg_is_a_problem_line_none_green(self):
+        report = runtime_boundary_report(_profile(), None, None)
+        assert report.verdict == BOUNDARY_OUTSIDE
+        joined = "\n".join(report.problems)
+        assert "closure" in joined and "egress" in joined and "credential" in joined
+
+    def test_a_wrong_schema_stamp_is_refused(self):
+        with pytest.raises(ValueError, match="schema"):
+            RuntimeBoundaryReport(
+                schema="forge.qualification.boundary/0",
+                profile_digest="x",
+                closure_binding=CLOSURE_UNPINNED,
+                dependency_closure_digest="",
+                fingerprint_status="not_checked",
+            )

@@ -65,7 +65,12 @@ dataclasses and pydantic contracts all read):
   (``held``/``cleared``; empty means the router's pause-booking pairing
   holds it), ``sequence``;
 - ``verifications`` — verification rows: ``verification_id``/``id``,
-  ``result`` (``passed``/``failed``/``unknown``), ``at``, ``candidate_sha``;
+  ``result`` (``passed``/``failed``/``unknown``), ``at``, ``candidate_sha``.
+  A ``passed`` row binds to the CURRENT candidate: when it names a
+  ``candidate_sha`` that is not among the run's ``candidate_shas`` it is
+  an OLD green verdict about a DIFFERENT candidate and decorates nothing
+  (R36-15 — the binding is asserted by tests); a row naming no candidate
+  binds to whatever candidate the run holds;
 - ``publications`` — publication-intent rows: ``operation_key``/``id``,
   ``status``, ``operation``, ``target_ref``, ``at``;
 - ``approvals`` — gate-approval rows: ``approved_by``, ``at``,
@@ -112,6 +117,7 @@ __all__ = [
     "initial_projection",
     "render",
     "source_digest",
+    "status_note_lines",
 ]
 
 #: The schema discriminator every rendered projection carries (versioned:
@@ -415,9 +421,18 @@ def derive_state(
     run_evidence = run.get("evidence") if isinstance(run.get("evidence"), Mapping) else {}
     if not candidate_shas and isinstance(_first(run_evidence, "candidate_sha"), str):
         candidate_shas = [run_evidence["candidate_sha"]]
-    verified = any(
-        str(_first(v, "result", "outcome") or "") in _VERIFICATION_PASSED for v in verifications
-    )
+    # R36-15: a passed verification DECORATES only the candidate it tested.
+    # A row whose candidate_sha is not among the run's current candidates is
+    # an old green verdict about a DIFFERENT artifact — it cannot make the
+    # current one verified_ready. A row naming no candidate binds to
+    # whatever candidate the run holds (the hand-built fixture shape).
+    verifying = [
+        v
+        for v in verifications
+        if str(_first(v, "result", "outcome") or "") in _VERIFICATION_PASSED
+        and str(v.get("candidate_sha") or "") in ("", *candidate_shas)
+    ]
+    verified = bool(verifying)
     accepted_marker = bool(run_evidence.get("accepted") or run_evidence.get("accepted_by"))
 
     # -- last semantic transition (the wedged clock) ----------------------
@@ -479,8 +494,10 @@ def derive_state(
         reasons.append(f"attempt {attempt_id} is executing")
     elif candidate_shas and verified:
         state = "verified_ready"
-        link("verification", _first(verifications[-1], "verification_id", "id"), verifications[-1])
-        reasons.append(f"candidate {candidate_shas[0][:12]} exists, verification passed")
+        link("verification", _first(verifying[-1], "verification_id", "id"), verifying[-1])
+        reasons.append(
+            f"candidate {candidate_shas[0][:12]} exists, verification passed for that candidate"
+        )
     elif candidate_shas:
         state = "unverified"
         link("run", run_id, run)
@@ -805,6 +822,58 @@ def render(projection: OperatorProjection) -> dict[str, Any]:
             "rows_observed": dict(projection.rows_observed),
         }
     )
+
+
+def _short(value: Any, size: int = 12) -> str:
+    """A compact identity prefix — the native-comment spelling of a sha."""
+    return str(value or "")[:size]
+
+
+def status_note_lines(projection: OperatorProjection) -> list[str]:
+    """Compact native-comment lines for one projection (R36-15 parity).
+
+    The SAME state semantics as :func:`render` — one state, the same
+    identities, the same blocked/waiting line — rendered as the short
+    lines a ``/status`` native comment carries. Pure: it reads the
+    projection and nothing else, writes nothing, and is the parity hook
+    the native surface and the management API agree through (a test pins
+    that both surfaces agree on state and identity for the same
+    snapshot). Long identities are shortened to 12 characters; the full
+    values live in the render.
+    """
+    identity = projection.identity
+    lines = [f"Run {projection.run_id} is {projection.state}."]
+    detail: list[str] = []
+    if identity.get("source_sha"):
+        detail.append(f"source {_short(identity['source_sha'])}")
+    if identity.get("plan_digest"):
+        detail.append(f"plan {_short(identity['plan_digest'])}")
+    if identity.get("attempt_id"):
+        detail.append(f"attempt {identity['attempt_id']}")
+    if identity.get("generation") is not None:
+        detail.append(f"generation {identity['generation']}")
+    candidates = identity.get("candidate_shas") or []
+    if candidates:
+        detail.append(f"candidate {_short(candidates[0])}")
+    if identity.get("checkpoint_id"):
+        digest = _short(identity.get("checkpoint_digest"), 12)
+        detail.append(
+            f"checkpoint {identity['checkpoint_id']}" + (f" ({digest})" if digest else "")
+        )
+    if detail:
+        lines.append("Identity: " + ", ".join(detail) + ".")
+    if projection.blocked_reason:
+        lines.append(f"Blocked: {projection.blocked_reason}")
+    elif projection.waiting_on:
+        lines.append(f"Waiting on: {projection.waiting_on}")
+    if projection.unresolved_effects:
+        lines.append(
+            f"{len(projection.unresolved_effects)} unresolved external effect(s) — "
+            "reconcile before retry."
+        )
+    if projection.last_transition_at:
+        lines.append(f"Last transition: {projection.last_transition_at}")
+    return lines
 
 
 # ---------------------------------------------------------------------------

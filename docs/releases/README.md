@@ -80,6 +80,27 @@ capability, a blocked record, or evidence only for an older version. Each
 gap carries its reason. Fresh means: a qualified promotion record at the
 version being checked tags canary evidence for that capability.
 
+R36-22 extends the query with the **profile-qualification channel**: the
+live-provider capabilities (`real_provider_e2e`) are judged on the
+separate committed record store (`qualification/records/`, see
+[profile-records.md](profile-records.md)) — a provider-matched record at
+the version being checked whose DERIVED verdict is `supported` or
+`lab-qualified` clears the gap; a `declared_only` record keeps it, named.
+
+## Profile qualification — a separate evidence record (R36-22)
+
+A promoted digest still does not qualify every provider/recipe/harness
+combination. That lives in **another** record: `qualification/records/`
+(stamp `forge.profile.qualification/1`), documented in
+[profile-records.md](profile-records.md) — evidence classes with
+applicability that never substitute for one another, verdicts derived
+(`supported | lab-qualified | declared_only | unqualified`), named
+requalification triggers, upgrade claims that distinguish same-head
+preservation from real schema transitions, and a promotion-refusal hook
+(a required profile evidence entry marked `skip` refuses that profile's
+promotion even with core CI green — wired into the release workflow's
+`promotion-gate` job).
+
 ## Generated version pins
 
 `scripts/generate_template_pins.py` renders the README image pins **from

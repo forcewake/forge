@@ -1,0 +1,42 @@
+{
+  "criteria_verdict_scope": "the 2-of-3 verdict in report.json is bounded to evidence_class lab-operational; the cost criterion is unjudgeable by construction (no paid models) and is named, not failed",
+  "deviations_from_the_partner_pilot_shape": [
+    "the environment is the forge lab, not a design-partner customer \u2014 no buyer/user problem was agreed with a customer and no fee was paid (the demand test is unexecuted)",
+    "the window is the execution day, not 4-8 weeks \u2014 no J-curve and no adoption learning exist to measure",
+    "the baseline is an AUTHORED lab baseline (the operator's planned manual time), not the partner's own frozen pre-pilot numbers \u2014 cycle_time_vs_baseline is bounded by that and never headlined",
+    "acceptance is the operator's mechanical independent verification over seam artifacts, not partner engineering review",
+    "the 2-of-3 verdict below is a LAB-SCOPE verdict about operating the seams; it says nothing about partner outcomes"
+  ],
+  "evidence_class": "lab-operational",
+  "live_blockers_cross_ref": {
+    "issue": 268,
+    "refused_stages": [
+      "flow (paid): controlplane.version_matches_profile \u2014 the deployed control plane reports 0.28.0; the profile pins the promoted wheel v0.35.0 (a paid flow against another build qualifies nothing)",
+      "flow (paid): budgets.caps_present \u2014 no FORGE_BUDGET_PROFILES and no --max-budget-json (an uncapped paid run is not qualification)",
+      "cross-runner resume drill: capability.lane_resume_dispatch \u2014 the GitLab dispatch seam carries no FORGE_LANE_RESUME/lane-control credentials (GitHub-only, R32-04; profile gitlab-ce-v1 \u00a78)"
+    ]
+  },
+  "next_step": "a paid design-partner pilot on the qualified profile, once the #268 live blockers clear (control-plane version pin, budget caps, the GitLab lane-resume dispatch parity)",
+  "pilot_id": "lab-pilot-v1",
+  "plan_id": "lab-pilot-v1",
+  "provenance": "lab-operational-pilot",
+  "schema": "forge.lab-pilot.bounding/1",
+  "spec_digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+  "what_did_not_run": [
+    "no paid model call anywhere: the vendor is the controlled scripted executable (real wire, scripted edits); token counts are wire observations, spend is unknown \u2014 never zero",
+    "no design-partner customer: the lab operator (the maintainer) is the only human; no customer decided usefulness",
+    "no partner engineering review: acceptance is the operator's independent mechanical verification over seam artifacts, never PR creation and never a model summary",
+    "no live provider: the native surface is the fake native server (its state survives worker death by construction, but it is not GitHub or GitLab)",
+    "mid-turn steer DELIVERY is not demonstrable with the scripted vendor (its turn completes faster than any poll cadence): the durable steer row, the real drain over HTTP and the journal's honest error outcome are the recorded evidence \u2014 a landed steer needs a real vendor",
+    "no 4-8 week window, no J-curve, no adoption learning: the lab window is its execution day"
+  ],
+  "what_ran_for_real": [
+    "real git checkouts at a frozen base (the lane's starting shape), reused from tests/production_entry",
+    "the REAL lane subprocess (python -m forge.lane_driver --driver codex) with the controlled scripted vendor speaking the real codex app-server JSON-RPC wire",
+    "the SHIPPED collector subprocess (python -m forge.harness_entry --collect-candidate)",
+    "the REAL capture_wip/restore_wip(promote='generation') checkpoint machinery uploaded/downloaded over real HTTP through the lane-control + checkpoint-channel routers on uvicorn",
+    "real durable sqlite state (a restarted worker is a fresh engine/session factory over the same rows)",
+    "the REAL GitHubRunService + GitHubClient over real HTTP against the fake native server's recorded dispatch ledger",
+    "the REAL durable control surface (OperatorControlService over PostgresMailbox: steer/pause/resume/answer command rows)"
+  ]
+}

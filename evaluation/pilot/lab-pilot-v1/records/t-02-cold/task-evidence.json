@@ -1,0 +1,143 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-02-cold/a1",
+      "note": "",
+      "wall_seconds": 0.806
+    }
+  ],
+  "brief": "Document usage: add notes/USAGE.md and point to it from README.md.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "c307534be6491a43d71c0d625d15c73aa7154279c1bc3524d6eb89acc7afba60",
+  "driver": "cold_reinstall",
+  "evidence_class": "lab-operational",
+  "interventions": [],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:41:57.993104+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:41:57.993123+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "cold-start-proven=ok; files-present=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": true,
+        "attempt_id": "t-02-cold/a1",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0346,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0016,
+    "rollbacks": 0,
+    "setup_minutes": 0.0299,
+    "started_at": "2026-09-24T01:41:55.915393+00:00",
+    "task_id": "t-02-cold",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "cold_reinstall",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "no .forge or forge-output state exists before the lane starts",
+      "name": "cold-start-proven",
+      "observed": ".forge=False forge-output=False",
+      "ok": true
+    },
+    {
+      "expected": "the diff adds/edits ['notes/USAGE.md', 'README.md']",
+      "name": "files-present",
+      "observed": "diff_digest=c307534be6491a43d71c0d625d15c73aa7154279c1bc3524d6eb89acc7afba60",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "2 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 1,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "notes/USAGE.md exists with the usage section and README carries the pointer; the run started from a workspace whose .forge state and prior outputs were wiped (cold reinstall), and the shipped collector still resolved the workspace generation",
+    "group": "g2-fixes",
+    "non_goals": [
+      "no reuse of any prior workspace generation or checkpoint",
+      "no changes beyond the two documentation files"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "cold_reinstall",
+    "stage": "small_fixes",
+    "task_id": "t-02-cold",
+    "title": "Ordinary change lands from a cold-reinstalled workspace",
+    "verification": [
+      {
+        "method": "the collected diff adds notes/USAGE.md and edits README.md with the expected bytes",
+        "name": "files-present"
+      },
+      {
+        "method": "the pre-run workspace holds no .forge or forge-output state (recorded before the lane starts)",
+        "name": "cold-start-proven"
+      }
+    ]
+  },
+  "task_id": "t-02-cold",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-02-cold/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.806,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

@@ -1,0 +1,209 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-10-live-irrelevant-docs-site",
+  "mode": "research",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 3,
+        "calls_executed": 3,
+        "wall_seconds_used": 1.75,
+        "tokens": {
+          "input": 1910,
+          "output": 400,
+          "input_lower_bound": 1910,
+          "output_lower_bound": 400,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 3,
+    "calls_proposed": 3,
+    "calls_executed": 3,
+    "observations": {
+      "count": 3,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 1.75,
+    "tokens": {
+      "input": 1910,
+      "output": 400,
+      "input_lower_bound": 1910,
+      "output_lower_bound": 400,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "docs-site",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "docs-site",
+        "repository_id": "gitlab-909",
+        "path": "index.md",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 238 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "path": "src/handlers/expiry.py",
+        "line": 33,
+        "kind": "research_match",
+        "detail": "handle_cancellation"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "path": "src/handlers/expiry.py",
+        "line": 816,
+        "kind": "research_read",
+        "detail": "read 163 chars from offset 815"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Cancellation is marked by the handler deep in orders/src/handlers/expiry.py (handle_cancellation) and the timer publishes the expiry event from orders/src/timer.py; the docs site describes the OLD lifecycle diagram and holds nothing either service reads.",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "read_file",
+      "repo_key": "docs-site",
+      "call": "index.md offset 0 length 300",
+      "content": "# Order lifecycle \u2014 docs site (RC seed)\n\nMarketing-adjacent documentation. This repository is intentionally\nIRRELEVANT to the orders/billing service code: it documents the OLD\nlifecycle diagram and holds no contract either service reads.\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "grep",
+      "repo_key": "orders",
+      "call": "pattern handle_cancellation",
+      "content": "src/handlers/expiry.py:33: def handle_cancellation(order_id: str) -> str:",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/handlers/expiry.py offset 815 length 163",
+      "content": "\n\ndef handle_cancellation(order_id: str) -> str:\n    \"\"\"Mark an order cancelled so a later expiry ignores it.\"\"\"\n    return f\"cancelled {_format_order(order_id)}\"\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address docs-site/index.md (research_read: read 238 chars from offset 0)",
+        "evidence_refs": [
+          "ev-1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address orders/src/handlers/expiry.py (research_match: handle_cancellation)",
+        "evidence_refs": [
+          "ev-2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "docs-site",
+        "path": "index.md",
+        "why": "research_read"
+      },
+      {
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "why": "research_match"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "# Order lifecycle \u2014 docs site (RC seed)",
+        "repo": "docs-site",
+        "path": "index.md",
+        "line": 1,
+        "asserted_content": "# Order lifecycle \u2014 docs site (RC seed)",
+        "evidence": "evidence:ev-1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "def handle_cancellation(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "line": 33,
+        "asserted_content": "def handle_cancellation(order_id: str) -> str:",
+        "evidence": "evidence:ev-2"
+      }
+    ],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "scripted:reactive-investigation/v1",
+    "route": "offline-scripted-over-real-tool-loop",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 3,
+      "calls_executed": 3,
+      "wall_seconds_used": 1.75,
+      "tokens": {
+        "input": 1910,
+        "output": 400,
+        "input_lower_bound": 1910,
+        "output_lower_bound": 400,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

@@ -1,0 +1,725 @@
+{
+  "schema": "forge.pilot.report/1",
+  "pilot_id": "lab-pilot-v1",
+  "plan_id": "lab-pilot-v1",
+  "spec": {
+    "schema": "forge.pilot.spec/1",
+    "digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+    "window": {
+      "start": "2026-09-22",
+      "end": "2026-09-23"
+    },
+    "decision_date": "2026-09-23"
+  },
+  "onboarding": {
+    "recorded_at": "2026-09-24T01:41:52.631872+00:00",
+    "unsupported_features": [
+      "Paid model calls \u2014 the vendor is the controlled scripted vendor speaking the real codex app-server wire; token counts are real wire observations but no spend exists, so every cost metric is unknown by construction",
+      "A real design-partner customer \u2014 the named environment is the forge LAB, not a customer; no customer decided usefulness here and the decision owners are the maintainers",
+      "The live GitLab CE flow \u2014 refused by the #268 qualification (deployed control plane 0.28.0 vs the pinned v0.35.0 wheel; no budget caps; the GitLab dispatch seam carries no lane-resume contract); this pilot runs the offline production-entry seams instead",
+      "Cross-runner resume on the LIVE GitLab dispatch seam \u2014 the GitHub-lane parity gap recorded in qualification/profiles/gitlab-ce-v1.md section 8; exercised offline through the lane subprocess resume contract instead",
+      "Human review by partner engineers \u2014 acceptance is the lab operator's independent verification over seam artifacts (diffs, dispatch ledgers, checkpoint identities), never a model self-summary and never PR creation",
+      "The 4-8 week partner window \u2014 the lab window is its single execution day; the J-curve and adoption learning a real window buys do not exist here and are not claimed"
+    ],
+    "spec_digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+    "ordering_onboarding_before_first_task": true
+  },
+  "tasks": {
+    "t-01-repair": {
+      "task_id": "t-01-repair",
+      "started_at": "2026-09-24T01:41:52.632159+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0477,
+      "plan_corrections": 1,
+      "plan_correction_notes": [
+        "the scripted vendor's first edit left a syntax error in src/app.py; the operator corrected the plan and re-ran (the failed attempt stays)"
+      ],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0546,
+      "attempts": [
+        {
+          "attempt_id": "t-01-repair/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-01-repair/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.001,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "test_repair",
+      "group": "g2-fixes",
+      "stage": "small_fixes",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-02-cold": {
+      "task_id": "t-02-cold",
+      "started_at": "2026-09-24T01:41:55.915393+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0299,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0346,
+      "attempts": [
+        {
+          "attempt_id": "t-02-cold/a1",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0016,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "cold_reinstall",
+      "group": "g2-fixes",
+      "stage": "small_fixes",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 1,
+      "accepted_attempts": 1
+    },
+    "t-03-adaptive": {
+      "task_id": "t-03-adaptive",
+      "started_at": "2026-09-24T01:41:57.999806+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0251,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.029,
+      "attempts": [
+        {
+          "attempt_id": "t-03-adaptive/a1",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0009,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "adaptive_control",
+      "group": "g2-fixes",
+      "stage": "small_fixes",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 1,
+      "accepted_attempts": 1
+    },
+    "t-04-ambiguous": {
+      "task_id": "t-04-ambiguous",
+      "started_at": "2026-09-24T01:41:59.742681+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0266,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0306,
+      "attempts": [
+        {
+          "attempt_id": "t-04-ambiguous/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-04-ambiguous/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [
+        {
+          "kind": "question_answer",
+          "note": "q-which-helper-what-name"
+        }
+      ],
+      "review_minutes": 0.001,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "ambiguous_task",
+      "group": "g1-questions",
+      "stage": "read_plan",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-05-missing": {
+      "task_id": "t-05-missing",
+      "started_at": "2026-09-24T01:42:01.587171+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0271,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0336,
+      "attempts": [
+        {
+          "attempt_id": "t-05-missing/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-05-missing/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [
+        {
+          "kind": "question_answer",
+          "note": "q-retry-limit-value"
+        }
+      ],
+      "review_minutes": 0.0022,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "missing_requirement",
+      "group": "g1-questions",
+      "stage": "read_plan",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-06-neighbor-schema": {
+      "task_id": "t-06-neighbor-schema",
+      "started_at": "2026-09-24T01:42:03.613314+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0318,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0352,
+      "attempts": [
+        {
+          "attempt_id": "t-06-neighbor-schema/a1",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout",
+        "lab/neighbor-contracts"
+      ],
+      "blocked": "",
+      "scenario": "neighbor_evidence",
+      "group": "g3-neighbors",
+      "stage": "branch_pr",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 1,
+      "accepted_attempts": 1
+    },
+    "t-07-neighbor-changelog": {
+      "task_id": "t-07-neighbor-changelog",
+      "started_at": "2026-09-24T01:42:05.736983+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0297,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0331,
+      "attempts": [
+        {
+          "attempt_id": "t-07-neighbor-changelog/a1",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout",
+        "lab/neighbor-contracts"
+      ],
+      "blocked": "",
+      "scenario": "neighbor_evidence",
+      "group": "g3-neighbors",
+      "stage": "branch_pr",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 1,
+      "accepted_attempts": 1
+    },
+    "t-08-steer": {
+      "task_id": "t-08-steer",
+      "started_at": "2026-09-24T01:42:07.731960+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0264,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0309,
+      "attempts": [
+        {
+          "attempt_id": "t-08-steer/a1",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [
+        {
+          "kind": "steer",
+          "note": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore."
+        }
+      ],
+      "review_minutes": 0.0013,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "human_intervention",
+      "group": "g4-operations",
+      "stage": "gate",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 1,
+      "accepted_attempts": 1
+    },
+    "t-09-pause-resume": {
+      "task_id": "t-09-pause-resume",
+      "started_at": "2026-09-24T01:42:09.592826+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0287,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0346,
+      "attempts": [
+        {
+          "attempt_id": "t-09-pause-resume/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-09-pause-resume/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [
+        {
+          "kind": "pause",
+          "note": "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b"
+        },
+        {
+          "kind": "resume",
+          "note": "cross-runner resume"
+        }
+      ],
+      "review_minutes": 0.0014,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "human_intervention",
+      "group": "g4-operations",
+      "stage": "gate",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-10-runner-loss": {
+      "task_id": "t-10-runner-loss",
+      "started_at": "2026-09-24T01:42:11.683897+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0039,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0078,
+      "attempts": [
+        {
+          "attempt_id": "t-10-runner-loss/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-10-runner-loss/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "acme/forge-pe"
+      ],
+      "blocked": "",
+      "scenario": "runner_loss",
+      "group": "g4-operations",
+      "stage": "gate",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-11-revoked-blob": {
+      "task_id": "t-11-revoked-blob",
+      "started_at": "2026-09-24T01:42:12.151071+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0352,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0393,
+      "attempts": [
+        {
+          "attempt_id": "t-11-revoked-blob/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-11-revoked-blob/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [],
+      "review_minutes": 0.0011,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "resource_revocation",
+      "group": "g4-operations",
+      "stage": "gate",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    },
+    "t-12-cross-runner": {
+      "task_id": "t-12-cross-runner",
+      "started_at": "2026-09-24T01:42:14.539069+00:00",
+      "accepted": true,
+      "unaccepted": false,
+      "human_code_change": false,
+      "setup_minutes": 0.0314,
+      "plan_corrections": 0,
+      "plan_correction_notes": [],
+      "manual_rescues": 0,
+      "rescue_notes": [],
+      "completion_latency_minutes": 0.0384,
+      "attempts": [
+        {
+          "attempt_id": "t-12-cross-runner/a1",
+          "accepted": false,
+          "spend_usd": null
+        },
+        {
+          "attempt_id": "t-12-cross-runner/a2",
+          "accepted": true,
+          "spend_usd": null
+        }
+      ],
+      "interventions": [
+        {
+          "kind": "resume",
+          "note": "cross-runner resume"
+        }
+      ],
+      "review_minutes": 0.0036,
+      "defects": 0,
+      "rollbacks": 0,
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "blocked": "",
+      "scenario": "runner_loss",
+      "group": "g4-operations",
+      "stage": "gate",
+      "owner": "Pavel Nasovich (lab operator)",
+      "recorded": true,
+      "attempts_count": 2,
+      "accepted_attempts": 1
+    }
+  },
+  "groups": {
+    "g1-questions": {
+      "stage": "read_plan",
+      "cadence": "after each task group completes \u2014 the lab pilot runs in one session, so the weekly operator cadence degenerates honestly to a per-group review pass",
+      "review_record": {
+        "tasks_planned": 2,
+        "tasks_recorded": 2,
+        "tasks_accepted": 2,
+        "tasks_unaccepted": 0,
+        "manual_rescues": 0,
+        "interventions": 2,
+        "review_minutes_total": 0.0032
+      }
+    },
+    "g2-fixes": {
+      "stage": "small_fixes",
+      "cadence": "after each task group completes \u2014 the lab pilot runs in one session, so the weekly operator cadence degenerates honestly to a per-group review pass",
+      "review_record": {
+        "tasks_planned": 3,
+        "tasks_recorded": 3,
+        "tasks_accepted": 3,
+        "tasks_unaccepted": 0,
+        "manual_rescues": 0,
+        "interventions": 0,
+        "review_minutes_total": 0.0035
+      }
+    },
+    "g3-neighbors": {
+      "stage": "branch_pr",
+      "cadence": "after each task group completes \u2014 the lab pilot runs in one session, so the weekly operator cadence degenerates honestly to a per-group review pass",
+      "review_record": {
+        "tasks_planned": 2,
+        "tasks_recorded": 2,
+        "tasks_accepted": 2,
+        "tasks_unaccepted": 0,
+        "manual_rescues": 0,
+        "interventions": 0,
+        "review_minutes_total": 0.0
+      }
+    },
+    "g4-operations": {
+      "stage": "gate",
+      "cadence": "after each task group completes \u2014 the lab pilot runs in one session, so the weekly operator cadence degenerates honestly to a per-group review pass",
+      "review_record": {
+        "tasks_planned": 5,
+        "tasks_recorded": 5,
+        "tasks_accepted": 5,
+        "tasks_unaccepted": 0,
+        "manual_rescues": 0,
+        "interventions": 4,
+        "review_minutes_total": 0.0074
+      }
+    }
+  },
+  "metrics": {
+    "tasks_total": 12,
+    "tasks_accepted": 12,
+    "tasks_unaccepted": 0,
+    "autonomy_rate": 1.0,
+    "total_cost_usd": null,
+    "cost_per_accepted_usd": null,
+    "defect_rollback_rate": 0.0,
+    "intervention_rate": 0.4167,
+    "interventions_per_task": 0.5,
+    "mean_cycle_time_minutes": 0.0335,
+    "baseline_cycle_time_minutes": 30.0,
+    "cycle_time_vs_baseline": 0.0011,
+    "reviewer_load_minutes_per_task": 0.0012,
+    "notes": [
+      "t-01-repair/t-01-repair/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-01-repair/t-01-repair/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-02-cold/t-02-cold/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-03-adaptive/t-03-adaptive/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-04-ambiguous/t-04-ambiguous/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-04-ambiguous/t-04-ambiguous/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-05-missing/t-05-missing/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-05-missing/t-05-missing/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-06-neighbor-schema/t-06-neighbor-schema/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-07-neighbor-changelog/t-07-neighbor-changelog/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-08-steer/t-08-steer/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-09-pause-resume/t-09-pause-resume/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-09-pause-resume/t-09-pause-resume/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-10-runner-loss/t-10-runner-loss/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-10-runner-loss/t-10-runner-loss/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-11-revoked-blob/t-11-revoked-blob/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-11-revoked-blob/t-11-revoked-blob/a2: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-12-cross-runner/t-12-cross-runner/a1: attempt spend unrecorded \u2014 cost unknown, never zero",
+      "t-12-cross-runner/t-12-cross-runner/a2: attempt spend unrecorded \u2014 cost unknown, never zero"
+    ],
+    "definitions": {
+      "autonomy_rate": "tasks accepted WITHOUT a human code change \u00f7 total recorded tasks \u2014 merged-as-is semantics; watch for rubber-stamping (paired with the reviewer-load counterweight)",
+      "cost_per_accepted_usd": "ALL-attempt spend (unaccepted attempts included) \u00f7 accepted tasks \u2014 never the accepted attempts' spend alone; unknown when any attempt spend is unrecorded, never zero",
+      "defect_rollback_rate": "(defects + rollbacks on agent-authored deliverables) \u00f7 accepted tasks \u2014 quality lags speed by 8\u201312 weeks, so this number is revisited after the observation window, not just at the end date",
+      "intervention_rate": "tasks with \u2265 1 intervention event \u00f7 total recorded tasks \u2014 steering counts as an intervention, not only full takeovers",
+      "cycle_time_vs_baseline": "mean completion latency \u00f7 the FROZEN pre-pilot baseline cycle time \u2014 1.0 is parity, below is faster; judged only at the named end date",
+      "reviewer_load_minutes_per_task": "senior-reviewer minutes per task \u2014 the capacity tax published beside every speed number, never averaged into them"
+    }
+  },
+  "criteria": [
+    {
+      "criterion_id": "lab-autonomy",
+      "statement": "At least half the recorded tasks are accepted with zero human code change on the deliverable.",
+      "metric": "autonomy_rate",
+      "op": ">=",
+      "value": 0.5,
+      "method": "tracker fold over operator-recorded acceptance and human_code_change flags, judged at the named end date over all recorded tasks (blocked tasks included)",
+      "end_date": "2026-09-23",
+      "measured": 1.0,
+      "met": true
+    },
+    {
+      "criterion_id": "lab-intervention-bounded",
+      "statement": "At most half the recorded tasks carry an intervention event (partial steering counted exactly like a takeover).",
+      "metric": "intervention_rate",
+      "op": "<=",
+      "value": 0.5,
+      "method": "tracker fold over recorded intervention events (steer/pause/resume/cancel/takeover/question_answer), judged at the named end date",
+      "end_date": "2026-09-23",
+      "measured": 0.4167,
+      "met": true
+    },
+    {
+      "criterion_id": "lab-cost-bounded",
+      "statement": "All-attempt spend per accepted task at or under $25 \u2014 expected UNJUDGEABLE at lab scope because no paid models run and spend is unknown, never zero.",
+      "metric": "cost_per_accepted_usd",
+      "op": "<=",
+      "value": 25.0,
+      "method": "tracker fold over the per-attempt usage ledger; any unrecorded spend keeps the criterion unjudgeable and named, never silently failed",
+      "end_date": "2026-09-23",
+      "measured": null,
+      "met": null
+    }
+  ],
+  "criteria_verdict": {
+    "rule": "2-of-3 measurable criteria by the named end date",
+    "met": 2,
+    "unmet_or_unjudgeable": 1,
+    "verdict": "met"
+  },
+  "readiness": {
+    "read_plan": {
+      "label": "ready_to_support",
+      "tasks": 2,
+      "recorded": 2,
+      "accepted": 2,
+      "manual_rescues": 0,
+      "reason": "every task in the stage ran, was accepted and needed zero manual rescues"
+    },
+    "small_fixes": {
+      "label": "ready_to_support",
+      "tasks": 3,
+      "recorded": 3,
+      "accepted": 3,
+      "manual_rescues": 0,
+      "reason": "every task in the stage ran, was accepted and needed zero manual rescues"
+    },
+    "branch_pr": {
+      "label": "ready_to_support",
+      "tasks": 2,
+      "recorded": 2,
+      "accepted": 2,
+      "manual_rescues": 0,
+      "reason": "every task in the stage ran, was accepted and needed zero manual rescues"
+    },
+    "gate": {
+      "label": "ready_to_support",
+      "tasks": 5,
+      "recorded": 5,
+      "accepted": 5,
+      "manual_rescues": 0,
+      "reason": "every task in the stage ran, was accepted and needed zero manual rescues"
+    }
+  },
+  "decision": {
+    "decision": "expand",
+    "reasons": [
+      "2-of-3 criteria by 2026-09-23: met ['lab-autonomy', 'lab-intervention-bounded'], unmet [], unjudgeable ['lab-cost-bounded'] \u2014 \u2265 2 of 3 met: the expand candidate, gated on the first gate's single-writable-repo rule"
+    ],
+    "gap": "",
+    "met_criteria": [
+      "lab-autonomy",
+      "lab-intervention-bounded"
+    ],
+    "unmet_criteria": [],
+    "unjudgeable_criteria": [
+      "lab-cost-bounded"
+    ],
+    "diagnostics_pointer": ""
+  },
+  "recommendation": {
+    "exit": "expand",
+    "note": "the only exits are expand / extend-once-for-a-named-gap / stop \u2014 each with documented learning"
+  },
+  "stop": null,
+  "provenance_labels": [
+    "lab-operational-pilot",
+    "evidence-class:lab-operational",
+    "scripted-vendor",
+    "no-paid-models"
+  ],
+  "limitations": [
+    "This kit is scaffolding plus an example spec \u2014 NOT a run pilot; no real design-partner tasks are claimed or implied by the shipped plan.",
+    "PR counts and acceptance rates are documented liars for agent fleets; they appear nowhere as criteria and never in the headline.",
+    "Quality lags speed by 8\u201312 weeks: the defect/rollback window outlives the pilot and the numbers must be revisited after the observation window closes.",
+    "Metrics fold operator-recorded facts; self-reported time savings is disqualified as a headline number and appears nowhere in this kit.",
+    "The baseline is the partner's own frozen pre-pilot numbers; a re-recorded baseline is a different pilot and a new spec.",
+    "Early dips are expected (the J-curve): the measurement window was fixed before kickoff precisely so the pilot is not judged mid-dip."
+  ]
+}

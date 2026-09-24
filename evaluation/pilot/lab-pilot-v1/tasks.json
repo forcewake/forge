@@ -1,0 +1,541 @@
+{
+  "schema": "forge.lab-pilot.tasks/1",
+  "plan_id": "lab-pilot-v1",
+  "note": "The 12-task bounded set for the lab-recorded operational pilot (R36-16 / issue #275). The 'tasks' entries are forge.pilot kit task documents; the 'drivers' entries are the runner's per-task scenario scripts over the production-entry seams (real services, real processes, scripted vendor on the real wire). The mix: ordinary x3, ambiguity/question-first x2, neighbor-dependency x2, intervention x2, infrastructure-failure+retry x2, cross-runner resume x1.",
+  "owner": "Pavel Nasovich (lab operator)",
+  "tasks": [
+    {
+      "task_id": "t-01-repair",
+      "title": "Repair the widget code the scripted vendor initially breaks",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "src/app.py compiles and prints the widget banner; the collected candidate diff carries exactly the repaired file; the first, broken attempt stays in the record with its failed independent check",
+      "non_goals": [
+        "no changes outside src/app.py",
+        "no dependency or tooling changes"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "candidate-compiles",
+          "method": "py_compile over the candidate's src/app.py applied in a fresh checkout of the frozen base — independent of the agent's self-report"
+        },
+        {
+          "name": "diff-applies-cleanly",
+          "method": "git apply --check of the collected diff onto the frozen base in a fresh clone"
+        }
+      ],
+      "scenario": "test_repair",
+      "group": "g2-fixes",
+      "stage": "small_fixes"
+    },
+    {
+      "task_id": "t-02-cold",
+      "title": "Ordinary change lands from a cold-reinstalled workspace",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "notes/USAGE.md exists with the usage section and README carries the pointer; the run started from a workspace whose .forge state and prior outputs were wiped (cold reinstall), and the shipped collector still resolved the workspace generation",
+      "non_goals": [
+        "no reuse of any prior workspace generation or checkpoint",
+        "no changes beyond the two documentation files"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 1
+      },
+      "verification": [
+        {
+          "name": "files-present",
+          "method": "the collected diff adds notes/USAGE.md and edits README.md with the expected bytes"
+        },
+        {
+          "name": "cold-start-proven",
+          "method": "the pre-run workspace holds no .forge or forge-output state (recorded before the lane starts)"
+        }
+      ],
+      "scenario": "cold_reinstall",
+      "group": "g2-fixes",
+      "stage": "small_fixes"
+    },
+    {
+      "task_id": "t-03-adaptive",
+      "title": "Ordinary change with the adaptive control path attached and idle",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "src/app.py is updated while the lane's steering bridge stays attached to the control plane over real HTTP with an honest EMPTY journal (zero commands pending) and the turn completes",
+      "non_goals": [
+        "no operator commands are issued in this task",
+        "no changes outside src/app.py"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 1
+      },
+      "verification": [
+        {
+          "name": "steering-attached-idle",
+          "method": "the lane meta carries a steering_journal that is an honest empty list (attached, nothing routed)"
+        },
+        {
+          "name": "edit-landed",
+          "method": "the collected diff carries the src/app.py change"
+        }
+      ],
+      "scenario": "adaptive_control",
+      "group": "g2-fixes",
+      "stage": "small_fixes"
+    },
+    {
+      "task_id": "t-04-ambiguous",
+      "title": "Ambiguous rename request asks before editing",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the brief 'rename the helper' is ambiguous (which helper, to what name); the discovery stage raises the named question and waits — zero vendor turns and zero file edits on the first attempt, because asking is the CORRECT behavior; after the operator's durable answer the task completes the rename",
+      "non_goals": [
+        "no speculative edits before the answer lands",
+        "no renaming anything other than the single named function"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "question-before-edits",
+          "method": "the first attempt's vendor event log holds no turn events and the checkout is byte-identical to its frozen base"
+        },
+        {
+          "name": "answer-durable",
+          "method": "the operator's answer exists as a durable control_commands row of kind answer"
+        },
+        {
+          "name": "rename-landed",
+          "method": "the final candidate renames exactly the named function in src/app.py"
+        }
+      ],
+      "scenario": "ambiguous_task",
+      "group": "g1-questions",
+      "stage": "read_plan"
+    },
+    {
+      "task_id": "t-05-missing",
+      "title": "Missing threshold requirement is asked, not guessed",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the brief asks for a retry constant but omits its value (a missing requirement); discovery blocks on the CRITICAL open question instead of inventing a default, the operator answers with the actual value, and only then the edit lands in src/config.py",
+      "non_goals": [
+        "no default value may be invented for the missing threshold",
+        "no edits before the question resolves"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "blocked-not-defaulted",
+          "method": "the discovery record blocks with the named CRITICAL question and the first attempt leaves the checkout clean"
+        },
+        {
+          "name": "answer-durable",
+          "method": "the operator's answer exists as a durable control_commands row of kind answer"
+        },
+        {
+          "name": "value-matches-answer",
+          "method": "the landed RETRY_LIMIT constant equals the operator's answered value"
+        }
+      ],
+      "scenario": "missing_requirement",
+      "group": "g1-questions",
+      "stage": "read_plan"
+    },
+    {
+      "task_id": "t-06-neighbor-schema",
+      "title": "Schema constant cited from the neighbor contract at its exact OID",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the plan's citation resolves to lab/neighbor-contracts at the pinned OID and path (validate_plan_citations over the real neighbor git repo); the writable-repo edit implements the cited contract value; the neighbor stays read-only (clean status, unchanged head)",
+      "non_goals": [
+        "no writes to the neighbor repository",
+        "no hard-coding values the contract does not state"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 1
+      },
+      "verification": [
+        {
+          "name": "citations-resolve",
+          "method": "every plan citation resolves to repository + OID + path in the neighbor (the kit's citation validator)"
+        },
+        {
+          "name": "neighbor-read-only",
+          "method": "git status of the neighbor is clean and its head is unchanged after the run"
+        },
+        {
+          "name": "value-from-contract",
+          "method": "the landed constant equals the value read from the cited neighbor file at the cited OID"
+        }
+      ],
+      "scenario": "neighbor_evidence",
+      "group": "g3-neighbors",
+      "stage": "branch_pr"
+    },
+    {
+      "task_id": "t-07-neighbor-changelog",
+      "title": "Rate-limit decision discovered from the neighbor's changelog event",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the decisive event (the limit change) exists only in the neighbor's CHANGELOG; the plan records and cites it at the exact OID, the edit lands the cited limit in src/limits.py, and the neighbor remains read-only",
+      "non_goals": [
+        "no writes to the neighbor repository",
+        "no limit value may come from anywhere but the cited changelog line"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 1
+      },
+      "verification": [
+        {
+          "name": "citations-resolve",
+          "method": "the changelog citation resolves to repository + OID + path"
+        },
+        {
+          "name": "neighbor-read-only",
+          "method": "git status of the neighbor is clean and its head is unchanged after the run"
+        },
+        {
+          "name": "limit-matches-changelog",
+          "method": "the landed limit equals the value in the cited changelog line"
+        }
+      ],
+      "scenario": "neighbor_evidence",
+      "group": "g3-neighbors",
+      "stage": "branch_pr"
+    },
+    {
+      "task_id": "t-08-steer",
+      "title": "Operator steer reaches the running lane over the durable control plane",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the operator's guidance is a durable control_commands row (kind steer) recorded before the lane runs; the lane runs with its steering bridge attached over real HTTP and carries a steering journal naming the steer; the deliverable reflects the steered path",
+      "non_goals": [
+        "no acceptance-policy changes (a steer never grants authority)",
+        "no human edits to the candidate — the steer is guidance only"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 1
+      },
+      "verification": [
+        {
+          "name": "steer-durable",
+          "method": "the steer exists as a control_commands row in the control-plane database"
+        },
+        {
+          "name": "journal-names-the-steer",
+          "method": "the lane meta's steering journal holds an entry of kind steer"
+        },
+        {
+          "name": "steered-path-landed",
+          "method": "the candidate carries the steered artifact (the guidance's named file)"
+        }
+      ],
+      "scenario": "human_intervention",
+      "group": "g4-operations",
+      "stage": "gate"
+    },
+    {
+      "task_id": "t-09-pause-resume",
+      "title": "Operator pause checkpoints the WIP; the resume completes the turn",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the pause is a durable command with a verified checkpoint uploaded over real HTTP; the resume command re-admits the work; the resumed lane completes and the final candidate carries BOTH the pre-pause and post-resume edits (AT-01 seam outcome)",
+      "non_goals": [
+        "no fresh restart of the paused work (the resume must restore the exact WIP)",
+        "no edits after the collector ran"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "checkpoint-verified",
+          "method": "the pause's capture receipt is verified and its artifact id is recorded"
+        },
+        {
+          "name": "resume-restored-exact-wip",
+          "method": "the resumed workspace-generation pointer names the checkpoint id and the restored pre-pause bytes are present in the candidate"
+        },
+        {
+          "name": "both-legs-in-diff",
+          "method": "the collected diff carries the pre-pause edit AND the resumed-turn edit"
+        }
+      ],
+      "scenario": "human_intervention",
+      "group": "g4-operations",
+      "stage": "gate"
+    },
+    {
+      "task_id": "t-10-runner-loss",
+      "title": "Runner lost before any useful work: the retry dispatches fresh",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the bootstrap death is journaled on the run row; the authenticated /retry through the real service produces exactly one new native dispatch whose recorded inputs carry lane_resume_mode=fresh with no checkpoint prerequisite (AT-02 seam outcome, asserted on the native server's dispatch ledger)",
+      "non_goals": [
+        "no checkpoint may be demanded (no useful work existed)",
+        "no lane subprocess runs in this task (the death precedes the vendor)"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "ledger-carries-fresh-retry",
+          "method": "the native server's dispatch ledger holds exactly two dispatches for the run and the last inputs carry lane_resume_mode=fresh"
+        },
+        {
+          "name": "decision-evidence-bound",
+          "method": "the run's continuation evidence names mode fresh and no_checkpoint_baseline true"
+        },
+        {
+          "name": "client-stayed-on-modeled-surface",
+          "method": "the native server's unknown_paths list is empty"
+        }
+      ],
+      "scenario": "runner_loss",
+      "group": "g4-operations",
+      "stage": "gate"
+    },
+    {
+      "task_id": "t-11-revoked-blob",
+      "title": "Revoked checkpoint blob halts loudly; the operator retry recovers fresh",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the rotted referenced blob makes the required-continuation lane halt wip_restore_failed with ZERO vendor events after the pause leg and zero publication (AT-03 seam outcome); the operator's fresh retry then completes the task with the same intended edit",
+      "non_goals": [
+        "no silent fresh restart may replace the failed required resume",
+        "no vendor turn may run against the rotted authority"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "halt-was-loud",
+          "method": "the first resumed lane exits non-zero with wip_restore_failed and a failed candidate.meta.json"
+        },
+        {
+          "name": "zero-vendor-events-after-pause",
+          "method": "the vendor event log holds no events after the pre-pause leg"
+        },
+        {
+          "name": "fresh-retry-completed",
+          "method": "the retry attempt's collector reports a non-empty generation diff with the intended edit"
+        }
+      ],
+      "scenario": "resource_revocation",
+      "group": "g4-operations",
+      "stage": "gate"
+    },
+    {
+      "task_id": "t-12-cross-runner",
+      "title": "Cross-runner continuation restores the exact WIP into a new generation",
+      "owner": "Pavel Nasovich (lab operator)",
+      "expected_outcome": "the first runner's WIP is checkpointed over real HTTP; a SECOND runner (fresh checkout, fresh lane subprocess, required resume) restores the exact bytes into a new workspace generation and completes its own turn; the shipped collector captures changed, new AND deleted files; both checkouts survive intact (AT-01 seam outcome)",
+      "non_goals": [
+        "the first runner's checkout must never be mutated by the resume",
+        "no human edits — the candidate is exactly restored-WIP plus the resumed turn"
+      ],
+      "budget": {
+        "max_spend_usd": 5.0,
+        "max_attempts": 2
+      },
+      "verification": [
+        {
+          "name": "restored-bytes-in-candidate",
+          "method": "the collected diff carries the pre-checkpoint edit's exact bytes"
+        },
+        {
+          "name": "generation-pointer-names-checkpoint",
+          "method": "the resumed checkout's workspace-generation pointer names the checkpoint id"
+        },
+        {
+          "name": "both-checkouts-intact",
+          "method": "the first checkout still holds its WIP bytes and the resumed checkout is clean at its base"
+        }
+      ],
+      "scenario": "runner_loss",
+      "group": "g4-operations",
+      "stage": "gate"
+    }
+  ],
+  "drivers": {
+    "t-01-repair": {
+      "kind": "test_repair",
+      "brief": "Repair the widget code so it compiles and prints the widget banner.",
+      "target_file": "src/app.py",
+      "broken_edit": "print('widget banner'\n",
+      "repaired_edit": "print('widget banner')\nprint('widget: ok')\n"
+    },
+    "t-02-cold": {
+      "kind": "cold_reinstall",
+      "brief": "Document usage: add notes/USAGE.md and point to it from README.md.",
+      "actions": [
+        {
+          "op": "write",
+          "path": "notes/USAGE.md",
+          "content": "# Usage\n\nRun the widget via src/app.py.\n"
+        },
+        {
+          "op": "write",
+          "path": "README.md",
+          "content": "base readme\nSee notes/USAGE.md for usage.\n"
+        }
+      ]
+    },
+    "t-03-adaptive": {
+      "kind": "adaptive_idle",
+      "brief": "Update the banner implementation in src/app.py.",
+      "actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('base')\nprint('adaptive control attached')\n"
+        }
+      ]
+    },
+    "t-04-ambiguous": {
+      "kind": "question_first",
+      "brief": "Rename the helper.",
+      "question_id": "q-which-helper-what-name",
+      "question_text": "The brief says 'rename the helper' but names neither which helper nor the new name. Which function in src/app.py, and to what?",
+      "critical": false,
+      "answer_text": "Rename helper() in src/app.py to render_widget(). Nothing else changes.",
+      "final_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "def render_widget():\n    print('widget')\n\n\nrender_widget()\n"
+        }
+      ],
+      "final_check_name": "rename-landed"
+    },
+    "t-05-missing": {
+      "kind": "question_first",
+      "brief": "Add the retry limit constant to src/config.py.",
+      "question_id": "q-retry-limit-value",
+      "question_text": "The brief asks for RETRY_LIMIT in src/config.py but states no value; a default cannot be invented. What is the limit?",
+      "critical": true,
+      "answer_text": "RETRY_LIMIT = 4",
+      "final_actions": [
+        {
+          "op": "write",
+          "path": "src/config.py",
+          "content": "RETRY_LIMIT = 4\n"
+        }
+      ],
+      "final_check_name": "value-matches-answer"
+    },
+    "t-06-neighbor-schema": {
+      "kind": "neighbor",
+      "brief": "Land MAX_ITEMS in src/schema.py to match the widget schema contract.",
+      "neighbor_path": "contracts/widget.schema.json",
+      "neighbor_content": "{\n  \"type\": \"object\",\n  \"max_items\": 8\n}\n",
+      "cited_value": "8",
+      "target_file": "src/schema.py",
+      "target_content": "MAX_ITEMS = 8\n"
+    },
+    "t-07-neighbor-changelog": {
+      "kind": "neighbor",
+      "brief": "Land REQUESTS_PER_MINUTE in src/limits.py to match the current rate-limit decision.",
+      "neighbor_path": "CHANGELOG.md",
+      "neighbor_content": "# Neighbor changelog\n\n## 2026-09-20\n- rate limit: REQUESTS_PER_MINUTE lowered to 120\n",
+      "cited_value": "120",
+      "target_file": "src/limits.py",
+      "target_content": "REQUESTS_PER_MINUTE = 120\n",
+      "value_check_name": "limit-matches-changelog"
+    },
+    "t-08-steer": {
+      "kind": "intervention_steer",
+      "brief": "Write the rollout notes for the widget.",
+      "steer_text": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore.",
+      "actions": [
+        {
+          "op": "write",
+          "path": "docs/rollout.md",
+          "content": "# Rollout\n\nThe widget rolls out behind the paused-checkpoint restore.\n"
+        }
+      ]
+    },
+    "t-09-pause-resume": {
+      "kind": "intervention_pause_resume",
+      "brief": "Extend the widget implementation.",
+      "pre_pause_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('paused wip')\n"
+        }
+      ],
+      "resumed_actions": [
+        {
+          "op": "write",
+          "path": "notes/resumed.md",
+          "content": "resumed-turn edit\n"
+        }
+      ]
+    },
+    "t-10-runner-loss": {
+      "kind": "runner_loss_retry",
+      "brief": "Implement the widget (the runner dies at bootstrap before the vendor starts).",
+      "issue_title": "Add the widget",
+      "issue_body": "Make widgets real."
+    },
+    "t-11-revoked-blob": {
+      "kind": "resource_revocation",
+      "brief": "Implement the widget (the checkpoint authority rots before the required resume).",
+      "pre_pause_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('paused wip')\n"
+        }
+      ],
+      "retry_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('fresh retry')\n"
+        }
+      ]
+    },
+    "t-12-cross-runner": {
+      "kind": "cross_runner_resume",
+      "brief": "Implement the widget across two runners.",
+      "pre_pause_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('restored wip')\n"
+        },
+        {
+          "op": "write",
+          "path": "notes/new-file.md",
+          "content": "agent edit\n"
+        },
+        {
+          "op": "delete",
+          "path": "run.sh"
+        }
+      ],
+      "resumed_actions": [
+        {
+          "op": "write",
+          "path": "src/app.py",
+          "content": "print('resumed turn')\n"
+        },
+        {
+          "op": "write",
+          "path": "notes/resumed.md",
+          "content": "resumed-turn edit\n"
+        }
+      ]
+    }
+  }
+}

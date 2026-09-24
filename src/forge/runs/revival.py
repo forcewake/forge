@@ -41,13 +41,14 @@ every lane, and the limits come from the same settings.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, cast
 
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -59,6 +60,7 @@ from forge.durable.intents import OPEN_STATES
 from forge.durable.models import ActionLog, FlowRun, PublicationIntent, RunBudget
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the module import-light
+    from forge.adaptive.checkpoint_repository import CheckpointLookupOutcome
     from forge.config import Settings
     from forge.orchestrator.project_config import ConfigReadResult
 
@@ -1169,29 +1171,101 @@ async def resolve_retry_target(
     return matches[0] if len(matches) == 1 else None
 
 
-def retry_rejection(run: FlowRun | None, *, other_active: bool = False) -> str:
-    """Why ``/retry`` refuses *run* — an actionable message, or "" when fine."""
+class RetryRefusalCode(StrEnum):
+    """The TYPED ``/retry`` refusal reasons (R36-02, issue #261).
+
+    The operator-facing MESSAGE is unchanged; the CODE is what programs
+    branch on — the GitHub retry handler superseded ONLY the continuity arm
+    (:attr:`NOTHING_TO_RETRY`), and only for a decision that proves the
+    continuity demand wrong (a proven no-WIP death) or an operator-authorized
+    discard. Every other code — cancellation, another live attempt, a
+    non-retryable status, no subject — keeps refusing no matter what the
+    continuation decision says.
+    """
+
+    #: No retryable run on the subject (nothing to resolve a command to).
+    NO_RETRYABLE_RUN = "no_retryable_run"
+    #: Another run is already in flight on the same subject.
+    OTHER_ACTIVE = "other_active"
+    #: The run's status is not failed/blocked.
+    NOT_RETRYABLE_STATUS = "not_retryable_status"
+    #: The run was cancelled — its publication grant is revoked.
+    CANCEL_REQUESTED = "cancel_requested"
+    #: The continuity arm: no candidate AND no durable checkpoint — nothing
+    #: to retry IN PLACE (may be superseded by a proven baseline or an
+    #: explicit operator restart).
+    NOTHING_TO_RETRY = "nothing_to_retry"
+    #: R36-03: the checkpoint AUTHORITY could not answer (outage, refused
+    #: credential, rotted bytes, or never consulted) — distinct from a
+    #: proven absence, and never worded as one.
+    CHECKPOINT_AUTHORITY_UNAVAILABLE = "checkpoint_authority_unavailable"
+
+
+class RetryRejection(str):
+    """A typed ``/retry`` refusal (R36-02).
+
+    The VALUE is the operator-facing message — every existing caller posts
+    it verbatim (``f"🔁 {rejection}"``) and truthiness still means
+    "refused" — while :attr:`code` carries the machine-readable
+    :class:`RetryRefusalCode` the caller may branch on.
+    """
+
+    code: str
+    __slots__ = ("code",)
+
+    def __new__(cls, code: str | RetryRefusalCode, message: str) -> RetryRejection:
+        rejection = super().__new__(cls, message)
+        rejection.code = str(code)
+        return rejection
+
+
+def retry_rejection(
+    run: FlowRun | None,
+    *,
+    other_active: bool = False,
+    checkpoint: CheckpointLookupOutcome | None = None,
+) -> str:
+    """Why ``/retry`` refuses *run* — an actionable message, or "" when fine.
+
+    R36-02: refusals are TYPED — the returned string is a
+    :class:`RetryRejection` whose ``code`` names the refusing arm; the
+    wording is unchanged for operators.
+
+    R36-03: the continuity arm consumes the PRE-RESOLVED typed lookup
+    outcome (``checkpoint`` — a
+    :class:`forge.adaptive.checkpoint_repository.CheckpointLookupOutcome`
+    the caller awaited through the configured async authority; ``None``
+    when it never consulted one). The refusal table never performs a
+    lookup itself: an outage, a refused credential or rotted bytes are
+    answers of their own kind (:attr:`RetryRefusalCode.
+    CHECKPOINT_AUTHORITY_UNAVAILABLE`) — distinct from a PROVEN
+    absence, and never worded as "no stored checkpoint".
+    """
     if run is None:
-        return (
+        return RetryRejection(
+            RetryRefusalCode.NO_RETRYABLE_RUN,
             "`/retry` found no retryable run on this issue. "
-            "Start a fresh run by posting a new implement request."
+            "Start a fresh run by posting a new implement request.",
         )
     if other_active:
-        return (
+        return RetryRejection(
+            RetryRefusalCode.OTHER_ACTIVE,
             f"Run `{run.id[:8]}` cannot be retried: another run is already in flight on this "
             "subject — forge keeps one active run per subject. Let it finish or cancel it "
-            "first."
+            "first.",
         )
     status = run.status
     if status not in _RETRYABLE_STATUSES:
-        return (
+        return RetryRejection(
+            RetryRefusalCode.NOT_RETRYABLE_STATUS,
             f"Run `{run.id[:8]}` is `{status}`, not `failed`/`blocked` — there is nothing to "
-            "retry. Cancelled runs and fresh work need a new implement request."
+            "retry. Cancelled runs and fresh work need a new implement request.",
         )
     if run.cancel_requested:
-        return (
+        return RetryRejection(
+            RetryRefusalCode.CANCEL_REQUESTED,
             f"Run `{run.id[:8]}` was cancelled by an operator — retrying a revoked publication "
-            "grant is not allowed. Start fresh with a new implement request."
+            "grant is not allowed. Start fresh with a new implement request.",
         )
     if not list(run.candidate_shas or []):
         # Wave D: a run that was PAUSED mid-turn has no candidate — but
@@ -1199,36 +1273,199 @@ def retry_rejection(run: FlowRun | None, *, other_active: bool = False) -> str:
         # pause captured verified WIP). The checkpoint IS the work to
         # continue from; the re-dispatched lane restores from it before
         # its turn. No checkpoint AND no candidate = genuinely nothing.
-        if not _has_durable_checkpoint(run.id):
-            return (
+        outcome = checkpoint
+        if outcome is None or not getattr(outcome, "state", None):
+            # The authority was never consulted or could not answer: an
+            # unprovable checkpoint state is NOT "no stored checkpoint"
+            # — zero model starts until the authority answers.
+            return RetryRejection(
+                RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE,
+                f"Run `{run.id[:8]}` died before it committed a candidate and the "
+                "checkpoint authority could not prove the work's recoverable state — "
+                "nothing was dispatched. Resolve the checkpoint authority (or "
+                "explicitly restart with `/retry <run-id> restart`) and retry.",
+            )
+        state = str(outcome.state)
+        if state == "exact":
+            return ""  # the checkpoint is the resume point
+        if state == "absent":
+            return RetryRejection(
+                RetryRefusalCode.NOTHING_TO_RETRY,
                 f"Run `{run.id[:8]}` died before it committed a candidate and has no "
                 "stored checkpoint — there is no work to retry in place. Start fresh "
-                "with a new implement request."
+                "with a new implement request.",
             )
-        return ""  # the checkpoint is the resume point
+        # unavailable / corrupt / unauthorized — typed, distinct, and
+        # worded by WHAT failed, never as a proven absence.
+        detail = str(getattr(outcome, "detail", "") or "").strip()
+        named = {"unavailable": "is unavailable", "corrupt": "holds a corrupt checkpoint"}.get(
+            state, "refused the lookup credential"
+        )
+        return RetryRejection(
+            RetryRefusalCode.CHECKPOINT_AUTHORITY_UNAVAILABLE,
+            f"Run `{run.id[:8]}` died before it committed a candidate; the "
+            f"checkpoint authority {named} — nothing was dispatched. "
+            + (f"Detail: {detail}. " if detail else "")
+            + "Resolve the checkpoint authority (or explicitly restart with "
+            "`/retry <run-id> restart`) and retry.",
+        )
     return ""
 
 
-def _has_durable_checkpoint(run_id: str) -> bool:
-    """The control plane holds a verified checkpoint for this work.
+#: R36-03: the explicit opt-in for the RETIRED legacy lookup chain
+#: (raw filesystem index + the generation-less work token over HTTP).
+#: ``FORGE_RETRY_LEGACY_LOOKUP=1`` re-enables it for deployments pinned
+#: to a versioned pre-R36-03 build ONLY; the modern path (the configured
+#: async authority) is the default and the only supported one.
+LEGACY_LOOKUP_ENV: str = "FORGE_RETRY_LEGACY_LOOKUP"
 
-    LIVE-found (wave D): the /retry handler runs in the WORKER process,
-    which has NO data/ mount — the checkpoint store lives on the APP.
-    The honest check is the CHECKPOINT API (the same authority the lane
-    dials), not the local filesystem.
+#: R36-03: the observability label the legacy adapter answers under —
+#: unmistakable in logs and outcomes, so nobody mistakes it for the
+#: configured authority.
+LEGACY_LOOKUP_AUTHORITY: str = "legacy-http-opt-in"
+
+
+async def durable_checkpoint_outcome(
+    run_id: str,
+    *,
+    repository: Any = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> CheckpointLookupOutcome:
+    """The TYPED checkpoint-presence lookup every retry/revival path runs.
+
+    R36-03 (issue #262): the old :func:`_has_durable_checkpoint` read the
+    RAW filesystem index, then fell back to a SYNCHRONOUS ``httpx.get``
+    with the LEGACY work-only token, and collapsed every failure into
+    ``False`` — a PostgreSQL-only checkpoint read as "no checkpoint" in
+    ``/retry``. This adapter is its replacement — a thin async selection
+    over the configured authority (``checkpoint.lookup.authority`` /
+    ``checkpoint.lookup.outcome`` / ``checkpoint.lookup.latency``):
+
+    - an injected *repository* wins (tests, an explicitly composed
+      service);
+    - else :func:`forge.adaptive.checkpoint_repository.
+      resolve_checkpoint_lookup_authority` — a session factory selects
+      the SAME configured repository upload/resume use; without one,
+      the control URL + lane credential select the authenticated
+      checkpoint-channel proxy (:class:`HttpCheckpointRepository`);
+    - neither → the TYPED ``unavailable``: never the filesystem index a
+      factory-less process has no contract with, never "absent", never
+      a synchronous HTTP call inside the event loop.
+
+    The legacy chain survives ONLY behind the explicit opt-in
+    (:data:`LEGACY_LOOKUP_ENV`, default OFF) as
+    :func:`_legacy_http_lookup` — see its docstring for the removal
+    path.
     """
+    from forge.adaptive.checkpoint_repository import (
+        CheckpointLookupOutcome,
+        LOOKUP_UNAVAILABLE,
+        resolve_checkpoint_lookup_authority,
+    )
+
+    source = os.environ if env is None else env
+    if str(source.get(LEGACY_LOOKUP_ENV, "")).strip() == "1":
+        return await _legacy_http_lookup(run_id, env=source)
+    authority = repository
+    if authority is None:
+        try:
+            authority = resolve_checkpoint_lookup_authority(
+                env=env, session_factory=session_factory
+            )
+        except Exception as exc:  # a misconfigured authority is typed, never fs
+            outcome = CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority="misconfigured",
+                detail=f"the checkpoint authority is misconfigured: {exc}",
+            )
+            logger.warning(
+                "checkpoint.lookup authority misconfigured for work %s: %s",
+                run_id[:8],
+                exc,
+            )
+            return outcome
+    if authority is None:
+        outcome = CheckpointLookupOutcome.missing(
+            LOOKUP_UNAVAILABLE,
+            detail=(
+                "no checkpoint authority is configured for this process (no session "
+                "factory, no FORGE_LANE_CONTROL_URL credential) — the retry lookup "
+                "refuses to guess, and never reads a filesystem index it has no "
+                "contract with"
+            ),
+        )
+        logger.warning("checkpoint.lookup no authority for work %s", run_id[:8])
+        return outcome
+    try:
+        outcome = await authority.lookup_outcome(run_id)
+    except Exception as exc:  # noqa: BLE001 — a raising lookup is unavailable
+        outcome = CheckpointLookupOutcome.missing(
+            LOOKUP_UNAVAILABLE,
+            detail=f"the checkpoint authority raised during the lookup: {exc}",
+        )
+    logger.info(
+        "checkpoint.lookup authority=%s outcome=%s work=%s%s",
+        outcome.authority or "unknown",
+        outcome.state,
+        run_id[:8],
+        f" latency={outcome.latency_s:.3f}s" if outcome.latency_s is not None else "",
+    )
+    return outcome
+
+
+async def _legacy_http_lookup(
+    run_id: str, *, env: Mapping[str, str] | None = None
+) -> CheckpointLookupOutcome:
+    """The RETIRED pre-R36-03 lookup chain, kept behind an explicit opt-in.
+
+    What this does (verbatim from the retired :func:`_has_durable_
+    checkpoint`): read the LOCAL filesystem checkpoint index, then dial
+    ``GET /lane/checkpoints/{run_id}` with the GENERATION-LESS legacy
+    work token (``lane_control_token(secret, run_id)`` — the token
+    #243/Q35-06 made expire) over SYNCHRONOUS ``httpx``, and collapse
+    every error and non-200 into "no checkpoint". Every property the
+    modern path guarantees is absent here ON PURPOSE: this is the
+    behavior a versioned pre-R36-03 deployment still has, nothing more.
+
+    Opt-in: :data:`LEGACY_LOOKUP_ENV` (``FORGE_RETRY_LEGACY_LOOKUP=1``),
+    default OFF. The outcome is labeled :data:`LEGACY_LOOKUP_AUTHORITY`
+    so logs and evidence can never mistake it for the configured
+    authority, and it answers only ``exact``/``absent`` (the lossy
+    boolean it always was — an outage still reads as absent here,
+    exactly like the deployment it emulates).
+
+    REMOVAL PATH: this function and the ``FORGE_RETRY_LEGACY_LOOKUP``
+    read in :func:`durable_checkpoint_outcome` are deleted together at
+    R38 — one release after every deployment recorded in the rollout
+    ledger (issue #262's "migrate callers, not data") has passed a full
+    legacy-credential window with the modern authority. No data
+    migration is involved: flipping the env off selects the configured
+    authority with no change to any persisted checkpoint.
+    """
+    from forge.adaptive.checkpoint_repository import (
+        CheckpointLookupOutcome,
+        LOOKUP_ABSENT,
+    )
+
+    source = os.environ if env is None else env
     # 1. The local filesystem (the APP process sees it directly).
+    checkpoint_id: str | None = None
     try:
         from forge.api_checkpoint_channel import CheckpointStore, _store_dir
 
-        index = CheckpointStore(_store_dir())._load_index(run_id)
-        if index.get("checkpoints"):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    # 2. The checkpoint API (the WORKER crosses the process boundary).
-    url = (os.environ.get("FORGE_LANE_CONTROL_URL") or "").strip()
-    secret = os.environ.get("FORGE_LANE_CONTROL_SECRET") or ""
+        index = CheckpointStore(_store_dir())._load_index(run_id)  # noqa: SLF001 — retired code
+        checkpoints = list(index.get("checkpoints") or [])
+        if checkpoints:
+            checkpoint_id = str(checkpoints[-1].get("checkpoint_id") or "") or None
+    except Exception:  # noqa: BLE001 — the legacy chain swallowed everything
+        checkpoint_id = None
+    if checkpoint_id is not None:
+        return CheckpointLookupOutcome.exact(checkpoint_id, authority=LEGACY_LOOKUP_AUTHORITY)
+    # 2. The legacy work-token HTTP fallback (the worker crossing the
+    #    process boundary with the EXPIRING credential).
+    url = (source.get("FORGE_LANE_CONTROL_URL") or "").strip()
+    secret = source.get("FORGE_LANE_CONTROL_SECRET") or ""
     if url and secret:
         try:
             import httpx
@@ -1236,15 +1473,27 @@ def _has_durable_checkpoint(run_id: str) -> bool:
             from forge.api_lane_control import lane_control_token
 
             token = lane_control_token(secret, run_id)
-            resp = httpx.get(
+            resp = await asyncio.to_thread(
+                httpx.get,
                 f"{url}/lane/checkpoints/{run_id}",
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
-            return resp.status_code == 200
-        except Exception:  # noqa: BLE001 — unreachable API = no checkpoint
-            return False
-    return False
+            if resp.status_code == 200:
+                document = resp.json() if resp.content else {}
+                legacy_id = str(document.get("checkpoint_id") if isinstance(document, dict) else "")
+                return CheckpointLookupOutcome.exact(legacy_id, authority=LEGACY_LOOKUP_AUTHORITY)
+        except Exception:  # noqa: BLE001 — the legacy chain swallowed everything
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_ABSENT,
+                authority=LEGACY_LOOKUP_AUTHORITY,
+                detail="the legacy opt-in lookup failed (collapsed to absent, as it always did)",
+            )
+    return CheckpointLookupOutcome.missing(
+        LOOKUP_ABSENT,
+        authority=LEGACY_LOOKUP_AUTHORITY,
+        detail="the legacy opt-in lookup answered no checkpoint (collapsed, as it always did)",
+    )
 
 
 def retry_in_flight_rejection(run_id: str) -> str:
@@ -1491,13 +1740,22 @@ def format_status_reply(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def why_blocked_reply(run: FlowRun, *, other_active: bool = False) -> str:
+def why_blocked_reply(
+    run: FlowRun,
+    *,
+    other_active: bool = False,
+    checkpoint: CheckpointLookupOutcome | None = None,
+) -> str:
     """The ``/why-blocked`` note: the precise cause + the honest revival paths.
 
     READ-ONLY: the parked reason, its Tier-1 classification, and the
     revive/retry verdict — :func:`retry_rejection` is THE one rejection
     table (R29), so this reply can never promise a revival ``/retry``
     would refuse.
+
+    R36-03: *checkpoint* is the caller's pre-resolved typed lookup
+    outcome (``None`` = not consulted) — the reply reports what the
+    AUTHORITY answered, never a guess.
     """
     status = run.status
     reason = (run.status_reason or "").strip()
@@ -1521,7 +1779,7 @@ def why_blocked_reply(run: FlowRun, *, other_active: bool = False) -> str:
                 f"due {revival.get('due_at') or '—'}, "
                 f"dispatched {revival.get('dispatched_at') or '—'}"
             )
-        rejection = retry_rejection(run, other_active=other_active)
+        rejection = retry_rejection(run, other_active=other_active, checkpoint=checkpoint)
         if rejection:
             lines.append(f"- **Not /retry-eligible:** {rejection}")
         else:

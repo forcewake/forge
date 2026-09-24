@@ -34,7 +34,9 @@ from forge.adaptive.verification_sets import (
     TestBundleChange,
     VerificationLane,
     VerificationSelector,
+    WorldInputDrift,
     async_failure_scenarios,
+    baseline_drift,
     bound_applicability_digest,
     bound_tested_world_digest,
     contract_checks,
@@ -42,6 +44,7 @@ from forge.adaptive.verification_sets import (
     environment_compose,
     evidence_aware_review,
     focused_recipe,
+    freeze_tested_world,
     freeze_verified_world,
     freshness,
     member_identity,
@@ -873,3 +876,127 @@ class TestSupersedeAndHistory:
         record = record_evidence("ev", _candidate_set(), covers=["orders"])
         with pytest.raises(ValueError, match="duplicate evidence id"):
             EvidenceLedger().record(record, record)
+
+
+class TestFreezeTestedWorld:
+    """R36-19: the COMPLETE freeze — bundle/profile digests enter the
+    world identity at the same moment the digests are persisted."""
+
+    def test_freezing_completes_missing_bundle_digests_into_the_identity(self):
+        # a bare set (no bundles) + the caller's digests = ONE persisted
+        # world identity covering members, images AND the bundles.
+        frozen = freeze_tested_world(
+            _candidate_set(),
+            contract_bundle_digest="a" * 64,
+            test_bundle_digest="b" * 64,
+            environment_profile_digest="c" * 64,
+            environment_pins={"postgres": POSTGRES_PIN},
+            policy_refs=["compat/1"],
+        )
+        assert frozen.contract_bundle_digest == "a" * 64
+        assert frozen.test_bundle_digest == "b" * 64
+        assert frozen.environment_profile_digest == "c" * 64
+        assert bound_tested_world_digest(frozen) == world_digest(
+            frozen, environment={"postgres": POSTGRES_PIN}, policy_refs=["compat/1"]
+        )
+
+    def test_a_completed_bundle_is_part_of_the_digest_a_bare_freeze_lacks(self):
+        bare = freeze_verified_world(_candidate_set(), environment_pins={"postgres": POSTGRES_PIN})
+        completed = freeze_tested_world(
+            _candidate_set(),
+            test_bundle_digest="b" * 64,
+            environment_pins={"postgres": POSTGRES_PIN},
+        )
+        assert completed.tested_world_digest != bare.tested_world_digest
+
+    def test_supplying_the_digest_the_set_already_carries_is_idempotent(self):
+        once = freeze_tested_world(
+            _candidate_set(), test_bundle_digest="b" * 64, policy_refs=["compat/1"]
+        )
+        again = freeze_tested_world(once, test_bundle_digest="b" * 64, policy_refs=["compat/1"])
+        assert again == once
+
+    def test_replacing_a_recorded_bundle_digest_is_refused(self):
+        frozen = freeze_tested_world(_candidate_set(), test_bundle_digest="b" * 64)
+        with pytest.raises(ValueError, match="a changed bundle is a new set"):
+            freeze_tested_world(frozen, test_bundle_digest="c" * 64)
+
+    def test_a_garbage_bundle_digest_never_enters_the_world(self):
+        # a BARE set (no digests recorded yet) so the format refusal is
+        # what fires, not the already-recorded refusal.
+        bare = _candidate_set().model_copy(update={"environment_profile_digest": None})
+        for name, value in (
+            ("contract_bundle_digest", "not-hex"),
+            ("test_bundle_digest", "XYZ" * 21),  # wrong charset AND length
+            ("environment_profile_digest", "latest"),
+        ):
+            with pytest.raises(ValueError, match="lowercase 64-hex sha256"):
+                freeze_tested_world(bare, **{name: value})
+
+
+class TestBaselineDrift:
+    """R36-19 ``verification.baseline_drift``: name the moved inputs."""
+
+    def test_identical_worlds_drift_nothing(self):
+        frozen = freeze_tested_world(_candidate_set(), environment_pins={"postgres": POSTGRES_PIN})
+        assert baseline_drift(frozen, frozen) == ()
+
+    def test_a_rebuilt_image_under_an_unchanged_source_sha_is_flagged(self):
+        # the review's exact arm: candidate_oid identical, image moved.
+        frozen = freeze_tested_world(_candidate_set(), environment_pins={"postgres": POSTGRES_PIN})
+        rebuilt = freeze_tested_world(
+            _with_orders_moved(frozen, image=f"sha256:{'9' * 64}"),
+            environment_pins={"postgres": POSTGRES_PIN},
+        )
+        (drift,) = baseline_drift(frozen, rebuilt)
+        assert drift == WorldInputDrift(
+            input_path="member/orders/image_digest",
+            previous=f"sha256:{'e' * 64}",
+            current=f"sha256:{'9' * 64}",
+            source_sha_unchanged=True,
+        )
+
+    def test_a_moved_candidate_oid_is_drift_without_the_source_sha_flag(self):
+        frozen = freeze_tested_world(_candidate_set())
+        moved = freeze_tested_world(_with_orders_moved(frozen))
+        (drift,) = baseline_drift(frozen, moved)
+        assert drift.input_path == "member/orders/candidate_oid"
+        assert drift.source_sha_unchanged is False
+
+    def test_a_test_bundle_appearing_is_drift_from_the_unset_value(self):
+        frozen = freeze_tested_world(_candidate_set())
+        rebundled = freeze_tested_world(frozen, test_bundle_digest="7" * 64)
+        (drift,) = baseline_drift(frozen, rebundled)
+        assert (drift.input_path, drift.previous, drift.current) == (
+            "test_bundle_digest",
+            "<none>",
+            "7" * 64,
+        )
+
+    def test_a_moved_pin_is_drift_per_service(self):
+        before = freeze_tested_world(_candidate_set(), environment_pins={"postgres": POSTGRES_PIN})
+        after = freeze_tested_world(_candidate_set(), environment_pins={"postgres": POSTGRES_MOVED})
+        (drift,) = baseline_drift(before, after)
+        assert drift.input_path == "environment_pin/postgres"
+        assert (drift.previous, drift.current) == (POSTGRES_PIN, POSTGRES_MOVED)
+
+    def test_provenance_and_obligations_never_drift(self):
+        # plan revision, work id (provenance) and the work-contract /
+        # contract-bundle digests (this-run obligations) are not
+        # dependencies: moving them is NOT baseline drift.
+        frozen = freeze_tested_world(
+            _candidate_set(), contract_bundle_digest="a" * 64, policy_refs=["compat/1"]
+        )
+        renumbered = frozen.model_copy(update={"plan_revision": 99, "work_id": "wp-other-9"})
+        assert baseline_drift(frozen, renumbered) == ()
+
+    def test_the_drift_rows_render_the_observability_fragment(self):
+        frozen = freeze_tested_world(_candidate_set())
+        moved = freeze_tested_world(_with_orders_moved(frozen))
+        (drift,) = baseline_drift(frozen, moved)
+        assert drift.as_document() == {
+            "input": "member/orders/candidate_oid",
+            "previous": drift.previous,
+            "current": drift.current,
+            "source_sha_unchanged": False,
+        }

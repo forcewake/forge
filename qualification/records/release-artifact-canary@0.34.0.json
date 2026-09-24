@@ -1,0 +1,61 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "release-artifact-canary",
+    "release-canary/previous-release-upgrade"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "none — disposable Postgres, LiteLLM reachability via in-image stub",
+  "evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "class": "binary-smoke",
+      "covers": "fresh stage: migrate, boot gate, /health, /mcp 401, doctor (promotion.json canary rows)",
+      "executed_at": "sha256:64025dc783ed4aa4e7cd75b23b10077679de6451a43cb763c3934d530955c416",
+      "outcome": "pass"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "class": "binary-smoke",
+      "covers": "seed-real-data + migrate stages: seeded at previous head 026 (flow_runs, run_specs, step_runs, control_commands, publication_intents); upgrade preserved counts + digests",
+      "executed_at": "sha256:64025dc783ed4aa4e7cd75b23b10077679de6451a43cb763c3934d530955c416",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.34.0/promotion.json"
+  ],
+  "harness_binary": "ghcr.io/forcewake/forge",
+  "harness_version": "sha256:64025dc783ed4aa4e7cd75b23b10077679de6451a43cb763c3934d530955c416",
+  "image_digest": "sha256:64025dc783ed4aa4e7cd75b23b10077679de6451a43cb763c3934d530955c416",
+  "note": "Image-only release (no wheel/sdist built — the promotion record says so).",
+  "profile": "release-artifact-canary",
+  "provider": "*",
+  "provider_behavior_fingerprint": "",
+  "provider_version": "",
+  "record_id": "release-artifact-canary@0.34.0",
+  "release_version": "0.34.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "container image (Containerfile; python-3.13, disposable Postgres)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": {
+    "evidence_ref": "docs/releases/evidence/v0.34.0/promotion.json",
+    "preservation_checks": [
+      "per-table row counts identical after upgrade",
+      "sha256 fingerprints over ordered row identity identical after upgrade"
+    ],
+    "seeded_records": [
+      "flow_runs: 1 (mid-flight, frozen run_specs spec)",
+      "run_specs: 1",
+      "step_runs: bounded set",
+      "control_commands: 1",
+      "publication_intents: 1"
+    ],
+    "source_schema": "026",
+    "target_schema": "026"
+  },
+  "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
+  "wheel_sha256": ""
+}

@@ -81,6 +81,88 @@ safety layer BOTH authorities share, in this module:
   transactions the phases must run inside — but the protection overlay
   both phases consult is the shared logic here.
 
+R36-04 (review ``16339c2``, probe P04) adds the synchronization
+protocol the recheck above could not replace: Q35-05's SELECT only
+sees references committed BEFORE it ran, so a DIFFERENT work's landing
+(per-work locks never conflict) could still commit a reference to a
+shared CAS digest between the collector's FINAL reference scan and its
+unlink — an acknowledged checkpoint left holding an address without
+bytes. READ COMMITTED is a statement-time snapshot, not a prohibition
+on future references; the fix is ONE volume-wide reference/delete lock
+(the store's ``cas-refs.lock`` flock, plus a postgres
+``pg_advisory_lock`` twin on a constant key where the blob root is not
+shared) held:
+
+- by every LANDING for its reference-recording transaction — the
+  filesystem index read-modify-write, or the metadata row transaction
+  (the blob writes stay OUTSIDE the lock; under it the landing
+  RE-LANDS any closure address a sweep unlinked mid-put, before the
+  reference commits), and
+- by every SWEEP (explicit retention, on-upload cleanup, pending-GC
+  recovery) from its FINAL reference scan through its last unlink:
+  lock → final scan → delete-metadata transaction → unlink → unlock.
+
+The one lock order (volume lock before the per-work pin flock and the
+metadata rows; after the per-work index lock and the first-upload
+advisory anchor) is cycle-free — two concurrent collectors plus a
+concurrent writer serialize rather than deadlock, every wait bounded
+by ``FORGE_CHECKPOINT_GC_LOCK_WAIT_SECONDS`` with the typed
+``GCLockTimeout`` refusal (a sweep aborts and retries later; a landing
+fails with nothing committed). ``FORGE_CHECKPOINT_SWEEP=off`` is the
+operator's rollout fence: both authorities keep marking (tombstones,
+journal records, metadata deletions) but never unlink, and turning
+sweeping back on collects the marked set against CURRENT reachability.
+Pins are untouched — consumer identity binding stays exactly as
+Q35-05 left it; this issue is strictly the writer/deleter protocol.
+This volume-wide mutex is the conservative first implementation the
+issue prescribes; per-digest refinement is deferred until load
+measurement justifies it (the lock and sweep seams in the store module
+are the only places it would land).
+
+R36-03 (review ``16339c2``, issue #262) adds the TYPED lookup the
+retry/revival chain consumes: :meth:`CheckpointRepository.lookup_outcome`
+answers :class:`CheckpointLookupOutcome` — ``exact`` (with the
+checkpoint's content address), ``absent``, ``unavailable``, ``corrupt``
+or ``unauthorized`` — and NOTHING collapses one into another. The
+store-backed half lives on :class:`_StoreBackedRepository` (the ACTIVE
+entry, then the VERIFIED read so rot is never "exact"); the HTTP half
+is :class:`HttpCheckpointRepository` — the authenticated
+``GET /lane/checkpoints/{work_id}`` surface the lane itself dials,
+wrapped for processes without blob/database access; and
+:func:`resolve_checkpoint_lookup_authority` is the selection matrix
+(session factory → the configured repository; control URL + lane
+credential → the HTTP proxy; neither → the caller's typed
+``unavailable`` — never a filesystem index, never the legacy token).
+
+R36-05 (review ``16339c2``, issue #264) moves the cutover FENCE into
+this composition point. Q35-21's migration tool could flip an authority
+MARKER (``<root>/migration/authority.json``) and documented the
+``enforce_authority_marker(resolve_repository(...))`` wrapper — but the
+NORMAL :func:`resolve_repository` returned RAW repositories, so an
+already-running old-authority process kept writing the retired index
+after a cutover. Now ``resolve_repository(..., fenced=True)`` (the
+DEFAULT) attaches :class:`AuthorityMarkerFence` to the resolved
+repository: the marker is read at construction (the
+:data:`METRIC_CONFIGURED_VS_ACTIVE` startup line) and RE-CHECKED before
+every metadata mutation (``put``/``put_checkpoint``/``apply_retention``)
+— an authority mismatch refuses with the typed
+:class:`MutationsFencedError` naming configured-vs-active, and a cutover
+holding its fence refuses BOTH sides. Reads never fence: retired history
+stays explicitly read-only and distinguishable (``authority()`` keeps
+naming the authority that answered). LOCK ORDER, stated once: the fence
+check runs BEFORE the mutation takes the store's volume-wide GC lock
+(``<root>/cas-refs.lock`` and its postgres advisory twin) and before
+every per-work lock — a fence refusal therefore never WAITS on the
+volume lock, and no path holds the volume lock while waiting for the
+cutover fence, so the orders cannot cycle. The first supported rollout
+mode is the DRAINED-OFFLINE cutover: the fence makes concurrent
+processes SAFE TO REFUSE (an old process refuses mutations after the
+flip, without a restart), and does not promise an online zero-downtime
+migration — a mutation that passed the check instants before the flip
+may still commit. :func:`enforce_authority_marker` remains the wrapper
+for repositories constructed DIRECTLY (the migration documentation's
+spelling), sharing this ONE fence implementation.
+
 Crash windows, documented once for both authorities: (1) a put writes
 blobs before its index row commits — a crash between them leaves
 collectable CAS orphans the health report names, never an index entry
@@ -96,14 +178,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import random
 import re
 import socket
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -118,17 +202,47 @@ try:  # POSIX process-level advisory locking (Linux CI, macOS dev boxes).
 except ImportError:  # pragma: no cover — non-POSIX platform without flock
     fcntl = None  # type: ignore[assignment]
 
+_LOGGER = logging.getLogger(__name__)
+
 __all__ = [
     "AUTHORITY_FILESYSTEM",
+    "AUTHORITY_HTTP",
+    "AUTHORITY_MARKER_SCHEMA",
     "AUTHORITY_POSTGRES",
+    "AuthorityMarkerFence",
+    "BACKUP_MANIFEST_SCHEMA",
+    "BackupMismatchError",
     "CheckpointGcJournal",
+    "CheckpointLookupOutcome",
     "CheckpointPins",
     "CheckpointRepository",
     "CheckpointRepositoryMisconfigured",
     "CheckpointRepositoryUnavailable",
     "FilesystemCheckpointRepository",
+    "HttpCheckpointRepository",
+    "LOOKUP_ABSENT",
+    "LOOKUP_CORRUPT",
+    "LOOKUP_EXACT",
+    "LOOKUP_UNAVAILABLE",
+    "LOOKUP_UNAUTHORIZED",
+    "METRIC_CONFIGURED_VS_ACTIVE",
+    "METRIC_MUTATION_REFUSED",
+    "MutationsFencedError",
     "PostgresCheckpointRepository",
+    "SingleAuthorityRepository",
+    "StoreBackup",
+    "authority_marker_path",
+    "authority_state_report",
+    "backup_store",
+    "cutover_fence_path",
+    "cutover_in_progress",
+    "enforce_authority_marker",
+    "migration_dir",
+    "read_authority_marker",
+    "resolve_checkpoint_lookup_authority",
     "resolve_repository",
+    "restore_store",
+    "verify_backup_consistency",
 ]
 
 #: The authority names :meth:`CheckpointRepository.authority` answers.
@@ -136,6 +250,34 @@ __all__ = [
 #: the postgres spelling names the ``checkpoint_metadata`` table.
 AUTHORITY_FILESYSTEM: Final = "filesystem"
 AUTHORITY_POSTGRES: Final = "postgres"
+
+#: R36-03: the authenticated checkpoint-channel PROXY's authority name —
+#: a process without blob/database access reads the same authority
+#: through the lane's own HTTP surface instead of a local index.
+AUTHORITY_HTTP: Final = "checkpoint-channel"
+
+#: R36-03 (issue #262): the five TYPED lookup states. A retry/revival
+#: continuation decision consumes these and NOTHING may collapse one
+#: into another — a 503, an expired credential or unreadable bytes are
+#: answers of their own kind, never "no checkpoint".
+LOOKUP_EXACT: Final = "exact"
+LOOKUP_ABSENT: Final = "absent"
+LOOKUP_UNAVAILABLE: Final = "unavailable"
+LOOKUP_CORRUPT: Final = "corrupt"
+LOOKUP_UNAUTHORIZED: Final = "unauthorized"
+
+#: R36-05 (issue #264): the observability names the cutover fence
+#: reports. The startup/health line is
+#: :data:`METRIC_CONFIGURED_VS_ACTIVE` (see :func:`authority_state_report`);
+#: every refusal logs :data:`METRIC_MUTATION_REFUSED` with the same
+#: configured-vs-active pair the error names.
+METRIC_CONFIGURED_VS_ACTIVE: Final = "migration.configured_vs_active_authority"
+METRIC_MUTATION_REFUSED: Final = "migration.mutation_refused"
+
+#: The deployment authority MARKER document's schema — written by the
+#: migration tool's cutover/rollback under its exclusive fence, read
+#: HERE at composition time and before every metadata mutation.
+AUTHORITY_MARKER_SCHEMA: Final = "forge.checkpoint.authority/1"
 
 
 class CheckpointRepositoryUnavailable(Exception):
@@ -165,6 +307,337 @@ class CheckpointRepositoryMisconfigured(Exception):
     specific diagnostic instead of degrading to a filesystem index the
     operator believes is transactional.
     """
+
+
+class MutationsFencedError(CheckpointRepositoryUnavailable):
+    """A metadata mutation refused: another authority owns the store.
+
+    The SPECIFIC refusal a fenced repository answers with after a
+    cutover (or while a cutover holds the fence): exactly one backend
+    accepts metadata mutations, the other refuses with this error while
+    its immutable READS stay available. Never retried automatically —
+    the operator either cuts back (the migration tool's
+    ``rollback --verify-report ...``) or fixes the deployment's
+    configured authority.
+
+    R36-05: the error subclasses
+    :class:`CheckpointRepositoryUnavailable` deliberately — the HTTP
+    channel's existing outage mapping then answers a fenced upload with
+    503 plus the fence message (a REFUSAL naming the configured-vs-active
+    pair), never an untyped 500 and never a silent write to the retired
+    authority.
+    """
+
+
+# ---------------------------------------------------------------------------
+# R36-05: the cutover fence at the composition root — the authority marker
+# ---------------------------------------------------------------------------
+
+
+def migration_dir(root: Path | str) -> Path:
+    """The migration state directory: ``<store-root>/migration``."""
+    return Path(root) / "migration"
+
+
+def authority_marker_path(root: Path | str) -> Path:
+    """The deployment authority marker: ``<store-root>/migration/authority.json``.
+
+    The state file the migration tool's CUTOVER writes atomically and
+    the standard composition READS (through :class:`AuthorityMarkerFence`
+    at construction and before every metadata mutation): it names the
+    ONE authority that accepts metadata mutations. It is a marker, not
+    an index — it never decides which checkpoint is active.
+    """
+    return migration_dir(root) / "authority.json"
+
+
+def cutover_fence_path(root: Path | str) -> Path:
+    """The exclusive cutover fence: ``<store-root>/migration/cutover.lock``.
+
+    Taken (exclusive ``flock``) only by the migration tool's flip
+    commands and the reverse import; probed non-blockingly by
+    :func:`cutover_in_progress` on every fenced mutation. While it is
+    held, fenced repositories refuse mutations on BOTH sides.
+    """
+    return migration_dir(root) / "cutover.lock"
+
+
+def read_authority_marker(root: Path | str) -> dict[str, Any] | None:
+    """The authority marker document, or ``None`` when none exists."""
+    path = authority_marker_path(root)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(document, dict) and document.get("schema") == AUTHORITY_MARKER_SCHEMA:
+        return document
+    return None
+
+
+def cutover_in_progress(root: Path | str) -> bool:
+    """Whether a cutover/rollback currently holds the fence (a probe)."""
+    if fcntl is None:  # pragma: no cover — non-POSIX without flock
+        return False
+    path = cutover_fence_path(root)
+    if not path.is_file():
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True  # held by the cutover process
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+class AuthorityMarkerFence:
+    """The mutation fence every standard-composed repository carries (R36-05).
+
+    ONE implementation of the cutover fence, shared by the composition
+    root (:func:`resolve_repository` attaches it by default) and by the
+    documented wrapper (:func:`enforce_authority_marker` — the spelling
+    for repositories constructed directly). It reads the deployment
+    authority marker at CONSTRUCTION (the snapshot
+    :meth:`state` reports at startup) and RE-CHECKS the marker before
+    every metadata mutation:
+
+    - a cutover holding its fence → :class:`MutationsFencedError` (both
+      sides refuse; the flip is single-flight);
+    - no marker → allowed (the fence is dormant — no cutover ran);
+    - the marker names a DIFFERENT authority than the repository serves
+      → :class:`MutationsFencedError` naming configured-vs-active, with
+      :data:`METRIC_MUTATION_REFUSED` logged.
+
+    Reads never pass through here — retired history stays read-only and
+    distinguishable (``authority()`` keeps naming the authority that
+    answered). The pin overlay (``pin``/``unpin``) is deliberately NOT
+    fenced: it is a protection overlay on the shared blob volume, not
+    the metadata authority the cutover retires, and its removal
+    endangers nothing while every deletion path is fenced.
+
+    LOCK ORDER, stated once for every consumer: the fence check runs
+    BEFORE the mutation takes the store's volume-wide GC lock
+    (``<root>/cas-refs.lock`` and its postgres advisory twin) and before
+    any per-work lock — a fence refusal therefore never WAITS on the
+    volume lock, and no path holds the volume lock while waiting for
+    the cutover fence, so the two orders cannot cycle. The honest
+    boundary: a mutation that passed this check instants before the
+    marker flipped may still commit — the first supported rollout mode
+    is the DRAINED-OFFLINE cutover, where the fence makes concurrent
+    processes safe to REFUSE without promising online zero downtime.
+    """
+
+    def __init__(self, root: Path | str) -> None:
+        self._root = Path(root)
+        #: The construction-time snapshot (observability only — every
+        #: mutation re-reads the marker FRESH, so a running process
+        #: switches behavior the moment the cutover lands).
+        self.construction_marker: dict[str, Any] | None = read_authority_marker(self._root)
+
+    def refuse_mutations(self, configured_authority: str) -> None:
+        """Refuse unless *configured_authority* is the marker's authority."""
+        if cutover_in_progress(self._root):
+            raise MutationsFencedError(
+                "a checkpoint authority cutover is in progress (fence at "
+                f"{cutover_fence_path(self._root)}) — mutations are fenced on both "
+                "sides; retry once the cutover completes"
+            )
+        marker = read_authority_marker(self._root)
+        if marker is None:
+            return  # dormant: no cutover has flipped this store
+        named = str(marker.get("authority") or "")
+        if named and named != configured_authority:
+            _LOGGER.warning(
+                "%s: configured=%s active=%s work_root=%s — the marker at %s "
+                "names another authority; the mutation is refused",
+                METRIC_MUTATION_REFUSED,
+                configured_authority,
+                named,
+                self._root,
+                authority_marker_path(self._root),
+            )
+            raise MutationsFencedError(
+                f"the checkpoint authority marker at {authority_marker_path(self._root)} "
+                f"names {named!r}; this {configured_authority!r} repository refuses "
+                "metadata mutations (configured vs active authority mismatch) — "
+                "immutable reads stay available; recovery: `python -m "
+                "forge.adaptive.checkpoint_migration rollback --verify-report <path>`"
+            )
+
+    def state(self) -> dict[str, Any]:
+        """The marker-side view of the fence (a fresh read, never cached)."""
+        marker = read_authority_marker(self._root)
+        return {
+            "active_authority": str(marker.get("authority") or "") if marker else None,
+            "marker_generation": marker.get("generation") if marker else None,
+            "marker_path": str(authority_marker_path(self._root)),
+            "cutover_in_progress": cutover_in_progress(self._root),
+        }
+
+
+def authority_state_report(
+    env: Mapping[str, str] | None = None,
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """``migration.configured_vs_active_authority`` — the startup/health line.
+
+    R36-05: wherever the application composes the repository (the app's
+    startup, the control service's composition, ``forge doctor``), this
+    is the ONE line that reports the deployment's CONFIGURED checkpoint
+    authority (``FORGE_CHECKPOINT_DURABILITY``, with ``best_effort``
+    spelled as the ``filesystem`` authority it names) against the
+    authority the deployment's MARKER declares ACTIVE, plus the marker's
+    generation (its flip counter — content identity, never a timestamp
+    authorization). ``state`` is one of:
+
+    - ``unmarked`` — no marker exists; the fence is dormant (no cutover
+      has run against this store root);
+    - ``aligned`` — the configured repository IS the authority the
+      marker names; mutations pass the fence;
+    - ``mismatch`` — the configured repository is NOT the marker's
+      authority: this process's metadata mutations will be refused with
+      :class:`MutationsFencedError` until it restarts on the configured
+      authority or the operator rolls the marker back.
+
+    A misconfigured mode (junk ``FORGE_CHECKPOINT_DURABILITY``) is
+    reported as ``configured_problem`` — the composition itself refuses
+    construction separately, this report never raises.
+    """
+    from forge.api_checkpoint_channel import (
+        CHECKPOINT_STORE_DIR_ENV,
+        DEFAULT_CHECKPOINT_ROOT,
+        DURABILITY_BEST_EFFORT,
+        DurabilityContract,
+    )
+
+    source: Mapping[str, str] = os.environ if env is None else env
+    storage_root = (
+        Path(root)
+        if root is not None
+        else Path(str(source.get(CHECKPOINT_STORE_DIR_ENV, "")).strip() or DEFAULT_CHECKPOINT_ROOT)
+    )
+    configured_problem = ""
+    try:
+        mode = DurabilityContract.mode_from_env(dict(source))
+    except ValueError as exc:
+        mode = ""
+        configured_problem = str(exc)
+    configured_authority = AUTHORITY_FILESYSTEM if mode == DURABILITY_BEST_EFFORT else mode
+    marker = read_authority_marker(storage_root)
+    active = str(marker.get("authority") or "") if marker else ""
+    if marker is None:
+        state = "unmarked"
+    elif configured_authority and configured_authority != active:
+        state = "mismatch"
+    else:
+        state = "aligned"
+    return {
+        "metric": METRIC_CONFIGURED_VS_ACTIVE,
+        "configured_repository": mode or None,
+        "configured_authority": configured_authority or None,
+        "active_authority": active or None,
+        "marker_generation": marker.get("generation") if marker else None,
+        "marker_path": str(authority_marker_path(storage_root)),
+        "cutover_in_progress": cutover_in_progress(storage_root),
+        "state": state,
+        "configured_problem": configured_problem,
+    }
+
+
+@dataclass(frozen=True)
+class CheckpointLookupOutcome:
+    """The TYPED answer of one checkpoint-presence lookup (R36-03).
+
+    The retry/revival continuation chain used to collapse every lookup
+    failure into ``False`` ("no checkpoint") — a PostgreSQL-only
+    checkpoint read as nothing in ``/retry`` exactly when the control
+    plane was slow or the legacy token window closed. This is the typed
+    replacement: :attr:`state` is one of :data:`LOOKUP_EXACT`,
+    :data:`LOOKUP_ABSENT`, :data:`LOOKUP_UNAVAILABLE`,
+    :data:`LOOKUP_CORRUPT` or :data:`LOOKUP_UNAUTHORIZED`, and NOTHING
+    may collapse one into another — the consumer decides, the lookup
+    never decides for it by lossy encoding.
+
+    ``exact`` additionally carries the checkpoint's :attr:`checkpoint_id`
+    (its content address — the manifest's SHA-256) and :attr:`digest`
+    (the same address, the ``continuation.checkpoint_digest``
+    observability spelling), so the decision can PIN the exact bytes it
+    approved; a later upload changes nothing about a decision that
+    already holds one. The remaining states carry an operator-facing
+    :attr:`detail` instead, plus the :attr:`authority` that answered and
+    the measured :attr:`latency_s` (``checkpoint.lookup.latency``).
+    """
+
+    #: One of the ``LOOKUP_*`` state constants.
+    state: str
+    #: The exact checkpoint's content address (``exact`` only).
+    checkpoint_id: str | None = None
+    #: The exact checkpoint's digest — the same address (``exact`` only).
+    digest: str | None = None
+    #: Which authority answered (``filesystem`` / ``postgres`` /
+    #: ``checkpoint-channel`` / the legacy adapter's label).
+    authority: str = ""
+    #: The operator-facing explanation of a non-exact answer.
+    detail: str = ""
+    #: How long the lookup took, when it was measured.
+    latency_s: float | None = None
+
+    @classmethod
+    def exact(
+        cls,
+        checkpoint_id: str,
+        *,
+        authority: str = "",
+        digest: str | None = None,
+        latency_s: float | None = None,
+    ) -> CheckpointLookupOutcome:
+        """The one state that carries the checkpoint's identity."""
+        return cls(
+            state=LOOKUP_EXACT,
+            checkpoint_id=checkpoint_id,
+            digest=digest or checkpoint_id,
+            authority=authority,
+            latency_s=latency_s,
+        )
+
+    @classmethod
+    def missing(
+        cls,
+        state: str,
+        *,
+        authority: str = "",
+        detail: str = "",
+        latency_s: float | None = None,
+    ) -> CheckpointLookupOutcome:
+        """A non-exact answer (absent/unavailable/corrupt/unauthorized)."""
+        return cls(state=state, authority=authority, detail=detail, latency_s=latency_s)
+
+    @property
+    def is_exact(self) -> bool:
+        return self.state == LOOKUP_EXACT
+
+    @property
+    def is_absent(self) -> bool:
+        return self.state == LOOKUP_ABSENT
+
+    @property
+    def is_unavailable(self) -> bool:
+        return self.state == LOOKUP_UNAVAILABLE
+
+    @property
+    def is_corrupt(self) -> bool:
+        return self.state == LOOKUP_CORRUPT
+
+    @property
+    def is_unauthorized(self) -> bool:
+        return self.state == LOOKUP_UNAUTHORIZED
 
 
 @runtime_checkable
@@ -219,6 +692,22 @@ class CheckpointRepository(Protocol):
         is re-hashed to its address — rotted bytes raise
         :class:`forge.api_checkpoint_channel.CheckpointCorruptError`
         rather than being served as if they were the checkpoint.
+        """
+        ...
+
+    async def lookup_outcome(self, work_id: str) -> CheckpointLookupOutcome:
+        """The TYPED presence lookup the retry/revival chain runs (R36-03).
+
+        One call, five disjoint answers: ``exact`` (the work's ACTIVE
+        checkpoint exists AND its bytes re-hash to their addresses — the
+        outcome carries the checkpoint's content address), ``absent``
+        (the configured authority provably holds nothing for the work),
+        ``corrupt`` (the index names a checkpoint whose stored bytes no
+        longer match), ``unavailable`` (the authority could not be
+        reached) and ``unauthorized`` (the HTTP proxy's credential was
+        refused). Nothing collapses: the CALLER distinguishes an outage
+        from an absence, exactly the distinction the untyped boolean
+        this replaces destroyed.
         """
         ...
 
@@ -736,9 +1225,35 @@ class _StoreBackedRepository:
     module; the subclasses only choose WHICH index the store consults
     (the filesystem JSON index synchronously, the ``checkpoint_metadata``
     table transactionally) and how the failures of that index are typed.
+
+    R36-05: instances composed through :func:`resolve_repository` carry
+    an :class:`AuthorityMarkerFence`; every metadata mutation passes
+    :meth:`_refuse_metadata_mutation` FIRST (see the fence's lock-order
+    contract). Directly constructed instances (the migration tool's own
+    import spelling, and every pre-R36-05 caller) stay unfenced.
     """
 
     _store: CheckpointStore
+
+    #: The authority name the subclass serves (a class constant).
+    _AUTHORITY_NAME: str = ""
+
+    #: The composition-root mutation fence — None when constructed
+    #: directly (the migration tool's spelling).
+    _authority_fence: AuthorityMarkerFence | None = None
+
+    def _refuse_metadata_mutation(self) -> None:
+        """The R36-05 fence check every mutation passes FIRST.
+
+        Runs BEFORE the store takes the volume-wide GC lock or any
+        per-work lock (the one documented lock order — see
+        :class:`AuthorityMarkerFence`), so a fence refusal never waits
+        on a contended volume and can never deadlock against a sweep.
+        Reads (``entry``/``read``/``lookup_outcome``/listings/health)
+        and the pin overlay deliberately do NOT pass through here.
+        """
+        if self._authority_fence is not None:
+            self._authority_fence.refuse_mutations(self._AUTHORITY_NAME)
 
     async def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
         """The authority-specific lookup every seam here composes with."""
@@ -816,6 +1331,76 @@ class _StoreBackedRepository:
         manifest_bytes, blobs = await self.read_entry(entry)
         return manifest_bytes, [blobs[digest] for digest in sorted(blobs)]
 
+    async def lookup_outcome(self, work_id: str) -> CheckpointLookupOutcome:
+        """The typed presence lookup, shared by both store-backed
+        authorities (R36-03 — see the protocol method).
+
+        The verified read is deliberate: an ``exact`` answer must mean
+        the checkpoint is not merely INDEXED but READABLE — the decision
+        that pins it would otherwise dispatch a lane at bytes that rot.
+        The re-hash runs off the event loop (a worker thread), the same
+        as every other store read here.
+        """
+        from forge.api_checkpoint_channel import CheckpointCorruptError
+
+        started = time.monotonic()
+        authority = await self.authority()
+        try:
+            entry = await self.entry(work_id)
+        except CheckpointRepositoryUnavailable as exc:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=authority,
+                detail=str(exc),
+                latency_s=time.monotonic() - started,
+            )
+        if entry is None:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_ABSENT,
+                authority=authority,
+                detail=(
+                    f"the {authority} checkpoint authority holds no checkpoint for work {work_id!r}"
+                ),
+                latency_s=time.monotonic() - started,
+            )
+        checkpoint_id = str(entry.get("checkpoint_id") or "")
+        try:
+            await self.read_entry(entry)  # verified — rot is never "exact"
+        except CheckpointRepositoryUnavailable as exc:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=authority,
+                detail=str(exc),
+                latency_s=time.monotonic() - started,
+            )
+        except OSError as exc:  # the blob volume itself is unreachable
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=authority,
+                detail=(
+                    f"the {authority} checkpoint authority cannot read the blobs "
+                    f"of checkpoint {checkpoint_id[:12]} for work {work_id!r}: {exc}"
+                ),
+                latency_s=time.monotonic() - started,
+            )
+        except (CheckpointCorruptError, ValueError) as exc:
+            # Rotted bytes — or an index row naming non-addresses — are
+            # data the authority can no longer honor, never "absent".
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_CORRUPT,
+                authority=authority,
+                detail=(
+                    f"checkpoint {checkpoint_id[:12]} for work {work_id!r} no "
+                    f"longer hashes to its addresses: {exc}"
+                ),
+                latency_s=time.monotonic() - started,
+            )
+        return CheckpointLookupOutcome.exact(
+            checkpoint_id,
+            authority=authority,
+            latency_s=time.monotonic() - started,
+        )
+
     async def put(
         self,
         work_id: str,
@@ -858,7 +1443,15 @@ class FilesystemCheckpointRepository(_StoreBackedRepository):
     one configured authority).
     """
 
-    def __init__(self, root: Path | str, *, policy: StoragePolicy | None = None) -> None:
+    _AUTHORITY_NAME = AUTHORITY_FILESYSTEM
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        policy: StoragePolicy | None = None,
+        fence: AuthorityMarkerFence | None = None,
+    ) -> None:
         from forge.api_checkpoint_channel import CheckpointStore
 
         try:
@@ -867,6 +1460,7 @@ class FilesystemCheckpointRepository(_StoreBackedRepository):
             raise CheckpointRepositoryUnavailable(
                 f"the filesystem checkpoint authority at {root} cannot be initialized: {exc}"
             ) from exc
+        self._authority_fence = fence
 
     async def authority(self) -> str:
         return AUTHORITY_FILESYSTEM
@@ -887,7 +1481,10 @@ class FilesystemCheckpointRepository(_StoreBackedRepository):
         Same verdict shape the upload route has always answered with
         (``checkpoint_id``, ``sequence``, ``latest``, and the NEXT-06
         ``superseded`` fields when another writer owns the index lock).
+        The R36-05 fence check runs FIRST — before the store's per-work
+        index lock and the volume-wide reference/delete lock.
         """
+        self._refuse_metadata_mutation()
 
         def _land() -> dict[str, Any]:
             return self._store.put_checkpoint(
@@ -910,6 +1507,7 @@ class FilesystemCheckpointRepository(_StoreBackedRepository):
 
     async def apply_retention(self, work_id: str, keep_last: int) -> int:
         """The operator's retention pass (never the ACTIVE checkpoint)."""
+        self._refuse_metadata_mutation()  # R36-05: the delete family fences too
         return await asyncio.to_thread(self._store.apply_retention, work_id, keep_last)
 
     async def storage_health_report(self, policy: StoragePolicy | None = None) -> dict[str, Any]:
@@ -933,12 +1531,15 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
     answer, never ``None``, never a filesystem index consult.
     """
 
+    _AUTHORITY_NAME = AUTHORITY_POSTGRES
+
     def __init__(
         self,
         root: Path | str,
         session_factory: async_sessionmaker[AsyncSession] | None,
         *,
         policy: StoragePolicy | None = None,
+        fence: AuthorityMarkerFence | None = None,
     ) -> None:
         from forge.api_checkpoint_channel import CheckpointStore, DurabilityContract
 
@@ -963,6 +1564,10 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
         #: once) — the advisory first-upload anchor exists only there;
         #: SQLite (tests) serializes writers natively.
         self._postgres_dialect: bool | None = None
+        #: R36-05: the composition-root mutation fence (None when the
+        #: migration tool constructs this repository directly — its
+        #: imports ARE the operator's authority-moving path).
+        self._authority_fence = fence
 
     @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
@@ -1041,12 +1646,19 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
         CONFLICT DO NOTHING`` under the composite PK) so a racing twin's
         commit wins, on-upload retention inside the same transaction,
         blobs before the commit and doomed-blob unlinks after it.
-        Q35-05 wraps that call with the two serialization layers the
-        store alone cannot provide: the per-work PIN flock (a pin can
-        never land inside this landing's retention recheck) and, for
-        the work's FIRST checkpoint, :meth:`first_upload_lock` (an
-        empty row set is not a mutex).
+        Q35-05 added the per-work PIN flock around that call; R36-04
+        moved it INSIDE the store, nested in the VOLUME-wide
+        reference/delete lock the landing now takes (a different work's
+        sweep must not interleave its final scan and unlink with this
+        landing's reference commit). The work's FIRST checkpoint still
+        serializes through :meth:`first_upload_lock` (an empty row set
+        is not a mutex) — taken BEFORE the volume lock, which no sweep
+        ever waits on, so no cycle exists. R36-05: the composition-root
+        FENCE check runs FIRST of all — before the first-upload anchor,
+        the volume lock and the pin flock (the one documented lock
+        order; see :class:`AuthorityMarkerFence`).
         """
+        self._refuse_metadata_mutation()
         try:
             if await self.entry(work_id) is None:
                 async with self.first_upload_lock(work_id):
@@ -1055,6 +1667,10 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
         except (CheckpointRepositoryUnavailable, CheckpointRepositoryMisconfigured):
             raise  # already typed — never re-wrapped
         except Exception as exc:
+            from forge.api_checkpoint_channel import GCLockTimeout
+
+            if isinstance(exc, GCLockTimeout):
+                raise  # R36-04: recoverable, typed — the landing is re-delivered
             if _refusal(exc):
                 raise
             raise _unavailable(f"put for work {work_id!r}", exc) from exc
@@ -1066,14 +1682,27 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
         blobs: dict[str, bytes],
         sequence: int,
     ) -> dict[str, Any]:
-        """One landing under the per-work pin flock (see :meth:`put_checkpoint`)."""
-        async with self._store.pins.alock(work_id):
-            return await self._store.aput_checkpoint(
-                work_id=work_id,
-                manifest_bytes=manifest_bytes,
-                blobs=blobs,
-                sequence=sequence,
-            )
+        """One landing — the store holds the volume lock and the pin flock.
+
+        R36-04 moved BOTH synchronization layers INSIDE
+        :meth:`CheckpointStore.aput_checkpoint`: the landing takes the
+        VOLUME-wide reference/delete lock first, then the per-work pin
+        flock nested inside it — the same single order every sweep
+        takes — so a retention pass for ANY work can never interleave
+        its final reference scan and unlink with this landing's
+        reference commit. The repository-level pin wrapper Q35-05 put
+        here would INVERT that order (pin flock outside the volume
+        lock, while ``aapply_retention`` holds volume-then-pins) and
+        deadlock; the guarantee it provided — a pin can never land
+        inside this landing's retention recheck — is unchanged, one
+        level down.
+        """
+        return await self._store.aput_checkpoint(
+            work_id=work_id,
+            manifest_bytes=manifest_bytes,
+            blobs=blobs,
+            sequence=sequence,
+        )
 
     async def list_entries(self) -> list[dict[str, Any]]:
         try:
@@ -1084,9 +1713,14 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
             raise _unavailable("list", exc) from exc
 
     async def apply_retention(self, work_id: str, keep_last: int) -> int:
+        self._refuse_metadata_mutation()  # R36-05: the delete family fences too
         try:
             return await self._store.aapply_retention(work_id, keep_last)
         except Exception as exc:
+            from forge.api_checkpoint_channel import GCLockTimeout
+
+            if isinstance(exc, GCLockTimeout):
+                raise  # R36-04: the sweep aborts and retries later — typed, not "unreachable"
             if _refusal(exc):
                 raise
             raise _unavailable(f"retention for work {work_id!r}", exc) from exc
@@ -1101,11 +1735,19 @@ class PostgresCheckpointRepository(_StoreBackedRepository):
             raise _unavailable("health report", exc) from exc
 
 
+def _default_store_root() -> Path:
+    """The store root the environment names (the channel's default)."""
+    from forge.api_checkpoint_channel import CHECKPOINT_STORE_DIR_ENV, DEFAULT_CHECKPOINT_ROOT
+
+    return Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "").strip() or DEFAULT_CHECKPOINT_ROOT)
+
+
 def resolve_repository(
     env: Mapping[str, str] | None = None,
     *,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     root: Path | str | None = None,
+    fenced: bool = True,
 ) -> CheckpointRepository:
     """The ONE composition point: the configured checkpoint authority.
 
@@ -1118,6 +1760,19 @@ def resolve_repository(
     factory it derives for its mailbox) — and returns the repository
     every surface should share: the HTTP upload route, the resume
     producer, the operator reads and the retention jobs.
+
+    R36-05: *fenced* (the DEFAULT) attaches
+    :class:`AuthorityMarkerFence` to the resolved repository — the
+    marker at ``<root>/migration/authority.json`` is read at
+    construction (report it with :func:`authority_state_report`) and
+    re-checked before every metadata mutation, so an ordinary process
+    composed BEFORE a cutover refuses its next mutation AFTER the flip
+    with the typed :class:`MutationsFencedError` instead of writing the
+    retired authority. ``fenced=False`` is the migration tool's own
+    spelling (its imports ARE the operator's authority-moving path);
+    the deployed wrapper for directly constructed repositories is
+    :func:`enforce_authority_marker` — ONE fence implementation shared
+    by both spellings.
 
     Fail closed, at construction: an unknown mode value and a
     ``postgres`` selection without a session factory raise
@@ -1147,6 +1802,7 @@ def resolve_repository(
         if root is not None
         else Path(str(source.get(CHECKPOINT_STORE_DIR_ENV, "")).strip() or DEFAULT_CHECKPOINT_ROOT)
     )
+    fence = AuthorityMarkerFence(storage_root) if fenced else None
     if mode == DURABILITY_POSTGRES:
         if session_factory is None:
             raise CheckpointRepositoryMisconfigured(
@@ -1154,5 +1810,779 @@ def resolve_repository(
                 "database holding checkpoint_metadata — refusing to degrade the "
                 "checkpoint authority back to the filesystem index"
             )
-        return PostgresCheckpointRepository(storage_root, session_factory)
-    return FilesystemCheckpointRepository(storage_root)
+        return PostgresCheckpointRepository(storage_root, session_factory, fence=fence)
+    return FilesystemCheckpointRepository(storage_root, fence=fence)
+
+
+class SingleAuthorityRepository:
+    """One repository, mutation-fenced by the deployment authority marker.
+
+    The wrapper the migration documentation composes for repositories
+    constructed DIRECTLY:
+    ``enforce_authority_marker(FilesystemCheckpointRepository(...))`` —
+    the standard composition (:func:`resolve_repository`) now attaches
+    the SAME fence (:class:`AuthorityMarkerFence`, ONE implementation)
+    at resolution time, so this wrapper is the explicit spelling for
+    hand-composed instances and for wrapping a raw resolution
+    (``resolve_repository(..., fenced=False)``). Mutations
+    (``put``/``put_checkpoint``/``apply_retention``) are refused with
+    the typed :class:`MutationsFencedError` when the marker at
+    ``<store-root>/migration/authority.json`` names a DIFFERENT
+    authority, or while a cutover holds the fence; immutable reads
+    (``entry``, ``read``, ``read_entry``, ``pins``, listings, health)
+    pass through untouched, so the old root stays readable exactly as
+    documented — distinguishable through :meth:`authority`, which keeps
+    naming the authority that answered. The marker is re-read on every
+    mutation — a running process switches behavior when the cutover
+    lands, without a restart of the guard itself. Lock order: the fence
+    check precedes every store lock (see :class:`AuthorityMarkerFence`).
+    """
+
+    def __init__(self, repository: Any, root: Path | str | None = None) -> None:
+        self._repository = repository
+        self._root = Path(root) if root is not None else _default_store_root()
+        self._fence = AuthorityMarkerFence(self._root)
+
+    async def _refuse_if_fenced(self) -> None:
+        self._fence.refuse_mutations(await self._repository.authority())
+
+    # -- fenced mutations -----------------------------------------------------
+
+    async def put(
+        self,
+        work_id: str,
+        checkpoint_id: str,
+        manifest_bytes: bytes,
+        blobs: dict[str, bytes],
+    ) -> None:
+        await self._refuse_if_fenced()
+        return await self._repository.put(work_id, checkpoint_id, manifest_bytes, blobs)
+
+    async def put_checkpoint(
+        self,
+        *,
+        work_id: str,
+        manifest_bytes: bytes,
+        blobs: dict[str, bytes],
+        sequence: int,
+    ) -> dict[str, Any]:
+        await self._refuse_if_fenced()
+        return await self._repository.put_checkpoint(
+            work_id=work_id, manifest_bytes=manifest_bytes, blobs=blobs, sequence=sequence
+        )
+
+    async def apply_retention(self, work_id: str, keep_last: int) -> int:
+        await self._refuse_if_fenced()
+        return await self._repository.apply_retention(work_id, keep_last)
+
+    # -- passthrough (reads, pins, listings) ------------------------------------
+
+    async def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
+        return await self._repository.entry(work_id, checkpoint_id)
+
+    async def read(self, work_id: str) -> tuple[bytes, list[bytes]] | None:
+        return await self._repository.read(work_id)
+
+    async def read_entry(self, entry: dict[str, Any]) -> tuple[bytes, dict[str, bytes]]:
+        return await self._repository.read_entry(entry)
+
+    async def authority(self) -> str:
+        return await self._repository.authority()
+
+    async def pin(self, work_id: str, checkpoint_id: str, reason: str = "") -> bool:
+        return await self._repository.pin(work_id, checkpoint_id, reason)
+
+    async def unpin(self, work_id: str, checkpoint_id: str, reason: str | None = None) -> int:
+        return await self._repository.unpin(work_id, checkpoint_id, reason)
+
+    async def pins(self, work_id: str | None = None) -> list[dict[str, Any]]:
+        return await self._repository.pins(work_id)
+
+    async def list_entries(self) -> list[dict[str, Any]]:
+        return await self._repository.list_entries()
+
+    async def storage_health_report(self, policy: Any = None) -> dict[str, Any]:
+        return await self._repository.storage_health_report(policy)
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward-compat passthrough (first_upload_lock and whatever the
+        # protocol grows next): the guard fences mutations, never reads.
+        return getattr(self._repository, name)
+
+
+def enforce_authority_marker(
+    repository: Any, root: Path | str | None = None
+) -> SingleAuthorityRepository:
+    """Wrap *repository* so exactly ONE authority accepts mutations.
+
+    The documented deployment composition for repositories constructed
+    directly: ``enforce_authority_marker(FilesystemCheckpointRepository(
+    root), root)``. The marker lives at
+    ``<store-root>/migration/authority.json`` and is written only by the
+    migration tool's cutover/rollback under the cutover fence. The
+    STANDARD composition (:func:`resolve_repository`) attaches the same
+    fence by default since R36-05 — wrapping an already-fenced
+    repository merely checks the marker twice, never differently. Reads
+    never fence.
+    """
+    return SingleAuthorityRepository(repository, root)
+
+
+#: R36-03: how long the HTTP lookup proxy waits for one checkpoint read
+#: — bounded, so a slow control plane delays the retry decision instead
+#: of freezing the event loop (the old path did a synchronous 10s GET
+#: INSIDE the loop).
+HTTP_LOOKUP_TIMEOUT_S: Final = 5.0
+
+#: A bare checkpoint id must be a 64-hex content address (the same shape
+#: the channel's own ``checkpoint_id`` validation uses).
+_HEX64: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+class HttpCheckpointRepository:
+    """The authenticated checkpoint-channel proxy for processes without
+    blob/database access (R36-03, issue #262).
+
+    A lane-side or worker process that must evaluate a retry's
+    continuation evidence has neither the shared blob volume nor the
+    metadata database — its ONE honest window on the configured
+    authority is the SAME authenticated HTTP surface the lane itself
+    dials: ``GET /lane/checkpoints/{work_id}`` (the checkpoint channel
+    route, guarded by :func:`forge.api_lane_control.
+    authorize_work_credential`). This class is that window wrapped as
+    the :class:`CheckpointLookupOutcome` contract — nothing more:
+
+    - 200 → ``exact`` (the served ``checkpoint_id`` is the identity the
+      decision pins; the channel verified every blob on the way out);
+    - 404 → ``absent`` (the configured authority holds nothing);
+    - 401/403 → ``unauthorized`` (the credential was refused — an
+      expired or superseded attempt token is an ANSWER, not an outage);
+    - 503 → ``unavailable`` (the authority itself could not answer);
+    - 500 → ``corrupt`` (the channel re-hash refused the stored bytes);
+    - any other status or a transport error/timeout → ``unavailable``.
+
+    The credential is the lane's OWN derivation — never a new scheme:
+    either a pre-computed work-scoped token (the dispatch-provisioned
+    ``FORGE_LANE_CONTROL_TOKEN`` shape, used as-is), or the shared
+    secret plus the work's CURRENT attempt generation, minted exactly
+    the way the dispatch mints it
+    (:func:`forge.api_lane_control.lane_control_token` with the
+    generation from :func:`forge.api_lane_control.durable_run_generation`).
+    MINTING THE GENERATION-LESS LEGACY TOKEN IS REFUSED: the legacy
+    window's closing must not break the modern path because the modern
+    path never depended on it.
+
+    The lookup runs on :class:`httpx.AsyncClient` with a bounded
+    timeout — the synchronous ``httpx.get`` inside the control event
+    loop is gone. An injected *client* (tests) replaces the owned one
+    and is never closed here.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str | Callable[[str], Awaitable[str]] | None = None,
+        secret: str | None = None,
+        generation_lookup: Callable[[str], Awaitable[int | None]] | None = None,
+        timeout: float = HTTP_LOOKUP_TIMEOUT_S,
+        client: Any | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+        self._secret = (secret or "").strip() or None
+        self._generation_lookup = generation_lookup
+        self._timeout = timeout
+        self._owns_client = client is None
+        self._client = client
+
+    async def authority(self) -> str:
+        return AUTHORITY_HTTP
+
+    async def _work_token(self, work_id: str) -> str | None:
+        """The attempt-scoped credential for ONE work, or ``None``.
+
+        ``None`` is the honest "cannot mint" — the caller answers
+        ``unavailable`` with the reason, never a legacy token and never
+        a guess.
+        """
+        if isinstance(self._token, str):
+            return self._token
+        if callable(self._token):
+            token = await self._token(work_id)
+            return str(token) if token else None
+        if self._secret:
+            if self._generation_lookup is None:
+                return None  # no generation authority → no attempt-scoped mint
+            from forge.api_lane_control import lane_control_token
+
+            generation = await self._generation_lookup(work_id)
+            if generation is None:
+                return None
+            return lane_control_token(self._secret, work_id, generation=generation)
+        return None
+
+    async def lookup_outcome(self, work_id: str) -> CheckpointLookupOutcome:
+        """One authenticated presence lookup against the channel route."""
+        import httpx
+
+        started = time.monotonic()
+        token = await self._work_token(work_id)
+        if token is None:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=AUTHORITY_HTTP,
+                detail=(
+                    "no attempt-scoped lane credential is configured for the "
+                    "checkpoint-channel lookup (FORGE_LANE_CONTROL_TOKEN, or "
+                    "FORGE_LANE_CONTROL_SECRET plus the durable generation "
+                    "authority) — the modern path refuses the legacy "
+                    "generation-less token rather than guessing"
+                ),
+                latency_s=time.monotonic() - started,
+            )
+        url = f"{self._base_url}/lane/checkpoints/{work_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            if self._client is not None:
+                response = await self._client.get(url, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=AUTHORITY_HTTP,
+                detail=f"the checkpoint channel at {self._base_url} is unreachable: {exc}",
+                latency_s=time.monotonic() - started,
+            )
+        latency = time.monotonic() - started
+        status = response.status_code
+        if status == 200:
+            try:
+                document = response.json()
+            except ValueError as exc:
+                return CheckpointLookupOutcome.missing(
+                    LOOKUP_CORRUPT,
+                    authority=AUTHORITY_HTTP,
+                    detail=f"the checkpoint channel answered with non-JSON content: {exc}",
+                    latency_s=latency,
+                )
+            checkpoint_id = str(document.get("checkpoint_id") if isinstance(document, dict) else "")
+            if not _HEX64.fullmatch(checkpoint_id):
+                return CheckpointLookupOutcome.missing(
+                    LOOKUP_CORRUPT,
+                    authority=AUTHORITY_HTTP,
+                    detail=(
+                        "the checkpoint channel answered 200 without a valid "
+                        f"checkpoint_id ({checkpoint_id!r})"
+                    ),
+                    latency_s=latency,
+                )
+            return CheckpointLookupOutcome.exact(
+                checkpoint_id, authority=AUTHORITY_HTTP, latency_s=latency
+            )
+        if status == 404:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_ABSENT,
+                authority=AUTHORITY_HTTP,
+                detail="the checkpoint channel holds no checkpoint for this work",
+                latency_s=latency,
+            )
+        if status in (401, 403):
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAUTHORIZED,
+                authority=AUTHORITY_HTTP,
+                detail=(
+                    f"the checkpoint channel refused the lane credential ({status}) — "
+                    "an expired or superseded attempt token is an answer, not an outage"
+                ),
+                latency_s=latency,
+            )
+        if status == 503:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_UNAVAILABLE,
+                authority=AUTHORITY_HTTP,
+                detail="the checkpoint channel reports the checkpoint authority unavailable",
+                latency_s=latency,
+            )
+        if status == 500:
+            return CheckpointLookupOutcome.missing(
+                LOOKUP_CORRUPT,
+                authority=AUTHORITY_HTTP,
+                detail=(
+                    "the checkpoint channel failed the verified read of the "
+                    "stored checkpoint (rotted bytes or a broken index row)"
+                ),
+                latency_s=latency,
+            )
+        return CheckpointLookupOutcome.missing(
+            LOOKUP_UNAVAILABLE,
+            authority=AUTHORITY_HTTP,
+            detail=f"the checkpoint channel answered an unexpected {status}",
+            latency_s=latency,
+        )
+
+
+def resolve_checkpoint_lookup_authority(
+    env: Mapping[str, str] | None = None,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    root: Path | str | None = None,
+) -> CheckpointRepository | HttpCheckpointRepository | None:
+    """The R36-03 selection matrix for the RETRY/REVIVAL lookup chain.
+
+    One honest authority per process, selected in order:
+
+    1. a session factory is wired → :func:`resolve_repository` — the
+       SAME single composition point upload, resume and operations use
+       (``FORGE_CHECKPOINT_DURABILITY`` honored; a misconfiguration
+       raises here exactly as it does on every other surface);
+    2. no factory, but a control URL and a lane credential are
+       configured (``FORGE_LANE_CONTROL_URL`` plus
+       ``FORGE_LANE_CONTROL_TOKEN``, or ``FORGE_LANE_CONTROL_SECRET``
+       when the factory-less process still has a generation authority —
+       which it does not, so the token shape is the realistic one) →
+       the :class:`HttpCheckpointRepository` proxy;
+    3. neither → ``None``: the caller answers the TYPED ``unavailable``
+       — never the filesystem index, never "absent".
+
+    Deliberately NOT selected: a bare filesystem index read for a
+    factory-less process (the authority a worker has no contract with —
+    the exact defect this resolves) and the legacy work-only HTTP token
+    (see :func:`forge.runs.revival.durable_checkpoint_outcome` for the
+    explicitly opt-in legacy adapter).
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    if session_factory is not None:
+        return resolve_repository(env=dict(source), session_factory=session_factory, root=root)
+    base_url = str(source.get("FORGE_LANE_CONTROL_URL", "")).strip()
+    if not base_url:
+        return None
+    token = str(source.get("FORGE_LANE_CONTROL_TOKEN", "")).strip()
+    if token:
+        return HttpCheckpointRepository(base_url=base_url, token=token)
+    secret = str(source.get("FORGE_LANE_CONTROL_SECRET", "")).strip()
+    if secret:
+        # A generation lookup needs the durable authority — a factory-less
+        # process has none, so the secret alone cannot mint the modern
+        # attempt-scoped credential; the HTTP proxy is still returned and
+        # answers the typed "unavailable" with the exact reason.
+        return HttpCheckpointRepository(base_url=base_url, secret=secret)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# R36-21 (issue #280): backup/restore of metadata AND blobs together
+# ---------------------------------------------------------------------------
+
+#: The backup manifest document's schema — one consistent store state,
+#: metadata half and blob half captured together, verifiable on restore.
+BACKUP_MANIFEST_SCHEMA: Final = "forge.checkpoint.backup/1"
+
+#: The subdirectories of a store root that ARE durable state (the lock
+#: files, ``*.lock`` / ``cas-refs.lock``, and the migration cutover fence
+#: are transient coordination artifacts and are deliberately NOT backed
+#: up; the authority MARKER under ``migration/`` IS durable — it names
+#: which authority owns the metadata).
+_BACKUP_DIRS: Final = ("pins", "gc", "migration")
+
+#: Where the exported ``checkpoint_metadata`` rows live inside a backup
+#: (the postgres authority's metadata half; absent in filesystem backups).
+_BACKUP_METADATA_ROWS: Final = "checkpoint_metadata.jsonl"
+
+
+class BackupMismatchError(Exception):
+    """A backup's metadata and blob halves do not describe ONE store state.
+
+    Raised by :func:`restore_store` (and pre-checkable through
+    :func:`verify_backup_consistency`) when a checkpoint the metadata
+    half names references bytes the blob half does not carry — the
+    shape an operator reassembling a backup from different moments
+    (metadata taken at t2, blobs taken at t1) produces. The restore
+    REFUSES before writing anything into the target: a restored index
+    entry whose bytes are missing is a work that looks resumable and
+    is not, exactly the silent corruption this typing exists to
+    prevent. :attr:`affected` lists every offending
+    ``(work_id, checkpoint_id, missing digests)`` so the operator sees
+    WHICH works the mismatch touches.
+    """
+
+    def __init__(self, affected: list[dict[str, Any]]) -> None:
+        works = ", ".join(sorted({str(item.get("work_id")) for item in affected}))
+        super().__init__(
+            f"the backup's metadata and blob halves disagree for work(s) {works}: "
+            f"{len(affected)} checkpoint(s) name bytes the blob half does not carry "
+            f"({'; '.join(str(item.get('work_id')) + '/' + str(item.get('checkpoint_id'))[:12] for item in affected[:5])}"
+            f"{'…' if len(affected) > 5 else ''}) — restore refused; re-take the "
+            "backup so both halves describe one consistent store state"
+        )
+        self.affected = affected
+
+
+@dataclass(frozen=True)
+class StoreBackup:
+    """One captured store state: metadata AND blobs together (R36-21).
+
+    :attr:`path` is the backup directory (self-contained — safe to move
+    off-host); :attr:`created_at` its capture time. The counts are the
+    coverage facts the restore drill reports
+    (``backup.restore_coverage``): how many works/checkpoints/blobs/pins
+    and pending-GC records were captured, plus the exported
+    ``checkpoint_metadata`` row count (0 for filesystem-authority
+    backups, whose metadata lives in ``works/``).
+    """
+
+    path: Path
+    created_at: str
+    works: int
+    checkpoints: int
+    blobs: int
+    pins: int
+    pending_gc: int
+    metadata_rows: int
+
+    def manifest(self) -> dict[str, Any]:
+        """The backup's own manifest document (a fresh read from disk)."""
+        try:
+            document = json.loads((self.path / "backup.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return document if isinstance(document, dict) else {}
+
+
+def _blob_half_has(path: Path, digest: str) -> bool:
+    """Whether the blob half at *path* carries *digest* (64-hex only)."""
+    return bool(_HEX64.fullmatch(digest)) and (path / digest[:2] / digest).is_file()
+
+
+def _metadata_entries(root: Path) -> dict[str, list[dict[str, Any]]]:
+    """The filesystem half's index entries: work id → entry dicts."""
+    works: dict[str, list[dict[str, Any]]] = {}
+    index_dir = root / "works"
+    for path in sorted(index_dir.glob("*.json")) if index_dir.is_dir() else []:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(document, dict) or not isinstance(document.get("checkpoints"), list):
+            continue
+        entries = [e for e in document["checkpoints"] if isinstance(e, dict)]
+        if entries:
+            works[path.stem] = entries
+    return works
+
+
+def _exported_rows(root: Path) -> list[dict[str, Any]]:
+    """The postgres half's exported ``checkpoint_metadata`` rows."""
+    path = root / _BACKUP_METADATA_ROWS
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and isinstance(document.get("work_id"), str):
+            rows.append(document)
+    return rows
+
+
+def verify_backup_consistency(backup: StoreBackup | Path) -> list[dict[str, Any]]:
+    """Check a backup's halves describe ONE state; list every mismatch.
+
+    For EVERY checkpoint the metadata half names — filesystem index
+    entries AND exported ``checkpoint_metadata`` rows — the blob half
+    must carry the checkpoint's manifest bytes AND every digest that
+    manifest references. Anything missing is returned as
+    ``{"work_id", "checkpoint_id", "missing": [digests]}``; an empty
+    list is a consistent backup. :func:`restore_store` runs exactly
+    this check FIRST and refuses with :class:`BackupMismatchError`
+    before writing anything.
+    """
+
+    root = Path(backup.path) if isinstance(backup, StoreBackup) else Path(backup)
+    affected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    named: list[tuple[str, dict[str, Any]]] = [
+        (work, entry) for work, entries in _metadata_entries(root).items() for entry in entries
+    ]
+    named.extend(
+        (str(row["work_id"]), row) for row in _exported_rows(root)
+    )  # exported row: checkpoint_id at top level
+    for work_id, entry in named:
+        checkpoint_id = str(entry.get("checkpoint_id") or "")
+        if not checkpoint_id or (work_id, checkpoint_id) in seen:
+            continue
+        seen.add((work_id, checkpoint_id))
+        missing: list[str] = []
+        if not _blob_half_has(root, checkpoint_id):
+            missing.append(checkpoint_id)
+            # The manifest bytes are gone with it — the closure cannot be
+            # checked; report the manifest address alone.
+            affected.append(
+                {"work_id": work_id, "checkpoint_id": checkpoint_id, "missing": missing}
+            )
+            continue
+        try:
+            manifest = json.loads((root / checkpoint_id[:2] / checkpoint_id).read_text("utf-8"))
+        except (OSError, ValueError):
+            affected.append(
+                {"work_id": work_id, "checkpoint_id": checkpoint_id, "missing": [checkpoint_id]}
+            )
+            continue
+        files = manifest.get("files") if isinstance(manifest, dict) else None
+        if isinstance(files, dict):
+            for name, spec in sorted(files.items()):
+                digest = str(spec.get("digest") or "") if isinstance(spec, dict) else ""
+                if digest and not _blob_half_has(root, digest):
+                    missing.append(digest)
+        if missing:
+            affected.append(
+                {"work_id": work_id, "checkpoint_id": checkpoint_id, "missing": missing}
+            )
+    return affected
+
+
+def _cas_shards(root: Path) -> list[Path]:
+    """The two-hex CAS shard directories of a store root (``00``..``ff``)."""
+    return sorted(p for p in root.iterdir() if p.is_dir() and _HEX2_DIR(p.name))
+
+
+def _HEX2_DIR(name: str) -> bool:
+    """Whether *name* is a two-hex CAS shard directory name."""
+    return len(name) == 2 and all(c in "0123456789abcdef" for c in name)
+
+
+def _count_blobs(root: Path) -> int:
+    """How many CAS files (blobs + manifests) a store half carries."""
+    return sum(1 for shard in _cas_shards(root) for blob in shard.glob("*") if blob.is_file())
+
+
+def _ignore_locks(_dir: str, names: list[str]) -> list[str]:
+    """The copytree filter: transient ``flock`` files are never state."""
+    return [name for name in names if name.endswith(".lock")]
+
+
+async def backup_store(
+    root: Path | str,
+    target: Path | str | None = None,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> StoreBackup:
+    """Capture ONE consistent store state — metadata AND blobs together.
+
+    Copies the durable halves of the store root — the CAS blobs
+    (``<root>/<xx>/<digest>``), the filesystem index (``works/``), the
+    pin overlay (``pins/``), the pending-GC journal (``gc/``) and the
+    authority marker (``migration/authority.json``) — into *target* (a
+    sibling ``<root>-backup-<pid>-<n>`` directory under the root's
+    parent when omitted). Lock files are deliberately excluded: they
+    are transient coordination artifacts, never state. When
+    *session_factory* is given, the postgres authority's metadata half
+    (the ``checkpoint_metadata`` table) is exported to
+    ``checkpoint_metadata.jsonl`` inside the backup — a postgres store
+    backed up WITHOUT its factory would silently miss its entire
+    index, so pass the factory the repository was composed with.
+
+    The backup is taken WITHOUT quiescing writers: the blob writes and
+    the index commits are each atomic, so the copy observes either the
+    before or the after of any in-flight landing, never a torn entry
+    (the same discipline the crash windows rely on). For a
+    point-in-time-guaranteed copy, quiesce uploads first — the
+    operations drill documents this as the runbook step.
+    """
+
+    import shutil
+
+    source = Path(root)
+    if not source.is_dir():
+        raise CheckpointRepositoryUnavailable(
+            f"cannot back up the checkpoint store at {source}: the root does not exist"
+        )
+    destination: Path | None = Path(target) if target is not None else None
+    if destination is None:
+        counter = 0
+        while True:
+            candidate = source.parent / f"{source.name}-backup-{os.getpid()}-{counter}"
+            if not candidate.exists():
+                destination = candidate
+                break
+            counter += 1
+    destination.mkdir(parents=True, exist_ok=False)
+
+    for name in _BACKUP_DIRS:
+        if (source / name).is_dir():
+            await asyncio.to_thread(
+                shutil.copytree,
+                source / name,
+                destination / name,
+                ignore=_ignore_locks,
+                dirs_exist_ok=True,
+            )
+    if (source / "works").is_dir():
+        await asyncio.to_thread(
+            shutil.copytree,
+            source / "works",
+            destination / "works",
+            ignore=_ignore_locks,
+            dirs_exist_ok=True,
+        )
+    for shard in _cas_shards(source):
+        await asyncio.to_thread(
+            shutil.copytree, shard, destination / shard.name, dirs_exist_ok=True
+        )
+
+    exported = 0
+    if session_factory is not None:
+        from sqlalchemy import select
+
+        from forge.api_checkpoint_channel import CheckpointMetadataRow
+
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(CheckpointMetadataRow).order_by(
+                            CheckpointMetadataRow.work_id,
+                            CheckpointMetadataRow.checkpoint_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        lines = [
+            json.dumps(
+                {
+                    "work_id": row.work_id,
+                    "checkpoint_id": row.checkpoint_id,
+                    "sequence": int(row.sequence),
+                    "files": int(row.files),
+                    "uploaded_at": str(row.uploaded_at or ""),
+                },
+                sort_keys=True,
+            )
+            for row in rows
+        ]
+        (destination / _BACKUP_METADATA_ROWS).write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
+        exported = len(lines)
+
+    index_works = _metadata_entries(destination)
+    backup = StoreBackup(
+        path=destination,
+        created_at=_now_iso(),
+        works=len(index_works),
+        checkpoints=sum(len(entries) for entries in index_works.values()) + exported,
+        blobs=_count_blobs(destination),
+        pins=len(list((destination / "pins").glob("*.json")))
+        if (destination / "pins").is_dir()
+        else 0,
+        pending_gc=len(list((destination / "gc").glob("*.json")))
+        if (destination / "gc").is_dir()
+        else 0,
+        metadata_rows=exported,
+    )
+    (destination / "backup.json").write_text(
+        json.dumps(
+            {
+                "schema": BACKUP_MANIFEST_SCHEMA,
+                "created_at": backup.created_at,
+                "source_root": str(source),
+                "works": backup.works,
+                "checkpoints": backup.checkpoints,
+                "blobs": backup.blobs,
+                "pins": backup.pins,
+                "pending_gc": backup.pending_gc,
+                "metadata_rows": backup.metadata_rows,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return backup
+
+
+async def restore_store(
+    backup: StoreBackup | Path,
+    target: Path | str,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> dict[str, Any]:
+    """Restore a backup into *target* — verifying it FIRST (R36-21).
+
+    The order is the safety property: :func:`verify_backup_consistency`
+    runs over the backup BEFORE anything is written, and a metadata
+    half naming bytes the blob half does not carry REFUSES with
+    :class:`BackupMismatchError` listing the affected works — the
+    mismatched-halves restore (metadata from t2, blobs from t1) is
+    never silently accepted, and a refused restore leaves the target
+    untouched. With the halves consistent, the CAS blobs, the
+    filesystem index (``works/``), the pin overlay (``pins/``), the
+    pending-GC journal (``gc/``) and the authority marker are copied
+    into *target*, and — when the backup carries exported
+    ``checkpoint_metadata`` rows and a *session_factory* is given —
+    the rows are re-imported idempotently (an existing row with the
+    same ``(work_id, checkpoint_id)`` is skipped). Returns the
+    restored coverage counts (the ``backup.restore_coverage`` signal).
+    """
+
+    import shutil
+
+    source = Path(backup.path) if isinstance(backup, StoreBackup) else Path(backup)
+    destination = Path(target)
+    mismatches = verify_backup_consistency(source)
+    if mismatches:
+        raise BackupMismatchError(mismatches)
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in (*_BACKUP_DIRS, "works"):
+        if (source / name).is_dir():
+            await asyncio.to_thread(
+                shutil.copytree, source / name, destination / name, dirs_exist_ok=True
+            )
+    for shard in _cas_shards(source):
+        await asyncio.to_thread(
+            shutil.copytree, shard, destination / shard.name, dirs_exist_ok=True
+        )
+
+    imported = 0
+    rows = _exported_rows(source)
+    if rows and session_factory is not None:
+        from forge.api_checkpoint_channel import CheckpointMetadataRow
+
+        async with session_factory() as session:
+            for row in rows:
+                existing = await session.get(
+                    CheckpointMetadataRow, (row["work_id"], row["checkpoint_id"])
+                )
+                if existing is not None:
+                    continue
+                session.add(
+                    CheckpointMetadataRow(
+                        work_id=str(row["work_id"]),
+                        checkpoint_id=str(row["checkpoint_id"]),
+                        sequence=int(row.get("sequence") or 0),
+                        files=int(row.get("files") or 0),
+                        uploaded_at=str(row.get("uploaded_at") or ""),
+                    )
+                )
+                imported += 1
+            await session.commit()
+    index_works = _metadata_entries(destination)
+    return {
+        "works": len(index_works) or (1 if rows else 0),
+        "checkpoints": sum(len(entries) for entries in index_works.values()) + imported,
+        "blobs": _count_blobs(destination),
+        "pins": len(list((destination / "pins").glob("*.json")))
+        if (destination / "pins").is_dir()
+        else 0,
+        "pending_gc": len(list((destination / "gc").glob("*.json")))
+        if (destination / "gc").is_dir()
+        else 0,
+        "metadata_rows": imported,
+    }

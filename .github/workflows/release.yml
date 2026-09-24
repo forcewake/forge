@@ -200,6 +200,15 @@ jobs:
             --out promotion.json \
             --archive
 
+      # R36-22: the committed profile-qualification records are part of this
+      # gate's contract. This step only READS the committed store (never
+      # re-runs anything): a record whose required evidence is marked skipped
+      # or failed refuses that profile's promotion EVEN WITH core CI green.
+      # Only each profile's LATEST record is judged; fixing a refusal means
+      # landing a NEW record — the store is append-only history.
+      - name: Profile-qualification records gate (R36-22)
+        run: uv run python -m forge.profile_qualification gate --root .
+
       - name: Keep the promotion record
         if: always()
         uses: actions/upload-artifact@v4

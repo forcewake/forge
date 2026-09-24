@@ -1,0 +1,11 @@
+diff --git a/src/app.py b/src/app.py
+index 262fc93ffc66da17422a110ce0a2ac7e1850b3b0..cbc42e690df0f7bf872f7b86b16743a8a49e0b08 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,5 @@
+-print('base')
++def render_widget():
++    print('widget')
++
++
++render_widget()

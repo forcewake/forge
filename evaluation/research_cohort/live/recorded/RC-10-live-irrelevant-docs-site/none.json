@@ -1,0 +1,74 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-10-live-irrelevant-docs-site",
+  "mode": "none",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads."
+      }
+    ],
+    "surface": [],
+    "claims": [],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "planner-input-only/v1",
+    "route": "deterministic (no model calls)",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "input_lower_bound": 0,
+        "output_lower_bound": 0,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "planner-input construction with discovery off",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

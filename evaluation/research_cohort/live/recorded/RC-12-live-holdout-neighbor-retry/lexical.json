@@ -1,0 +1,142 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-12-live-holdout-neighbor-retry",
+  "mode": "lexical",
+  "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address billing/src/retry.py (reference: Orders)",
+        "evidence_refs": [
+          "lex-1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address orders/src/dispatch.py (symbol: _log_dispatch)",
+        "evidence_refs": [
+          "lex-2"
+        ]
+      },
+      {
+        "step_id": "s3",
+        "objective": "address orders/src/dispatch.py (symbol: dispatch_with_retry)",
+        "evidence_refs": [
+          "lex-3"
+        ]
+      },
+      {
+        "step_id": "s4",
+        "objective": "address orders/src/dispatch.py (reference: dispatch)",
+        "evidence_refs": [
+          "lex-4"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing",
+        "path": "src/retry.py",
+        "why": "reference"
+      },
+      {
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "why": "symbol"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\"",
+        "repo": "billing",
+        "path": "src/retry.py",
+        "line": 1,
+        "asserted_content": "\"\"\"Billing's retry contract (RC seed) \u2014 consumed by Orders' dispatch.\"\"\""
+      },
+      {
+        "claim_id": "c2",
+        "text": "def _log_dispatch(order_id: str, attempt: int) -> None:",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 16,
+        "asserted_content": "def _log_dispatch(order_id: str, attempt: int) -> None:"
+      },
+      {
+        "claim_id": "c3",
+        "text": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 20,
+        "asserted_content": "def dispatch_with_retry(order_id: str, attempts: int = 3) -> str:"
+      },
+      {
+        "claim_id": "c4",
+        "text": "print(f\"dispatch order={order_id} attempt={attempt}\")",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 17,
+        "asserted_content": "print(f\"dispatch order={order_id} attempt={attempt}\")"
+      }
+    ],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "deterministic-lexical-probes/v1",
+    "route": "deterministic (no model calls)",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "input_lower_bound": 0,
+        "output_lower_bound": 0,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

@@ -486,6 +486,35 @@ ENTRIES: Final[tuple[ManifestEntry, ...]] = (
         "under docs/releases/evidence/v<version>/ and renders the README pins.",
     ),
     ManifestEntry(
+        capability="profile-qualification-records",
+        provider="*",
+        backend="*",
+        level="contract_tested",
+        evidence_class="contract_suite",
+        evidence=(
+            "src/forge/profile_qualification.py",
+            "tests/test_profile_qualification.py",
+            "docs/releases/profile-records.md",
+            "qualification/records/release-artifact-canary@0.35.0.json",
+            "qualification/records/gitlab-ce-v1@0.35.0.json",
+        ),
+        ci_jobs=_CI_TEST,
+        gating="pr_gate",
+        note="R36-22: profile qualification is a SEPARATE committed record store "
+        "(qualification/records/, stamp forge.profile.qualification/1) binding provider "
+        "version, runtime recipe, harness binary+version, credential route, control "
+        "capabilities, verification contract and the R36-10 closure digest. Evidence "
+        "classes never substitute (model-fixture caps at declared_only, "
+        "offline-operational/pg-integration at lab-qualified; supported needs "
+        "live-provider-or-stronger per required capability); verdicts are DERIVED from "
+        "the evidence, never asserted. Requalification triggers on changed runtime "
+        "dependencies, template defaults, authority contracts and provider behavior; "
+        "upgrade claims distinguish same-head preservation from real schema "
+        "transitions (the v0.35.0 027->027 canary is a preservation claim, never an "
+        "upgrade proof); a skipped required profile evidence entry refuses the "
+        "profile's promotion even with core CI green.",
+    ),
+    ManifestEntry(
         capability="real-provider-e2e",
         provider="github",
         backend="*",
@@ -1093,6 +1122,17 @@ FINDING_CLOSURES: Final[tuple[FindingClosure, ...]] = (
             "tests/test_github_runs.py",
             "tests/test_azure_runs.py",
         ),
+    ),
+    # 16339c2 review, R36-22 — profile qualification from separate evidence
+    # records; the closure's regression IS this store's test suite.
+    FindingClosure(
+        finding="R36-22",
+        capability="profile-qualification-records",
+        level="contract_tested",
+        evidence=("tests/test_profile_qualification.py",),
+        note="Verdict derivation, substitution caps, requalification triggers, "
+        "upgrade-claim honesty, the gaps join and the skip-refusal hook are held "
+        "by tests/test_profile_qualification.py.",
     ),
 )
 

@@ -70,6 +70,7 @@ __all__ = [
     "ConflictingReceipt",
     "DeliveryMetrics",
     "LatencyBreakdown",
+    "attempt_records_from_evidence",
     "delivery_metrics_for_run",
     "reconcile_delivery",
 ]
@@ -725,6 +726,19 @@ def _ci_observations_from_evidence(evidence: Mapping[str, Any]) -> list[dict[str
     return observations
 
 
+def attempt_records_from_evidence(evidence: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The run's per-attempt evidence records, defensively extracted (R36-17).
+
+    Additive: ONE spelling of the ``attempts`` extraction shared by the
+    metrics loader and the delivery-measurement linker — non-list evidence
+    and non-mapping entries are absent, never coerced.
+    """
+    attempts = evidence.get(ATTEMPT_EVIDENCE_KEY)
+    if not isinstance(attempts, list):
+        return []
+    return [record for record in attempts if isinstance(record, Mapping)]
+
+
 async def delivery_metrics_for_run(
     run_id: str, session_factory: async_sessionmaker[AsyncSession]
 ) -> DeliveryMetrics:
@@ -749,12 +763,7 @@ async def delivery_metrics_for_run(
                 notes=(f"no flow run {run_id!r} — nothing to reconcile",),
             )
         evidence = run.evidence if isinstance(run.evidence, Mapping) else {}
-        attempts = evidence.get(ATTEMPT_EVIDENCE_KEY)
-        attempt_records: list[Mapping[str, Any]] = (
-            [record for record in attempts if isinstance(record, Mapping)]
-            if isinstance(attempts, list)
-            else []
-        )
+        attempt_records: list[Mapping[str, Any]] = attempt_records_from_evidence(evidence)
 
         gates: list[dict[str, Any]] = []
         approvals = (

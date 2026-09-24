@@ -1,0 +1,221 @@
+{
+  "profile": "gitlab-ce-v1",
+  "profile_document": "qualification/profiles/gitlab-ce-v1.md",
+  "generated_at": "2026-09-24T00:17:45.929822+00:00",
+  "stages": {
+    "preflight": {
+      "status": "refused",
+      "checks": [
+        {
+          "name": "credentials.present",
+          "status": "pass",
+          "detail": "GITLAB_URL/TOKEN/WEBHOOK_SECRET present"
+        },
+        {
+          "name": "credentials.bot_identity",
+          "status": "pass",
+          "detail": "FORGE_BOT_TOKEN present (forge never speaks with approver credentials)"
+        },
+        {
+          "name": "gitlab.ce_edition",
+          "status": "pass",
+          "detail": "GitLab 19.3.2 (revision 34042bf7d00, enterprise=False)"
+        },
+        {
+          "name": "project.access",
+          "status": "pass",
+          "detail": "forcewake/forge-lab (default branch main, builds=enabled)"
+        },
+        {
+          "name": "runner.available",
+          "status": "pass",
+          "detail": "1 online runner(s): #4 unraid"
+        },
+        {
+          "name": "webhook.registered",
+          "status": "pass",
+          "detail": "hooks: ['https://forge.forcewake.me/webhook']"
+        },
+        {
+          "name": "controlplane.reachable",
+          "status": "pass",
+          "detail": "/health \u2192 {\"status\": \"ok\", \"version\": \"0.28.0\", \"database\": \"ok\", \"litellm\": \"ok\", \"redis\": \"ok\", \"queue_depth\": 0, \"dlq_depth\": 3}"
+        },
+        {
+          "name": "controlplane.version_matches_profile",
+          "status": "fail",
+          "detail": "deployed control plane reports 0.28.0; the profile pins the promoted wheel v0.35.0 (a paid flow against another build qualifies nothing)"
+        },
+        {
+          "name": "onboarding.lane_template",
+          "status": "pass",
+          "detail": "the project's .gitlab-ci.yml includes a forge lane template"
+        },
+        {
+          "name": "onboarding.verification_job",
+          "status": "pass",
+          "detail": "independent `smoke` job present (FORGE_REQUIRED_JOBS=smoke)"
+        },
+        {
+          "name": "onboarding.lane_credentials",
+          "status": "pass",
+          "detail": "ANTHROPIC_AUTH_TOKEN/BASE_URL project variables present"
+        },
+        {
+          "name": "budgets.caps_present",
+          "status": "fail",
+          "detail": "{\"harness_timeout_seconds\": 5400} \u2014 no FORGE_BUDGET_PROFILES and no --max-budget-json: the paid flow stage refuses (an uncapped paid run is not qualification)"
+        },
+        {
+          "name": "capability.lane_resume_dispatch",
+          "status": "warn",
+          "detail": "the GitLab dispatch seam carries no FORGE_LANE_RESUME/lane-control credentials (GitHub-only, R32-04) \u2014 the cross-runner resume drill is refused on the live flow stage (profile \u00a78)"
+        }
+      ],
+      "caps": {
+        "harness_timeout_seconds": 5400
+      },
+      "reason": "controlplane.version_matches_profile: deployed control plane reports 0.28.0; the profile pins the promoted wheel v0.35.0 (a paid flow against another build qualifies nothing); budgets.caps_present: {\"harness_timeout_seconds\": 5400} \u2014 no FORGE_BUDGET_PROFILES and no --max-budget-json: the paid flow stage refuses (an uncapped paid run is not qualification)",
+      "recorded_at": "2026-09-24T00:13:36.021095+00:00"
+    },
+    "install-check": {
+      "status": "green",
+      "receipt": {
+        "pin": "wheel",
+        "route": "default-wheel (promoted)",
+        "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.35.0/forge-0.35.0-py3-none-any.whl",
+        "expected_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+        "actual_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+        "qualified": true,
+        "version": "0.35.0"
+      },
+      "identity": {
+        "route": "default-wheel (promoted)",
+        "expected_version": "0.35.0",
+        "installed_version": "0.35.0"
+      },
+      "checks": [
+        {
+          "name": "venv.clean",
+          "status": "pass",
+          "detail": "/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-ce-qual-5rqkxd7g/venv (freshly created, no cache)"
+        },
+        {
+          "name": "wheel.download",
+          "status": "pass",
+          "detail": "pip download \u2192 [PosixPath('/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/forge-ce-qual-5rqkxd7g/wheel/forge-0.35.0-py3-none-any.whl')]"
+        },
+        {
+          "name": "wheel.sha256",
+          "status": "pass",
+          "detail": "expected 1e365612473426a2\u2026 actual 1e365612473426a2\u2026"
+        },
+        {
+          "name": "wheel.install",
+          "status": "pass",
+          "detail": "rs-0.23.2 tqdm-4.70.1 truststore-0.10.4 typer-0.27.2 typing-extensions-4.16.0 typing-inspection-0.4.4 urllib3-2.8.0 uvicorn-0.42.0 uvloop-0.22.1 watchfiles-1.3.0 websockets-17.1 yarl-1.25.1 zipp-4.1.0"
+        },
+        {
+          "name": "identity.installed_version",
+          "status": "pass",
+          "detail": "expected 0.35.0, installed 0.35.0"
+        }
+      ],
+      "recorded_at": "2026-09-24T00:14:03.913164+00:00"
+    },
+    "flow": {
+      "status": "refused",
+      "reason": "preflight refused: controlplane.version_matches_profile: deployed control plane reports 0.28.0; the profile pins the promoted wheel v0.35.0 (a paid flow against another build qualifies nothing); budgets.caps_present: {\"harness_timeout_seconds\": 5400} \u2014 no FORGE_BUDGET_PROFILES and no --max-budget-json: the paid flow stage refuses (an uncapped paid run is not qualification)",
+      "recorded_at": "2026-09-24T00:14:10.784637+00:00"
+    },
+    "report": {
+      "status": "written",
+      "offline_trace": {
+        "command": "pytest tests/production_entry/test_gitlab_ce_entry.py (env-stripped)",
+        "returncode": 0,
+        "summary": "6 passed, 2 warnings in 10.11s"
+      },
+      "recorded_at": "2026-09-24T00:17:45.929901+00:00"
+    }
+  },
+  "releases": {
+    "gitlab_ce": {
+      "version": "19.3.2",
+      "revision": "34042bf7d00",
+      "enterprise": false
+    },
+    "control_plane": {
+      "deployed_version": "0.28.0",
+      "pinned_wheel": {
+        "url": "https://github.com/forcewake/forge/releases/download/v0.35.0/forge-0.35.0-py3-none-any.whl",
+        "sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+        "version": "0.35.0"
+      },
+      "health": {
+        "status": "ok",
+        "version": "0.28.0",
+        "database": "ok",
+        "litellm": "ok",
+        "redis": "ok",
+        "queue_depth": 0,
+        "dlq_depth": 3
+      }
+    },
+    "forge": {
+      "pin": "wheel",
+      "route": "default-wheel (promoted)",
+      "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.35.0/forge-0.35.0-py3-none-any.whl",
+      "expected_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+      "actual_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+      "qualified": true,
+      "version": "0.35.0"
+    }
+  },
+  "manual_interventions": [],
+  "human_review": {
+    "outcome": "not-reached (the live flow stage did not produce a Draft MR; offline trace CE-2 ends at its own Draft MR for human review)",
+    "mr_url": null
+  },
+  "counters": {
+    "profile.cold_install_success": true,
+    "delivery.manual_rescue_count": 0,
+    "resume.cross_runner_success": true,
+    "verification.current_candidate_pass": null
+  },
+  "host_facts": {
+    "token_user": "forcewake",
+    "project": {
+      "id": 68,
+      "path": "forcewake/forge-lab",
+      "default_branch": "main",
+      "builds_access_level": "enabled"
+    },
+    "runners": [
+      {
+        "id": 3,
+        "description": "forge-lab runner (podman docker executor)",
+        "status": "stale",
+        "paused": true,
+        "type": "project_type"
+      },
+      {
+        "id": 4,
+        "description": "unraid",
+        "status": "online",
+        "paused": false,
+        "type": "instance_type"
+      }
+    ]
+  },
+  "offline_trace": {
+    "command": "pytest tests/production_entry/test_gitlab_ce_entry.py (env-stripped)",
+    "returncode": 0,
+    "summary": "6 passed, 2 warnings in 10.11s"
+  },
+  "resume_cross_runner": {
+    "live": false,
+    "offline": true,
+    "surface": "production-entry trace CE-2 (tests/production_entry/test_gitlab_ce_entry.py)",
+    "live_blocker": "GitLab dispatch carries no lane-resume contract (profile \u00a78); the live flow stage was refused before paid execution"
+  }
+}

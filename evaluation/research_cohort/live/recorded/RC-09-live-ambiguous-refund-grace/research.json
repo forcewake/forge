@@ -1,0 +1,197 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-09-live-ambiguous-refund-grace",
+  "mode": "research",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 2,
+        "calls_executed": 2,
+        "wall_seconds_used": 1.25,
+        "tokens": {
+          "input": 1220,
+          "output": 360,
+          "input_lower_bound": 1220,
+          "output_lower_bound": 360,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 2,
+    "calls_proposed": 2,
+    "calls_executed": 2,
+    "observations": {
+      "count": 2,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 1.25,
+    "tokens": {
+      "input": 1220,
+      "output": 360,
+      "input_lower_bound": 1220,
+      "output_lower_bound": 360,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "docs-site",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "orders",
+        "repository_id": "gitlab-101",
+        "path": "src/checkout.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 320 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "billing",
+        "repository_id": "gitlab-102",
+        "path": "src/subscriptions.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 397 chars from offset 0"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Orders' checkout (src/checkout.py) leaves the grace-window rules explicitly undecided, and Billing's subscriptions module (src/subscriptions.py) lapses on the shared expiry event without answering them either. Is the grace window 7 or 30 days after expiry, and who absorbs the payment fee?",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/checkout.py offset 0 length 400",
+      "content": "\"\"\"Checkout entrypoints (RC seed).\"\"\"\n\nSECONDS_PER_DAY = 86400\n\n\ndef request_refund(order_id: str) -> str:\n    \"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"\n    return f\"refund-requested order={order_id}\"\n\n\ndef cancel_order(order_id: str) -> str:\n    return f\"cancelled order={order_id}\"\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing",
+      "call": "src/subscriptions.py offset 0 length 400",
+      "content": "\"\"\"Subscription lifecycle (RC seed).\"\"\"\n\nfrom src.events import ORDER_EXPIRED_EVENT, validate_order_expired\n\n\ndef lapse_on_expiry(payload: dict) -> str:\n    \"\"\"Lapse the subscription when the shared expiry event arrives.\"\"\"\n    if not validate_order_expired(payload):\n        raise ValueError(\"payload missing the shared schema fields\")\n    return f\"subscription lapsed via {ORDER_EXPIRED_EVENT}\"\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address orders/src/checkout.py (research_read: read 320 chars from offset 0)",
+        "evidence_refs": [
+          "ev-1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address billing/src/subscriptions.py (research_read: read 397 chars from offset 0)",
+        "evidence_refs": [
+          "ev-2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "why": "research_read"
+      },
+      {
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "why": "research_read"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "\"\"\"Checkout entrypoints (RC seed).\"\"\"",
+        "repo": "orders",
+        "path": "src/checkout.py",
+        "line": 1,
+        "asserted_content": "\"\"\"Checkout entrypoints (RC seed).\"\"\"",
+        "evidence": "evidence:ev-1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "\"\"\"Subscription lifecycle (RC seed).\"\"\"",
+        "repo": "billing",
+        "path": "src/subscriptions.py",
+        "line": 1,
+        "asserted_content": "\"\"\"Subscription lifecycle (RC seed).\"\"\"",
+        "evidence": "evidence:ev-2"
+      }
+    ],
+    "questions": [
+      {
+        "question_id": "q1",
+        "text": "Is the grace window 7 or 30 days after expiry, and who absorbs the payment fee?"
+      }
+    ],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "scripted:reactive-investigation/v1",
+    "route": "offline-scripted-over-real-tool-loop",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 2,
+      "calls_executed": 2,
+      "wall_seconds_used": 1.25,
+      "tokens": {
+        "input": 1220,
+        "output": 360,
+        "input_lower_bound": 1220,
+        "output_lower_bound": 360,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

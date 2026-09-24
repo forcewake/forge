@@ -1,0 +1,186 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-07-neighbor-changelog/a1",
+      "note": "",
+      "wall_seconds": 0.809
+    }
+  ],
+  "brief": "Land REQUESTS_PER_MINUTE in src/limits.py to match the current rate-limit decision.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "50b0013dab61636f5c5fe6f75656ee3dfe24bd6f299c2b3404bafb928c755d66",
+  "driver": "neighbor",
+  "evidence_class": "lab-operational",
+  "interventions": [],
+  "neighbor": {
+    "head_after": "0cc73ec85bf501d782724778fc7d1d82d226e4e2",
+    "head_before": "0cc73ec85bf501d782724778fc7d1d82d226e4e2",
+    "path": "CHANGELOG.md",
+    "repo": "lab/neighbor-contracts",
+    "source_oid": "0631ff15defd9d78eff4921390999de99aa74dc0"
+  },
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:06.308688+00:00",
+      "point": "plan-approval",
+      "question": "Does the plan cite the neighbor decision at 0631ff15defd\u2026?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:06.308716+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "approved",
+      "detail": "citations resolve to lab/neighbor-contracts@0631ff15defd\u2026:CHANGELOG.md",
+      "point": "plan-approval",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:07.720931+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:07.720946+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "citations-resolve=ok; neighbor-read-only=ok; limit-matches-changelog=ok; diff-applies-cleanly=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "plan": {
+    "assumptions": [],
+    "decision_requests": [],
+    "schema": "forge.plan.evidence-backed/1",
+    "steps": [
+      {
+        "action": "write src/limits.py with the cited value",
+        "evidence_refs": [
+          "neighbor-decision"
+        ],
+        "step_id": "land-constant"
+      }
+    ],
+    "summary": "Land the constant from the neighbor decision (CHANGELOG.md).",
+    "unknowns": []
+  },
+  "plan_digest": "cfded015c780959f8d24fa7b324755074892ea9c27fa2d6b966abd7ac1936e18",
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": true,
+        "attempt_id": "t-07-neighbor-changelog/a1",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0331,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0,
+    "rollbacks": 0,
+    "setup_minutes": 0.0297,
+    "started_at": "2026-09-24T01:42:05.736983+00:00",
+    "task_id": "t-07-neighbor-changelog",
+    "touched_repos": [
+      "lab/checkout",
+      "lab/neighbor-contracts"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "neighbor_evidence",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "every plan citation resolves to repository + OID + path",
+      "name": "citations-resolve",
+      "observed": "violations=[] oid=0631ff15defd9d78eff4921390999de99aa74dc0",
+      "ok": true
+    },
+    {
+      "expected": "the neighbor stays read-only (clean status, unchanged head)",
+      "name": "neighbor-read-only",
+      "observed": "status='' head_unchanged=True",
+      "ok": true
+    },
+    {
+      "expected": "the landed constant equals the cited value 120",
+      "name": "limit-matches-changelog",
+      "observed": "diff_digest=50b0013dab61636f5c5fe6f75656ee3dfe24bd6f299c2b3404bafb928c755d66",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 1,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the decisive event (the limit change) exists only in the neighbor's CHANGELOG; the plan records and cites it at the exact OID, the edit lands the cited limit in src/limits.py, and the neighbor remains read-only",
+    "group": "g3-neighbors",
+    "non_goals": [
+      "no writes to the neighbor repository",
+      "no limit value may come from anywhere but the cited changelog line"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "neighbor_evidence",
+    "stage": "branch_pr",
+    "task_id": "t-07-neighbor-changelog",
+    "title": "Rate-limit decision discovered from the neighbor's changelog event",
+    "verification": [
+      {
+        "method": "the changelog citation resolves to repository + OID + path",
+        "name": "citations-resolve"
+      },
+      {
+        "method": "git status of the neighbor is clean and its head is unchanged after the run",
+        "name": "neighbor-read-only"
+      },
+      {
+        "method": "the landed limit equals the value in the cited changelog line",
+        "name": "limit-matches-changelog"
+      }
+    ]
+  },
+  "task_id": "t-07-neighbor-changelog",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-07-neighbor-changelog/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.809,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

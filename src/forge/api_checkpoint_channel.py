@@ -148,13 +148,68 @@ that no index entry references is named by the health report
 pending record covers the commit-to-unlink crash window, and crash
 recovery between blob write and index commit leaves exactly such
 orphans, never a reference without bytes.
+
+R36-04 (review ``16339c2``, probe P04) closes the window Q35-05's
+recheck could not: the recheck's SELECT only ever sees references
+committed BEFORE it ran, so a DIFFERENT work's landing — serialized
+against the collector on a different per-work lock — could still
+commit a reference to a shared digest between the collector's FINAL
+reference scan and its unlink, leaving an acknowledged reference
+without bytes. READ COMMITTED gives statement-time snapshots, not a
+prohibition on future references; moving the SELECT closer to the
+unlink is not a fix. The protocol that IS the fix — ONE lock per CAS
+volume, shared by writers and deleters:
+
+- **the lock** — ``<root>/cas-refs.lock`` (an exclusive ``flock``,
+  bounded jittered retry, :class:`GCLockTimeout` on exhaustion), plus
+  a postgres ``pg_advisory_lock`` twin on ONE constant key for
+  deployments whose blob root is NOT shared but whose database is:
+  either half alone serializes reference acquisition against
+  deletion; both are taken, flock first, so mixed topologies cannot
+  cycle.
+- **writers** take it for the REFERENCE-RECORDING transaction only —
+  the filesystem index read-modify-write, or the metadata row
+  transaction — NOT for the blob writes (they are idempotent and
+  content-addressed; the volume must not serialize every upload's
+  fsyncs). Under the lock the landing REPAIRS first: any closure
+  address a sweep unlinked while the blobs were being written outside
+  the lock is re-landed BEFORE the reference commits, so a committed
+  reference always finds its bytes and a crash still leaves only
+  collectable orphans.
+- **deleters** (explicit retention, on-upload cleanup, pending-GC
+  recovery) hold it from their FINAL reference scan through the last
+  unlink: lock → final scan → delete-metadata transaction → unlink →
+  unlock. A reference therefore cannot commit inside that interval —
+  its writer is queued on the same lock — and a writer queued behind
+  a sweep re-lands what the sweep was entitled to delete.
+- **ordering** (why this cannot deadlock): the volume lock is always
+  taken BEFORE the per-work pin flock and the metadata rows, and
+  AFTER the per-work index lock and the first-upload advisory anchor —
+  one global order, no cycle. Two concurrent collectors and a
+  concurrent writer serialize; every wait is bounded by
+  ``FORGE_CHECKPOINT_GC_LOCK_WAIT_SECONDS`` (default 30s), a timed-out
+  sweep aborts with its marks standing (a later pass completes them)
+  and a timed-out landing fails with nothing committed.
+- **rollout** — ``FORGE_CHECKPOINT_SWEEP=off`` fences the unlink half
+  of every GC pass (both durability authorities) while the marks
+  stand: metadata is deleted, tombstones and journal records persist,
+  bytes stay. Turning sweeping back on collects the marked set
+  against CURRENT reachability — the ordinary pending-GC completion.
+
+This is deliberately the CONSERVATIVE first implementation the issue
+asks for: one volume-wide mutex. Refinement to per-digest ownership
+(or tombstoned handoff) is a measured-load question — the protocol's
+seams (``_cas_refs_lock``/``_acas_refs_lock``, ``_sweep_locked``/
+``_asweep_locked``) are the only places such a refinement would land.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import random
@@ -162,8 +217,8 @@ import re
 import socket
 import tempfile
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -206,10 +261,13 @@ __all__ = [
     "DEFAULT_MAX_WORK_TOTAL_BYTES",
     "DEFAULT_HISTORY_KEEP",
     "DEFAULT_LOCK_WAIT_SECONDS",
+    "DEFAULT_GC_LOCK_WAIT_SECONDS",
     "DURABILITY_BEST_EFFORT",
     "DURABILITY_ENV",
     "DURABILITY_MODES",
     "DURABILITY_POSTGRES",
+    "GC_LOCK_WAIT_SECONDS_ENV",
+    "GCLockTimeout",
     "HISTORY_KEEP_ENV",
     "LANE_CONTROL_SECRET_ENV",
     "LOCK_WAIT_SECONDS_ENV",
@@ -218,6 +276,7 @@ __all__ = [
     "MAX_REQUEST_BYTES_ENV",
     "MAX_TOTAL_BLOB_BYTES_ENV",
     "MAX_WORK_TOTAL_BYTES_ENV",
+    "SWEEP_ENV",
     "CheckpointCorruptError",
     "CheckpointMetadataRow",
     "CheckpointStore",
@@ -308,8 +367,39 @@ DURABILITY_BEST_EFFORT: Final = "best_effort"
 DURABILITY_POSTGRES: Final = "postgres"
 DURABILITY_MODES: frozenset[str] = frozenset({DURABILITY_BEST_EFFORT, DURABILITY_POSTGRES})
 
+#: R36-04: the operator's destructive-sweep switch. ``off`` disables the
+#: CAS unlink half of every garbage-collection pass — explicit retention,
+#: on-upload cleanup and pending-GC recovery — while the MARKS stand
+#: (tombstones, journal records, deleted metadata rows are kept), so a
+#: rollout can qualify the locking protocol with byte deletion fenced
+#: off and turn collecting back on once satisfied. Any other value
+#: (including unset) keeps sweeping enabled.
+SWEEP_ENV: Final = "FORGE_CHECKPOINT_SWEEP"
+
+#: R36-04: how long a writer's reference acquisition or a sweep waits
+#: for the volume-wide reference/delete lock before refusing with
+#: :class:`GCLockTimeout` — a sweep aborts and retries later; a writer
+#: fails the landing honestly (nothing committed, the idempotent re-put
+#: retries). Bounded, never a silent indefinite block.
+GC_LOCK_WAIT_SECONDS_ENV: Final = "FORGE_CHECKPOINT_GC_LOCK_WAIT_SECONDS"
+DEFAULT_GC_LOCK_WAIT_SECONDS: Final = 30.0
+
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX2 = re.compile(r"^[0-9a-f]{2}$")
+
+#: R36-04: the volume-wide reference/delete lock's file, at the CAS blob
+#: ROOT — one lock per volume, every work and every process.
+_CAS_REFS_LOCK_NAME: Final = "cas-refs.lock"
+
+#: R36-04: the CONSTANT postgres advisory key of the volume lock — the
+#: first 8 bytes of a fixed domain string as a signed 64-bit integer,
+#: the same value in every process. A collision with an unrelated
+#: advisory key (2^-64 per pair) would only over-serialize, never
+#: under-serialize, so it is safe by construction.
+_CAS_REFS_ADVISORY_KEY: Final = int.from_bytes(
+    hashlib.sha256(b"forge.checkpoint.cas-refs.volume").digest()[:8], "big", signed=True
+)
+
 #: A work id must be a safe single path segment — it names an index
 #: FILE and a URL path component, so escapes (``/``, ``..``, ``@`` for
 #: the remote-ref separator) are refused, not sanitized.
@@ -385,6 +475,31 @@ class IndexLockHeldError(RuntimeError):
         self.holder = holder
 
 
+class GCLockTimeout(RuntimeError):
+    """The volume-wide CAS reference/delete lock was not granted in budget.
+
+    R36-04: reference acquisition and destructive sweeping serialize on
+    ONE lock per CAS volume (``<root>/cas-refs.lock``, plus a postgres
+    advisory-lock twin for blob roots that are not shared). The wait is
+    bounded by :data:`GC_LOCK_WAIT_SECONDS_ENV` — a SWEEP that exhausts
+    it aborts with this refusal before deleting anything (its marks
+    stand; a later pass completes them against fresh reachability), and
+    a WRITER that exhausts it fails the landing honestly: nothing was
+    committed, the blobs it wrote are collectable orphans, and the
+    content-addressed idempotent re-put retries. Never a silent
+    indefinite block, and never bytes lost to an unbounded wait.
+    """
+
+    def __init__(self, wait_seconds: float) -> None:
+        super().__init__(
+            f"the CAS volume's reference/delete lock was not granted within "
+            f"{wait_seconds:.3f}s ({GC_LOCK_WAIT_SECONDS_ENV}) — a sweep must "
+            "retry later and a landing must be re-delivered; nothing was "
+            "deleted or committed by the refusing side"
+        )
+        self.wait_seconds = wait_seconds
+
+
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     """Read an integer env knob, degrading to *default* (never below *minimum*)."""
     raw = os.environ.get(name, "").strip()
@@ -406,6 +521,21 @@ def _env_float(name: str, default: float) -> float:
 def _lock_wait_seconds() -> float:
     """The per-work index lock's retry budget (NEXT-06), from the env."""
     return _env_float(LOCK_WAIT_SECONDS_ENV, DEFAULT_LOCK_WAIT_SECONDS)
+
+
+def _gc_lock_wait_seconds() -> float:
+    """The volume-wide reference/delete lock's retry budget (R36-04)."""
+    return _env_float(GC_LOCK_WAIT_SECONDS_ENV, DEFAULT_GC_LOCK_WAIT_SECONDS)
+
+
+def _sweep_enabled() -> bool:
+    """Whether destructive CAS unlinks are permitted (R36-04 rollout knob).
+
+    Only the exact value ``off`` (case-insensitive) fences the unlink
+    half of a GC pass; anything else — including unset — keeps sweeping.
+    See :data:`SWEEP_ENV`.
+    """
+    return os.environ.get(SWEEP_ENV, "").strip().lower() != "off"
 
 
 @dataclass(frozen=True)
@@ -667,6 +797,17 @@ class CheckpointStore:
         # shared by BOTH authorities; injectable for tests.
         self.pins = pins if pins is not None else CheckpointPins(self._root)
         self.gc_journal = gc_journal if gc_journal is not None else CheckpointGcJournal(self._root)
+        # R36-04: TEST-ONLY barrier seam. When set, fired after a sweep's
+        # FINAL reference scan and before its first unlink — the P04
+        # schedule driver. Never set by production code; a hook may be a
+        # plain callable (both authorities) or a coroutine function (the
+        # async ``a*`` paths await it).
+        self.gc_after_final_scan: Callable[[], Any] | None = None
+        # R36-04: whether the metadata authority really reaches PostgreSQL
+        # — the advisory-lock twin of the volume lock exists only there
+        # (SQLite, the test approximation, serializes on the flock alone).
+        # Probed once, cached.
+        self._volume_lock_is_postgres: bool | None = None
 
     # -- content-addressed files --------------------------------------------
 
@@ -863,6 +1004,198 @@ class CheckpointStore:
         except BaseException:
             os.unlink(tmp_name)
             raise
+
+    # -- the volume-wide reference/delete lock (R36-04) ----------------------
+
+    def _cas_refs_lock_path(self) -> Path:
+        """The VOLUME-wide reference/delete lock file: ``<root>/cas-refs.lock``.
+
+        One lock for the whole CAS volume — every work, both durability
+        authorities, every process sharing the volume. It is NOT the
+        per-work index lock: the P04 defect lived precisely in the fact
+        that work A's retention and work B's landing serialized on
+        DIFFERENT per-work locks, so B's reference commit could slide
+        between A's final reference scan and A's unlink.
+        """
+        return self._root / _CAS_REFS_LOCK_NAME
+
+    @contextmanager
+    def _cas_refs_lock(self, *, wait_seconds: float | None = None) -> Iterator[None]:
+        """The volume lock — sync spelling (filesystem authority paths).
+
+        ``LOCK_EX | LOCK_NB`` retried with jitter until the budget
+        (:data:`GC_LOCK_WAIT_SECONDS_ENV`, or *wait_seconds*) elapses;
+        exhaustion refuses with :class:`GCLockTimeout` — bounded, never
+        a silent indefinite block. Ordering discipline: this lock is
+        taken AFTER the per-work index/pin locks and BEFORE any
+        transaction the guarded section runs (see the module docstring's
+        protocol) — the ONE rule is that nothing may be acquired before
+        it that someone else might take while holding it.
+        """
+        if fcntl is None:  # pragma: no cover — non-POSIX without flock
+            yield
+            return
+        path = self._cas_refs_lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        budget = _gc_lock_wait_seconds() if wait_seconds is None else max(0.0, wait_seconds)
+        deadline = time.monotonic() + budget
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise GCLockTimeout(budget) from None
+                    time.sleep(min(random.uniform(0.0005, 0.003), remaining))
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    @asynccontextmanager
+    async def _acas_refs_flock(self, *, wait_seconds: float | None = None) -> AsyncIterator[None]:
+        """The volume lock's flock half — async spelling (a* paths).
+
+        Same file, same exclusion as :meth:`_cas_refs_lock`; the retry
+        sleeps are ``asyncio.sleep`` so a contended lock never blocks
+        the event loop.
+        """
+        if fcntl is None:  # pragma: no cover — non-POSIX without flock
+            yield
+            return
+        path = self._cas_refs_lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        budget = _gc_lock_wait_seconds() if wait_seconds is None else max(0.0, wait_seconds)
+        deadline = time.monotonic() + budget
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise GCLockTimeout(budget) from None
+                    await asyncio.sleep(min(random.uniform(0.0005, 0.003), remaining))
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    async def _acas_refs_is_postgres(self) -> bool:
+        """Whether the metadata authority really reaches PostgreSQL (cached).
+
+        Only then does the volume lock take its advisory twin: a
+        deployment whose blob root is NOT shared across processes still
+        needs cross-process serialization, and ``pg_advisory_lock`` on a
+        constant key provides it through the shared database. SQLite
+        (the test approximation) serializes on the flock alone.
+        """
+        if self._volume_lock_is_postgres is None:
+            factory = self.durability.session_factory
+            reaches = False
+            if factory is not None:
+                async with factory() as session:
+                    bind = session.bind
+                    reaches = bind is not None and bind.dialect.name == "postgresql"
+            self._volume_lock_is_postgres = reaches
+        return self._volume_lock_is_postgres
+
+    @asynccontextmanager
+    async def _acas_refs_advisory(
+        self, *, wait_seconds: float | None = None
+    ) -> AsyncIterator[None]:
+        """The volume lock's postgres twin — ``pg_advisory_lock`` on ONE key.
+
+        A session-scoped advisory lock on the CONSTANT volume key
+        (:data:`_CAS_REFS_ADVISORY_KEY` — the same value in every
+        process, no table row to agree through), held on ONE dedicated
+        connection for the duration and released in ``finally``. Taken
+        INSIDE the flock, never outside it, so mixed deployments (some
+        processes share the volume, some only the database) serialize on
+        either half without a lock-order cycle.
+
+        The wait is BOUNDED like the flock's: the acquiring transaction
+        sets a transaction-scoped ``lock_timeout`` of the same budget,
+        and a PostgreSQL cancellation ("canceling statement due to lock
+        timeout") is translated to the same :class:`GCLockTimeout` —
+        ``pg_advisory_lock`` would otherwise block forever, and an
+        unbounded half would make the protocol's bounded-wait promise
+        false. Any other database error propagates untouched.
+        """
+        from sqlalchemy import text
+
+        factory = self._require_metadata_session()
+        budget = _gc_lock_wait_seconds() if wait_seconds is None else max(0.0, wait_seconds)
+        timeout_ms = max(1, int(budget * 1000))
+        async with factory() as session:
+            async with session.begin():  # holds ONE connection for the lock
+                await session.execute(
+                    text("SELECT set_config('lock_timeout', :ms, true)"), {"ms": str(timeout_ms)}
+                )
+                try:
+                    await session.execute(
+                        text("SELECT pg_advisory_lock(:key)"), {"key": _CAS_REFS_ADVISORY_KEY}
+                    )
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "lock timeout" in message or "canceling statement" in message:
+                        raise GCLockTimeout(budget) from exc
+                    raise
+                try:
+                    yield
+                finally:
+                    await session.execute(
+                        text("SELECT pg_advisory_unlock(:key)"), {"key": _CAS_REFS_ADVISORY_KEY}
+                    )
+
+    @asynccontextmanager
+    async def _acas_refs_lock(self, *, wait_seconds: float | None = None) -> AsyncIterator[None]:
+        """The volume lock — async spelling: the flock first, then the
+        postgres advisory twin when the metadata authority is PostgreSQL.
+
+        Either half serializes reference acquisition against deletion;
+        taking both, in this fixed order, covers shared-volume AND
+        shared-database-only topologies with one protocol.
+        """
+        async with self._acas_refs_flock(wait_seconds=wait_seconds):
+            if await self._acas_refs_is_postgres():
+                async with self._acas_refs_advisory(wait_seconds=wait_seconds):
+                    yield
+            else:
+                yield
+
+    def _repair_unlinked_closure(
+        self, checkpoint_id: str, manifest_bytes: bytes, blobs: dict[str, bytes]
+    ) -> None:
+        """Re-land closure bytes a concurrent sweep unlinked mid-put (R36-04).
+
+        A landing's blob WRITES deliberately run OUTSIDE the volume lock
+        (they are idempotent and content-addressed — holding the volume
+        lock across every upload's fsyncs would serialize the whole
+        deployment's writes). A sweep that held the lock between those
+        writes and this reference acquisition may therefore have unlinked
+        the very addresses this checkpoint is about to reference. Under
+        the lock no further unlink can intervene, so re-landing whatever
+        vanished HERE — cheap existence checks in the common case —
+        closes the window from the writer's side: the committed
+        reference always finds its bytes, and a crash before the commit
+        still leaves only collectable orphans, never a reference
+        without bytes.
+        """
+        for digest, data in sorted(blobs.items()):
+            if not self._cas_path(digest).exists():
+                self._write_cas(digest, data)
+        if not self._cas_path(checkpoint_id).exists():
+            self._write_cas(checkpoint_id, manifest_bytes)
 
     @staticmethod
     def _entry_order(entry: dict[str, Any]) -> tuple[int, str]:
@@ -1092,6 +1425,15 @@ class CheckpointStore:
         filesystem index). The ``postgres`` contract's is
         :meth:`aput_checkpoint` — same refusal prelude, transactional
         index, no lock needed for the content-addressed blobs.
+
+        R36-04: the index read-modify-write — the REFERENCE ACQUISITION
+        — runs under the VOLUME-wide reference/delete lock (nested
+        inside the per-work index lock), with the race repair first:
+        blob writes stay outside that lock, so a sweep that held it
+        meanwhile may have unlinked the freshly written addresses, and
+        :meth:`_repair_unlinked_closure` re-lands whatever vanished
+        before the reference commits. A sweep's final-scan-to-unlink
+        interval can therefore never contain this reference's commit.
         """
         checkpoint_id = self._verify_upload(work_id, manifest_bytes, blobs)
 
@@ -1105,29 +1447,41 @@ class CheckpointStore:
                 for digest, data in blobs.items():
                     self._write_cas(digest, data)
                 self._write_cas(checkpoint_id, manifest_bytes)
-                own = next(
-                    (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id),
-                    None,
-                )
-                if own is None:
-                    own = {
+                # R36-04: the REFERENCE ACQUISITION — the index
+                # read-modify-write that makes these bytes referenced —
+                # runs under the VOLUME-wide reference/delete lock, with
+                # the race repair first (a sweep that held the lock while
+                # this landing wrote its bytes may have unlinked them;
+                # see _repair_unlinked_closure). A retention pass for ANY
+                # work must hold the same lock from ITS final scan
+                # through ITS unlink, so a reference can no longer commit
+                # inside that window.
+                with self._cas_refs_lock():
+                    self._repair_unlinked_closure(checkpoint_id, manifest_bytes, blobs)
+                    own = next(
+                        (entry for entry in entries if entry.get("checkpoint_id") == checkpoint_id),
+                        None,
+                    )
+                    if own is None:
+                        own = {
+                            "checkpoint_id": checkpoint_id,
+                            "sequence": sequence,
+                            "files": len(blobs),
+                            "uploaded_at": _now_iso(),
+                        }
+                        entries.append(own)
+                    entries.sort(key=self._entry_order)
+                    self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
+                    latest = self._latest_entry(entries)
+                    result = {
+                        "work_id": work_id,
                         "checkpoint_id": checkpoint_id,
                         "sequence": sequence,
                         "files": len(blobs),
-                        "uploaded_at": _now_iso(),
+                        "uploaded_at": str(own.get("uploaded_at") or ""),
+                        "latest": latest is not None
+                        and latest.get("checkpoint_id") == checkpoint_id,
                     }
-                    entries.append(own)
-                entries.sort(key=self._entry_order)
-                self._save_index(work_id, {"work_id": work_id, "checkpoints": entries})
-                latest = self._latest_entry(entries)
-                result = {
-                    "work_id": work_id,
-                    "checkpoint_id": checkpoint_id,
-                    "sequence": sequence,
-                    "files": len(blobs),
-                    "uploaded_at": str(own.get("uploaded_at") or ""),
-                    "latest": latest is not None and latest.get("checkpoint_id") == checkpoint_id,
-                }
         except IndexLockHeldError as exc:
             # NEXT-06: the other writer won. Nothing was written; the
             # caller's upload is superseded history by verdict, not by
@@ -1149,10 +1503,11 @@ class CheckpointStore:
             if keep > 0:
                 try:
                     self.apply_retention(work_id, keep)
-                except IndexLockHeldError:
+                except (IndexLockHeldError, GCLockTimeout):
                     # The landing committed; retention is maintenance —
                     # the next upload or operator pass re-runs it against
-                    # the recorded decision.
+                    # the recorded decision (R36-04: a contended volume
+                    # lock defers the sweep, it never drops it).
                     pass
         return result
 
@@ -1240,70 +1595,96 @@ class CheckpointStore:
         through :meth:`forge.adaptive.checkpoint_repository.
         PostgresCheckpointRepository.first_upload_lock` (the advisory
         anchor) around this call.
+
+        R36-04: the landing's REFERENCE ACQUISITION — the row
+        transaction — runs under the VOLUME-wide reference/delete lock
+        (flock on ``cas-refs.lock`` plus the postgres advisory twin),
+        with the per-work pin flock nested inside it. The blob WRITES
+        stay outside that lock (idempotent, content-addressed; holding
+        the volume lock across every upload's fsyncs would serialize
+        the deployment's writes); under the lock the landing REPAIRS
+        first (:meth:`_repair_unlinked_closure`) — a sweep that held the
+        lock while these bytes were being written may have unlinked
+        them, and re-landing them under the lock, before the commit, is
+        what guarantees a committed row never lacks its bytes. No
+        sweep's final-scan-to-unlink interval can contain this
+        transaction: sweeps hold the same lock.
         """
         checkpoint_id = self._verify_upload(work_id, manifest_bytes, blobs)
         factory = self._require_metadata_session()
         await self._acomplete_pending_gc(work_id)
+        # Blob writes FIRST, outside the volume lock — a crash here
+        # leaves collectable CAS content, never a row without bytes.
+        for digest, data in blobs.items():
+            self._write_cas(digest, data)  # idempotent, lock-free
+        self._write_cas(checkpoint_id, manifest_bytes)
         doomed_digests: list[str] = []
-        async with factory() as session:
-            async with session.begin():
-                rows = list(
-                    (
-                        (
-                            await session.execute(
-                                select(CheckpointMetadataRow)
-                                .where(CheckpointMetadataRow.work_id == work_id)
-                                .order_by(
-                                    CheckpointMetadataRow.sequence,
-                                    CheckpointMetadataRow.checkpoint_id,
+        unlinked_digests: set[str] = set()
+        async with self._acas_refs_lock():
+            async with self.pins.alock(work_id):
+                self._repair_unlinked_closure(checkpoint_id, manifest_bytes, blobs)
+                async with factory() as session:
+                    async with session.begin():
+                        rows = list(
+                            (
+                                (
+                                    await session.execute(
+                                        select(CheckpointMetadataRow)
+                                        .where(CheckpointMetadataRow.work_id == work_id)
+                                        .order_by(
+                                            CheckpointMetadataRow.sequence,
+                                            CheckpointMetadataRow.checkpoint_id,
+                                        )
+                                        .with_for_update()
+                                    )
                                 )
-                                .with_for_update()
+                                .scalars()
+                                .all()
                             )
                         )
-                        .scalars()
-                        .all()
-                    )
-                )
-                self._refuse_over_work_quota(
-                    work_id, [row.as_entry() for row in rows], manifest_bytes, blobs
-                )
-                own = next((row for row in rows if row.checkpoint_id == checkpoint_id), None)
-                uploaded_at = _now_iso()
-                if own is None:
-                    # rowcount is the INSERT's inserted-row count; SQLAlchemy
-                    # 2.0 stubs only type it on CursorResult — access it via
-                    # the runtime attr (the budgets.py precedent).
-                    inserted = (
-                        await session.execute(
-                            self._metadata_insert(
-                                session,
-                                work_id=work_id,
-                                checkpoint_id=checkpoint_id,
-                                sequence=sequence,
-                                files=len(blobs),
-                                uploaded_at=uploaded_at,
-                            )
+                        self._refuse_over_work_quota(
+                            work_id, [row.as_entry() for row in rows], manifest_bytes, blobs
                         )
-                    ).rowcount  # type: ignore[attr-defined]
-                    if inserted != 1:  # a racing twin's committed row won
-                        twin = await session.get(CheckpointMetadataRow, (work_id, checkpoint_id))
-                        if twin is not None:
-                            uploaded_at = str(twin.uploaded_at or uploaded_at)
-                else:
-                    uploaded_at = str(own.uploaded_at or uploaded_at)
-                for digest, data in blobs.items():
-                    self._write_cas(digest, data)  # idempotent, lock-free
-                self._write_cas(checkpoint_id, manifest_bytes)
-                if self.policy.cleanup_trigger == "on_upload":
-                    keep = self.policy.retention_keep()
-                    if keep > 0:
-                        _removed, doomed_digests = await self._aretention_pass(
-                            session, work_id, keep
+                        own = next(
+                            (row for row in rows if row.checkpoint_id == checkpoint_id), None
                         )
-        for digest in doomed_digests:  # post-commit: rows first, blobs second
-            self._cas_path(digest).unlink(missing_ok=True)
-        if doomed_digests:
-            self.gc_journal.clear(work_id, doomed_digests)
+                        uploaded_at = _now_iso()
+                        if own is None:
+                            # rowcount is the INSERT's inserted-row count; SQLAlchemy
+                            # 2.0 stubs only type it on CursorResult — access it via
+                            # the runtime attr (the budgets.py precedent).
+                            inserted = (
+                                await session.execute(
+                                    self._metadata_insert(
+                                        session,
+                                        work_id=work_id,
+                                        checkpoint_id=checkpoint_id,
+                                        sequence=sequence,
+                                        files=len(blobs),
+                                        uploaded_at=uploaded_at,
+                                    )
+                                )
+                            ).rowcount  # type: ignore[attr-defined]
+                            if inserted != 1:  # a racing twin's committed row won
+                                twin = await session.get(
+                                    CheckpointMetadataRow, (work_id, checkpoint_id)
+                                )
+                                if twin is not None:
+                                    uploaded_at = str(twin.uploaded_at or uploaded_at)
+                        else:
+                            uploaded_at = str(own.uploaded_at or uploaded_at)
+                        if self.policy.cleanup_trigger == "on_upload":
+                            keep = self.policy.retention_keep()
+                            if keep > 0:
+                                _removed, doomed_digests = await self._aretention_pass(
+                                    session, work_id, keep
+                                )
+                    # COMMIT — rows first, blobs second.
+                # POST-COMMIT sweep — rows first, blobs second. R36-04: the
+                # ONE unlink entry, still under this landing's volume lock.
+                unlinked_digests = await self._asweep_locked(doomed_digests)
+            if unlinked_digests:
+                self.gc_journal.clear(work_id, sorted(unlinked_digests))
         active = self._adb_active(rows, own is None, checkpoint_id, sequence)
         return {
             "work_id": work_id,
@@ -1414,10 +1795,28 @@ class CheckpointStore:
         for row in rows:
             await session.delete(row)
 
-    async def _asweep(self, digests: list[str]) -> None:
-        """The SWEEP: idempotent unlink of the deletion survivors."""
+    async def _asweep_locked(self, digests: list[str]) -> set[str]:
+        """The SWEEP under the volume lock — the postgres authority's ONE
+        unlink entry (R36-04).
+
+        The async twin of :meth:`_sweep_locked`: every caller holds
+        :meth:`_acas_refs_lock` from its final survivor scan through this
+        call; the TEST-ONLY barrier may be a coroutine function (awaited
+        here); ``FORGE_CHECKPOINT_SWEEP=off`` unlinks nothing. Returns
+        the digests actually unlinked — a caller's journal keeps only
+        the spared set pending. The seam the interrupted-GC proofs crash
+        on purpose.
+        """
+        hook = self.gc_after_final_scan
+        if hook is not None:
+            outcome = hook()
+            if inspect.isawaitable(outcome):
+                await outcome
+        if not _sweep_enabled():
+            return set()
         for digest in digests:
             self._cas_path(digest).unlink(missing_ok=True)
+        return set(digests)
 
     async def _aretention_pass(
         self, session: AsyncSession, work_id: str, keep_last: int
@@ -1473,22 +1872,29 @@ class CheckpointStore:
 
         The journal's recovery pass: whatever a previous pass recorded
         as pending but never unlinked (it crashed, or a late reference
-        spared the digest) is re-derived from the table and the pins AS
+        spared the digest, or ``FORGE_CHECKPOINT_SWEEP=off`` fenced the
+        unlink half off) is re-derived from the table and the pins AS
         THEY STAND NOW — only still-unreferenced digests go. A journal
         left by a ROLLED-BACK transaction names digests whose rows
         still exist, so this pass spares them and clears the record:
         recovery never replays blindly, and never double-deletes.
+
+        R36-04: the survivor scan AND the unlink run inside ONE volume
+        lock hold (lock → final scan → unlink → unlock) — a landing
+        that starts while this pass holds the lock cannot commit a
+        reference into the scan-to-unlink interval.
         """
         pending = self.gc_journal.pending(work_id)
         if not pending:
             return
         factory = self._require_metadata_session()
-        async with factory() as session:
-            referenced = await self._adb_referenced_digests(session, set())
-        referenced |= self._pin_closure()
-        unlinked = [digest for digest in pending if digest not in referenced]
-        await self._asweep(unlinked)
-        self.gc_journal.clear(work_id, unlinked)
+        async with self._acas_refs_lock():
+            async with factory() as session:
+                referenced = await self._adb_referenced_digests(session, set())
+            referenced |= self._pin_closure()
+            doomed = [digest for digest in pending if digest not in referenced]
+            unlinked = await self._asweep_locked(doomed)
+            self.gc_journal.clear(work_id, sorted(unlinked))
 
     async def aentry(self, work_id: str, checkpoint_id: str | None = None) -> dict | None:
         """The work's ACTIVE entry (highest sequence), or the named one.
@@ -1592,59 +1998,71 @@ class CheckpointStore:
         completion pass covers it. The per-work PIN flock is held
         across the transaction: a pin for this work can never land
         between the recheck's pin read and the commit.
+
+        R36-04: the whole delete-and-sweep tail runs under the
+        VOLUME-wide reference/delete lock, taken BEFORE the pin flock
+        (the one lock order — a landing that inverts it could
+        deadlock): the FRESH survivor scan, the deletion transaction,
+        the commit and the unlink all sit inside one hold, so a
+        DIFFERENT work's landing cannot commit a reference to a doomed
+        digest between this pass's scan and its unlink. A READ
+        COMMITTED statement only sees references committed before it
+        ran — excluding the writer from the scan-to-unlink interval is
+        what closes the P04 window, not moving the SELECT.
         """
         factory = self._require_metadata_session()
         await self._acomplete_pending_gc(work_id)
         mark = await self._amark_retention(work_id, keep_last)
         if not mark.removed_ids:
             return 0
-        async with self.pins.alock(work_id):
-            deletion: list[str] = []
-            async with factory() as session:
-                async with session.begin():
-                    rows = list(
-                        (
+        async with self._acas_refs_lock():
+            async with self.pins.alock(work_id):
+                deletion: list[str] = []
+                async with factory() as session:
+                    async with session.begin():
+                        rows = list(
                             (
-                                await session.execute(
-                                    select(CheckpointMetadataRow)
-                                    .where(CheckpointMetadataRow.work_id == work_id)
-                                    .order_by(
-                                        CheckpointMetadataRow.sequence,
-                                        CheckpointMetadataRow.checkpoint_id,
+                                (
+                                    await session.execute(
+                                        select(CheckpointMetadataRow)
+                                        .where(CheckpointMetadataRow.work_id == work_id)
+                                        .order_by(
+                                            CheckpointMetadataRow.sequence,
+                                            CheckpointMetadataRow.checkpoint_id,
+                                        )
+                                        .with_for_update()
                                     )
-                                    .with_for_update()
                                 )
+                                .scalars()
+                                .all()
                             )
-                            .scalars()
-                            .all()
                         )
-                    )
-                    present = {str(row.checkpoint_id): row for row in rows}
-                    # RECHECK, part one — pins as they stand NOW: a pin
-                    # recorded since the mark keeps its row and its bytes.
-                    protected_now = self.pins.protected_ids()
-                    final_ids = [
-                        row_id
-                        for row_id in mark.removed_ids
-                        if row_id in present and row_id not in protected_now
-                    ]
-                    if not final_ids:
-                        return 0  # converged elsewhere, or every candidate was pinned late
-                    removed_ids = set(final_ids)
-                    doomed = self._closure_of(removed_ids)
-                    # RECHECK, part two — the FRESH survivor scan (the
-                    # P03 fix): references committed since the mark are
-                    # visible to this statement and leave the deletion set.
-                    referenced = await self._adb_referenced_digests(session, removed_ids)
-                    referenced |= self._pin_closure()
-                    deletion = sorted(doomed - referenced)
-                    await self._adelete_rows(session, [present[row_id] for row_id in final_ids])
-                    self.gc_journal.record(work_id, deletion)
-                # COMMIT — rows first, blobs second.
-            removed = len(final_ids)
-            await self._asweep(deletion)
-            self.gc_journal.clear(work_id, deletion)
-        return removed
+                        present = {str(row.checkpoint_id): row for row in rows}
+                        # RECHECK, part one — pins as they stand NOW: a pin
+                        # recorded since the mark keeps its row and its bytes.
+                        protected_now = self.pins.protected_ids()
+                        final_ids = [
+                            row_id
+                            for row_id in mark.removed_ids
+                            if row_id in present and row_id not in protected_now
+                        ]
+                        if not final_ids:
+                            return 0  # converged elsewhere, or every candidate was pinned late
+                        removed_ids = set(final_ids)
+                        doomed = self._closure_of(removed_ids)
+                        # RECHECK, part two — the FRESH survivor scan (the
+                        # P03 fix): references committed since the mark are
+                        # visible to this statement and leave the deletion set.
+                        referenced = await self._adb_referenced_digests(session, removed_ids)
+                        referenced |= self._pin_closure()
+                        deletion = sorted(doomed - referenced)
+                        await self._adelete_rows(session, [present[row_id] for row_id in final_ids])
+                        self.gc_journal.record(work_id, deletion)
+                    # COMMIT — rows first, blobs second.
+                removed = len(final_ids)
+                unlinked = await self._asweep_locked(deletion)
+                self.gc_journal.clear(work_id, sorted(unlinked))
+            return removed
 
     def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
         """The work's ACTIVE entry (highest sequence), or the named one.
@@ -1746,15 +2164,29 @@ class CheckpointStore:
         """
         return self._closure_of(self.pins.protected_ids())
 
-    def _sweep(self, digests: list[str]) -> None:
-        """The SWEEP: unlink the deletion survivors — idempotent.
+    def _sweep_locked(self, digests: list[str]) -> set[str]:
+        """The SWEEP under the volume lock — the filesystem authority's ONE
+        unlink entry (R36-04).
 
-        A missing blob is already gone — success, not an error — so an
-        interrupted sweep re-runs to convergence. This method is the
-        seam the interrupted-GC proofs crash on purpose.
+        Every caller holds :meth:`_cas_refs_lock` from its FINAL reference
+        scan through this call (lock → final scan → metadata deletion →
+        unlink → unlock), so a reference that commits after the scan
+        cannot exist: its writer needed the same lock first. Fires the
+        TEST-ONLY ``gc_after_final_scan`` barrier, honors
+        :func:`_sweep_enabled` (``FORGE_CHECKPOINT_SWEEP=off`` unlinks
+        nothing — the marks stand for a later pass), unlinks idempotently
+        (a missing blob is already gone) and RETURNS the digests actually
+        unlinked so the caller keeps only the spared set pending. This is
+        the seam the interrupted-GC proofs crash on purpose.
         """
+        hook = self.gc_after_final_scan
+        if hook is not None:
+            hook()
+        if not _sweep_enabled():
+            return set()
         for digest in digests:
             self._cas_path(digest).unlink(missing_ok=True)
+        return set(digests)
 
     def _referenced_by_retained_works(self, exclude_ids: set[str]) -> set[str]:
         """Every digest ANY retained checkpoint of ANY work still needs.
@@ -1819,6 +2251,23 @@ class CheckpointStore:
            wins the race; its bytes stay readable (the P03 defect).
         3. **Sweep** — only the survivors are unlinked, idempotently.
 
+        R36-04 places the FINAL reference scan and the unlink of BOTH
+        sweeps here (the crash-recovery completion in step 1 and the
+        live sweep in step 5) inside ONE volume-wide reference/delete
+        lock each (``cas-refs.lock``, nested INSIDE the per-work index
+        and pin locks — the one lock order the filesystem authority
+        uses): a DIFFERENT work's landing can no longer commit a
+        reference to a shared digest between this pass's final scan and
+        its unlink, because that landing's own reference acquisition
+        takes the same volume lock and must wait for the sweep to
+        finish (its race repair then re-lands anything this pass was
+        entitled to delete). The MARK stays outside the lock on purpose
+        — a reference that commits between the mark and the deletion is
+        the recheck's to catch. Moving the SELECT closer to the unlink
+        would not close the window — a READ COMMITTED statement sees
+        only what committed before it ran; only excluding the writer
+        from the scan-to-unlink interval does.
+
         NEXT-06 records the DECISION in the index:
         ``{"keep", "ran_at", "removed", "holder", "kept_tail",
         "pending_gc"}``. A re-run that sees the same decision over the
@@ -1852,14 +2301,17 @@ class CheckpointStore:
             # (entries dropped, digests recorded) but died before/during
             # the unlink. Complete it against CURRENT reachability AND
             # pins — the same recheck discipline the live sweep runs.
+            # R36-04: the recovery's survivor scan AND its unlink sit in
+            # ONE volume-lock hold (lock → final scan → unlink → unlock).
             pending = decision.get("pending_gc") if decision is not None else None
             if isinstance(pending, list) and pending and decision is not None:
                 pending_digests = {
                     str(digest) for digest in pending if _HEX64.fullmatch(str(digest))
                 }
-                still = self._referenced_by_retained_works(set()) | self._pin_closure()
-                self._sweep(sorted(pending_digests - still))
-                spared = sorted(pending_digests & still)
+                with self._cas_refs_lock():
+                    still = self._referenced_by_retained_works(set()) | self._pin_closure()
+                    gone = self._sweep_locked(sorted(pending_digests - still))
+                spared = sorted(pending_digests - gone)
                 document["retention"] = {**decision, "pending_gc": spared}
                 self._save_index(work_id, document)
                 decision = document["retention"]
@@ -1885,7 +2337,10 @@ class CheckpointStore:
             ):
                 return 0
 
-            # 3. MARK — pinned entries are never candidates (Q35-05).
+            # 3. MARK — pinned entries are never candidates (Q35-05). A
+            # proposal, deliberately OUTSIDE the volume lock: a reference
+            # that commits after the mark but before the deletion is
+            # exactly what the recheck below must still see.
             protected = self.pins.ids_for(work_id)
             keep_count = max(1, min(keep_last, len(entries))) if keep_last > 0 else 1
             removed = [
@@ -1944,10 +2399,16 @@ class CheckpointStore:
             # 5. SWEEP with the RECHECK — reachability re-derived from
             # the CURRENT indexes and pins: a reference that landed
             # since the mark wins and keeps its bytes (Q35-05/P03).
-            still = self._referenced_by_retained_works(set()) | self._pin_closure()
-            deletable = [digest for digest in pending_gc if digest not in still]
-            self._sweep(deletable)
-            spared = [digest for digest in pending_gc if digest in still]
+            # R36-04: the FINAL reference scan and the unlink sit in ONE
+            # volume-lock hold — a different work's landing takes the
+            # same lock for its reference acquisition, so no reference
+            # can commit inside this interval (and a landing queued
+            # behind the hold re-lands its bytes afterwards).
+            with self._cas_refs_lock():
+                still = self._referenced_by_retained_works(set()) | self._pin_closure()
+                deletable = [digest for digest in pending_gc if digest not in still]
+                gone = self._sweep_locked(deletable)
+            spared = [digest for digest in pending_gc if digest not in gone]
             document = self._load_index(work_id)
             document["retention"] = {**document.get("retention", {}), "pending_gc": spared}
             self._save_index(work_id, document)
@@ -2509,6 +2970,12 @@ async def put_checkpoint(
             sequence=sequence,
         )
     except CheckpointRepositoryUnavailable as exc:  # an outage is never 404
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except GCLockTimeout as exc:
+        # R36-04: a sweep held the volume lock past the landing's budget.
+        # Nothing was committed (the blobs it wrote are collectable
+        # orphans); the content-addressed re-put retries — 503, not 500,
+        # because the caller's next attempt is the documented remedy.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except StorageQuotaExceededError as exc:  # R28-14: an honest 413, store intact
         raise HTTPException(status_code=413, detail=str(exc)) from exc

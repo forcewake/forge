@@ -3,8 +3,10 @@
 This document covers the persistent operator view: the versioned
 projection over a run's durable rows (`forge.adaptive.operator_view`), the
 state vocabulary and what proves each state, the replay protection on
-updates, the recovery-action validity matrix, and the exportable support
-bundle (`forge.adaptive.support_bundle`).
+updates, the recovery-action validity matrix, the exportable support
+bundle (`forge.adaptive.support_bundle`), and — since R36-15 — the
+authorized snapshot reader (`forge.adaptive.operator_snapshot`) and the
+authenticated read API (`forge.api_operator`) that surface them live.
 
 For the control commands themselves, see
 [operator-commands.md](operator-commands.md) and
@@ -62,7 +64,7 @@ what it overlaid).
 | `safely_paused` | A checkpoint is committed and the fence is held | A committed checkpoint row (+ fence word `held`, or a checkpointed pause — the router raises the fence with the booking) |
 | `resumed` | A resume was accepted AND the checkpoint bytes were ACTIVATED | A resume command (not refused) + a checkpoint row with an activation time |
 | `unverified` | A candidate exists; independent verification has not passed | The run's `candidate_shas` with no `passed` verification row |
-| `verified_ready` | Independent verification passed for the candidate | A verification row with result `passed` |
+| `verified_ready` | Independent verification passed for the candidate | A verification row with result `passed` bound to the CURRENT candidate (its `candidate_sha` is one of the run's `candidate_shas`; a passed row naming no candidate binds to whatever the run holds) |
 | `wedged` | Executing but no SEMANTIC transition within the threshold — the looked-launched-but-stalled failure | Latest attempt `executing` + the newest transition timestamp (timeline rows, attempt updates, checkpoints, verifications) older than the threshold (default 30 minutes, a parameter of `derive_state`) |
 | `stale` | The stored projection predates the source rows | `stored.source_digest` ≠ the current rows' digest |
 | `dead` | Terminal-failed/cancelled with external effects never reconciled | A failed/cancelled terminal + publication intents in `requested`/`dispatched`/`probing`/`unknown` |
@@ -193,3 +195,81 @@ management API response and this view can therefore never disagree about
 what a run is doing — they disagree only about which slice they render.
 When the rows move, every surface moves; when they have not, every
 surface says so (`rows_observed`, `stale`).
+
+`status_note_lines(projection)` is the parity hook for the native side:
+the compact lines a `/status` reply renders (state, short identities,
+blocked/waiting, unresolved effects, last transition) are derived from
+the SAME projection the API renders — a test pins that both surfaces
+agree on state and identity for the same snapshot.
+
+## 8. The authorized snapshot reader (R36-15)
+
+`OperatorSnapshotReader` (`forge.adaptive.operator_snapshot`) is the ONE
+subject-scoped async reader that assembles the projection inputs from
+the durable authorities: the run row (`FlowRun`, with `status_reason` as
+`blocked_reason`), the revival-attempt records (`ActionLog` rows with a
+`retryability`), the control commands and deliveries (`control_commands`
+/ `control_command_deliveries`), the ACTIVE checkpoint (through the
+injected `CheckpointRepository`), the pause fence (`pause_fences`), the
+verification verdict (`evidence["verification"]`, the unified R02 shape),
+the publication intents, the gate approvals and the admission leases.
+
+Two rules pin its contract:
+
+- **Subject-scope enforcement.** The reader takes an authorized subject
+  scope (repo full names) and every run query filters by it; a run
+  outside the scope is `None` — indistinguishable from unknown — on the
+  list, detail and support-bundle paths.
+- **Coverage honesty.** The snapshot carries `source_coverage` per
+  section (`present | missing | unknown`) and `projection_age` (how old
+  the newest observed row is). A source never queried is `unknown` —
+  `questions` (no durable authority yet), checkpoints without an
+  injected repository, or any section whose authority was unreachable
+  (a checkpoint outage is `unknown`, never "no checkpoint"). An observed
+  empty section is `missing`. Neither is ever filled or assumed.
+
+The derived-state bindings the reader feeds (and tests pin): a `passed`
+verification decorates only the candidate it tested (`tested_oid` must
+be a current `candidate_shas` entry — an old green verdict about another
+candidate reads `unverified`); `safely_paused` stands on the
+repository's real ACTIVE entry plus the durable fence word; a resume's
+activation proof is the resume command that reached
+`applied`/`checkpointed`.
+
+## 9. The read API (R36-15)
+
+`forge.api_operator` mounts three GET routes, read-only by construction
+(zero write endpoints; rendering performs no provider writes, no model
+calls, no state transitions):
+
+| Route | Returns |
+|---|---|
+| `GET /operator/runs?repo=owner/a&repo=owner/b` | Thin summaries per run: state, underlying state, blocked/waiting line, `updated_at`, `projection_age_seconds`, unresolved-effect count |
+| `GET /operator/runs/{run_id}?repo=owner/a` | The full `render()` document plus `subject`, `source_coverage`, `projection_age_seconds`, `occupancy` (the admission/lease slice) and `actions` — the ADVISORY hints |
+| `GET /operator/runs/{run_id}/support-bundle?repo=owner/a` | The `forge.support.bundle/1` document (coverage, digest, every attempt — failed included), redaction on |
+
+**Authentication** is the lane-control credential family, reused: the
+same `HMAC-SHA256` under `FORGE_LANE_CONTROL_SECRET`, presented as a
+bearer token, where the signed material is the SUBJECT SCOPE —
+`operator:` + the declared repo full names, comma-joined sorted
+(`operator_scope_token(secret, repos)` mints it). The caller declares
+the scope it asks about (exactly as a lane declares its `work_id`) and
+the server verifies the token signs exactly that scope. Fail-closed
+ladder: no secret / no session factory → **503**; no bearer → **401**;
+blank declared scope → **400** (no wildcard — least authority); token
+that does not sign the declared scope → **403**; a run outside the
+verified scope → **404**, indistinguishable from unknown.
+
+**Actions are advisory.** The API renders hints for the read-only
+`observer` role (probe only). Execution goes through the EXISTING
+guarded command routes — the command router's authenticated ingress, the
+lane-control ack surface — which revalidate authority and the current
+world: a stale action replayed after the rows moved is refused there
+(the lane ack's CTL-04 CAS expires commands written against an old plan
+revision / execution epoch; `RecoveryActions.decide` names the current
+state and the safe next action).
+
+The composition may inject the checkpoint authority by setting
+`app.state.operator_checkpoint_repository` to a `CheckpointRepository`;
+without it the checkpoints section reads `unknown` — never an invented
+empty history.

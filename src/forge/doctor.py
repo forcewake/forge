@@ -469,7 +469,7 @@ async def _grandfathered_works(settings: Settings) -> str:
 
 
 async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
-    """Q35-21 preflight: the checkpoint metadata migration's three views.
+    """Q35-21 preflight + the R36-05 authority-marker view.
 
     Read-only, env-driven (``FORGE_CHECKPOINT_DURABILITY`` /
     ``FORGE_CHECKPOINT_STORE_DIR``), best-effort on the database half
@@ -488,7 +488,15 @@ async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
       unsupported topology, in its simplest honest form: a WARNING when
       the configured store root looks node-local (relative or under a
       temp directory — the documented heuristic), because a shared
-      database does not make node-local content-addressed blobs shared.
+      database does not make node-local content-addressed blobs shared;
+    - ``checkpoint.authority_marker`` (R36-05, issue #264) — the
+      composition-root fence's state: which authority the deployment's
+      marker names (and its generation), the CONFIGURED repository, and
+      a MISMATCH verdict — a process configured for the retired
+      authority has its metadata mutations refused with
+      ``MutationsFencedError``, so a mismatch FAILS with the two
+      remedies named (restart on the configured authority, or the
+      gated rollback). Read-only: doctor never flips either authority.
     """
     from forge.adaptive.checkpoint_migration import preflight
 
@@ -598,6 +606,55 @@ async def check_checkpoint_authority(settings: Settings) -> list[CheckResult]:
                 True,
                 f"blob root {topology['store_root']} assumed shared — confirm every "
                 "replica mounts this volume (heuristic: absolute, non-temp path)",
+                "",
+            )
+        )
+
+    # R36-05: the authority marker, the configured repository, and any
+    # mismatch — read exactly the way the composition-root fence reads
+    # them, changing neither authority.
+    marker = views["authority_marker"]
+    state = str(marker.get("state") or "unmarked")
+    if state == "mismatch":
+        detail = (
+            f"the authority marker names {marker.get('active_authority')!r} "
+            f"(generation {marker.get('marker_generation')}), but this process is "
+            f"configured for {marker.get('configured_authority')!r} — its checkpoint "
+            "mutations will be refused with MutationsFencedError; set "
+            "FORGE_CHECKPOINT_DURABILITY to the marker's authority and restart, or "
+            "roll the marker back (python -m forge.adaptive.checkpoint_migration "
+            "rollback --verify-report <path>)"
+        )
+        results.append(_result("checkpoint.authority_marker", False, "", detail))
+    elif marker.get("cutover_in_progress"):
+        results.append(
+            _result(
+                "checkpoint.authority_marker",
+                None,
+                "a checkpoint authority cutover currently holds the fence — mutations "
+                "are fenced on both sides; retry once the flip completes",
+                "",
+            )
+        )
+    elif state == "unmarked":
+        results.append(
+            _result(
+                "checkpoint.authority_marker",
+                True,
+                f"no authority marker at {marker.get('marker_path')} — the mutation "
+                f"fence is dormant; the configured repository is "
+                f"{marker.get('configured_authority')!r}",
+                "",
+            )
+        )
+    else:
+        results.append(
+            _result(
+                "checkpoint.authority_marker",
+                True,
+                f"the authority marker names {marker.get('active_authority')!r} "
+                f"(generation {marker.get('marker_generation')}) and the configured "
+                f"repository is {marker.get('configured_authority')!r} — aligned",
                 "",
             )
         )

@@ -147,6 +147,7 @@ from forge.harnesses.brief_envelope import (
 )
 from forge.candidate_collector import (
     CollectionError,
+    CollectionIdentity,
     collect_candidate,
 )
 from forge.harnesses.mcp import McpConfigError, parse_servers
@@ -994,6 +995,17 @@ def main(argv: list[str] | None = None) -> int:
             "instead of collecting the checkout (the resumed-delivery profile)"
         ),
     )
+    parser.add_argument(
+        "--expected-checkpoint-id",
+        default=None,
+        help=(
+            "R36-01: the checkpoint id the TRUSTED dispatch bound this attempt "
+            "to — the pointer's own checkpoint must EQUAL it (a pointer naming "
+            "the current work but a different checkpoint is refused). Optional "
+            "and empty on a fresh/legacy dispatch: the absence is EXPLICITLY "
+            "recorded (checkpoint_binding=unbound), never guessed"
+        ),
+    )
     parser.add_argument("--forge-run-id", default=None, help="forge run id for --emit-meta")
     parser.add_argument(
         "--attempt-base-oid", default=None, help="frozen attempt base for --emit-meta"
@@ -1326,13 +1338,25 @@ def main(argv: list[str] | None = None) -> int:
         # own exit classification (.forge/exit) is NEVER rewritten here:
         # this step runs ``if: always()`` and a collection failure must
         # redden the job as infrastructure, not re-classify the turn.
+        # R36-01: the EXPECTED identity comes from the dispatch inputs
+        # (this step's arguments), never from the agent-writable pointer —
+        # work id, frozen base and, when the dispatch carried it, the
+        # checkpoint this attempt restores. An absent expected checkpoint
+        # is the explicit fresh/legacy mode (recorded unbound, never
+        # guessed); a present one binds the pointer's checkpoint exactly.
+        expected_identity = CollectionIdentity(
+            work_id=(args.forge_run_id or "").strip(),
+            attempt_base_oid=(args.attempt_base_oid or "").strip(),
+            checkpoint_id=(args.expected_checkpoint_id or "").strip(),
+        )
         try:
             result = collect_candidate(
                 Path.cwd(),
-                args.forge_run_id or "",
-                args.attempt_base_oid or "",
+                expected_identity.work_id,
+                expected_identity.attempt_base_oid,
                 args.output_root,
                 allow_missing_pointer=not args.require_generation,
+                expected=expected_identity,
             )
         except CollectionError as exc:
             print(f"harness_entry: candidate collection failed ({exc})", file=sys.stderr)

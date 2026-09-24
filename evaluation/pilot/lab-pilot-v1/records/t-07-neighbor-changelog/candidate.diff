@@ -1,0 +1,7 @@
+diff --git a/src/limits.py b/src/limits.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3a514a304f67458aa72ed970007df4548e9c934
+--- /dev/null
++++ b/src/limits.py
+@@ -0,0 +1 @@
++REQUESTS_PER_MINUTE = 120

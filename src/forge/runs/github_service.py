@@ -133,7 +133,24 @@ from forge.adaptive.research_planner import (
     completion_from_llm_client,
     discovery_mode,
 )
-from forge.adaptive.revisions import ACTIVE_PLAN_KEY, dispatch_plan_binding
+from forge.adaptive.revisions import (
+    ACTIVE_PLAN_KEY,
+    dispatch_plan_binding,
+    executor_digest_document,
+    refused_wip_reuse,
+)
+from forge.adaptive.verification_binding import (
+    DEFAULT_INFRA_RETRIES,
+    FAILURE_CLASS_CODE,
+    FAILURE_CLASS_INFRASTRUCTURE,
+    InfraRetryBudget,
+    InfraRetryLedger,
+    GenerationBinding,
+    VerificationSubject,
+    candidate_digest_of,
+    classify_repair_failure,
+    expected_report_coverage_of,
+)
 from forge.adaptive.system_context import (
     NeighborRepository,
     SystemContextProfile,
@@ -143,6 +160,7 @@ from forge.adaptive.system_context import (
 from forge.factory.planner import PLAN_SUMMARY_CHARS, PLANNER_TIER
 from forge.adaptive.admission import AdmissionPolicy as FairUsePolicy
 from forge.adaptive.admission import (
+    ExecutionLease,
     NativeProbe,
     NativeStatus,
     clear_native_start_intent,
@@ -223,9 +241,12 @@ from forge.runs.revival import (
     retry_delivery_key,
     retry_in_flight_rejection,
     retry_rejection,
+    RetryRejection,
+    RetryRefusalCode,
     terminalize_failure,
     why_blocked_reply,
 )
+from forge.runs import revival
 from forge.runs.revival import RevivalInFlight
 from forge.runs.spec import (
     EXECUTABLE_SPEC_SCHEMA_VERSION,
@@ -235,13 +256,18 @@ from forge.runs.spec import (
     load_verified_spec,
 )
 from forge.runs.verification import (
+    FRESHNESS_STALE,
     GITHUB_CODE_FAILURE_CONCLUSIONS,
     GITHUB_INFRA_CONCLUSIONS,
     GITHUB_SUCCESS_CONCLUSIONS,
     PRODUCER_GITHUB_CHECKS,
+    STATUS_UNKNOWN,
     VERIFICATION_INFRA_REASON,
     epoch_started_at,
+    render_stale,
+    subject_digest_of_evidence,
     verification_epoch,
+    verdict_freshness,
     waived_conclusions_from_settings,
 )
 from forge.runs.usecases import (
@@ -1299,6 +1325,14 @@ class GitHubRunService:
         dead attempt's recoverable state (the continuation decision, made
         once, persisted before this ack, reused on repeated events) — no
         longer unconditionally ``required``.
+
+        R36-02 (issue #261): the command parses into a TYPED recovery
+        request — ``restart`` grants a discard ONLY from its documented
+        argument position — and a standing ``retry_rejection`` is superseded
+        ONLY in its continuity arm (``nothing_to_retry``), ONLY for a
+        decision that proves the demand wrong (a proven no-WIP baseline) or
+        an operator-authorized discard; cancellation, another live attempt,
+        a non-retryable status and a foreign subject still refuse.
         """
         match = _RETRY_RE.search(note_text or "")
         if match is None:
@@ -1313,11 +1347,13 @@ class GitHubRunService:
             logger.info("GitHub /retry off-issue — ignoring")
             return
 
-        requested = (match.group(1) or "").lower()
-        # Q35-02: ``/retry <run-id> restart`` — the operator's explicit
-        # discard of the held WIP (the EXPLICIT_RESTART arm of the
-        # continuation decision below).
-        discard_requested = continuation.operator_discard_requested(note_text)
+        # R36-02: the TYPED recovery request — `restart` is honored only
+        # from the documented argument position of the /retry command, so
+        # negated/quoted/unrelated mentions of the word never grant a
+        # discard. The bare ``/retry [<id>]`` shape parses unchanged.
+        command = continuation.parse_recovery_request(note_text)
+        requested = command.requested
+        discard_requested = command.restart
         attempt_key = retry_delivery_key(delivery_id)
         run_id: str | None = None
         # A07: the dispatch leg below aims at the VERIFIED run's subject, read
@@ -1330,6 +1366,7 @@ class GitHubRunService:
         status = ""
         status_reason = ""
         cycle = 1
+        attempt_generation = 0
         evidence: dict = {}
         candidates: list = []
         cancel_requested = False
@@ -1372,13 +1409,22 @@ class GitHubRunService:
                         repo_full_name=run.github_repo_full_name,
                         exclude_run_id=run.id,
                     )
-                    rejection = retry_rejection(run, other_active=other_active)
+                # R36-03: the typed refusal evaluation runs AFTER the
+                # session block — its checkpoint arm consumes ONE
+                # pre-resolved typed lookup through the configured async
+                # authority (never a raw index read or a synchronous
+                # HTTP call inside the loop), and holding a session
+                # open across a bounded remote lookup is exactly what
+                # the async chain removes.
                 # Q35-02: the continuation decision reads these whatever the
                 # rejection said — the proven-no-WIP override below needs
                 # them even when retry_rejection refused.
                 status = run.status
                 status_reason = run.status_reason or ""
                 cycle = run.commit_cycle or 1
+                # R36-02 lineage: the dead attempt's durable generation the
+                # decision continues FROM (the bump below opens the NEW one).
+                attempt_generation = int(run.cancellation_generation or 0)
                 evidence = dict(run.evidence or {})
                 candidates = list(run.candidate_shas or [])
                 cancel_requested = bool(run.cancel_requested)
@@ -1387,37 +1433,90 @@ class GitHubRunService:
                 "GitHub /retry on %s#%s — no retryable run", self._repo_full_name, issue_number
             )
             return
+        # R36-03: ONE typed consultation of the configured async
+        # authority feeds BOTH the refusal evaluation and the
+        # continuation decision below.
+        checkpoint_outcome = await revival.durable_checkpoint_outcome(
+            run_id, session_factory=self._session_factory
+        )
+        if not rejection:
+            rejection = retry_rejection(
+                run, other_active=other_active, checkpoint=checkpoint_outcome
+            )
         # Q35-02: decide ONCE, from the recorded recoverable state, BEFORE the
         # ack note — and reuse the persisted decision on a repeated retry
         # event whose evidence snapshot is unchanged (one decision, one
-        # logical attempt).
+        # logical attempt). R36-02: the decision additionally carries its
+        # lineage — the originating attempt, the native command/event
+        # identity and, for a discard, WHO authorized it. R36-03: the
+        # pre-resolved typed outcome pins the exact checkpoint on the
+        # decision (``continuation.checkpoint_digest``).
         decision = await self._select_continuation(
             run_id,
             death_reason=status_reason,
             evidence=evidence,
             candidate_shas=candidates,
             operator_discard_requested=discard_requested,
+            discard_authorized_by=(f"operator:@{author_username}" if discard_requested else None),
+            native_command_id=delivery_id,
+            source_attempt=attempt_generation,
+            checkpoint=checkpoint_outcome,
         )
+        # R36-02: the typed override matrix. ONLY the continuity arm
+        # (``nothing_to_retry``) may be superseded, and only when the
+        # decision PROVES the demand wrong or the operator authorized the
+        # discard: a proven no-WIP death (COMMITTED_BASELINE — the
+        # checkpoint that arm demands can never exist), or an explicit
+        # restart (EXPLICIT_RESTART — the operator-authorized discard
+        # satisfies the continuity requirement). Every OTHER code still
+        # refuses: cancellation, another live attempt, a non-retryable
+        # status, a foreign subject.
+        rejection_code = rejection.code if isinstance(rejection, RetryRejection) else ""
         if (
             rejection
-            # Only the "nothing to retry in place" arm of retry_rejection is
-            # superseded here, and only when the decision PROVES it wrong:
-            # with no vendor session ever started there provably is no work
-            # to lose, so the committed baseline IS the retry's continuation
-            # source — the checkpoint that arm demands can never exist.
-            and decision.mode is continuation.ContinuationMode.COMMITTED_BASELINE
+            and rejection_code == RetryRefusalCode.NOTHING_TO_RETRY.value
+            and decision.mode
+            in (
+                continuation.ContinuationMode.COMMITTED_BASELINE,
+                continuation.ContinuationMode.EXPLICIT_RESTART,
+            )
             and not other_active
             and status in ("failed", "blocked")
             and not cancel_requested
             and not candidates
         ):
             logger.info(
-                "GitHub /retry of run %s — proven no-WIP death overrides the "
-                "no-candidate/no-checkpoint refusal (Q35-02)",
+                "GitHub /retry of run %s — %s overrides the no-candidate/no-checkpoint "
+                "refusal (R36-02)",
                 run_id[:8],
+                decision.mode_selected,
             )
             rejection = ""
         if rejection:
+            # R36-02: record the typed refusal code on the persisted
+            # decision (observability), then post the operator wording.
+            await self._annotate_continuation_refusal(run_id, rejection_code)
+            if rejection_code == RetryRefusalCode.NOTHING_TO_RETRY.value and (
+                not decision.dispatchable
+            ):
+                # The continuity arm refused an UNCERTAIN recoverable state:
+                # the honest reply is the decision note (the park WITH its
+                # explanation and the documented ways out), not the generic
+                # "start fresh" wording that would presume the WIP was empty.
+                await self._post_journaled_note(
+                    project_id,
+                    issue_number,
+                    continuation.uncertain_retry_note(run_id, decision),
+                    run_id,
+                    "retry_uncertain_note",
+                )
+                logger.info(
+                    "GitHub /retry of run %s parked for an operator decision — continuation "
+                    "source unknown (%s), nothing dispatched (R36-02)",
+                    run_id[:8],
+                    decision.mode_selected,
+                )
+                return
             await self._post_journaled_note(
                 project_id, issue_number, f"🔁 {rejection}", run_id, "retry_rejected_note"
             )
@@ -1558,6 +1657,11 @@ class GitHubRunService:
         candidate_shas: list | None = None,
         operator_discard_requested: bool = False,
         checkpoint_lookup: Callable[[str], Any] | None = None,
+        checkpoint: Any | None = None,
+        intent_lookup: continuation.IntentLookup | None = None,
+        discard_authorized_by: str | None = None,
+        native_command_id: str | None = None,
+        source_attempt: int | None = None,
     ) -> continuation.ContinuationDecision:
         """The run's continuation decision — reused when the evidence says so.
 
@@ -1567,28 +1671,52 @@ class GitHubRunService:
         evidence snapshot is unchanged re-materializes the SAME decision
         instead of re-deciding; a materially changed snapshot re-decides.
 
-        Checkpoint presence comes from the authority the /retry path already
-        consults (the local index, then the lane-control checkpoint API) via
-        the injectable *checkpoint_lookup* — a failing lookup is UNKNOWN
-        (None), never a proven absence.
+        R36-03: checkpoint presence comes from the CONFIGURED ASYNC
+        AUTHORITY — *checkpoint* (a pre-resolved typed
+        ``CheckpointLookupOutcome``, the caller's single consultation)
+        wins; else the injectable *checkpoint_lookup* (tests); else this
+        service's session factory selects the same repository the
+        upload/resume surfaces share. The typed outcome also carries the
+        exact checkpoint's digest: an EXACT_WIP decision records
+        ``continuation.checkpoint_digest`` and PINS it (one pin per
+        authorized decision, keyed by the decision's command id) — a
+        checkpoint uploaded after the decision changes nothing.
+
+        R36-02: the vendor-start certainty for a ``dispatch never observed``
+        death comes from the persisted native-start INTENT via the
+        injectable *intent_lookup* (default: this service's
+        ``execution_leases`` query) — discovery absence alone stays UNKNOWN.
+        The decision additionally carries its lineage (the originating
+        *source_attempt*, the *native_command_id*/event identity, and, for a
+        discard, *discard_authorized_by*) into the persisted document.
         """
-        lookup = checkpoint_lookup or continuation.durable_checkpoint_lookup
-        try:
-            checkpoint = lookup(run_id)
-            if isinstance(checkpoint, Awaitable):
-                checkpoint = await checkpoint
-        except Exception:  # noqa: BLE001 — a failed lookup is unknown, not False
-            checkpoint = None
+        if checkpoint is None:
+            lookup = checkpoint_lookup or self._default_checkpoint_lookup
+            try:
+                result = lookup(run_id)
+                if isinstance(result, Awaitable):
+                    result = await result
+            except Exception:  # noqa: BLE001 — a failed lookup is unknown, not False
+                result = None
+        else:
+            result = checkpoint
+        committed, checkpoint_digest = continuation.normalize_checkpoint_result(result)
         prior_doc = evidence.get(continuation.CONTINUATION_EVIDENCE_KEY)
-        snapshot = continuation.evidence_from_record(
+        snapshot = await continuation.evidence_from_record(
             death_reason=death_reason,
+            run_id=run_id,
             evidence=evidence,
             candidate_shas=candidate_shas,
             operator_discard_requested=operator_discard_requested,
-            checkpoint_committed=checkpoint if isinstance(checkpoint, bool) else None,
+            checkpoint_committed=committed,
             prior_mode_selected=(
                 str(prior_doc.get("mode")) if isinstance(prior_doc, dict) else None
             ),
+            intent_lookup=intent_lookup or self._native_start_verdict,
+            discard_authorized_by=discard_authorized_by,
+            native_command_id=native_command_id,
+            source_attempt=source_attempt,
+            checkpoint_digest=checkpoint_digest,
         )
         reused = continuation.matching_decision(prior_doc, snapshot)
         if reused is not None:
@@ -1601,6 +1729,25 @@ class GitHubRunService:
             )
             return reused
         decision = continuation.decide_continuation(snapshot)
+        # R36-03: pin the EXACT checkpoint the decision approves — one
+        # pin per authorized decision, keyed by its command id (the pin
+        # overlay is idempotent per (checkpoint_id, reason), so a
+        # repeated command accumulates nothing).
+        if (
+            decision.mode is continuation.ContinuationMode.EXACT_WIP
+            and checkpoint_digest
+            and decision.dispatchable
+        ):
+            command_key = native_command_id or f"{run_id}@{decision.decided_at}"
+            pinned = await self._pin_continuation_checkpoint(run_id, checkpoint_digest, command_key)
+            if not pinned:
+                logger.warning(
+                    "Run %s continuation decision approved checkpoint %s but the GC pin "
+                    "did not land — the lane's strict required-restore guard remains "
+                    "the safety net (R36-03)",
+                    run_id[:8],
+                    checkpoint_digest[:12],
+                )
         await self._merge_run_evidence(
             run_id, {continuation.CONTINUATION_EVIDENCE_KEY: decision.as_document()}
         )
@@ -1611,6 +1758,106 @@ class GitHubRunService:
             decision.reason,
         )
         return decision
+
+    def _default_checkpoint_lookup(self, run_id: str) -> Any:
+        """The configured checkpoint authority for THIS service (R36-03).
+
+        The service's session factory selects the SAME repository the
+        upload route and the resume producer share — never a raw
+        filesystem index, never the legacy work-only token over HTTP.
+        """
+        from forge.runs import revival
+
+        return revival.durable_checkpoint_outcome(run_id, session_factory=self._session_factory)
+
+    async def _pin_continuation_checkpoint(
+        self, run_id: str, checkpoint_id: str, command_key: str
+    ) -> bool:
+        """Protect the decision's exact checkpoint from GC (R36-03).
+
+        The pin is keyed by the decision's command id
+        (``retry-continuation:<id>``): the overlay is idempotent per
+        ``(checkpoint_id, reason)``, so one authorized decision holds
+        ONE pin and a repeated command adds nothing. A typed failure is
+        logged, never fatal — the pin is GC protection, and the lane's
+        strict required-restore guard (R32-04) stays the safety line.
+        """
+        from forge.adaptive.checkpoint_repository import resolve_checkpoint_lookup_authority
+
+        try:
+            authority = resolve_checkpoint_lookup_authority(session_factory=self._session_factory)
+        except Exception as exc:  # noqa: BLE001 — a misconfigured authority cannot pin
+            logger.warning(
+                "Run %s: the checkpoint authority could not be resolved for the "
+                "continuation pin: %s",
+                run_id[:8],
+                exc,
+            )
+            return False
+        pin = getattr(authority, "pin", None)
+        if pin is None:  # pragma: no cover — every repository here pins
+            return False
+        try:
+            return bool(await pin(run_id, checkpoint_id, f"retry-continuation:{command_key}"))
+        except Exception as exc:  # noqa: BLE001 — the pin is protection, not authority
+            logger.warning(
+                "Run %s: pinning continuation checkpoint %s failed: %s",
+                run_id[:8],
+                checkpoint_id[:12],
+                exc,
+            )
+            return False
+
+    async def _native_start_verdict(self, run_id: str) -> str:
+        """The persisted native-start intent verdict for *run_id* (R36-02).
+
+        The evidence source for vendor-start certainty: the
+        ``execution_leases`` rows :func:`record_native_start_intent` wrote
+        BEFORE every provider call on this run. Lease rows with NO intent on
+        a dead run PROVE the provider call was never attempted
+        (``never_dispatched`` — the only discovery-independent proof of a
+        no-vendor start); an intent anywhere means the call WAS attempted
+        (``dispatched``) — which still leaves the vendor start unknown, the
+        response may have been lost after acceptance; no lease rows at all
+        is ``unknown`` (nothing recorded, nothing provable).
+        """
+        async with self._session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ExecutionLease.native_intent_at).where(
+                            ExecutionLease.run_id == run_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if not rows:
+            return continuation.NATIVE_START_UNKNOWN
+        if any(intent_at is not None for intent_at in rows):
+            return continuation.NATIVE_START_DISPATCHED
+        return continuation.NATIVE_START_NEVER_DISPATCHED
+
+    async def _annotate_continuation_refusal(self, run_id: str, code: str) -> None:
+        """Record ``continuation.refusal_code`` when a /retry refusal stands.
+
+        R36-02 observability: the typed code lands on the persisted decision
+        document (read-modify-write — never clobbering the decision itself),
+        so an operator post-mortem sees WHY the retry was refused beside what
+        was decided. A non-typed refusal (the in-flight double-dispatch
+        guard) records nothing.
+        """
+        if not code:
+            return
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            evidence = dict(run.evidence or {})
+            doc = evidence.get(continuation.CONTINUATION_EVIDENCE_KEY)
+            if isinstance(doc, dict):
+                evidence[continuation.CONTINUATION_EVIDENCE_KEY] = {**doc, "refusal_code": code}
+                run.evidence = evidence
+                await session.commit()
 
     async def evaluate_revival_recovery(self, now: datetime | None = None) -> int:
         """One recovery pass over this repo lane's stranded revival attempts (A11)."""
@@ -1723,7 +1970,15 @@ class GitHubRunService:
                     repo_full_name=run.github_repo_full_name,
                     exclude_run_id=run.id,
                 )
-                body = why_blocked_reply(run, other_active=other_active)
+                # R36-03: the read-only eligibility verdict reports what
+                # the configured async authority answered — never a
+                # raw-index guess.
+                checkpoint_outcome = await revival.durable_checkpoint_outcome(
+                    run.id, session_factory=self._session_factory
+                )
+                body = why_blocked_reply(
+                    run, other_active=other_active, checkpoint=checkpoint_outcome
+                )
                 run_id = run.id
         await self._post_journaled_note(
             project_id,
@@ -1854,6 +2109,10 @@ class GitHubRunService:
                 else ""
             )
             death_reason = revival_reason or str(run.status_reason or "")
+            # R36-02 lineage: the dead attempt's durable generation the
+            # decision continues FROM — captured BEFORE the bump below opens
+            # the revival's NEW attempt.
+            source_attempt = int(run.cancellation_generation or 0)
             run.cancellation_generation = max(
                 int(run.cancellation_generation or 0) + 1, fence.resumed_publication_epoch or 0
             )
@@ -1866,6 +2125,7 @@ class GitHubRunService:
             death_reason=death_reason,
             evidence=evidence,
             candidate_shas=candidates,
+            source_attempt=source_attempt,
         )
         if not decision.dispatchable:
             logger.warning(
@@ -3385,10 +3645,14 @@ class GitHubRunService:
         dispatch facts and persists its digest on the run's evidence
         (``attempt_start``). A construction or boundary refusal parks the
         run ``blocked(composition_boundary: …)`` naming the exact field,
-        with zero provider calls. Coordinate axes stay separate: the
-        attempt base is the attempt identity, the cancellation epoch is
-        the authority axis, and a checkpoint sequence is never accepted
-        on either.
+        with zero provider calls. R36-06 (#265): the envelope is v2 —
+        the EXECUTION identity is the durable id derived from (run id,
+        attempt ordinal, source base), so two dispatches from the same
+        commit carry distinct execution identities while a repeat
+        delivery of one persisted intent reconstructs the identical
+        authority-bearing envelope; the cancellation epoch is inside the
+        envelope digest, and a checkpoint sequence or command watermark
+        is never accepted on any identity axis.
         """
         if resume_mode not in LANE_RESUME_MODES:
             raise ValueError(
@@ -3441,6 +3705,18 @@ class GitHubRunService:
             envelope_digest = str(envelope.get("envelope_digest") or "")
             spec_digest = str(run.spec_digest or "")
             claimed_plan_digest = str(run.plan_digest or "")
+            # R36-06: the pinned continuation identity — the exact
+            # checkpoint content address the persisted continuation
+            # decision approved (``continuation.checkpoint_digest``),
+            # read from durable state when this dispatch resumes WIP
+            # (``required``); empty for fresh/restart, which resume
+            # nothing. Read here, pinned into the envelope below.
+            continuation_document = (run.evidence or {}).get("continuation")
+            continuation_ref_digest = (
+                str(continuation_document.get("checkpoint_digest") or "")
+                if isinstance(continuation_document, dict)
+                else ""
+            )
             # Q35-07: the persisted composition envelope of the PRIOR
             # dispatch (None on a run persisted before the adoption — the
             # explicit legacy shape below).
@@ -3481,6 +3757,33 @@ class GitHubRunService:
         plan_binding_document = (
             plan_binding.as_document() if plan_binding.revised_from_digest else None
         )
+        # R36-13 (#272): the WIP reuse decision the activation persisted is a
+        # dispatch-boundary fence too — a checkpoint the activation routed to
+        # an explicit ``fresh_attempt`` must never ride a ``required`` resume
+        # silently. The dispatch refuses BEFORE any provider I/O (nothing is
+        # ensured, dispatched or journaled below), naming the recorded
+        # decision and the operator's explicit way out: the ``restart``
+        # discard, or a fresh plan. ``fresh``/``restart`` dispatches pass —
+        # they restore nothing, so there is nothing to misuse.
+        reuse_refusal = await refused_wip_reuse(
+            self._session_factory, run_id, resume_mode=resume_mode
+        )
+        if reuse_refusal is not None:
+            note = self._wip_reuse_comment(run_id, reuse_refusal)
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"checkpoint_reuse_refused: {str(reuse_refusal.get('route_reason') or '')[:200]}",
+            )
+            await self._post_journaled_note(
+                project_id, issue_number, note, run_id, "checkpoint_reuse_refused"
+            )
+            logger.info(
+                "GitHub run %s dispatch refused [checkpoint_reuse_refused] — the"
+                " activation routed the held checkpoint to a fresh attempt",
+                run_id[:8],
+            )
+            return
 
         # Q35-07 (the ADR-0029 adoption): the composition boundary — the
         # frozen AttemptStartSpec envelope EVERY GitHub dispatch constructs
@@ -3489,10 +3792,16 @@ class GitHubRunService:
         # inputs resolve ONCE, from the durable record: the frozen spec's
         # execution-profile digest, the caller's continuation-selected
         # resume mode (the persisted continuation decision for /retry and
-        # the revival), the run row's attempt base and cancellation epoch,
+        # the revival) with its pinned checkpoint digest, the run row's
+        # attempt base, durable attempt ordinal and cancellation epoch,
         # the reserved execution lease. No live setting enters the
         # envelope, so settings mutated after approval cannot reshape a
-        # recovered attempt.
+        # recovered attempt. R36-06 (#265): the envelope is v2 — the
+        # execution identity is DERIVED from (run id, attempt ordinal,
+        # source base), so two dispatches from the same commit hold
+        # distinct execution ids while a restart between envelope
+        # construction and the native start reconstructs the identical
+        # authority-bearing envelope.
         lease = await open_lease_for_run(self._session_factory, run_id)
         try:
             composed = compose_attempt_start(
@@ -3501,10 +3810,12 @@ class GitHubRunService:
                 project_id=project_id,
                 attempt_oid=attempt_base,
                 authority_epoch=generation,
+                attempt_ordinal=generation,
                 profile_digest=spec.profile_digest,
                 fallback_profile_digest=spec_digest,
                 resume_mode=resume_mode,
                 lease_id=lease.lease_id if lease is not None else "",
+                continuation_ref_digest=continuation_ref_digest,
                 prior_document=prior_attempt_start,
             )
         except CompositionBoundaryError as exc:
@@ -3530,6 +3841,18 @@ class GitHubRunService:
                 "spec and the durable dispatch facts",
                 run_id[:8],
             )
+        if composed.prior_identity is not None:
+            # R36-06: the prior envelope predates the v2 extension — the
+            # weaker identity (source OID only) is read through the
+            # compat adapter, recorded on the document, and refused for
+            # authority-bearing comparisons. Never silent.
+            logger.info(
+                "composition.legacy_read: GitHub run %s prior attempt_start envelope is "
+                "version %s — execution identity unavailable in the historical shape, "
+                "recorded for audit only",
+                run_id[:8],
+                composed.prior_identity.get("envelope_version"),
+            )
         # The audit trail: the envelope digest + context digest persist
         # BEFORE the launch, so a redispatch (the reconciler's re-drive, a
         # stranding recovery) verifies digest equality — the same
@@ -3538,10 +3861,13 @@ class GitHubRunService:
             run_id, {composition_adoption.ATTEMPT_START_EVIDENCE_KEY: composed.document}
         )
         logger.info(
-            "composition.version_used: GitHub run %s attempt_start v%d (%s resume, "
-            "envelope %s, context %s%s)",
+            "composition.envelope_version: GitHub run %s attempt_start v%d (execution "
+            "%s, source %s, epoch %d, %s resume, envelope %s, context %s%s)",
             run_id[:8],
             composition_adoption.ATTEMPT_START_VERSION,
+            composed.spec.execution_attempt_id[:12],
+            composed.spec.source_base_oid[:12],
+            composed.spec.authority_epoch,
             composed.spec.resume_mode,
             composed.document["envelope_digest"][:12],
             composed.document["context_digest"][:12],
@@ -3720,8 +4046,27 @@ class GitHubRunService:
                     # R32-11: the dispatched lane's plan binding — which
                     # revision/digest it runs under, frozen beside the
                     # handle the reconciler restarts from.
+                    # R36-13 (#272): beside it, the EXACT executor-input
+                    # identity this dispatch sent — ``revision.executor_digest``:
+                    # the digest over the identity inputs the native job
+                    # received (run id, the ACTIVE plan digest, the brief
+                    # envelope, the spec, the resume mode), recomputable from
+                    # the native ledger's recorded inputs, so "the next real
+                    # executor input carries the approved revision" is an
+                    # artifact-level equality, not a status string.
                     **(
-                        {"plan_binding": plan_binding_document}
+                        {
+                            "plan_binding": plan_binding_document,
+                            "revision_executor_digest": executor_digest_document(
+                                run_id=run_id,
+                                plan_digest=plan_binding.plan_digest,
+                                active_revision=plan_binding.active_revision,
+                                envelope_digest=envelope_digest,
+                                spec_digest=spec_digest,
+                                lane_resume_mode=resume_mode,
+                                revised_from_digest=plan_binding.revised_from_digest,
+                            ),
+                        }
                         if plan_binding_document is not None
                         else {}
                     ),
@@ -3797,6 +4142,23 @@ class GitHubRunService:
             "Re-issue the command against the revised plan (the plan comment's "
             "`revised from … to …` footer names the active digest), or restart "
             f"from a fresh plan: `/cancel {run_id}` then `/implement`.\n\n"
+            "*This is an automated message.*"
+        )
+
+    @staticmethod
+    def _wip_reuse_comment(run_id: str, decision: dict) -> str:
+        """The actionable refusal for a required resume the activation routed away (R36-13)."""
+        reason = str(decision.get("route_reason") or "the recorded decision refused the reuse")
+        revision = decision.get("activated_revision") or "?"
+        return (
+            f"Run `{run_id[:8]}` was **blocked**: checkpoint_reuse_refused.\n\n"
+            f"The approved revision **{revision}** recorded an explicit "
+            "`checkpoint.reuse_decision` routing the held WIP to a **fresh "
+            f"attempt** — {reason}.\n\n"
+            "Nothing was dispatched. The held checkpoint is never silently "
+            "reused across an incompatible revision: re-dispatch with the "
+            f"explicit discard (`/retry restart {run_id[:8]}`), or start a "
+            f"fresh plan: `/cancel {run_id}` then `/implement`.\n\n"
             "*This is an automated message.*"
         )
 
@@ -4774,6 +5136,99 @@ class GitHubRunService:
         # gate — the GitHub harness reconciler polls this run and only a
         # verified (or honestly unverified) run continues to review.
 
+    def _verification_subject_document(
+        self,
+        *,
+        evidence: Mapping[str, Any] | None,
+        candidate_sha: str,
+        base_sha: str,
+        plan_digest: str,
+        profile_digest: str,
+        tested_oid: str,
+    ) -> dict[str, Any]:
+        """The R36-14 subject a verdict names — built from DURABLE facts.
+
+        The candidate digest is the collector's diff digest when the
+        publication recorded one (``published_candidate.diff_digest`` /
+        ``candidate_collection.diff_digest`` — the envelope binding),
+        else the digest DERIVED over the durable publication identity
+        (published oid + frozen base + plan digest), so a repair, a
+        revision or a re-collection still moves it. Source and tested
+        OIDs are recorded SEPARATELY: where the provider tests a
+        synthetic merge the tested sha legitimately differs from the
+        review head, and that difference must stay visible instead of
+        being folded away. The generation binding and the tested
+        environment/profile digest (the spec-frozen execution profile)
+        complete the world the checks ran in.
+        """
+        published = (evidence or {}).get("published_candidate")
+        collection = (evidence or {}).get("candidate_collection")
+        recorded_digest = ""
+        if isinstance(published, Mapping):
+            recorded_digest = str(published.get("diff_digest") or "")
+        if not recorded_digest and isinstance(collection, Mapping):
+            recorded_digest = str(collection.get("diff_digest") or "")
+        subject = VerificationSubject(
+            candidate_digest=candidate_digest_of(
+                source_oid=candidate_sha,
+                base_oid=base_sha,
+                plan_digest=plan_digest,
+                recorded_digest=recorded_digest,
+            ),
+            source_oid=candidate_sha,
+            tested_oid=tested_oid or candidate_sha,
+            generation=GenerationBinding.from_document(
+                collection if isinstance(collection, Mapping) else None
+            ),
+            plan_revision_digest=plan_digest,
+            environment_profile_digest=profile_digest,
+        )
+        return subject.as_document()
+
+    async def _record_infra_retry(self, run_id: str, failure_reason: str) -> bool:
+        """Record one infrastructure-PREREQUISITE verification failure.
+
+        R36-14: a runner that was unavailable or a report transport that
+        failed blames the world, not the change — it never consumes the
+        spec-frozen code-repair iterations. It rides the bounded
+        DISTINCT infra budget (``repair_ledger`` on the run's
+        evidence): within budget the run keeps waiting (the reconciler
+        re-polls; the R17 verification deadline stays the outer bound),
+        exhausted it blocks honestly with the shared
+        ``verification_infrastructure`` vocabulary. Returns whether the
+        run may keep waiting.
+        """
+        raw = getattr(self._settings, "FORGE_INFRA_REPAIR_RETRIES", None)
+        budget = InfraRetryBudget(max_retries=DEFAULT_INFRA_RETRIES if raw is None else int(raw))
+        async with self._session_factory() as session:
+            run = await self._get_run(session, run_id)
+            ledger = InfraRetryLedger.from_document((run.evidence or {}).get("repair_ledger"))
+            if ledger.exhausted(budget):
+                await self._to_terminal(
+                    run_id,
+                    FlowStatus.BLOCKED,
+                    f"{VERIFICATION_INFRA_REASON}: {failure_reason} — infrastructure "
+                    f"retries exhausted ({budget.max_retries})",
+                )
+                return False
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "repair_ledger": ledger.record().as_document(),
+                    "repair": {
+                        "failure_class": FAILURE_CLASS_INFRASTRUCTURE,
+                        "reason": failure_reason,
+                    },
+                },
+            )
+        logger.info(
+            "Run %s verification failure is infrastructure-prerequisite (%s) — "
+            "waiting within the distinct infra budget",
+            run_id[:8],
+            failure_reason[:120],
+        )
+        return True
+
     async def evaluate_waiting_ci_one(self, run_id: str, now=None) -> None:
         """One verification pass over a waiting_ci run (R02, A01).
 
@@ -4864,7 +5319,15 @@ class GitHubRunService:
                 self._owner, self._repo, candidate_sha
             )
         except Exception:
+            # R36-14: a checks-transport error is an infrastructure
+            # PREREQUISITE failure — classified as ``infrastructure``
+            # (``repair.failure_class``), never a code defect: it consumes
+            # no code-repair iteration and rides the bounded DISTINCT infra
+            # budget (the R17 deadline above stays the outer bound).
             logger.exception("Checks read failed for %s — keeping it waiting", run_id[:8])
+            await self._record_infra_retry(
+                run_id, "checks transport error — the verification surface could not be read"
+            )
             return
         # A01: the harness lane itself is execution, not verification —
         # excluded by workflow IDENTITY (the spec-frozen FILENAME matched on
@@ -4994,10 +5457,56 @@ class GitHubRunService:
             now=now,
         )
 
+        # R36-14: the verdict NAMES its subject — the exact candidate and
+        # the tested world (see _verification_subject_document). The stamp
+        # rides the recorded fragment as ``verification.subject_identity``
+        # so a later reader can decide freshness against the THEN-current
+        # candidate instead of trusting a sha spelling alone.
+        subject_document = self._verification_subject_document(
+            evidence=evidence,
+            candidate_sha=candidate_sha,
+            base_sha=run.base_sha or "",
+            plan_digest=run.plan_digest or "",
+            profile_digest=spec.profile_digest,
+            tested_oid=subject_head_oid,
+        )
+        fragment = decision.evidence()
+        if decision.verdict is not None:
+            fragment["subject_identity"] = subject_document
+            # R36-14: the expected-report inventory frozen WITH the work
+            # contract — at verdict time the observed reports reconcile
+            # against the FROZEN rows: a missing report, a skipped required
+            # check or a report from an older attempt can never produce
+            # verified_ready (the coverage rides the fragment as the
+            # ``verification.expected_report_coverage`` observability).
+            coverage = expected_report_coverage_of(evidence)
+            if coverage is not None:
+                fragment["expected_report_coverage"] = coverage.as_document()
+                if decision.verified and not coverage.verifies:
+                    await self._merge_run_evidence(
+                        run_id,
+                        {
+                            "verification": {
+                                **fragment,
+                                "status": STATUS_UNKNOWN,
+                                "summary": (
+                                    "required checks green but expected report coverage "
+                                    "incomplete: " + "; ".join(coverage.problems)
+                                ),
+                            }
+                        },
+                    )
+                    logger.info(
+                        "Run %s expected report coverage incomplete — keeping it waiting",
+                        run_id[:8],
+                    )
+                    return
+
         if decision.verdict is not None:
             # ADR-0027: the unified R02 evidence shape (one key set on every
-            # provider — ``tested_oid`` is the sha the provider verified).
-            await self._merge_run_evidence(run_id, {"verification": decision.evidence()})
+            # provider — ``tested_oid`` is the sha the provider verified);
+            # R36-14: plus the subject the verdict vouches for.
+            await self._merge_run_evidence(run_id, {"verification": fragment})
 
         if decision.outcome == OUTCOME_WAIT:
             if decision.verdict is not None:
@@ -5026,14 +5535,32 @@ class GitHubRunService:
         if decision.outcome == OUTCOME_REPAIR:
             # ADR-0008: only a conclusion that blames the change drives the
             # bounded repair loop (required checks prove, optional ones
-            # neither block nor substitute — A01).
+            # neither block nor substitute — A01). R36-14: an
+            # infrastructure-PREREQUISITE signature (runner unavailable,
+            # report transport error) classifies as ``infrastructure`` —
+            # it never blindly consumes the code-repair iterations; it
+            # rides the bounded DISTINCT infra budget instead.
             names = ", ".join(decision.failing)
+            failure_reason = f"checks failed ({names})"
+            failure_class = classify_repair_failure(failure_reason, surface=surface)
+            if failure_class == FAILURE_CLASS_INFRASTRUCTURE:
+                await self._record_infra_retry(run_id, failure_reason)
+                return
+            await self._merge_run_evidence(
+                run_id,
+                {
+                    "repair": {
+                        "failure_class": FAILURE_CLASS_CODE,
+                        "reason": failure_reason,
+                    }
+                },
+            )
             await self._begin_repair(
                 run_id,
                 project_id=run.project_id,
                 issue_number=issue_number,
-                failure_kind="code",
-                failure_reason=f"checks failed ({names})",
+                failure_kind=FAILURE_CLASS_CODE,
+                failure_reason=failure_reason,
             )
             return
 
@@ -5055,7 +5582,7 @@ class GitHubRunService:
             candidate_sha=candidate_sha,
             base_sha=run.base_sha or "",
             verified=decision.verified,
-            verification_evidence=decision.evidence(),
+            verification_evidence=fragment,
         )
 
     async def resume_verification(self, run_id: str) -> None:
@@ -5092,6 +5619,39 @@ class GitHubRunService:
         # (the shared reading, ADR-0027 — both evidence key spellings
         # tolerated for pre-consolidation rows).
         verified = verified_verdict(verification, candidate_sha)
+        # R36-14 freshness gate: a PASSED record whose subject names
+        # ANOTHER candidate (a repair landed, a revision bumped, the diff
+        # was re-collected) renders ``stale`` and never reaches
+        # verified_ready — the ready decision would require fresh
+        # verification, so the run parks visibly instead of shipping on a
+        # superseded verdict. A record without a subject identity is
+        # honestly UNKNOWN and keeps its legacy sha-binding meaning.
+        current_subject = self._verification_subject_document(
+            evidence=run.evidence or {},
+            candidate_sha=candidate_sha,
+            base_sha=run.base_sha or "",
+            plan_digest=run.plan_digest or "",
+            profile_digest="",  # unknown here: the spec is read downstream
+            tested_oid=candidate_sha,
+        )
+        freshness = verdict_freshness(
+            verification, str(current_subject.get("candidate_digest") or "")
+        )
+        if verified and freshness == FRESHNESS_STALE:
+            stale_reason = (
+                "the recorded verdict's subject "
+                f"({subject_digest_of_evidence(verification)[:12] or '?'}) does not "
+                "bind the current candidate"
+            )
+            await self._merge_run_evidence(
+                run_id, {"verification": render_stale(verification, stale_reason)}
+            )
+            await self._to_terminal(
+                run_id,
+                FlowStatus.BLOCKED,
+                f"verification_stale: {stale_reason} — fresh verification required",
+            )
+            return
         await self._review_and_ready(
             run_id,
             project_id=project_id,

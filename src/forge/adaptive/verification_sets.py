@@ -24,11 +24,20 @@ verification EXECUTION separate and its evidence honest:
   every member is pinned, and every launched service resolves to a
   recorded exact artifact or is flagged unresolved (never a mutable
   tag) — plus the set's tested-world digest.
-- :func:`freeze_verified_world` / :func:`bound_tested_world_digest` /
+- :func:`freeze_verified_world` / :func:`freeze_tested_world` /
+  :func:`bound_tested_world_digest` /
   :func:`bound_applicability_digest` — the NXT-22 freeze-time binding:
   the world digests (and the pins/policies they cover) are PERSISTED on
   the candidate set at freeze time, so results bind to the digest that
   was recorded then, never to a call-time recomputation.
+  :func:`freeze_tested_world` (R36-19) completes the freeze with the
+  bundle/profile digests a whole tested world is composed of, so the
+  persisted digest covers members AND images AND the contract/test
+  bundles AND the environment profile in one identity.
+- :func:`baseline_drift` / :class:`WorldInputDrift` — the R36-19
+  ``verification.baseline_drift`` source: the NAMED applicability
+  inputs that moved between two frozen worlds, flagging the review's
+  exact arm (a rebuilt image under an UNCHANGED source SHA).
 - :class:`DependencyIdentity` / :class:`EvidenceRecord` /
   :class:`EvidenceLedger` — the NXT-21 per-dependency applicability
   core: evidence records claim the EXACT member identities (plus test
@@ -52,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -76,7 +86,9 @@ __all__ = [
     "TestBundleChange",
     "VerificationLane",
     "VerificationSelector",
+    "WorldInputDrift",
     "async_failure_scenarios",
+    "baseline_drift",
     "bound_applicability_digest",
     "bound_tested_world_digest",
     "contract_checks",
@@ -85,6 +97,7 @@ __all__ = [
     "environment_compose",
     "evidence_aware_review",
     "focused_recipe",
+    "freeze_tested_world",
     "freeze_verified_world",
     "freshness",
     "member_identity",
@@ -435,6 +448,188 @@ def bound_applicability_digest(candidate_set: CandidateSet) -> str:
             " freeze_verified_world first — a binding must be recorded, not recomputed"
         )
     return candidate_set.applicability_digest
+
+
+# ---------------------------------------------------------------------------
+# The COMPLETE tested-world freeze (R36-19): members AND their images AND
+# the contract/test bundles AND the environment profile, one identity.
+# ---------------------------------------------------------------------------
+
+#: Bundle/profile digests are verification identity: a value must be a
+#: lowercase 64-hex sha256 to enter the world digest (the same shape
+#: :func:`forge.adaptive.workpackage.tested_world_digest` covers).
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+#: The spelled absence of an optional world input (bundle digests, pins,
+#: policy refs may legitimately be absent — drift reports say so instead
+#: of comparing against an ambiguous empty string).
+_ABSENT = "<absent>"
+_UNSET = "<none>"
+
+
+def _require_bundle_digest(name: str, value: str) -> str:
+    if not _HEX64.fullmatch(value):
+        raise ValueError(
+            f"{name} must be a lowercase 64-hex sha256 to enter the tested-world digest: {value!r}"
+        )
+    return value
+
+
+def freeze_tested_world(
+    candidate_set: CandidateSet,
+    *,
+    contract_bundle_digest: str | None = None,
+    test_bundle_digest: str | None = None,
+    environment_profile_digest: str | None = None,
+    environment_pins: Mapping[str, str] | None = None,
+    policy_refs: Iterable[str] | None = None,
+) -> CandidateSet:
+    """Freeze the COMPLETE tested world (R36-19) and persist its digests.
+
+    The world a system verification binds to is composed of EVERY
+    applicability input: changed AND unchanged repository revisions, the
+    EXACT image artifact of each (a rebuilt image under the same source
+    SHA is a different world), the contract bundle, the test bundle, the
+    environment profile, the external service pins and the policy refs.
+    :func:`freeze_verified_world` persists pins/refs and the digests over
+    whatever the set already carries; this entry COMPLETES that set with
+    any bundle/profile digests the caller freezes at the same moment, so
+    the persisted tested-world and applicability digests cover the full
+    composition in one identity.
+
+    Supplied digests fill MISSING fields only: replacing a digest the
+    set already records is refused — one frozen set records one world,
+    and a changed bundle is a NEW set, not an edit of the old one.
+    """
+    updates: dict[str, str] = {}
+    for name, supplied in (
+        ("contract_bundle_digest", contract_bundle_digest),
+        ("test_bundle_digest", test_bundle_digest),
+        ("environment_profile_digest", environment_profile_digest),
+    ):
+        held = getattr(candidate_set, name)
+        if supplied is None or supplied == held:
+            continue
+        if held is not None:
+            raise ValueError(
+                f"the set already records {name}={held}:"
+                " one frozen set records one world — a changed bundle is a new set"
+            )
+        updates[name] = _require_bundle_digest(name, supplied)
+    completed = (
+        CandidateSet.model_validate({**candidate_set.model_dump(), **updates})
+        if updates
+        else candidate_set
+    )
+    return freeze_verified_world(
+        completed, environment_pins=environment_pins, policy_refs=policy_refs
+    )
+
+
+@dataclass(frozen=True)
+class WorldInputDrift:
+    """ONE named applicability input that moved between two worlds (R36-19).
+
+    ``input_path`` names the input structurally —
+    ``member/<repository>/image_digest``, ``member/<repository>/candidate_oid``,
+    ``member/<repository>`` (appearance/removal), ``test_bundle_digest``,
+    ``environment_profile_digest``, ``environment_pin/<service>``,
+    ``policy_refs`` — so drift is REPORTED BY NAME, never as an opaque
+    digest inequality. ``source_sha_unchanged`` is the review's exact
+    arm: the image was rebuilt while the source SHA (candidate oid)
+    stayed put, so a source-SHA match alone would have hidden the drift.
+    """
+
+    input_path: str
+    previous: str
+    current: str
+    source_sha_unchanged: bool = False
+
+    def as_document(self) -> dict[str, str | bool]:
+        """The ``verification.baseline_drift`` fragment's one row."""
+        return {
+            "input": self.input_path,
+            "previous": self.previous,
+            "current": self.current,
+            "source_sha_unchanged": self.source_sha_unchanged,
+        }
+
+
+def _describe_member(member: CandidateSetMember) -> str:
+    return f"{member.candidate_oid}@{member.image_digest}"
+
+
+def baseline_drift(previous: CandidateSet, current: CandidateSet) -> tuple[WorldInputDrift, ...]:
+    """Name EVERY applicability input that moved between two candidate sets.
+
+    The R36-19 selective-invalidation source: replaying previously
+    passed evidence is judged against the inputs the evidence actually
+    claimed, and what moved is reported by NAME (the drifted baseline
+    dependency, the rebuilt image, the changed test bundle, the moved
+    pin, the edited policy) — never as a bare "digest differs". The
+    comparison covers exactly the applicability surface (members at
+    their candidate oids and image artifacts, the test bundle, the
+    environment profile, the pins, the policy refs); ``work_id``,
+    ``plan_revision`` and the work-contract/contract-bundle digests are
+    deliberately invisible (provenance and this-run obligations, not
+    dependencies — the same split :func:`applicability_digest` makes).
+    """
+    drifts: list[WorldInputDrift] = []
+    previous_members = {member.repository_id: member for member in previous.members}
+    current_members = {member.repository_id: member for member in current.members}
+    for repository_id in sorted(set(previous_members) | set(current_members)):
+        before = previous_members.get(repository_id)
+        after = current_members.get(repository_id)
+        if before is None:
+            drifts.append(
+                WorldInputDrift(f"member/{repository_id}", _ABSENT, _describe_member(after))
+            )
+            continue
+        if after is None:
+            drifts.append(
+                WorldInputDrift(f"member/{repository_id}", _describe_member(before), _ABSENT)
+            )
+            continue
+        if before.candidate_oid != after.candidate_oid:
+            drifts.append(
+                WorldInputDrift(
+                    f"member/{repository_id}/candidate_oid",
+                    before.candidate_oid,
+                    after.candidate_oid,
+                )
+            )
+        if before.image_digest != after.image_digest:
+            drifts.append(
+                WorldInputDrift(
+                    f"member/{repository_id}/image_digest",
+                    before.image_digest,
+                    after.image_digest,
+                    source_sha_unchanged=before.candidate_oid == after.candidate_oid,
+                )
+            )
+        if before.role != after.role:
+            drifts.append(WorldInputDrift(f"member/{repository_id}/role", before.role, after.role))
+    for field in ("test_bundle_digest", "environment_profile_digest"):
+        before, after = getattr(previous, field), getattr(current, field)
+        if before != after:
+            drifts.append(WorldInputDrift(field, before or _UNSET, after or _UNSET))
+    previous_pins = dict(previous.environment_pins)
+    current_pins = dict(current.environment_pins)
+    for service in sorted(set(previous_pins) | set(current_pins)):
+        before, after = previous_pins.get(service), current_pins.get(service)
+        if before != after:
+            drifts.append(
+                WorldInputDrift(f"environment_pin/{service}", before or _UNSET, after or _UNSET)
+            )
+    before_refs = sorted(set(previous.policy_refs))
+    after_refs = sorted(set(current.policy_refs))
+    if before_refs != after_refs:
+        drifts.append(
+            WorldInputDrift(
+                "policy_refs", ",".join(before_refs) or _UNSET, ",".join(after_refs) or _UNSET
+            )
+        )
+    return tuple(drifts)
 
 
 # ---------------------------------------------------------------------------

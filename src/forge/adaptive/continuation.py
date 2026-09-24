@@ -37,6 +37,23 @@ acknowledgement note, persisted on the run's evidence under the
 objective evidence fields), and a later retry event whose evidence digest
 matches reuses the persisted decision instead of re-deciding — one decision,
 one logical attempt per repeated event.
+
+R36-02 (issue #261) tightens the three evidence edges this module trusted:
+
+- the ``restart`` verb is parsed off the COMMAND into a typed
+  :class:`RecoveryRequest` — granted only from its documented argument
+  position (``/retry <run-id> restart``), never from a mention anywhere in
+  the note text (negated, quoted or unrelated);
+- a ``dispatch never observed`` death reason is NOT proof no vendor started
+  (the response/discovery can be lost while the job ran): the vendor-start
+  certainty comes from the PERSISTED native-start intent
+  (:func:`forge.adaptive.admission.record_native_start_intent` — no intent
+  row on a dead run is the only never-dispatched proof), and discovery
+  absence stays UNKNOWN;
+- the persisted decision additionally records its lineage — the originating
+  attempt, the native command/event identity, the evidence schema version
+  and who authorized a discard — so reuse is auditable, not just
+  boolean-equal.
 """
 
 from __future__ import annotations
@@ -44,10 +61,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Awaitable
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:  # pragma: no cover — typing only, keeps the module import-light
+    from forge.adaptive.checkpoint_repository import CheckpointLookupOutcome
 
 __all__ = [
     "CONTINUATION_EVIDENCE_KEY",
@@ -55,11 +76,19 @@ __all__ = [
     "ContinuationDecision",
     "ContinuationEvidence",
     "ContinuationMode",
+    "EVIDENCE_VERSION",
+    "IntentLookup",
+    "NATIVE_START_DISPATCHED",
+    "NATIVE_START_NEVER_DISPATCHED",
+    "NATIVE_START_UNKNOWN",
+    "RecoveryRequest",
     "decide_continuation",
     "durable_checkpoint_lookup",
     "evidence_from_record",
     "matching_decision",
+    "normalize_checkpoint_result",
     "operator_discard_requested",
+    "parse_recovery_request",
     "retry_ack_line",
     "uncertain_retry_note",
 ]
@@ -67,9 +96,34 @@ __all__ = [
 #: The evidence key the persisted decision lives under on the run row.
 CONTINUATION_EVIDENCE_KEY: str = "continuation"
 
-#: An injectable checkpoint-presence provider (sync or async): run id →
-#: ``True``/``False`` when presence is proven, ``None`` when unknown.
+#: The evidence SCHEMA version this build writes (R36-02: 2 — the
+#: vendor-start certainty now derives from the persisted native-start
+#: intent, and the document carries decision lineage). Purely informational
+#: for readers: reuse is governed by the objective evidence DIGEST, which
+#: moves by itself whenever the classification semantics change.
+EVIDENCE_VERSION: int = 2
+
+#: An injectable checkpoint-presence provider (ASYNC — R36-03): work id
+#: → a :class:`~forge.adaptive.checkpoint_repository.
+#: CheckpointLookupOutcome` (the typed modern answer), or a legacy
+#: ``True``/``False``/``None`` bool-ish (the tests' shorthand — True
+#: reads as exact, False as a proven absence, None as unknown).
 CheckpointLookup = Callable[[str], Any]
+
+#: The three verdicts a native-start INTENT lookup may return (R36-02).
+#: The persisted intent is the ONLY evidence that may prove a dispatch was
+#: never attempted; an intent that IS present proves the provider call was
+#: attempted — which still leaves the vendor start UNKNOWN (the response
+#: may have been lost after acceptance).
+NATIVE_START_NEVER_DISPATCHED = "never_dispatched"
+NATIVE_START_DISPATCHED = "dispatched"
+NATIVE_START_UNKNOWN = "unknown"
+
+#: An injectable native-start-intent provider (async): run id → one of
+#: :data:`NATIVE_START_NEVER_DISPATCHED` / :data:`NATIVE_START_DISPATCHED`
+#: / :data:`NATIVE_START_UNKNOWN` (``None`` tolerated as unknown). A
+#: raising lookup reads as UNKNOWN — never as proof.
+IntentLookup = Callable[[str], Awaitable["str | None"]]
 
 
 class ContinuationMode(str, Enum):
@@ -97,13 +151,39 @@ class ContinuationMode(str, Enum):
 
 
 @dataclass(frozen=True)
+class RecoveryRequest:
+    """The TYPED ``/retry`` command (R36-02): subject + recovery verb.
+
+    Built only by :func:`parse_recovery_request` — a regex over the COMMAND
+    (the first ``/retry`` token group), never a substring scan of the note:
+    the ``restart`` verb is granted ONLY from its documented argument
+    position (``/retry <run-id> restart``), so a negated ("do not
+    restart"), quoted or unrelated mention of the word can never request a
+    WIP discard.
+    """
+
+    #: The run-id token the command names ("" — the bare ``/retry``).
+    requested: str = ""
+    #: ``/retry <run-id> restart`` — the operator's explicit discard of the
+    #: held WIP, granted only from the documented argument position AND only
+    #: when the token addresses the resolved subject.
+    restart: bool = False
+    #: The resolved subject run the command addresses (audit lineage; the
+    #: *requested* token may be a prefix of it).
+    run_id: str = ""
+
+
+@dataclass(frozen=True)
 class ContinuationEvidence:
     """What the control plane PROVES about the dead attempt's recoverable state.
 
     Every tri-state field is evidence, never assumption: ``None`` means
     unknown (absence of a recording is not a recording of absence). The
-    objective fields (everything except *prior_mode_selected*) form the
-    decision's reuse digest — the prior mode is audit lineage, not input.
+    objective fields (everything except the lineage block below) form the
+    decision's reuse digest; the lineage fields are audit context — who
+    asked, which command, which attempt, what the intent lookup said — and
+    are deliberately excluded from :meth:`digest` (their decision-relevant
+    effect already flows through the objective fields).
     """
 
     #: Whether a vendor session provably started. ``None`` = unknown (a
@@ -121,6 +201,30 @@ class ContinuationEvidence:
     #: The mode a previously persisted decision selected (audit lineage;
     #: excluded from :meth:`digest`).
     prior_mode_selected: str | None = None
+    #: R36-02 lineage: what the persisted native-start intent lookup said
+    #: (one of the ``NATIVE_START_*`` verdicts, ``None`` when never
+    #: consulted). Observability, not a table input — its effect on the
+    #: decision flows through *vendor_started*.
+    native_start_verdict: str | None = None
+    #: R36-02 lineage: who authorized the discard (e.g. ``operator:@alice``).
+    discard_authorized_by: str | None = None
+    #: R36-02 lineage: the native command/event identity the decision was
+    #: made for (the ``/retry`` webhook delivery id; ``None`` when the
+    #: decision is not event-driven, e.g. the recovery scan's re-drive).
+    native_command_id: str | None = None
+    #: R36-02 lineage: the originating (dead) attempt's durable generation
+    #: the decision continues FROM.
+    source_attempt: int | None = None
+    #: R36-03 lineage: the EXACT checkpoint the lookup resolved when the
+    #: decision was authorized — its content address, the
+    #: ``continuation.checkpoint_digest`` observability spelling. A
+    #: LATER upload changes nothing about a decision that already holds
+    #: one: reuse grafts the ORIGINAL digest back (the dispatched
+    #: reference is pinned to what the request approved), which is why
+    #: this field is deliberately excluded from :meth:`digest` — a newer
+    #: checkpoint is not a changed recoverable STATE, it is newer bytes
+    #: for the same "a checkpoint exists" fact.
+    checkpoint_digest: str | None = None
 
     def digest(self) -> str:
         """A stable digest over the OBJECTIVE fields (prior mode excluded)."""
@@ -186,12 +290,29 @@ class ContinuationDecision:
             "reason": self.reason,
             "decided_at": self.decided_at,
             "evidence_digest": self.evidence.digest(),
+            # R36-02: the evidence SCHEMA generation this document was
+            # written under (informational — the digest governs reuse).
+            "evidence_version": EVIDENCE_VERSION,
             "uncertain": self.uncertain,
             "vendor_started": self.evidence.vendor_started,
             "checkpoint_committed": self.evidence.checkpoint_committed,
             "candidate_published": bool(self.evidence.candidate_published),
             "operator_discard_requested": bool(self.evidence.operator_discard_requested),
             "prior_mode_selected": self.evidence.prior_mode_selected,
+            # R36-02 lineage — the originating attempt, the native
+            # command/event identity, the intent verdict and the discard
+            # authority, recorded for reuse and audit. R36-03 adds the
+            # pinned checkpoint identity (``continuation.checkpoint_
+            # digest``) — the exact bytes the decision approved.
+            "source_attempt": self.evidence.source_attempt,
+            "native_command_id": self.evidence.native_command_id,
+            "native_start_verdict": self.evidence.native_start_verdict,
+            "checkpoint_digest": self.evidence.checkpoint_digest,
+            "discard_authorized_by": (
+                (self.evidence.discard_authorized_by or "operator")
+                if self.evidence.operator_discard_requested
+                else None
+            ),
             # ``retry.no_checkpoint_baseline`` — the observability flag that
             # a baseline retry was selected with no checkpoint involved.
             "no_checkpoint_baseline": (
@@ -296,6 +417,15 @@ def matching_decision(
     re-deciding. A materially changed snapshot (a checkpoint appeared or
     vanished, the operator asked to discard, …) re-decides. A corrupt or
     unrecognized document is refused — never guessed.
+
+    R36-02: the ORIGINAL decision's lineage (originating attempt, native
+    command/event identity, intent verdict, discard authority) is grafted
+    back onto the re-materialized decision — a reused decision keeps naming
+    the event that originated it, not the event that happened to repeat it.
+    R36-03 grafts the ORIGINAL pinned ``checkpoint_digest`` the same way:
+    a newer checkpoint landing after the decision is not a changed
+    recoverable STATE (the objective digest is blind to it on purpose),
+    and the reused decision keeps binding the bytes the request approved.
     """
     if not isinstance(document, Mapping):
         return None
@@ -309,10 +439,22 @@ def matching_decision(
             return None
     except ValueError:
         return None
+
+    def _graft(key: str, current: Any) -> Any:
+        value = document.get(key)
+        return current if value is None else value
+
     return ContinuationDecision(
         mode=mode,
         reason=reason,
-        evidence=evidence,
+        evidence=replace(
+            evidence,
+            native_command_id=_graft("native_command_id", evidence.native_command_id),
+            source_attempt=_graft("source_attempt", evidence.source_attempt),
+            native_start_verdict=_graft("native_start_verdict", evidence.native_start_verdict),
+            discard_authorized_by=_graft("discard_authorized_by", evidence.discard_authorized_by),
+            checkpoint_digest=_graft("checkpoint_digest", evidence.checkpoint_digest),
+        ),
         decided_at=decided_at,
         reused=True,
     )
@@ -323,17 +465,19 @@ def matching_decision(
 # ----------------------------------------------------------------------
 
 #: The lane's own environment-bootstrap failure classification (A18): the
-#: bootstrap stage died BEFORE any vendor client existed. Terminal reasons
-#: carry it as ``harness_infrastructure: harness_bootstrap_failed (...)``.
-_VENDOR_NEVER_STARTED_MARKERS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"harness_bootstrap_failed",
-        # R17 bounded discovery exhaustion: no workflow_dispatch run was ever
-        # observed — no lane, no vendor session, provably.
-        r"dispatch never observed",
-    )
-)
+#: bootstrap stage died BEFORE any vendor client existed. A PRE-DISPATCH
+#: proof that no vendor session started, independent of the intent record
+#: (the dispatched job itself reported the bootstrap death). Terminal
+#: reasons carry it as ``harness_infrastructure: harness_bootstrap_failed (...)``.
+_BOOTSTRAP_FAILED_MARKER = re.compile(r"harness_bootstrap_failed", re.IGNORECASE)
+
+#: R17 bounded discovery exhaustion: no workflow_dispatch run was ever
+#: OBSERVED — which is NOT proof that none ran: the dispatch response or
+#: the discovery listing can be lost while the job started. R36-02: this
+#: marker alone leaves the vendor start UNKNOWN; only the persisted
+#: native-start intent (see :func:`evidence_from_record`) may upgrade it to
+#: a proven never-dispatched.
+_DISPATCH_NOT_OBSERVED_MARKER = re.compile(r"dispatch never observed", re.IGNORECASE)
 
 #: Terminal reason markers proving the vendor stage WAS reached: the driver
 #: ran and failed / completed (bootstrap had succeeded).
@@ -357,23 +501,83 @@ _CANDIDATE_PUBLISHED_PREFIXES: tuple[str, ...] = ("commit_unknown_outcome",)
 _BOOTSTRAP_OK = "ok"
 _BOOTSTRAP_FAILED = "failed"
 
-#: The operator's explicit-discard keyword on the ``/retry`` note.
-_RESTART_KEYWORD_RE = re.compile(r"\brestart\b", re.IGNORECASE)
+#: The typed ``/retry`` COMMAND grammar (R36-02) — the SAME token shape the
+#: services' ``_RETRY_RE`` matches (``/retry [run-id]``), extended with the
+#: one documented recovery verb in its argument position:
+#: ``/retry <run-id> restart``. The verb is matched ONLY here — a mention
+#: anywhere else in the note text is just prose.
+_RECOVERY_COMMAND_RE = re.compile(
+    r"/retry(?:\s+([0-9a-f]{8,32})\b)?(?:\s+(restart)\b)?", re.IGNORECASE
+)
+
+#: The operator's explicit-discard verb on the ``/retry`` command.
+_RESTART_VERB = "restart"
+
+
+def parse_recovery_request(note_text: str | None, run_id: str = "") -> RecoveryRequest:
+    """Parse the ``/retry`` note into the typed :class:`RecoveryRequest`.
+
+    ``restart`` is accepted ONLY as the token immediately following the
+    command's run-id argument — ``/retry <run-id> restart`` — never from a
+    mention elsewhere in the text (negated, quoted or unrelated prose can
+    never grant a WIP discard). When *run_id* (the resolved subject) is
+    given, the verb additionally must ADDRESS that run (exact or prefix
+    match); the bare ``/retry [<id>]`` shape is parsed unchanged.
+    """
+    match = _RECOVERY_COMMAND_RE.search(note_text or "")
+    requested = (match.group(1) or "").lower() if match else ""
+    verb = (match.group(2) or "").lower() if match else ""
+    subject = (run_id or "").lower()
+    addresses_subject = (
+        not subject or not requested or subject == requested or subject.startswith(requested)
+    )
+    restart = verb == _RESTART_VERB and bool(requested) and addresses_subject
+    return RecoveryRequest(requested=requested, restart=restart, run_id=subject)
 
 
 def operator_discard_requested(note_text: str | None) -> bool:
-    """Whether the ``/retry`` note explicitly discards the WIP (``restart``)."""
-    return _RESTART_KEYWORD_RE.search(note_text or "") is not None
+    """Whether the ``/retry`` note explicitly discards the WIP (``restart``).
+
+    R36-02: the verb is honored only from its documented argument position
+    (see :func:`parse_recovery_request`) — a substring match anywhere in
+    the note ("do not restart", quoted documentation, an unrelated
+    mention) is NOT a discard request.
+    """
+    return parse_recovery_request(note_text).restart
 
 
-def evidence_from_record(
+async def _consult_native_start_intent(
+    intent_lookup: IntentLookup | None, run_id: str | None
+) -> str | None:
+    """One native-start intent consultation — UNKNOWN on any failure.
+
+    A missing lookup, a missing run id, a ``None`` verdict or a raising
+    provider all read as UNKNOWN: absence of an answer is never proof of
+    never-dispatched (R36-02).
+    """
+    if intent_lookup is None or not run_id:
+        return None
+    try:
+        verdict = await intent_lookup(run_id)
+    except Exception:  # noqa: BLE001 — an unreadable lookup is unknown, not proof
+        return None
+    return str(verdict) if verdict else None
+
+
+async def evidence_from_record(
     *,
     death_reason: str,
+    run_id: str | None = None,
     evidence: Mapping[str, Any] | None = None,
     candidate_shas: Any = None,
     operator_discard_requested: bool = False,
     checkpoint_committed: bool | None = None,
     prior_mode_selected: str | None = None,
+    intent_lookup: IntentLookup | None = None,
+    discard_authorized_by: str | None = None,
+    native_command_id: str | None = None,
+    source_attempt: int | None = None,
+    checkpoint_digest: str | None = None,
 ) -> ContinuationEvidence:
     """Build the evidence snapshot from the durable record the services hold.
 
@@ -382,15 +586,36 @@ def evidence_from_record(
     ``harness_driver_failed``, …) and the additive ``bootstrap`` evidence
     key — never from assumptions: an unclassifiable death (a plain
     ``harness_timeout`` with no marker) stays ``None``/unknown.
+
+    R36-02: a ``dispatch never observed`` reason is treated as what it is —
+    DISCOVERY absence, not execution proof. The vendor-start certainty for
+    that shape comes from the PERSISTED native-start intent
+    (*intent_lookup* over the ``execution_leases`` rows
+    :func:`forge.adaptive.admission.record_native_start_intent` wrote):
+    no intent row on a dead run PROVES the provider call was never
+    attempted; an intent row (or an unreadable lookup) leaves the start
+    UNKNOWN even though discovery found nothing. The bootstrap-failure
+    classification stays its own pre-dispatch proof either way.
+
+    R36-03: *checkpoint_committed* comes from the TYPED lookup outcome
+    (exact → True, absent → False, anything else → None — the caller
+    normalizes), and *checkpoint_digest* carries the exact checkpoint's
+    content address when the lookup answered ``exact`` — the pinned
+    ``continuation.checkpoint_digest`` lineage.
     """
     record = evidence if isinstance(evidence, Mapping) else {}
     reason = (death_reason or "").strip()
     bootstrap = str(record.get("bootstrap") or "").strip().lower()
     vendor_started: bool | None = None
-    if bootstrap == _BOOTSTRAP_FAILED or any(
-        marker.search(reason) for marker in _VENDOR_NEVER_STARTED_MARKERS
-    ):
+    native_start_verdict: str | None = None
+    if bootstrap == _BOOTSTRAP_FAILED or _BOOTSTRAP_FAILED_MARKER.search(reason):
         vendor_started = False
+    elif _DISPATCH_NOT_OBSERVED_MARKER.search(reason):
+        native_start_verdict = await _consult_native_start_intent(intent_lookup, run_id)
+        # Only a PROVEN never-dispatched intent upgrades discovery absence
+        # to a proven no-vendor start; "dispatched" stays unknown too (the
+        # intent proves the call was attempted, never that it was accepted).
+        vendor_started = False if native_start_verdict == NATIVE_START_NEVER_DISPATCHED else None
     elif bootstrap == _BOOTSTRAP_OK or any(
         marker.search(reason) for marker in _VENDOR_STARTED_MARKERS
     ):
@@ -405,23 +630,55 @@ def evidence_from_record(
         candidate_published=candidate_published,
         operator_discard_requested=bool(operator_discard_requested),
         prior_mode_selected=prior_mode_selected,
+        native_start_verdict=native_start_verdict,
+        discard_authorized_by=discard_authorized_by,
+        native_command_id=native_command_id,
+        source_attempt=source_attempt,
+        checkpoint_digest=checkpoint_digest,
     )
 
 
-def durable_checkpoint_lookup(run_id: str) -> bool | None:
-    """Checkpoint presence via the plumbing the /retry path already uses.
+async def durable_checkpoint_lookup(work_id: str) -> CheckpointLookupOutcome:
+    """The TYPED checkpoint-presence lookup through the configured async
+    authority (R36-03, issue #262).
 
-    Wraps :func:`forge.runs.revival._has_durable_checkpoint` (the local
-    checkpoint index, then the lane-control checkpoint API — the same
-    authority ``retry_rejection`` consults). Any failure maps to ``None``:
-    an unreachable lookup is UNKNOWN, never a proven absence.
+    Wraps :func:`forge.runs.revival.durable_checkpoint_outcome` — the
+    async selection over the configured repository (session factory →
+    the SAME authority upload/resume use; else the authenticated
+    checkpoint-channel proxy; else a typed ``unavailable``). The retired
+    synchronous chain (raw filesystem index + the legacy work-only
+    token, every failure collapsed to ``False``) is gone from this
+    path; its explicitly opt-in remnant lives in
+    :func:`forge.runs.revival._legacy_http_lookup`.
     """
-    try:
-        from forge.runs import revival  # lazy: keeps the module import-light
+    from forge.runs import revival  # lazy: keeps the module import-light
 
-        return bool(revival._has_durable_checkpoint(run_id))
-    except Exception:  # noqa: BLE001 — an unreadable lookup is unknown, not False
-        return None
+    return await revival.durable_checkpoint_outcome(work_id)
+
+
+def normalize_checkpoint_result(result: Any) -> tuple[bool | None, str | None]:
+    """One lookup answer → ``(checkpoint_committed, checkpoint_digest)``.
+
+    The bridge between the TYPED outcome (R36-03) and the evidence
+    snapshot's tri-state field: ``exact`` → ``(True, <digest>)``,
+    ``absent`` → ``(False, None)``, and EVERYTHING else —
+    ``unavailable`` / ``corrupt`` / ``unauthorized`` — → ``(None,
+    None)``: an unprovable checkpoint state is never a proven absence.
+    A legacy bool-ish answer (``True``/``False``/``None`` from the
+    tests' shorthand providers) maps through unchanged.
+    """
+    state = getattr(result, "state", None)
+    if state is not None:
+        state = str(state)
+        if state == "exact":
+            digest = getattr(result, "checkpoint_id", None) or getattr(result, "digest", None)
+            return True, (str(digest) if digest else None)
+        if state == "absent":
+            return False, None
+        return None, None
+    if isinstance(result, bool):
+        return result, None
+    return None, None
 
 
 # ----------------------------------------------------------------------

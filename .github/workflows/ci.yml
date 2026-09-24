@@ -88,7 +88,11 @@ jobs:
   # exit bar (tests/test_failure_injection.py) runs only when
   # FORGE_PG_TEST_URL is set — without the service it self-skips, so this
   # job is the one place the durable exit bar is actually enforced. No
-  # artifacts, no continue-on-error: pass/fail gates the workflow.
+  # continue-on-error: pass/fail gates the workflow. Since R36-08 (#267)
+  # the job ALSO runs the required PostgreSQL qualification gate (PE-4 +
+  # the checkpoint GC/repository/retry-authority traces on alembic-provisioned
+  # disposable databases) — see the gate step below and scripts/pg_gate.py;
+  # its report artifact is the qualification evidence.
   integration:
     runs-on: ubuntu-latest
     services:
@@ -114,6 +118,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # R36-08 (#267): a SECOND, dedicated PostgreSQL for the required
+      # qualification gate below — the gate provisions its own disposable
+      # databases (via the alembic chain) on a container nothing else in
+      # this job touches, mapped to a different host port so the
+      # failure-injection bar keeps 5432 to itself.
+      postgres-gate:
+        image: postgres:16
+        env:
+          POSTGRES_USER: forge
+          POSTGRES_PASSWORD: forge
+          POSTGRES_DB: forge
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U forge -d forge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # The job runs directly on the runner VM, so the service containers are
       # reached via the mapped localhost ports (GitHub's documented pattern
@@ -130,6 +152,28 @@ jobs:
 
       - name: Failure-injection exit bar (real Postgres)
         run: uv run pytest tests/test_failure_injection.py -q
+
+      # R36-08 (#267, AT-09): the REQUIRED PostgreSQL qualification gate.
+      # The mandatory selection — tests/production_entry/ (PE-4) plus the
+      # checkpoint GC / repository / retry-authority traces — runs on this
+      # SHA against disposable databases PROVISIONED THROUGH THE ALEMBIC
+      # CHAIN on the postgres-gate service. The runner refuses (non-zero,
+      # with the report artifact still uploaded) when FORGE_PG_TEST_URL is
+      # missing or unreachable, when a required test id vanished from the
+      # collected manifest (marker-removal mutation), when a required test
+      # skipped, or when the schema is not at the migration head — a green
+      # gate can never be built from skipped tests.
+      - name: Run the required PostgreSQL qualification gate
+        env:
+          FORGE_PG_TEST_URL: postgresql+asyncpg://forge:forge@127.0.0.1:5433/forge
+        run: uv run python scripts/pg_gate.py --report pg-gate.json
+
+      - name: Upload the qualification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-gate-qualification-report
+          path: pg-gate.json
 
   # Real-OS-process failure injection (review R20): tests/
   # test_failure_injection_os.py drives REAL `python -m forge.worker`

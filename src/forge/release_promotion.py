@@ -54,8 +54,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
 
+from .profile_qualification import ProfileQualificationRecord, evaluate_record
+
 __all__ = [
     "PROMOTION_STAMP",
+    "PROFILE_QUALIFICATION_CLASSES",
     "QUALIFICATION_CLASSES",
     "REQUIRED_CHECKS",
     "CanaryResult",
@@ -85,6 +88,13 @@ PROMOTION_STAMP: Final[str] = "forge.release.promotion/1"
 #: Evidence classes whose claims need live/release qualification evidence —
 #: the classes the gaps query treats as "requires qualification".
 QUALIFICATION_CLASSES: Final[frozenset[str]] = frozenset({"boot_canary", "real_provider_e2e"})
+
+#: The subset judged on the SEPARATE profile-qualification record channel
+#: (R36-22): live-provider workflows a release-artifact canary can never
+#: stand in for. When profile records are in scope of the gaps query, these
+#: entries' coverage is decided by the records (verdict derived from their
+#: evidence classes), not by canary tags.
+PROFILE_QUALIFICATION_CLASSES: Final[frozenset[str]] = frozenset({"real_provider_e2e"})
 
 #: Conclusions that prove a required check PASSED (GitHub check-run
 #: vocabulary; "pass" is kept for hand-built records).
@@ -473,10 +483,98 @@ def evaluate_promotion(
 # ---------------------------------------------------------------------------
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in version.split(".")[:3] if p.isdigit())
+
+
+def _profile_side_gap(
+    capability: str,
+    provider: str,
+    backend: str,
+    evidence_class: str,
+    records: tuple[ProfileQualificationRecord, ...],
+    target: str | None,
+    profile_root: Path | None,
+) -> QualificationGap | None:
+    """The profile-record channel's verdict on one capability (R36-22).
+
+    Coverage means: a record at the version being checked, whose provider
+    matches (a gitlab record never auto-supports a github claim), covering
+    the capability, whose DERIVED verdict is ``supported`` or
+    ``lab-qualified``. A ``declared_only`` record does NOT clear the gap —
+    it IS the gap, named: fixtures executed, live evidence absent. No
+    matching record at all, or only for older versions, or an unqualified
+    record — each is a gap with its own reason.
+    """
+    matching = [
+        record
+        for record in records
+        if capability in record.capabilities and (provider == "*" or record.provider == provider)
+    ]
+    if not matching:
+        reason = (
+            "no profile-qualification record covers this capability"
+            + (f" for provider {provider}" if provider != "*" else "")
+            + (f" at v{target}" if target else "")
+            + " — the workflow is not auto-supported by a sibling configuration"
+        )
+    else:
+        current = [
+            record for record in matching if target is None or record.release_version == target
+        ]
+        if not current:
+            older = sorted({record.release_version for record in matching})
+            reason = (
+                "profile-qualification evidence exists only for "
+                + ", ".join(f"v{version}" for version in older)
+                + " — stale for the version being checked"
+                + (f" (v{target})" if target else "")
+            )
+        else:
+            reports = {
+                record.record_id: evaluate_record(record, root=profile_root) for record in current
+            }
+            verdicts = {report.verdict for report in reports.values()}
+            if verdicts & {"supported", "lab-qualified"}:
+                return None  # covered — by executed, non-substituted evidence
+            if verdicts == {"unqualified"}:
+                unqualified = "; ".join(
+                    f"{record_id}: {'; '.join(report.reasons)}"
+                    for record_id, report in sorted(reports.items())
+                )
+                reason = (
+                    "the profile-qualification record(s) covering this capability are "
+                    f"unqualified — {unqualified}"
+                )
+            else:
+                best = [
+                    (record_id, report)
+                    for record_id, report in sorted(reports.items())
+                    if report.verdict == "declared_only"
+                ]
+                named = ", ".join(record_id for record_id, _ in best) or ", ".join(reports)
+                reason = (
+                    f"profile record(s) {named} cover this capability but the derived "
+                    "verdict is declared_only — model-fixture/binary-smoke evidence "
+                    "executed, live-provider-or-stronger evidence absent (a fixture "
+                    "never substitutes for live); supported needs live evidence per "
+                    "required capability"
+                )
+    return QualificationGap(
+        capability=capability,
+        provider=provider,
+        backend=backend,
+        evidence_class=evidence_class,
+        reason=reason,
+    )
+
+
 def qualification_gaps(
     manifest_entries: tuple[object, ...],
     promotion_records: tuple[PromotionRecord, ...],
     version: str | None = None,
+    profile_records: tuple[ProfileQualificationRecord, ...] = (),
+    profile_root: Path | None = None,
 ) -> tuple[QualificationGap, ...]:
     """Capabilities claiming qualification evidence with no fresh record.
 
@@ -489,10 +587,22 @@ def qualification_gaps(
     else — no records, no tagged stage for the capability, a blocked record,
     or evidence only for an older version — is an explicit gap with the
     reason spelled out.
+
+    R36-22 profile channel (additive): entries whose ``evidence_class`` is
+    in :data:`PROFILE_QUALIFICATION_CLASSES` are judged on the SEPARATE
+    profile-qualification records when any are in scope — coverage requires
+    a provider-matched record at the version being checked whose DERIVED
+    verdict is ``supported``/``lab-qualified`` (see
+    :func:`forge.profile_qualification.derive_verdict`; a declared_only
+    record keeps the gap, named). With no profile records in scope the
+    promotion-record path below keeps its exact pre-R36-22 behavior.
     """
     target = version
     if target is None and promotion_records:
         target = max(record.version for record in promotion_records)
+    profile_target = target
+    if profile_target is None and profile_records:
+        profile_target = max(record.release_version for record in profile_records)
 
     tagged: dict[str, PromotionRecord] = {}
     for record in promotion_records:
@@ -511,6 +621,20 @@ def qualification_gaps(
         if evidence_class not in QUALIFICATION_CLASSES:
             continue
         capability = getattr(entry, "capability", "")
+        provider = getattr(entry, "provider", "*")
+        if evidence_class in PROFILE_QUALIFICATION_CLASSES and profile_records:
+            gap = _profile_side_gap(
+                capability,
+                provider,
+                getattr(entry, "backend", "*"),
+                evidence_class,
+                profile_records,
+                profile_target,
+                profile_root,
+            )
+            if gap is not None:
+                gaps.append(gap)
+            continue
         record = tagged.get(capability)
         if record is not None:
             continue
@@ -906,11 +1030,22 @@ def _cmd_gate(args: argparse.Namespace) -> int:
 
 
 def _cmd_gaps(args: argparse.Namespace) -> int:
+    from .profile_qualification import load_profile_records
     from .release_manifest import ENTRIES
 
     root = Path(args.root)
     records = load_promotion_records(root)
-    gaps = qualification_gaps(ENTRIES, records, version=args.version)
+    # R36-22: the committed profile-qualification records join the query —
+    # profile-class capabilities are judged on them (verdicts derived from
+    # evidence classes, never from labels).
+    profile_records = load_profile_records(root)
+    gaps = qualification_gaps(
+        ENTRIES,
+        records,
+        version=args.version,
+        profile_records=profile_records,
+        profile_root=root,
+    )
     document = {
         "stamp": "forge.release.qualification-gaps/1",
         "version": args.version,

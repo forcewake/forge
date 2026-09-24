@@ -43,9 +43,13 @@ from forge.adaptive.research_cohort import (
     CANDIDATE_MODE,
     COHORT_SCHEMA,
     COHORT_MODES,
+    EVIDENCE_CLASS_FIXTURE_REPLAY,
     MIN_COHORT_TASKS,
+    PROVENANCE_LIVE_MODEL,
+    PROVENANCE_OFFLINE_SCRIPTED,
     RECORD_SCHEMA,
     REPORT_SCHEMA,
+    REVIEW_PENDING,
     VERDICT_HOLD,
     VERDICT_PASS,
     VERDICT_ROLLBACK,
@@ -53,6 +57,8 @@ from forge.adaptive.research_cohort import (
     CohortSpec,
     CohortSpecError,
     CohortTask,
+    Preregistration,
+    PreregTaskBinding,
     PromotionPolicy,
     RecordedRun,
     Rubric,
@@ -972,3 +978,203 @@ def test_evaluation_artifacts_are_replayable_from_a_clean_path():
     report = runner.run()
     assert report.schema == REPORT_SCHEMA
     assert report.verdict in {VERDICT_PASS, VERDICT_HOLD, VERDICT_ROLLBACK}
+
+
+# ---------------------------------------------------------------------------
+# R36-12 — pre-registration, provenance, review states on the report
+# ---------------------------------------------------------------------------
+
+
+def _prereg() -> Preregistration:
+    return Preregistration(
+        cohort_id="test-live-cohort",
+        registered_at="2026-09-24T00:00:00+00:00",
+        task_bindings=(
+            PreregTaskBinding(
+                task_id="T-1",
+                archetype=ARCHETYPE_NEIGHBOR_DEPENDENCY,
+                snapshot_digest="a" * 64,
+                acceptance_criteria=("the decisive claim cites the neighbor's bytes",),
+            ),
+        ),
+        eligibility={"reviewer_role": "code owner"},
+        budget=BUDGET,
+        arms=COHORT_MODES,
+        review_procedure={
+            "blind": True,
+            "counterbalanced": True,
+            "ordering_seed": 20260924,
+            "correction_effort_procedure": "one procedure for every mode",
+        },
+        promotion_criteria={
+            "margin": 0.05,
+            "accuracy_floor": 0.8,
+            "cost_bound": {"max_calls_total_per_mode": 60},
+        },
+        prompt_policy_digest="b" * 64,
+    )
+
+
+def test_preregistration_digest_is_over_the_frozen_content():
+    prereg = _prereg()
+    assert prereg.digest == Preregistration(**prereg.__dict__).digest
+    moved = Preregistration(
+        **{**prereg.__dict__, "budget": {"max_calls": 20, "wall_seconds": 90.0}}
+    )
+    assert moved.digest != prereg.digest  # the budget is frozen INTO the hash
+    document = prereg.as_document()
+    reloaded = Preregistration.from_document(document)
+    assert reloaded.digest == prereg.digest
+    document["budget"]["max_calls"] = 20  # tamper after the fact…
+    with pytest.raises(CohortSpecError, match="digest mismatch"):
+        Preregistration.from_document(document)
+
+
+def test_preregistration_revision_records_its_generation():
+    prereg = _prereg()
+    revised = prereg.revise(
+        "the research system prompt changed between iterations",
+        prompt_policy_digest="c" * 64,
+    )
+    assert revised.generation == 2
+    assert revised.supersedes == prereg.digest
+    assert revised.change_reason.startswith("the research system prompt")
+    with pytest.raises(CohortSpecError, match="change reason"):
+        prereg.revise("   ")
+    with pytest.raises(CohortSpecError, match="supersedes"):
+        Preregistration(**{**prereg.__dict__, "generation": 2}).validate()
+
+
+def test_preregistration_validation_pins_the_contract():
+    with pytest.raises(CohortSpecError, match="arms"):
+        Preregistration(**{**_prereg().__dict__, "arms": ("none",)}).validate()
+    with pytest.raises(CohortSpecError, match="cost_bound"):
+        Preregistration(
+            **{
+                **_prereg().__dict__,
+                "promotion_criteria": {"margin": 0.05, "accuracy_floor": 0.8},
+            }
+        ).validate()
+    with pytest.raises(CohortSpecError, match="correction-effort"):
+        Preregistration(
+            **{
+                **_prereg().__dict__,
+                "review_procedure": {"blind": True, "counterbalanced": True, "ordering_seed": 1},
+            }
+        ).validate()
+
+
+def test_recorded_run_round_trips_the_capture_block():
+    snapshot = make_snapshot({"src/events.py": _EVENTS_FILE})
+    run = make_run(snapshot=snapshot, plan={"steps": []}, mode="research")
+    captured = RecordedRun(
+        **{
+            **run.__dict__,
+            "capture": {
+                "provenance": PROVENANCE_OFFLINE_SCRIPTED,
+                "preregistration": {"digest": "d" * 64, "generation": 1},
+            },
+        }
+    )
+    document = {
+        "schema": RECORD_SCHEMA,
+        "task_id": "T-1",
+        "mode": "research",
+        "snapshot_digest": snapshot.digest,
+        "attempts": [{"attempt": 1, "stopped_reason": "", "cost": {}}],
+        "plan": {"steps": []},
+        "reviewer": {"correction_minutes": 3},
+        "capture": dict(captured.capture),
+    }
+    reloaded = RecordedRun.from_document(document)
+    assert reloaded.provenance == PROVENANCE_OFFLINE_SCRIPTED
+    assert reloaded.preregistration_digest == "d" * 64
+    assert reloaded.preregistration_generation == 1
+    assert reloaded.review_pending is False  # a preregistered capture WITH grades
+    assert captured.review_pending is True  # …and without grades it is pending
+
+
+def test_pending_review_keeps_reviewer_graded_dimensions_unknown():
+    """A preregistered capture without reviewer grades: accuracy, assumptions,
+    question quality and the overall stay UNKNOWN — never vacuous scores."""
+    snapshot = make_snapshot({"src/events.py": _EVENTS_FILE})
+    task = make_task(snapshot=snapshot)
+    plan = {
+        "steps": [{"step_id": "s1", "objective": "act", "evidence_refs": ["ev-1"]}],
+        "surface": [{"repo": "orders", "path": "src/events.py", "why": "read"}],
+        "claims": [a_claim(1, 'ORDER_EVENT = "order.expired.v2"')],
+        "questions": [{"question_id": "q1", "text": "which contract version?"}],
+        "assumptions": [{"text": "the neighbor still consumes v2"}],
+    }
+    run = RecordedRun(
+        **{
+            **make_run(snapshot=snapshot, plan=plan).__dict__,
+            "capture": {
+                "provenance": PROVENANCE_LIVE_MODEL,
+                "preregistration": {"digest": "d" * 64},
+            },
+        }
+    )
+    grade = grade_run(task, run, snapshot)
+    assert grade["review"]["state"] == REVIEW_PENDING
+    assert grade["review"]["pending_fields"] == [
+        "claim_importance",
+        "assumption_severity",
+        "correction_minutes",
+    ]
+    assert grade["evidence_accuracy"]["score"] is None
+    assert grade["evidence_accuracy"]["unreviewed_claims"] == 1
+    # the MECHANICAL verdict still computes — support is not a reviewer grade
+    assert grade["evidence_accuracy"]["claims"][0]["verdict"] == "semantic_match"
+    assert grade["impacted_surface_recall"]["score"] == 1.0
+    assert grade["unjustified_assumptions"]["score"] is None
+    assert grade["question_quality"]["score"] is None
+    assert grade["overall"] is None
+    assert grade["human_plan_correction_effort"]["state"] == REVIEW_PENDING
+
+
+def test_means_skip_unknown_values_instead_of_zeroing_them():
+    from forge.adaptive.research_cohort import aggregate_mode
+
+    snapshot = make_snapshot({"src/events.py": _EVENTS_FILE})
+    task = make_task(snapshot=snapshot)
+    plan = {
+        "steps": [],
+        "surface": [{"repo": "orders", "path": "src/events.py", "why": ""}],
+        "claims": [a_claim(1, 'ORDER_EVENT = "order.expired.v2"')],
+        "questions": [],
+        "assumptions": [],
+    }
+    pending = RecordedRun(
+        **{
+            **make_run(snapshot=snapshot, plan=plan).__dict__,
+            "capture": {
+                "provenance": PROVENANCE_LIVE_MODEL,
+                "preregistration": {"digest": "d" * 64},
+            },
+        }
+    )
+    grade = grade_run(task, pending, snapshot)
+    aggregate = aggregate_mode([grade], [pending])
+    assert aggregate["overall_mean"] is None
+    assert aggregate["evidence_accuracy_mean"] is None
+    assert aggregate["correction_minutes_mean"] is None  # unknown, never estimated
+    assert aggregate["correction_minutes_known_tasks"] == 0
+    assert aggregate["review_pending_tasks"] == 1
+
+
+def test_shipped_report_carries_provenance_and_the_fixture_evidence_class(shipped_report):
+    """The v1 fixture report names its evidence class honestly: an
+    authored-fixture replay, never a live performance claim."""
+    assert shipped_report["promotion"]["evidence_class"] == EVIDENCE_CLASS_FIXTURE_REPLAY
+    assert shipped_report["promotion"]["human_promotion_decision"]["required"] is False
+    assert shipped_report["promotion"]["sample"][CANDIDATE_MODE]["tasks_graded"] == 4
+    for mode in COHORT_MODES:
+        summary = shipped_report["provenance_summary"][mode]
+        assert summary["unlabeled"] == 4  # authored fixtures carry no capture block
+        assert summary["runs_total"] == 4
+    # the v1 reviewer grades are recorded: the correction mean stays over
+    # the KNOWN reviewers only, and every run is known
+    assert shipped_report["aggregate"]["research"]["correction_minutes_known_tasks"] == 4
+    assert "preregistration" not in shipped_report  # the fixture cohort has none
+    assert shipped_report["promotion"]["verdict"] == VERDICT_PASS  # unchanged

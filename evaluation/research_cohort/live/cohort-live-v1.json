@@ -1,0 +1,171 @@
+{
+  "schema": "forge.research.cohort/1",
+  "cohort_id": "research-cohort-live-v1",
+  "recorded_at": "2026-09-24T00:00:00+00:00",
+  "promotion": {
+    "owner": "R36 review lead (adaptive)",
+    "hold_expires": "2026-10-08",
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "RC-08-offline-neighbor-deadline-policy",
+      "archetype": "neighbor_dependency",
+      "statement": "Orders' dispatch must enforce the courier deadline window Billing owns. The deadline policy is defined in the neighbor repository only.",
+      "snapshot_digest": "f4243a4adbbd1aef8b2c484e3be153f7baefc8221beb6edda6362354179f9b5d",
+      "snapshot_ref": "snap-offline-neighbor.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.4,
+        "assumptions_weight": 0.2,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "billing",
+          "path": "src/courier.py"
+        },
+        {
+          "repo": "orders",
+          "path": "src/dispatch.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-09-live-ambiguous-refund-grace",
+      "archetype": "ambiguous_requirement",
+      "statement": "Support refund requests within the grace window after order expiry.",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.2,
+        "recall_weight": 0.15,
+        "assumptions_weight": 0.3,
+        "questions_weight": 0.35,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/checkout.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/subscriptions.py"
+        }
+      ],
+      "missing_decision": "the grace-window length (7 or 30 days) and who absorbs the payment fee",
+      "missing_decision_terms": [
+        "grace window",
+        "grace",
+        "7",
+        "30",
+        "fee",
+        "days"
+      ],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-10-live-irrelevant-docs-site",
+      "archetype": "irrelevant_repository",
+      "statement": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads.",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.45,
+        "assumptions_weight": 0.15,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/timer.py"
+        },
+        {
+          "repo": "orders",
+          "path": "src/handlers/expiry.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": [
+        "docs-site"
+      ]
+    },
+    {
+      "task_id": "RC-11-live-deep-lapse-handler",
+      "archetype": "deep_file_evidence",
+      "statement": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits.",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "snapshot_ref": "snap-checkout.json",
+      "held_back": false,
+      "rubric": {
+        "accuracy_weight": 0.4,
+        "recall_weight": 0.35,
+        "assumptions_weight": 0.15,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/handlers/expiry.py"
+        },
+        {
+          "repo": "orders",
+          "path": "src/timer.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    },
+    {
+      "task_id": "RC-12-live-holdout-neighbor-retry",
+      "archetype": "neighbor_dependency",
+      "statement": "Orders' dispatch must apply the retry policy Billing owns. The backoff contract is defined in the neighbor repository, not in Orders.",
+      "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+      "snapshot_ref": "snap-dispatch.json",
+      "held_back": true,
+      "rubric": {
+        "accuracy_weight": 0.3,
+        "recall_weight": 0.4,
+        "assumptions_weight": 0.2,
+        "questions_weight": 0.1,
+        "min_evidence_accuracy": 0.75,
+        "max_invented_defaults": 0
+      },
+      "expected_surface": [
+        {
+          "repo": "orders",
+          "path": "src/dispatch.py"
+        },
+        {
+          "repo": "billing",
+          "path": "src/retry.py"
+        }
+      ],
+      "missing_decision": "",
+      "missing_decision_terms": [],
+      "irrelevant_repos": []
+    }
+  ]
+}

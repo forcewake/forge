@@ -1,11 +1,11 @@
-"""forge candidate_collector — collect the candidate from the ACTIVE workspace (Q35-01).
+"""forge candidate_collector — collect the candidate from the ACTIVE workspace (Q35-01, R36-01).
 
 The shipped GitHub harness template's "Emit candidate artifact" step used
 to run ``git add -A`` + ``git diff --cached`` in the ORIGINAL checkout.
 After a cross-runner resume that is the WRONG tree: the lane
 (:mod:`forge.lane_driver`) restores WIP into a stable SIBLING generation
 (``<parent>/.forge-workspace-gen-<checkpoint_id[:12]>``), ``os.chdir()``s
-the LANE PROCESS into it (the agent's edits land there), and records the
+the LANE process into it (the agent's edits land there), and records the
 active generation in the checkout's ``.forge/workspace-generation``
 pointer — a separate Actions ``run`` starts in a fresh shell at the
 checkout, so the inline commands diffed the untouched base and the
@@ -18,14 +18,37 @@ This module is the packaged collector the template now invokes
 
 - it resolves the tree to collect through the CHECKOUT'S pointer — never
   through an inherited cwd — and VALIDATES the pointer's ownership
-  before anything runs: the generation must be a direct sibling named
+  before anything runs. R36-01 hardens that boundary from
+  same-target-shaped checks to PHYSICAL ownership + EXACT-attempt
+  binding: the generation must be a direct sibling named
   ``.forge-workspace-gen-<hex>`` (the only shape :mod:`forge.adaptive.
-  checkpointing` mints), the pointer's ``work_id`` must equal the
-  expected work id, and any absolute ``generation_path`` the document
-  carries must agree with the sibling resolution. A forged or foreign
-  pointer is a :class:`CollectionRefused` with the reason and produces
-  ZERO artifacts — an agent-written absolute path is never publication
-  authority;
+  checkpointing` mints) whose hex fragment is the FIRST 12 CHARACTERS of
+  the pointer's full checkpoint digest, the pointer's ``work_id`` must
+  equal the expected work id, and — when the trusted dispatch carried a
+  checkpoint identity (:class:`CollectionIdentity`) — the pointer's full
+  checkpoint digest must EQUAL it. A pointer naming the current work but
+  a different checkpoint is a :class:`CollectionRefused`, zero artifacts;
+- the generation is verified with NON-FOLLOWING checks: ``lstat`` must
+  see a REAL directory (a sibling-shaped SYMLINK to a foreign working
+  tree — the reviewer's probe, a 246-byte diff out of a foreign
+  repository — is refused by type, before any cleanup or Git), every
+  ancestor up to the checkout's parent must likewise be a real
+  non-symlink directory, and the tree must be PHYSICALLY contained under
+  that parent (``os.path.commonpath`` over realpaths). The document's
+  absolute ``generation_path`` is cross-checked but is never authority.
+  The ``.git`` metadata itself is lstat-checked: a SYMLINKED ``.git``
+  (linked-worktree topology) is a typed refusal naming that limitation,
+  BEFORE any cleanup runs;
+- the validated tree's identity (``st_dev``, ``st_ino``) is captured at
+  validation and RE-CHECKED immediately before the infrastructure
+  cleanup and before every Git invocation: a generation swapped between
+  validation and collection is a :class:`CollectionRefused`. (Full TOCTOU
+  prevention would hold an ``openat``-style directory handle across the
+  whole collection — a later hardening; the recheck closes the practical
+  validate→run window and detects every replacement that already
+  happened.) The cleanup (``.codegraph``, ``.venv``, ``__pycache__``,
+  ``.pytest_cache``, ``*.pyc``) runs ONLY inside the lstat-verified
+  owned tree — never the checkout while a generation is active;
 - it runs REAL Git (``subprocess``) with explicit ``git -C`` on the
   VALIDATED tree: staging and the frozen-base diff never depend on the
   caller's cwd. A Git failure is a :class:`CollectionError` carrying
@@ -34,18 +57,17 @@ This module is the packaged collector the template now invokes
   ZERO-CHANGE candidate (empty diff, exit 0) is a VALID result flagged
   ``zero_change`` — a no-op turn is never confused with a failed Git
   command, and neither is classified as the other;
-- it removes lane-infrastructure paths inside the COLLECTED tree only
-  (``.codegraph``, ``.venv``, ``__pycache__``, ``.pytest_cache`` and
-  every ``*.pyc`` — the same cleanup list the template step carried),
-  and writes ``candidate.diff`` into an output root OUTSIDE the
-  collected generation (default ``<checkout_root>/forge-output``), so
-  the candidate bytes can never stage themselves;
+- it writes ``candidate.diff`` into an output root OUTSIDE the collected
+  generation (default ``<checkout_root>/forge-output``), so the
+  candidate bytes can never stage themselves;
 - a MISSING pointer with ``allow_missing_pointer=True`` is the fresh-run
   path (no restore happened; the agent worked in the checkout itself —
   today's no-resume flow, byte-compatible: same commands, same output
-  path, same emit-meta contract). With ``allow_missing_pointer=False``
-  a missing pointer is the typed :class:`GenerationPointerMissing` —
-  never a silent fallback to the checkout.
+  path, same emit-meta contract), and the result RECORDS the explicit
+  no-generation identity (``checkpoint_binding="fresh"``). With
+  ``allow_missing_pointer=False`` a missing pointer is the typed
+  :class:`GenerationPointerMissing` — never a silent fallback to the
+  checkout.
 
 Stdlib + subprocess Git only — no forge imports: the module stays
 importable wherever the pinned lane package runs.
@@ -58,15 +80,21 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 __all__ = [
     "CANDIDATE_DIFF_NAME",
+    "CHECKPOINT_ID_RE",
     "GENERATION_POINTER",
     "GENERATION_POINTER_SCHEMA",
+    "CHECKPOINT_BINDING_EXACT",
+    "CHECKPOINT_BINDING_FRESH",
+    "CHECKPOINT_BINDING_UNBOUND",
     "CollectionError",
+    "CollectionIdentity",
     "CollectionRefused",
     "CollectionResult",
     "GenerationPointerMissing",
@@ -84,11 +112,27 @@ GENERATION_POINTER = ".forge/workspace-generation"
 #: collector minted trust for).
 GENERATION_POINTER_SCHEMA = "forge.workspace-generation/1"
 
+#: The checkpoint digest shape the whole lane mints and binds
+#: (:mod:`forge.adaptive.artifact_store` content addresses and
+#: lane_driver's resume-spec grammar agree): a sha256 hex digest.
+CHECKPOINT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
 #: The sibling-generation name prefix checkpointing's ``promote="generation"``
 #: restore mints: ``.forge-workspace-gen-<checkpoint_id[:12]>`` (the
 #: checkpoint id is a sha256 hex digest, so the fragment is hex).
 _GENERATION_PREFIX = ".forge-workspace-gen-"
 _GENERATION_NAME_RE = re.compile(r"^\.forge-workspace-gen-[0-9a-f]+$")
+
+#: Result ``checkpoint_binding`` vocabulary (R36-01):
+#: ``"exact"`` — the pointer's checkpoint digest EQUALS the dispatched
+#: expected checkpoint (the exact-attempt bind); ``"unbound"`` — the
+#: dispatch carried no expected checkpoint (legacy dispatch; the
+#: pointer's own digest is recorded, never guessed to be more); ``"fresh"``
+#: — no pointer at all, the explicit no-generation identity of a clean
+#: fresh run collected from the checkout.
+CHECKPOINT_BINDING_EXACT = "exact"
+CHECKPOINT_BINDING_UNBOUND = "unbound"
+CHECKPOINT_BINDING_FRESH = "fresh"
 
 #: Lane-infrastructure directories physically removed from the COLLECTED
 #: tree before staging — the template emit step's cleanup list, mirrored.
@@ -118,14 +162,41 @@ class CollectionError(Exception):
 
 class CollectionRefused(CollectionError):
     """The generation pointer failed OWNERSHIP validation — forged shape,
-    foreign work id, or an absolute path outside the owned sibling
-    pattern. Zero artifacts are produced; the reason names the refusal."""
+    foreign work id, wrong checkpoint, a symlinked generation, or a
+    validated tree replaced mid-collection. Zero artifacts are produced;
+    the reason names the refusal."""
 
 
 class GenerationPointerMissing(CollectionError):
     """No ``.forge/workspace-generation`` pointer exists and the caller
     required one (``allow_missing_pointer=False``) — a typed error, never
     a silent fallback to collecting the checkout."""
+
+
+@dataclass(frozen=True)
+class CollectionIdentity:
+    """The EXPECTED collection identity, from the TRUSTED dispatch record.
+
+    R36-01: the pointer document is agent-writable JSON — its asserted
+    ``work_id``/``checkpoint_id`` are CLAIMS, never authority. The caller
+    that knows what this attempt actually is (the lane entry point, fed
+    by the workflow dispatch inputs) hands that identity in, and the
+    collector binds the pointer to it:
+
+    - ``work_id`` — the forge work/run id of THIS attempt (required);
+    - ``attempt_base_oid`` — the frozen base the diff is taken against
+      (required — the diff has no meaning without it);
+    - ``checkpoint_id`` — the checkpoint the dispatch bound this attempt
+      to. ``""`` is the EXPLICIT unknown (a fresh/legacy dispatch that
+      carried no checkpoint identity — recorded as
+      ``checkpoint_binding="unbound"``, never guessed); any non-empty
+      value must be a 64-hex sha256 digest and the pointer's own digest
+      must EQUAL it exactly.
+    """
+
+    work_id: str
+    attempt_base_oid: str
+    checkpoint_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,7 +209,11 @@ class CollectionResult:
     pointer's identity for a generation collection and the expected work
     id / ``""`` for a checkout collection; ``zero_change`` flags the
     VALID empty diff (exit 0) so a no-op candidate is distinguishable
-    from a failed Git command by type, never by string matching.
+    from a failed Git command by type, never by string matching; and
+    ``checkpoint_binding`` records HOW the attempt was bound (R36-01):
+    ``"exact"`` (pointer digest == dispatched checkpoint), ``"unbound"``
+    (dispatch carried no checkpoint identity) or ``"fresh"`` (no
+    pointer — the explicit no-generation identity of a clean fresh run).
     """
 
     #: Where ``candidate.diff`` was written (outside the collected tree
@@ -159,6 +234,8 @@ class CollectionResult:
     zero_change: bool
     #: ``"generation"`` (pointer-resolved) | ``"checkout"`` (fresh run).
     source: str
+    #: ``"exact"`` | ``"unbound"`` | ``"fresh"`` — see the class docstring.
+    checkpoint_binding: str
 
     def as_dict(self) -> dict[str, object]:
         """A JSON-ready view (the CLI prints this for the step log)."""
@@ -171,6 +248,7 @@ class CollectionResult:
             "base_oid": self.base_oid,
             "zero_change": self.zero_change,
             "source": self.source,
+            "checkpoint_binding": self.checkpoint_binding,
         }
 
 
@@ -191,36 +269,126 @@ def _run_git(tree: Path, args: tuple[str, ...]) -> subprocess.CompletedProcess[b
         ) from exc
 
 
+def _real_dir_stamp(path: Path, *, what: str) -> tuple[int, int]:
+    """lstat *path* and demand a REAL directory — never a symlink.
+
+    The R36-01 core: ``is_dir()`` FOLLOWS symlinks, so a sibling-shaped
+    symlink to a foreign working tree passed the old ownership check.
+    ``lstat`` never follows; a symlink is refused by type, whatever it
+    points at. Returns the tree's ``(st_dev, st_ino)`` identity — the
+    stamp every later recheck (:func:`_assert_stable`) compares against.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise CollectionRefused(
+            f"{what} {path} does not exist ({exc}) — the restore that minted it cannot have landed"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        target = ""
+        try:
+            target = os.readlink(path)
+        except OSError:
+            pass
+        raise CollectionRefused(
+            f"{what} {path} is a SYMBOLIC LINK (-> {target or 'unreadable'}) — "
+            "a symlinked sibling is never this attempt's physically owned "
+            "workspace; refusing before any cleanup or Git runs"
+        )
+    if not stat.S_ISDIR(info.st_mode):
+        raise CollectionRefused(
+            f"{what} {path} is not a directory — a generation is a real "
+            "sibling directory, never any other file type"
+        )
+    return (info.st_dev, info.st_ino)
+
+
+def _assert_stable(generation: Path, stamp: tuple[int, int]) -> None:
+    """Re-lstat the VALIDATED generation and compare its inode identity.
+
+    R36-01's TOCTOU bound: the (dev, ino) captured at validation must
+    still name the same physical directory immediately before cleanup and
+    before every Git invocation — a pointer/directory swap between
+    validation and collection is a typed refusal, and the cleanup/Git
+    file operations stay inside the tree that was validated. (Holding an
+    ``openat``-style directory handle across the whole collection would
+    close the window entirely — noted for a later hardening; this recheck
+    detects every replacement that already happened.)
+    """
+    current = _real_dir_stamp(generation, what="validated generation")
+    if current != stamp:
+        raise CollectionRefused(
+            f"generation {generation} was REPLACED between validation and "
+            f"collection (identity {stamp} -> {current}) — refusing to "
+            "collect or clean a tree this attempt did not validate"
+        )
+
+
 def _require_git_worktree(tree: Path) -> None:
-    """Fail typed on a tree Git cannot collect from — BEFORE any command.
+    """Fail typed on a tree Git cannot SAFELY collect from — BEFORE any
+    command or cleanup (R36-01: non-following lstat, so the metadata
+    itself cannot be a symlink).
 
     A generation is a full ``copytree`` of the checkout (``.git``
-    directory included), so a regular repository collects fine. A
-    ``.git`` FILE is a linked-worktree pointer whose target is NOT
-    carried into the generation (the issue's unsupported-layout case),
-    and a missing ``.git`` is not a repository at all — both are typed
+    directory included), so a regular repository collects fine. A real
+    ``.git`` FILE is a linked-worktree gitfile whose target is NOT
+    carried into the generation (the unsupported-layout case), and a
+    SYMLINKED ``.git`` is refused with the linked-worktree limitation
+    named explicitly — its target is outside the owned tree, so the
+    object database the diff would read is not this attempt's. A missing
+    ``.git`` is not a repository at all. All three are typed
     :class:`CollectionError` reasons, never a Git stderr to decode.
     """
     git_dir = tree / ".git"
-    if not git_dir.exists():
+    try:
+        info = os.lstat(git_dir)
+    except OSError as exc:
         raise CollectionError(
             f"{tree} is not a Git repository (no .git) — the candidate cannot be collected from it"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise CollectionError(
+            f"{git_dir} is a SYMBOLIC LINK — a symlinked .git (linked-worktree "
+            "topology) points its object database outside the owned tree; "
+            "linked-worktree layouts are not carried into a generation, "
+            "refusing to collect from one before any cleanup"
         )
-    if not git_dir.is_dir():
+    if not stat.S_ISDIR(info.st_mode):
         raise CollectionError(
             f"{tree} carries a linked-worktree .git pointer — that topology is not "
             "carried into a generation; refusing to collect from it"
         )
 
 
-def _resolve_pointer(checkout_root: Path, expected_work_id: str) -> tuple[Path, str, str]:
+def _resolve_pointer(
+    checkout_root: Path, identity: CollectionIdentity
+) -> tuple[Path, str, str, tuple[int, int]]:
     """Resolve and OWNERSHIP-VALIDATE the checkout's generation pointer.
 
-    Returns ``(generation_dir, work_id, checkpoint_id)`` — the absolute
-    sibling directory the pointer's NAME resolves to (never a path read
-    out of the document), plus the pointer's identity. Every failure is
-    a :class:`CollectionRefused` naming the exact reason; nothing is
-    written by this function.
+    Returns ``(generation_dir, work_id, checkpoint_id, stamp)`` — the
+    absolute sibling directory the pointer's NAME resolves to (never a
+    path read out of the document), the pointer's identity, and the
+    lstat inode stamp of the verified tree. The validation ladder
+    (R36-01 — every rung a :class:`CollectionRefused` naming the exact
+    reason; nothing is written by this function):
+
+    1. the document is readable JSON with the pointer schema;
+    2. its ``work_id`` equals the EXPECTED work id (from the trusted
+       dispatch identity, not from the document itself);
+    3. its ``generation`` name is the owned sibling shape;
+    4. its ``checkpoint_id`` is a full 64-hex digest and the name's hex
+       fragment is that digest's first 12 characters — the NAME is bound
+       to the full checkpoint record;
+    5. when the identity carries an expected checkpoint, the pointer's
+       digest EQUALS it (a pointer naming the current work but a wrong
+       checkpoint is a foreign attempt's generation);
+    6. any absolute ``generation_path`` convenience copy agrees with the
+       sibling resolution (cross-check only — never authority);
+    7. the sibling is PHYSICALLY this attempt's: a real non-symlink
+       directory (lstat, never ``is_dir``), its ancestors up to the
+       checkout's parent likewise real directories, and the tree
+       physically contained under that parent (commonpath over
+       realpaths) — the (dev, ino) stamp returned for the rechecks.
     """
     pointer_path = checkout_root / GENERATION_POINTER
     try:
@@ -240,23 +408,43 @@ def _resolve_pointer(checkout_root: Path, expected_work_id: str) -> tuple[Path, 
             f"generation pointer {pointer_path} carries schema {schema!r} — expected "
             f"{GENERATION_POINTER_SCHEMA!r}; refusing to collect"
         )
-    expected = (expected_work_id or "").strip()
+    expected_work = identity.work_id
     work_id = str(document.get("work_id") or "").strip()
-    if not expected:
+    if not expected_work:
         raise CollectionRefused(
             "no expected work id was given to validate the generation pointer "
             "against — ownership cannot be established"
         )
-    if work_id != expected:
+    if work_id != expected_work:
         raise CollectionRefused(
             f"generation pointer names work {work_id!r} — not this run's "
-            f"{expected!r}; a foreign generation is never collection authority"
+            f"{expected_work!r}; a foreign generation is never collection authority"
         )
     name = str(document.get("generation") or "")
     if not _GENERATION_NAME_RE.fullmatch(name):
         raise CollectionRefused(
             f"generation pointer names {name!r} — not the owned sibling shape "
             f"'{_GENERATION_PREFIX}<hex>'; an arbitrary path is never collection authority"
+        )
+    checkpoint_id = str(document.get("checkpoint_id") or "").strip()
+    if not CHECKPOINT_ID_RE.fullmatch(checkpoint_id):
+        raise CollectionRefused(
+            f"generation pointer names checkpoint {checkpoint_id!r} — not a "
+            "well-formed 64-hex sha256 digest; the generation cannot be bound "
+            "to the attempt that minted it"
+        )
+    if name != f"{_GENERATION_PREFIX}{checkpoint_id[:12]}":
+        raise CollectionRefused(
+            f"generation pointer names sibling {name!r} but checkpoint "
+            f"{checkpoint_id[:12]}… mints {_GENERATION_PREFIX}{checkpoint_id[:12]!r} "
+            "— the generation name is not bound to the checkpoint record"
+        )
+    expected_checkpoint = identity.checkpoint_id
+    if expected_checkpoint and checkpoint_id != expected_checkpoint:
+        raise CollectionRefused(
+            f"generation pointer names checkpoint {checkpoint_id[:12]}… of work "
+            f"{work_id!r} — not this attempt's {expected_checkpoint[:12]}…; the "
+            "pointer names the current work but a different attempt's checkpoint"
         )
     # The NAME is the authority: the generation is a DIRECT SIBLING of the
     # checkout (the regex already excludes separators, '..', and absolute
@@ -277,23 +465,51 @@ def _resolve_pointer(checkout_root: Path, expected_work_id: str) -> tuple[Path, 
                 f"generation pointer's relative path {claimed!r} does not name the "
                 f"owned generation {name!r} — refusing the mismatched binding"
             )
-    if not resolved.is_dir():
+    # R36-01: PHYSICAL ownership — non-following lstat on the sibling and
+    # its ancestors (up to the checkout's parent), plus realpath
+    # containment under that parent. A pathname-prefix match alone is not
+    # ownership; same-target realpath equality alone is not ownership.
+    stamp = _real_dir_stamp(resolved, what="generation pointer names")
+    ancestor = resolved.parent
+    while True:
+        _real_dir_stamp(ancestor, what="generation ancestor")
+        if ancestor == checkout_root.parent:
+            break
+        if ancestor == ancestor.parent:  # filesystem root — unreachable
+            raise CollectionRefused(
+                f"generation {resolved} is not under the checkout's parent "
+                f"{checkout_root.parent} — refusing a foreign tree"
+            )
+        ancestor = ancestor.parent
+    real_generation = Path(os.path.realpath(resolved))
+    real_parent = Path(os.path.realpath(checkout_root.parent))
+    try:
+        contained = os.path.commonpath([str(real_generation), str(real_parent)]) == str(real_parent)
+    except ValueError:
+        contained = False
+    if not contained:
         raise CollectionRefused(
-            f"generation pointer names {resolved}, which does not exist as a "
-            "directory — the restore that minted it cannot have landed"
+            f"generation {resolved} is not physically contained under the "
+            f"checkout's parent {checkout_root.parent} — refusing a foreign tree"
         )
-    return resolved, work_id, str(document.get("checkpoint_id") or "")
+    return resolved, work_id, checkpoint_id, stamp
 
 
-def _clean_infrastructure(tree: Path) -> None:
+def _clean_infrastructure(tree: Path, *, guard: tuple[int, int] | None = None) -> None:
     """Remove lane-infrastructure paths from *tree* before staging.
 
     The template step's own cleanup, mirrored INSIDE the collected tree:
     the top-level ``.codegraph`` / ``.venv`` / ``__pycache__`` /
     ``.pytest_cache`` directories and every ``*.pyc`` (the ``find
     . -name '*.pyc' -delete`` equivalent) — never a deliverable, in the
-    generation as much as in the checkout.
+    generation as much as in the checkout. R36-01: when *guard* carries
+    the validated generation's inode stamp it is RE-CHECKED before the
+    first path is touched — cleanup only ever runs inside the tree this
+    attempt validated (never the checkout while a generation is active,
+    never a swapped directory).
     """
+    if guard is not None:
+        _assert_stable(tree, guard)
     for name in INFRASTRUCTURE_DIRS:
         shutil.rmtree(tree / name, ignore_errors=True)
     for directory, subdirs, files in os.walk(tree):
@@ -312,27 +528,39 @@ def collect_candidate(
     output_root: str | Path | None = None,
     *,
     allow_missing_pointer: bool = False,
+    expected: CollectionIdentity | None = None,
 ) -> CollectionResult:
     """Collect the candidate diff from the ACTIVE workspace generation.
 
-    Resolution order (Q35-01):
+    Resolution order (Q35-01, hardened by R36-01):
 
     1. ``<checkout_root>/.forge/workspace-generation`` exists → its
        validated sibling generation is the collected tree (the resumed
-       lane's contract). Validation is OWNERSHIP-shaped: work id, owned
-       name, direct sibling, agreeing absolute path — see
+       lane's contract). Validation is OWNERSHIP-shaped: expected work
+       id, owned name bound to the full checkpoint digest, exact
+       checkpoint equality when the dispatch carried one, non-following
+       physical checks on the sibling and its ancestors — see
        :func:`_resolve_pointer`. A refusal raises
        :class:`CollectionRefused` and produces ZERO artifacts.
     2. pointer absent + ``allow_missing_pointer`` → the fresh-run path:
        collect from *checkout_root* itself (the agent worked there; the
-       commands and output contract are exactly the historical ones).
+       commands and output contract are exactly the historical ones),
+       with the EXPLICIT no-generation identity recorded
+       (``checkpoint_binding="fresh"``).
     3. pointer absent + not allowed → :class:`GenerationPointerMissing`.
 
-    The frozen *attempt_base_oid* must be non-empty; staging and the
+    *expected* (R36-01) is the trusted-dispatch
+    :class:`CollectionIdentity`; when omitted, one is built from the
+    legacy *expected_work_id* / *attempt_base_oid* arguments with an
+    EXPLICITLY unknown checkpoint (``""`` — recorded as ``"unbound"``
+    for a generation collection, never guessed). The frozen
+    *attempt_base_oid* must be non-empty; staging and the
     ``--binary --full-index`` diff run via explicit ``git -C`` on the
     collected tree with NO error suppression — a non-zero Git exit is a
     :class:`CollectionError` carrying git's stderr, while a zero-change
-    tree is a successful ``zero_change=True`` result.
+    tree is a successful ``zero_change=True`` result. The validated
+    generation's inode identity is re-checked before cleanup and before
+    every Git invocation (:func:`_assert_stable`).
 
     *output_root* defaults to ``<checkout_root>/forge-output`` (the
     emit-meta/upload contract path) and is cleared BEFORE staging, so
@@ -342,24 +570,49 @@ def collect_candidate(
     diff is written outside the tree it describes.
     """
     checkout = Path(checkout_root).resolve()
-    base_oid = str(attempt_base_oid or "").strip()
+    identity = (
+        expected
+        if expected is not None
+        else CollectionIdentity(
+            work_id=str(expected_work_id or "").strip(),
+            attempt_base_oid=str(attempt_base_oid or "").strip(),
+        )
+    )
+    base_oid = identity.attempt_base_oid.strip()
+    if not identity.work_id:
+        raise CollectionRefused(
+            "no expected work id was given to validate the generation pointer "
+            "against — ownership cannot be established"
+        )
     if not base_oid:
         raise CollectionError("attempt base oid is empty — the diff has no frozen base")
+    if identity.checkpoint_id and not CHECKPOINT_ID_RE.fullmatch(identity.checkpoint_id):
+        raise CollectionRefused(
+            f"the expected checkpoint identity {identity.checkpoint_id!r} is not a "
+            "well-formed 64-hex sha256 digest — refusing to bind a collection to "
+            "a malformed digest"
+        )
 
     pointer_path = checkout / GENERATION_POINTER
     source = "checkout"
     checkpoint_id = ""
+    stamp: tuple[int, int] | None = None
     if pointer_path.is_file():
-        collected, work_id, checkpoint_id = _resolve_pointer(checkout, expected_work_id)
+        collected, work_id, checkpoint_id, stamp = _resolve_pointer(checkout, identity)
         source = "generation"
     elif allow_missing_pointer:
         collected = checkout
-        work_id = (expected_work_id or "").strip()
+        work_id = identity.work_id
     else:
         raise GenerationPointerMissing(
             f"{pointer_path} does not exist and a generation was required — "
             "the resumed candidate has no pointer to collect through"
         )
+    binding = (
+        CHECKPOINT_BINDING_FRESH
+        if source == "checkout"
+        else (CHECKPOINT_BINDING_EXACT if identity.checkpoint_id else CHECKPOINT_BINDING_UNBOUND)
+    )
 
     _require_git_worktree(collected)
 
@@ -385,16 +638,30 @@ def collect_candidate(
 
     # Clean the tree, then clear the staging directory — BOTH before the
     # first Git command, so neither infra paths nor stale candidate bytes
-    # can reach the index.
-    _clean_infrastructure(collected)
+    # can reach the index. R36-01: on a generation collection the cleanup
+    # root is the VALIDATED tree (inode-rechecked) and may never be the
+    # checkout itself.
+    if stamp is not None:
+        if real_collected == Path(os.path.realpath(checkout)):
+            raise CollectionError(
+                f"the validated generation {collected} resolves to the checkout "
+                "itself — a generation collection may never clean the checkout root"
+            )
+        _clean_infrastructure(collected, guard=stamp)
+    else:
+        _clean_infrastructure(collected)
     shutil.rmtree(real_output, ignore_errors=True)
 
+    if stamp is not None:
+        _assert_stable(collected, stamp)
     staged = _run_git(collected, ("add", "-A"))
     if staged.returncode != 0:
         raise CollectionError(
             f"git add -A failed in {collected} (exit {staged.returncode}): "
             f"{staged.stderr.decode('utf-8', 'replace').strip()}"
         )
+    if stamp is not None:
+        _assert_stable(collected, stamp)
     diffed = _run_git(collected, ("diff", "--cached", "--binary", "--full-index", base_oid))
     if diffed.returncode != 0:
         raise CollectionError(
@@ -416,4 +683,5 @@ def collect_candidate(
         base_oid=base_oid,
         zero_change=not diff_bytes,
         source=source,
+        checkpoint_binding=binding,
     )

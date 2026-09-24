@@ -32,7 +32,9 @@ from datetime import datetime, timezone
 from typing import Any, Final
 
 from forge.adaptive.checkpoint_repository import (
+    METRIC_CONFIGURED_VS_ACTIVE,
     CheckpointRepository,
+    authority_state_report,
     resolve_repository,
 )
 from forge.adaptive.control import (
@@ -539,6 +541,35 @@ class OperatorControlService:
         return await self.surface.pending(work_id)
 
 
+def _log_authority_state(state: Mapping[str, Any]) -> None:
+    """The R36-05 startup line: ``migration.configured_vs_active_authority``.
+
+    One log event wherever the app composes the repository, reporting
+    the CONFIGURED checkpoint authority against the authority the
+    deployment's MARKER declares ACTIVE (plus the marker's
+    generation). A mismatch is a WARNING — this process's metadata
+    mutations will be refused with ``MutationsFencedError`` until it
+    restarts on the configured authority or the operator rolls the
+    marker back — while the aligned/dormant states log at INFO.
+    """
+    line = (
+        f"{METRIC_CONFIGURED_VS_ACTIVE}: state={state['state']} "
+        f"configured={state['configured_authority']} active={state['active_authority']} "
+        f"generation={state['marker_generation']} marker={state['marker_path']}"
+    )
+    if state["state"] == "mismatch":
+        logger.warning(
+            "%s — this process's checkpoint mutations are fenced (restart on the "
+            "configured authority, or roll the marker back); %s",
+            line,
+            "recovery: python -m forge.adaptive.checkpoint_migration rollback --verify-report <path>",
+        )
+    elif state["cutover_in_progress"]:
+        logger.warning("%s — a cutover holds the fence; mutations are fenced on both sides", line)
+    else:
+        logger.info(line)
+
+
 def control_service_from_env(
     env: Mapping[str, str] | None = None,
     session_factory: Any | None = None,
@@ -566,6 +597,12 @@ def control_service_from_env(
     CheckpointRepositoryMisconfigured` — the composition root fails
     fast with the specific diagnostic instead of building a service
     whose resume would silently consult a different store.
+
+    R36-05: the resolved repository carries the cutover FENCE by
+    default (``resolve_repository(..., fenced=True)``), and the
+    composition logs the ``migration.configured_vs_active_authority``
+    startup line — the marker's state is observable exactly where the
+    repository is composed.
     """
     source = os.environ if env is None else env
     factory = session_factory
@@ -576,6 +613,7 @@ def control_service_from_env(
 
             factory = get_session_factory(url)
     repository = resolve_repository(source, session_factory=factory)
+    _log_authority_state(authority_state_report(source))
     if str(source.get(FORGE_CONTROL_MAILBOX_ENV, "")).strip().lower() != (
         _CONTROL_MAILBOX_POSTGRES
     ):

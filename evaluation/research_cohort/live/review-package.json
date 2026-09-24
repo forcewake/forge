@@ -1,0 +1,850 @@
+{
+  "schema": "forge.research.blind_review/1",
+  "package_id": "research-cohort-live-v1-blind-review",
+  "cohort_id": "research-cohort-live-v1",
+  "ordering": {
+    "seed": 20260924,
+    "counterbalanced": true,
+    "note": "task blocks are seeded-shuffled; unit positions rotate by task index so no position correlates with an arm"
+  },
+  "reviewer_instructions": {
+    "blinding": "plans are anonymized and counterbalanced; grade each on its own merits and record correction minutes under the ONE pre-registered procedure",
+    "evidence_checker": "the mechanical evidence checker is a consistency check only \u2014 token overlap is not semantic entailment"
+  },
+  "units": [
+    {
+      "review_id": "BR-001",
+      "position": 1,
+      "task": {
+        "statement": "Support refund requests within the grace window after order expiry.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "Support refund requests within the grace window after order expiry."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the grace-window decision and the fee owner \u2014 an invented default fails the criterion"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-002",
+      "position": 2,
+      "task": {
+        "statement": "Support refund requests within the grace window after order expiry.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/checkout.py (symbol: request_refund)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/checkout.py (reference: refund)"
+          },
+          {
+            "step_id": "s3",
+            "objective": "address orders/src/checkout.py (reference: refund)"
+          },
+          {
+            "step_id": "s4",
+            "objective": "address orders/src/checkout.py (reference: window)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "why": "symbol"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "def request_refund(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "line": 6,
+            "asserted_content": "def request_refund(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c2",
+            "text": "\"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"",
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "line": 7,
+            "asserted_content": "\"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\""
+          },
+          {
+            "claim_id": "c3",
+            "text": "return f\"refund-requested order={order_id}\"",
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "line": 8,
+            "asserted_content": "return f\"refund-requested order={order_id}\""
+          },
+          {
+            "claim_id": "c4",
+            "text": "\"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\"",
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "line": 7,
+            "asserted_content": "\"\"\"Request a refund for an order. Grace-window rules are NOT decided here.\"\"\""
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the grace-window decision and the fee owner \u2014 an invented default fails the criterion"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          },
+          {
+            "claim_id": "c3",
+            "grade": null
+          },
+          {
+            "claim_id": "c4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-003",
+      "position": 3,
+      "task": {
+        "statement": "Support refund requests within the grace window after order expiry.",
+        "archetype": "ambiguous_requirement"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/checkout.py (research_read: read 320 chars from offset 0)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address billing/src/subscriptions.py (research_read: read 397 chars from offset 0)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "why": "research_read"
+          },
+          {
+            "repo": "billing",
+            "path": "src/subscriptions.py",
+            "why": "research_read"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "\"\"\"Checkout entrypoints (RC seed).\"\"\"",
+            "repo": "orders",
+            "path": "src/checkout.py",
+            "line": 1,
+            "asserted_content": "\"\"\"Checkout entrypoints (RC seed).\"\"\""
+          },
+          {
+            "claim_id": "c2",
+            "text": "\"\"\"Subscription lifecycle (RC seed).\"\"\"",
+            "repo": "billing",
+            "path": "src/subscriptions.py",
+            "line": 1,
+            "asserted_content": "\"\"\"Subscription lifecycle (RC seed).\"\"\""
+          }
+        ],
+        "assumptions": [],
+        "questions": [
+          {
+            "question_id": "q1",
+            "text": "Is the grace window 7 or 30 days after expiry, and who absorbs the payment fee?"
+          }
+        ]
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan asks a SPECIFIC question naming the grace-window decision and the fee owner \u2014 an invented default fails the criterion"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [
+          {
+            "question_id": "q1",
+            "specific": null
+          }
+        ],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-004",
+      "position": 4,
+      "task": {
+        "statement": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/handlers/expiry.py (symbol: handle_expiry)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/timer.py (symbol: publish_expiry)"
+          },
+          {
+            "step_id": "s3",
+            "objective": "address orders/README.md (reference: expiry)"
+          },
+          {
+            "step_id": "s4",
+            "objective": "address orders/src/handlers/expiry.py (reference: expiry)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "why": "symbol"
+          },
+          {
+            "repo": "orders",
+            "path": "src/timer.py",
+            "why": "symbol"
+          },
+          {
+            "repo": "orders",
+            "path": "README.md",
+            "why": "reference"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "def handle_expiry(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 24,
+            "asserted_content": "def handle_expiry(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c2",
+            "text": "def publish_expiry(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/timer.py",
+            "line": 12,
+            "asserted_content": "def publish_expiry(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c3",
+            "text": "Checkout and expiry domain.",
+            "repo": "orders",
+            "path": "README.md",
+            "line": 3,
+            "asserted_content": "Checkout and expiry domain."
+          },
+          {
+            "claim_id": "c4",
+            "text": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 25,
+            "asserted_content": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\""
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep handler window, not the file head"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          },
+          {
+            "claim_id": "c3",
+            "grade": null
+          },
+          {
+            "claim_id": "c4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-005",
+      "position": 5,
+      "task": {
+        "statement": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/handlers/expiry.py (research_symbol: handle_expiry)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/timer.py (research_read: read 346 chars from offset 0)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "why": "research_symbol"
+          },
+          {
+            "repo": "orders",
+            "path": "src/timer.py",
+            "why": "research_read"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "def handle_expiry(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 24,
+            "asserted_content": "def handle_expiry(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c2",
+            "text": "\"\"\"Expiry timer for checkout orders (RC seed).",
+            "repo": "orders",
+            "path": "src/timer.py",
+            "line": 1,
+            "asserted_content": "\"\"\"Expiry timer for checkout orders (RC seed)."
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep handler window, not the file head"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-006",
+      "position": 6,
+      "task": {
+        "statement": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits.",
+        "archetype": "deep_file_evidence"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "When the expiry timer fires for a pending order, the lapse path runs through a handler deep inside the handlers module \u2014 find the exact handler that performs the lapse and the notification it emits."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites the deep handler window, not the file head"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-007",
+      "position": 7,
+      "task": {
+        "statement": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address docs-site/index.md (research_read: read 238 chars from offset 0)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/handlers/expiry.py (research_match: handle_cancellation)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "docs-site",
+            "path": "index.md",
+            "why": "research_read"
+          },
+          {
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "why": "research_match"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "# Order lifecycle \u2014 docs site (RC seed)",
+            "repo": "docs-site",
+            "path": "index.md",
+            "line": 1,
+            "asserted_content": "# Order lifecycle \u2014 docs site (RC seed)"
+          },
+          {
+            "claim_id": "c2",
+            "text": "def handle_cancellation(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 33,
+            "asserted_content": "def handle_cancellation(order_id: str) -> str:"
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-008",
+      "position": 8,
+      "task": {
+        "statement": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-009",
+      "position": 9,
+      "task": {
+        "statement": "Stop publishing the expiry event for orders already cancelled at expiry time. The authorized repository set includes a docs site; it holds nothing either service reads.",
+        "archetype": "irrelevant_repository"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/handlers/expiry.py (symbol: handle_expiry)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/timer.py (symbol: publish_expiry)"
+          },
+          {
+            "step_id": "s3",
+            "objective": "address orders/README.md (reference: expiry)"
+          },
+          {
+            "step_id": "s4",
+            "objective": "address orders/src/handlers/expiry.py (reference: expiry)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "why": "symbol"
+          },
+          {
+            "repo": "orders",
+            "path": "src/timer.py",
+            "why": "symbol"
+          },
+          {
+            "repo": "orders",
+            "path": "README.md",
+            "why": "reference"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "def handle_expiry(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 24,
+            "asserted_content": "def handle_expiry(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c2",
+            "text": "def publish_expiry(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/timer.py",
+            "line": 12,
+            "asserted_content": "def publish_expiry(order_id: str) -> str:"
+          },
+          {
+            "claim_id": "c3",
+            "text": "Checkout and expiry domain.",
+            "repo": "orders",
+            "path": "README.md",
+            "line": 3,
+            "asserted_content": "Checkout and expiry domain."
+          },
+          {
+            "claim_id": "c4",
+            "text": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"",
+            "repo": "orders",
+            "path": "src/handlers/expiry.py",
+            "line": 25,
+            "asserted_content": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\""
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's impacted surface stays inside orders; dragging the docs site in expands scope"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          },
+          {
+            "claim_id": "c3",
+            "grade": null
+          },
+          {
+            "claim_id": "c4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-010",
+      "position": 10,
+      "task": {
+        "statement": "Orders' dispatch must enforce the courier deadline window Billing owns. The deadline policy is defined in the neighbor repository only.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "Orders' dispatch must enforce the courier deadline window Billing owns. The deadline policy is defined in the neighbor repository only."
+          }
+        ],
+        "surface": [],
+        "claims": [],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites Billing's courier policy at its actual bytes (a non-initial window of the neighbor file)",
+          "the plan keeps the policy OWNED by Billing (imported, never redefined in Orders)"
+        ],
+        "claim_importance": [],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-011",
+      "position": 11,
+      "task": {
+        "statement": "Orders' dispatch must enforce the courier deadline window Billing owns. The deadline policy is defined in the neighbor repository only.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address orders/src/dispatch.py (reference: Orders)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/dispatch.py (reference: Orders)"
+          },
+          {
+            "step_id": "s3",
+            "objective": "address billing/src/courier.py (reference: Orders)"
+          },
+          {
+            "step_id": "s4",
+            "objective": "address orders/src/dispatch.py (symbol: dispatch_within_deadline)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "why": "reference"
+          },
+          {
+            "repo": "billing",
+            "path": "src/courier.py",
+            "why": "reference"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "\"\"\"Orders' dispatch retries (offline capture seed).",
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "line": 1,
+            "asserted_content": "\"\"\"Orders' dispatch retries (offline capture seed)."
+          },
+          {
+            "claim_id": "c2",
+            "text": "The courier deadline window is Billing's contract: Orders imports and",
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "line": 3,
+            "asserted_content": "The courier deadline window is Billing's contract: Orders imports and"
+          },
+          {
+            "claim_id": "c3",
+            "text": "Orders' dispatch enforces the window Billing owns; the policy is",
+            "repo": "billing",
+            "path": "src/courier.py",
+            "line": 3,
+            "asserted_content": "Orders' dispatch enforces the window Billing owns; the policy is"
+          },
+          {
+            "claim_id": "c4",
+            "text": "def dispatch_within_deadline(order_id: str) -> str:",
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "line": 10,
+            "asserted_content": "def dispatch_within_deadline(order_id: str) -> str:"
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites Billing's courier policy at its actual bytes (a non-initial window of the neighbor file)",
+          "the plan keeps the policy OWNED by Billing (imported, never redefined in Orders)"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          },
+          {
+            "claim_id": "c3",
+            "grade": null
+          },
+          {
+            "claim_id": "c4",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    },
+    {
+      "review_id": "BR-012",
+      "position": 12,
+      "task": {
+        "statement": "Orders' dispatch must enforce the courier deadline window Billing owns. The deadline policy is defined in the neighbor repository only.",
+        "archetype": "neighbor_dependency"
+      },
+      "plan": {
+        "steps": [
+          {
+            "step_id": "s1",
+            "objective": "address billing/src/courier.py (research_match: DEADLINE_POLICY)"
+          },
+          {
+            "step_id": "s2",
+            "objective": "address orders/src/dispatch.py (research_read: read 545 chars from offset 0)"
+          }
+        ],
+        "surface": [
+          {
+            "repo": "billing",
+            "path": "src/courier.py",
+            "why": "research_match"
+          },
+          {
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "why": "research_read"
+          }
+        ],
+        "claims": [
+          {
+            "claim_id": "c1",
+            "text": "COURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}",
+            "repo": "billing",
+            "path": "src/courier.py",
+            "line": 25,
+            "asserted_content": "COURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}"
+          },
+          {
+            "claim_id": "c2",
+            "text": "\"\"\"Orders' dispatch retries (offline capture seed).",
+            "repo": "orders",
+            "path": "src/dispatch.py",
+            "line": 1,
+            "asserted_content": "\"\"\"Orders' dispatch retries (offline capture seed)."
+          }
+        ],
+        "assumptions": [],
+        "questions": []
+      },
+      "form": {
+        "acceptance_criteria": [
+          "the plan's decisive claim cites Billing's courier policy at its actual bytes (a non-initial window of the neighbor file)",
+          "the plan keeps the policy OWNED by Billing (imported, never redefined in Orders)"
+        ],
+        "claim_importance": [
+          {
+            "claim_id": "c1",
+            "grade": null
+          },
+          {
+            "claim_id": "c2",
+            "grade": null
+          }
+        ],
+        "assumption_grades": [],
+        "question_specificity": [],
+        "correction_minutes": null,
+        "correction_severity": null
+      }
+    }
+  ]
+}

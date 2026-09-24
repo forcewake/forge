@@ -1,11 +1,19 @@
-"""ADR-0029 / R32-24: the composition boundary types and the recorded-evidence matrix.
+"""ADR-0029 / R32-24 / R36-06: the composition boundary types and the recorded-evidence matrix.
 
 Pinned here, per the issue's gates:
 
 - construction validation for all three types — every refusal case
   (empty/mismatched provider family, cross-family identity mixing,
   missing envelope fields as TypeError, unknown resume mode);
-- :func:`assert_attempt_start` happy path + each violation;
+- the R36-06 envelope v2 identity split: the execution identity is the
+  derived durable id (never the source OID, never the run id, never a
+  counter), the authority epoch and the pinned continuation ref are
+  INSIDE the digest, and the v1 compat shape serializes historically
+  without manufacturing an execution id;
+- :func:`assert_attempt_start` happy path + each violation, including
+  the identity-coherence refusals;
+- :func:`assert_publication_identity` — a callback is authorized by its
+  EXECUTION identity, never by a source-OID match alone;
 - :class:`CompositionMatrix` verified/untested/unsupported edges,
   ``blocked_by`` consistency in both directions, evidence-gated
   promotion, no silent demotion;
@@ -17,6 +25,8 @@ Pinned here, per the issue's gates:
 import pytest
 
 from forge.runs.composition import (
+    ATTEMPT_START_V1,
+    ATTEMPT_START_V2,
     EDGE_UNTESTED,
     EDGE_UNSUPPORTED,
     EDGE_VERIFIED,
@@ -29,11 +39,15 @@ from forge.runs.composition import (
     RepositoryContext,
     ResumeSpec,
     assert_attempt_start,
+    assert_publication_identity,
+    derive_execution_attempt_id,
     matrix_drift,
 )
 
 HEX64 = "ab" * 32
 OTHER_HEX64 = "cd" * 32
+SOURCE_OID = "f" * 40
+OTHER_SOURCE_OID = "e" * 40
 
 
 def a_repository(**overrides) -> RepositoryContext:
@@ -46,15 +60,28 @@ def a_repository(**overrides) -> RepositoryContext:
     return RepositoryContext(**base)
 
 
-def an_attempt_start(repository: RepositoryContext | None = None) -> AttemptStartSpec:
-    return AttemptStartSpec(
-        run_id="run-1",
-        attempt_id="attempt-1",
-        repository=repository or a_repository(),
-        profile_digest=HEX64,
-        resume_mode="fresh",
-        lease_id="lease-9",
-    )
+def the_execution_id(**overrides) -> str:
+    """The derived durable execution identity (R36-06's derivation)."""
+    kwargs = {"run_id": "run-1", "attempt_ordinal": 0, "source_base_oid": SOURCE_OID}
+    kwargs.update(overrides)
+    return derive_execution_attempt_id(**kwargs)
+
+
+def an_attempt_start(repository: RepositoryContext | None = None, **overrides) -> AttemptStartSpec:
+    kwargs = {
+        "run_id": "run-1",
+        "execution_attempt_id": the_execution_id(),
+        "source_base_oid": SOURCE_OID,
+        "repository": repository or a_repository(),
+        "profile_digest": HEX64,
+        "resume_mode": "fresh",
+        "lease_id": "lease-9",
+        "authority_epoch": 0,
+        "continuation_ref_digest": "",
+        "schema_version": ATTEMPT_START_V2,
+    }
+    kwargs.update(overrides)
+    return AttemptStartSpec(**kwargs)
 
 
 # -- RepositoryContext -------------------------------------------------------
@@ -216,6 +243,56 @@ class TestResumeSpec:
             ResumeSpec.from_payload({"checkpoint_sequence": 2})
 
 
+# -- derive_execution_attempt_id (R36-06) --------------------------------------
+
+
+class TestDeriveExecutionAttemptId:
+    def test_two_attempts_from_the_same_source_commit_derive_distinct_ids(self):
+        """AT-07 core: the source OID is shared, the EXECUTION identity is
+        not — the durable attempt ordinal is a derivation member."""
+        first = the_execution_id(attempt_ordinal=0)
+        retry = the_execution_id(attempt_ordinal=1)
+        assert first != retry
+        assert len(first) == 64
+
+    def test_the_same_durable_rows_derive_the_identical_id(self):
+        """Repeat delivery: the same (run, ordinal, source) rows — what a
+        restart between envelope construction and the native start
+        re-reads — derive the identical execution identity, never a fresh
+        one."""
+        assert the_execution_id() == the_execution_id()
+        assert the_execution_id() == derive_execution_attempt_id(
+            run_id="run-1", attempt_ordinal=0, source_base_oid=SOURCE_OID
+        )
+
+    @pytest.mark.parametrize(
+        ("knob", "value"),
+        [
+            ("run_id", "run-2"),
+            ("attempt_ordinal", 1),
+            ("source_base_oid", OTHER_SOURCE_OID),
+        ],
+    )
+    def test_every_durable_member_is_load_bearing(self, knob, value):
+        assert the_execution_id(**{knob: value}) != the_execution_id()
+
+    @pytest.mark.parametrize("bad_ordinal", [True, "1", 1.0, -1])
+    def test_a_malformed_ordinal_is_refused(self, bad_ordinal):
+        with pytest.raises(CompositionBoundaryError, match="attempt_ordinal"):
+            the_execution_id(attempt_ordinal=bad_ordinal)  # type: ignore[arg-type]
+
+    def test_an_empty_run_id_is_refused(self):
+        with pytest.raises(MissingEnvelopeFieldError, match="run_id"):
+            the_execution_id(run_id="")
+
+    @pytest.mark.parametrize("counter", ["7", "0", "0013", "12345678901234"])
+    def test_a_checkpoint_sequence_or_command_watermark_is_refused_as_the_source(self, counter):
+        """The axis guard at derivation time: a counter is never laundered
+        into an identity through the source member."""
+        with pytest.raises(CompositionBoundaryError, match="watermark"):
+            the_execution_id(source_base_oid=counter)
+
+
 # -- AttemptStartSpec ---------------------------------------------------------
 
 
@@ -223,6 +300,11 @@ class TestAttemptStartSpec:
     def test_happy_path(self):
         spec = an_attempt_start()
         assert spec.run_id == "run-1"
+        assert spec.execution_attempt_id == the_execution_id()
+        assert spec.source_base_oid == SOURCE_OID
+        assert spec.authority_epoch == 0
+        assert spec.continuation_ref_digest == ""
+        assert spec.schema_version == ATTEMPT_START_V2
         assert spec.resume_mode == "fresh"
         assert spec.lease_id == "lease-9"
 
@@ -231,8 +313,11 @@ class TestAttemptStartSpec:
         [
             ("run_id", ""),
             ("run_id", None),
-            ("attempt_id", ""),
-            ("attempt_id", "   "),
+            ("execution_attempt_id", ""),
+            ("execution_attempt_id", "   "),
+            ("execution_attempt_id", "not-a-digest"),
+            ("source_base_oid", ""),
+            ("source_base_oid", "   "),
             ("repository", None),
             ("repository", "github:acme/widgets"),
             ("profile_digest", ""),
@@ -241,16 +326,25 @@ class TestAttemptStartSpec:
             ("resume_mode", "whatever"),
             ("lease_id", ""),
             ("lease_id", None),
+            ("authority_epoch", True),
+            ("authority_epoch", "3"),
+            ("authority_epoch", -1),
+            ("continuation_ref_digest", "not-a-digest"),
+            ("schema_version", 3),
         ],
     )
     def test_missing_or_bad_envelope_field_is_a_typeerror_naming_it(self, field_name, bad_value):
         kwargs = {
             "run_id": "run-1",
-            "attempt_id": "attempt-1",
+            "execution_attempt_id": the_execution_id(),
+            "source_base_oid": SOURCE_OID,
             "repository": a_repository(),
             "profile_digest": HEX64,
             "resume_mode": "fresh",
             "lease_id": "lease-9",
+            "authority_epoch": 0,
+            "continuation_ref_digest": "",
+            "schema_version": ATTEMPT_START_V2,
         }
         kwargs[field_name] = bad_value
         with pytest.raises((MissingEnvelopeFieldError, CompositionBoundaryError), match=field_name):
@@ -267,27 +361,48 @@ class TestAttemptStartSpec:
         ]
         assert not defaulted
 
-    def test_run_id_is_not_the_attempt_id(self):
-        with pytest.raises(CompositionBoundaryError, match="run_id.*attempt_id"):
-            AttemptStartSpec(
-                run_id="run-1",
-                attempt_id="run-1",
-                repository=a_repository(),
-                profile_digest=HEX64,
-                resume_mode="fresh",
-                lease_id="lease-9",
-            )
+    @pytest.mark.parametrize(
+        ("field_name", "bad_value"),
+        [
+            ("run_id", the_execution_id()),  # run id == execution id
+            ("source_base_oid", "run-1"),  # run id == source oid
+        ],
+    )
+    def test_the_run_identity_is_never_an_attempt_or_source_identity(self, field_name, bad_value):
+        with pytest.raises(CompositionBoundaryError, match="never interchangeable"):
+            an_attempt_start(**{field_name: bad_value})
+
+    def test_the_execution_identity_is_never_the_source_oid(self):
+        """R36-06's core refusal: an execution identity is not a code
+        revision — two executions may share one source."""
+        shared = "e" * 64  # hex64 so the shape checks pass; only the axes collide
+        with pytest.raises(CompositionBoundaryError, match="never a code revision"):
+            an_attempt_start(source_base_oid=shared, execution_attempt_id=shared)
+
+    @pytest.mark.parametrize("counter", ["7", "42", "0013"])
+    def test_a_counter_shaped_source_oid_is_refused(self, counter):
+        """The checkpoint sequence / applied-command watermark shapes are
+        refused on the source axis at construction too."""
+        with pytest.raises(CompositionBoundaryError, match="watermark"):
+            an_attempt_start(source_base_oid=counter)
+
+    def test_required_mode_pins_the_continuation_ref(self):
+        spec = an_attempt_start(resume_mode="required", continuation_ref_digest=OTHER_HEX64)
+        assert spec.continuation_ref_digest == OTHER_HEX64
+        assert spec.to_document()["continuation_ref_digest"] == OTHER_HEX64
+
+    def test_required_mode_without_a_continuation_ref_is_refused(self):
+        with pytest.raises(MissingEnvelopeFieldError, match="continuation_ref_digest"):
+            an_attempt_start(resume_mode="required")
+
+    @pytest.mark.parametrize("mode", ["fresh", "restart"])
+    def test_checkpointless_mode_with_a_continuation_ref_is_a_contradiction(self, mode):
+        with pytest.raises(CompositionBoundaryError, match="continuation_ref_digest"):
+            an_attempt_start(resume_mode=mode, continuation_ref_digest=OTHER_HEX64)
 
     def test_non_sha256_profile_digest_is_refused(self):
         with pytest.raises(CompositionBoundaryError, match="profile_digest"):
-            AttemptStartSpec(
-                run_id="run-1",
-                attempt_id="attempt-1",
-                repository=a_repository(),
-                profile_digest=HEX64[:63],
-                resume_mode="fresh",
-                lease_id="lease-9",
-            )
+            an_attempt_start(profile_digest=HEX64[:63])
 
     def test_envelope_digest_is_deterministic_and_value_sensitive(self):
         one = an_attempt_start()
@@ -301,15 +416,89 @@ class TestAttemptStartSpec:
         )
         assert (
             one.envelope_digest()
-            != AttemptStartSpec(
-                run_id="run-1",
-                attempt_id="attempt-2",
-                repository=a_repository(),
-                profile_digest=HEX64,
-                resume_mode="required",
-                lease_id="lease-9",
+            != an_attempt_start(
+                execution_attempt_id=the_execution_id(attempt_ordinal=1)
             ).envelope_digest()
         )
+
+    def test_serialization_order_never_moves_the_digest(self):
+        """The inverse negative (AT-07): an unchanged intent is not
+        misclassified as new merely because the construction order
+        changed — the digest is over the canonical document."""
+        kwargs = {
+            "run_id": "run-1",
+            "execution_attempt_id": the_execution_id(),
+            "source_base_oid": SOURCE_OID,
+            "repository": a_repository(),
+            "profile_digest": HEX64,
+            "resume_mode": "fresh",
+            "lease_id": "lease-9",
+            "authority_epoch": 0,
+            "continuation_ref_digest": "",
+            "schema_version": ATTEMPT_START_V2,
+        }
+        forward = AttemptStartSpec(**kwargs)
+        backward = AttemptStartSpec(**dict(reversed(list(kwargs.items()))))
+        assert forward.envelope_digest() == backward.envelope_digest()
+
+    def test_a_changed_authority_epoch_changes_the_authority_digest_and_nothing_else(self):
+        """R36-06 acceptance: the epoch is INSIDE the envelope digest —
+        source, profile and lease unchanged, the digest still moves."""
+        low = an_attempt_start(authority_epoch=2)
+        high = an_attempt_start(authority_epoch=3)
+        assert low.source_base_oid == high.source_base_oid
+        assert low.profile_digest == high.profile_digest
+        assert low.lease_id == high.lease_id
+        assert low.execution_attempt_id == high.execution_attempt_id
+        assert low.envelope_digest() != high.envelope_digest()
+
+    def test_a_changed_execution_identity_changes_the_digest_with_the_epoch_unchanged(self):
+        first = an_attempt_start()
+        retry = an_attempt_start(execution_attempt_id=the_execution_id(attempt_ordinal=1))
+        assert first.authority_epoch == retry.authority_epoch
+        assert first.source_base_oid == retry.source_base_oid
+        assert first.envelope_digest() != retry.envelope_digest()
+
+    def test_to_document_carries_every_authority_bearing_member(self):
+        document = an_attempt_start().to_document()
+        assert document["schema_version"] == ATTEMPT_START_V2
+        assert document["execution_attempt_id"] == the_execution_id()
+        assert document["source_base_oid"] == SOURCE_OID
+        assert document["authority_epoch"] == 0
+        assert document["continuation_ref_digest"] == ""
+        # The digest is over exactly this document (documented equivalence).
+        assert an_attempt_start().envelope_digest() == an_attempt_start().envelope_digest()
+
+
+# -- the v1 compat shape -------------------------------------------------------
+
+
+class TestAttemptStartV1Compat:
+    def the_v1_spec(self) -> AttemptStartSpec:
+        return an_attempt_start(execution_attempt_id="", schema_version=ATTEMPT_START_V1)
+
+    def test_a_v1_read_carries_no_execution_identity_and_never_invents_one(self):
+        spec = self.the_v1_spec()
+        assert spec.schema_version == ATTEMPT_START_V1
+        assert spec.execution_attempt_id == ""
+
+    def test_a_v1_spec_never_carries_a_manufactured_execution_identity(self):
+        with pytest.raises(CompositionBoundaryError, match="never invents one"):
+            an_attempt_start(schema_version=ATTEMPT_START_V1)
+
+    def test_a_v1_document_serializes_the_historical_shape(self):
+        """v1 serializes with ``attempt_id`` carrying the source OID and
+        WITHOUT the epoch — byte-compatible with a pre-R36-06 envelope,
+        so the historical digest recomputes (audit, not upgrade)."""
+        from forge.runs.spec import canonical_json_digest
+
+        spec = self.the_v1_spec()
+        document = spec.to_document()
+        assert "attempt_id" in document
+        assert document["attempt_id"] == SOURCE_OID
+        assert "authority_epoch" not in document
+        assert "execution_attempt_id" not in document
+        assert spec.envelope_digest() == canonical_json_digest(document)
 
 
 # -- assert_attempt_start -----------------------------------------------------
@@ -364,6 +553,85 @@ class TestAssertAttemptStart:
         spec = self._bypassed(lease_id="")
         with pytest.raises(CompositionBoundaryError, match="lease_id"):
             assert_attempt_start(spec, a_repository())
+
+    def test_a_bypassed_execution_identity_is_refused_at_the_boundary(self):
+        spec = self._bypassed(execution_attempt_id="not-hex64")
+        with pytest.raises(CompositionBoundaryError, match="execution_attempt_id"):
+            assert_attempt_start(spec, a_repository())
+
+    def test_a_bypassed_identity_conflation_is_refused_at_the_boundary(self):
+        shared = "e" * 64
+        spec = self._bypassed(execution_attempt_id=shared, source_base_oid=shared)
+        with pytest.raises(CompositionBoundaryError, match="never a code revision"):
+            assert_attempt_start(spec, a_repository())
+
+
+# -- assert_publication_identity (R36-06) --------------------------------------
+
+
+class TestAssertPublicationIdentity:
+    def the_persisted_document(self, **overrides) -> dict:
+        document = {
+            "version": 2,
+            "envelope_digest": HEX64,
+            "execution_attempt_id": the_execution_id(),
+            "source_base_oid": SOURCE_OID,
+            "authority_epoch": 2,
+        }
+        document.update(overrides)
+        return document
+
+    def test_the_current_execution_identity_authorizes(self):
+        assert (
+            assert_publication_identity(
+                persisted=self.the_persisted_document(),
+                presented_execution_attempt_id=the_execution_id(),
+                presented_source_base_oid=SOURCE_OID,
+                presented_authority_epoch=2,
+            )
+            is None
+        )
+
+    def test_a_source_oid_match_alone_never_authorizes_a_stale_callback(self):
+        """AT-07: the callback from the PRECEDING attempt presents the same
+        source OID — refused, and the refusal says exactly why."""
+        with pytest.raises(CompositionBoundaryError, match="source-OID match alone"):
+            assert_publication_identity(
+                persisted=self.the_persisted_document(),
+                presented_execution_attempt_id=the_execution_id(attempt_ordinal=1),
+                presented_source_base_oid=SOURCE_OID,
+            )
+
+    def test_a_callback_without_an_execution_identity_is_refused(self):
+        with pytest.raises(CompositionBoundaryError, match="no execution_attempt_id"):
+            assert_publication_identity(
+                persisted=self.the_persisted_document(), presented_execution_attempt_id=""
+            )
+
+    def test_a_run_without_a_persisted_envelope_fails_closed(self):
+        with pytest.raises(CompositionBoundaryError, match="no persisted attempt_start"):
+            assert_publication_identity(
+                persisted=None, presented_execution_attempt_id=the_execution_id()
+            )
+
+    def test_a_v1_envelope_cannot_authorize(self):
+        """The compat policy: the weaker identity is readable for audit but
+        refused for authority-bearing comparisons — no new guarantee is
+        claimed over an old envelope."""
+        with pytest.raises(CompositionBoundaryError, match="version 1"):
+            assert_publication_identity(
+                persisted={"version": 1, "attempt_base": SOURCE_OID, "authority_epoch": 0},
+                presented_execution_attempt_id=the_execution_id(),
+                presented_source_base_oid=SOURCE_OID,
+            )
+
+    def test_an_epoch_mismatch_is_refused_naming_both(self):
+        with pytest.raises(CompositionBoundaryError, match="authority.epoch_mismatch"):
+            assert_publication_identity(
+                persisted=self.the_persisted_document(),
+                presented_execution_attempt_id=the_execution_id(),
+                presented_authority_epoch=3,
+            )
 
 
 # -- CompositionMatrix --------------------------------------------------------

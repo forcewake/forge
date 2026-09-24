@@ -106,7 +106,11 @@ __all__ = [
     "VerificationCheck",
     "build_pilot_report",
     "evaluate_stop",
+    "record_blocked_task",
     "record_onboarding",
+    "task_record_from_document",
+    "tracker_from_snapshot",
+    "usage_ledger_document",
 ]
 
 #: The schema stamp of a pilot spec document (the one-page learning
@@ -1071,6 +1075,12 @@ class TaskRecord:
     ``review_minutes``, ``defects``/``rollbacks``, ``accepted`` and
     ``human_code_change`` (the autonomy-rate inputs), and the repos the
     task actually touched (the scope check runs over these).
+
+    ``blocked`` (R36-16) names a task whose scenario genuinely could not
+    run — a seam gap, a missing dependency — recorded BY NAME instead of
+    silently dropping the task from the pilot.  A blocked task is never
+    accepted and stays in every denominator: a pilot that only counts
+    the tasks it could run is a selection lie.
     """
 
     task_id: str
@@ -1089,6 +1099,7 @@ class TaskRecord:
     defects: int = 0
     rollbacks: int = 0
     touched_repos: tuple[str, ...] = ()
+    blocked: str = ""
 
     def validate(self) -> None:
         if not self.task_id.strip():
@@ -1102,6 +1113,12 @@ class TaskRecord:
             raise PilotError(f"{self.task_id}: counters cannot be negative")
         if self.completion_latency_minutes is not None and self.completion_latency_minutes < 0:
             raise PilotError(f"{self.task_id}: completion latency cannot be negative")
+        if self.blocked.strip() and self.accepted:
+            raise PilotError(
+                f"{self.task_id}: a blocked task cannot be accepted — the blocked "
+                "reason is the outcome, and dropping it from the denominator would "
+                "be the selection lie"
+            )
         seen_attempts: set[str] = set()
         for attempt in self.attempts:
             if not attempt.attempt_id.strip():
@@ -1495,7 +1512,183 @@ def _task_record_document(record: TaskRecord) -> dict[str, Any]:
         "defects": record.defects,
         "rollbacks": record.rollbacks,
         "touched_repos": list(record.touched_repos),
+        "blocked": record.blocked,
     }
+
+
+def task_record_from_document(doc: Mapping[str, Any]) -> TaskRecord:
+    """Rebuild one :class:`TaskRecord` from its document form.
+
+    The inverse of :func:`_task_record_document` — what a replayed
+    report rebuilds its tracker from (the records document is the pilot's
+    durable evidence, so the report must be reconstructible from it
+    alone, byte-identically).  Unknown document fields are ignored
+    (forward-compatibility for additive schema growth).
+    """
+    if not isinstance(doc, Mapping):
+        raise PilotError("task record document is not an object")
+    record = TaskRecord(
+        task_id=str(doc.get("task_id") or ""),
+        started_at=str(doc.get("started_at") or ""),
+        accepted=bool(doc.get("accepted") or False),
+        human_code_change=bool(doc.get("human_code_change") or False),
+        setup_minutes=float(doc.get("setup_minutes") or 0.0),
+        plan_corrections=int(doc.get("plan_corrections") or 0),
+        plan_correction_notes=tuple(str(note) for note in doc.get("plan_correction_notes") or ()),
+        manual_rescues=int(doc.get("manual_rescues") or 0),
+        rescue_notes=tuple(str(note) for note in doc.get("rescue_notes") or ()),
+        completion_latency_minutes=(
+            float(doc["completion_latency_minutes"])
+            if doc.get("completion_latency_minutes") is not None
+            else None
+        ),
+        attempts=tuple(
+            AttemptUsage(
+                attempt_id=str(entry.get("attempt_id") or ""),
+                accepted=bool(entry.get("accepted") or False),
+                spend_usd=(
+                    float(entry["spend_usd"]) if entry.get("spend_usd") is not None else None
+                ),
+            )
+            for entry in doc.get("attempts") or ()
+            if isinstance(entry, Mapping)
+        ),
+        interventions=tuple(
+            InterventionEvent(kind=str(entry.get("kind") or ""), note=str(entry.get("note") or ""))
+            for entry in doc.get("interventions") or ()
+            if isinstance(entry, Mapping)
+        ),
+        review_minutes=float(doc.get("review_minutes") or 0.0),
+        defects=int(doc.get("defects") or 0),
+        rollbacks=int(doc.get("rollbacks") or 0),
+        touched_repos=tuple(str(repo) for repo in doc.get("touched_repos") or ()),
+        blocked=str(doc.get("blocked") or ""),
+    )
+    record.validate()
+    return record
+
+
+def record_blocked_task(tracker: PilotTracker, task_id: str, started_at: str, reason: str) -> None:
+    """Record a task whose scenario genuinely could not run (R36-16).
+
+    The honest alternative to dropping the task: it stays in every
+    denominator (total tasks, the autonomy and intervention rates) with
+    its named blocking reason, is never accepted, and carries no
+    completion latency (the cycle-time fold runs over completed tasks
+    only and will say so in its notes).
+    """
+    blocked_reason = reason.strip() or "blocked: unnamed reason"
+    if not blocked_reason.startswith("blocked:"):
+        blocked_reason = f"blocked: {blocked_reason}"
+    tracker.record_task(TaskRecord(task_id=task_id, started_at=started_at, blocked=blocked_reason))
+
+
+def usage_ledger_document(
+    attempt_id: str,
+    *,
+    source: str,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    model_time_s: float | None = None,
+    tool_call_count: int | None = None,
+    latency_breakdown: Mapping[str, float | None] | None = None,
+    spend_usd: float | None = None,
+) -> dict[str, Any]:
+    """One attempt's usage in the delivery-ledger shape (R36-17 / #276).
+
+    The per-attempt receipt row ``reconcile_delivery`` folds — keyed to
+    the attempt identity, every unknown an explicit ``null``, and the
+    COST STATE labeled rather than implied: ``spend_usd`` of ``None``
+    rides with ``cost_state: "unknown"`` ("unknown, never zero"), a
+    known spend with ``cost_state: "known"``.  Token counters are the
+    wire-observed counts when the vendor reports them (the lab vendor's
+    ``tokenUsage`` frames) and ``None`` when nothing on the wire did.
+    """
+    if not attempt_id.strip():
+        raise PilotError("usage ledger row needs a non-empty attempt_id")
+    if not source.strip():
+        raise PilotError(f"{attempt_id}: usage ledger row needs a named source")
+    known_tokens = (
+        input_tokens + output_tokens
+        if input_tokens is not None and output_tokens is not None
+        else None
+    )
+    return {
+        "attempt_id": attempt_id,
+        "source": source,
+        "spend_usd": spend_usd,
+        "cost_state": "known" if spend_usd is not None else "unknown",
+        "cost_note": ("spend unknown — never zero" if spend_usd is None else "spend recorded"),
+        "tokens": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total_known": known_tokens,
+        },
+        "model_time_s": model_time_s,
+        "tool_call_count": tool_call_count,
+        "latency_breakdown": dict(latency_breakdown or {}),
+    }
+
+
+def tracker_from_snapshot(
+    spec: PilotSpec,
+    snapshot: Mapping[str, Any],
+    *,
+    stop_reason: str = "",
+) -> PilotTracker:
+    """Rebuild a tracker from its records document — the replay entry point.
+
+    Restores the onboarding record, every task record and the granted
+    extensions through the SAME public recording API the live pilot
+    used, so a report rebuilt from the records alone is byte-identical
+    to the one the live run wrote (the determinism proof).  When
+    ``stop_reason`` names the stop the live run hit, the rebuilt tracker
+    re-preserves its diagnostics over the same state.
+
+    Ordering note: scope violations regenerate from each record's
+    touched repos as the records replay; authority violations replay
+    after the tasks.  A live pilot that recorded an authority violation
+    BETWEEN tasks replays it after them — the report content is
+    identical, but that ordering's diagnostics pointer may differ (the
+    runner's shape records violations only at task boundaries, where
+    replay is exact).
+    """
+    if not isinstance(snapshot, Mapping):
+        raise PilotError("tracker snapshot is not an object")
+    digest = str(snapshot.get("spec_digest") or "")
+    if digest != spec.frozen_digest:
+        raise PilotError(
+            f"snapshot is bound to a different spec ({digest[:12]}… != {spec.frozen_digest[:12]}…)"
+        )
+    tracker = PilotTracker(spec)
+    onboarding = snapshot.get("onboarding")
+    if isinstance(onboarding, Mapping):
+        tracker.record_onboarding(
+            OnboardingRecord(
+                recorded_at=str(onboarding.get("recorded_at") or ""),
+                unsupported_features=tuple(
+                    str(feature) for feature in onboarding.get("unsupported_features") or ()
+                ),
+                spec_digest=str(onboarding.get("spec_digest") or ""),
+            )
+        )
+    for entry in snapshot.get("tasks") or ():
+        tracker.record_task(task_record_from_document(entry))
+    for extension in snapshot.get("extensions") or ():
+        if isinstance(extension, Mapping) and str(extension.get("gap") or "").strip():
+            tracker.grant_extension(str(extension["gap"]))
+    for violation in snapshot.get("violations") or ():
+        if not isinstance(violation, Mapping):
+            continue
+        kind = str(violation.get("kind") or "")
+        if kind not in _AUTHORITY_VIOLATIONS:
+            continue  # scope violations regenerate from touched_repos
+        tracker.record_authority_violation(
+            kind, str(violation.get("detail") or ""), str(violation.get("task_id") or "")
+        )
+    if stop_reason.strip():
+        tracker.preserve_diagnostics(stop_reason.strip())
+    return tracker
 
 
 # ---------------------------------------------------------------------------

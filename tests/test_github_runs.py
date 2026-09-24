@@ -3414,7 +3414,12 @@ class TestAttemptScopedDispatchCredential:
         # Q35-02: the retry dispatches only with a JUSTIFIED continuation —
         # a committed checkpoint makes the exact-WIP resume the authorized
         # one, so this shape still re-dispatches (required mode).
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        from forge.adaptive import checkpoint_repository as _cr
+
+        async def _r36_lookup(run_id, **_):
+            return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+        monkeypatch.setattr(revival, "durable_checkpoint_outcome", _r36_lookup)
 
         service = make_service(db, fake, settings=self._harness_settings())
         run_id = await start(service)
@@ -3499,7 +3504,12 @@ class TestDispatchSelectsResumeMode:
         by the dispatch, not lane-side env setup."""
         from forge.runs import revival
 
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        from forge.adaptive import checkpoint_repository as _cr
+
+        async def _r36_lookup(run_id, **_):
+            return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+        monkeypatch.setattr(revival, "durable_checkpoint_outcome", _r36_lookup)
 
         service = self._service(db, fake)
         run_id = await self._drive_to_failed_with_candidate(db, fake, service)
@@ -3524,7 +3534,12 @@ class TestDispatchSelectsResumeMode:
         from forge.durable.controller import Controller
         from forge.runs import revival
 
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        from forge.adaptive import checkpoint_repository as _cr
+
+        async def _r36_lookup(run_id, **_):
+            return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+        monkeypatch.setattr(revival, "durable_checkpoint_outcome", _r36_lookup)
 
         service = self._service(db, fake)
         run_id = await self._drive_to_failed_with_candidate(db, fake, service)
@@ -3657,7 +3672,12 @@ class TestConditionalFenceTransitions:
 
         # Q35-02: a committed checkpoint keeps the retry dispatchable
         # (exact-WIP continuation) so the fence chain below is exercised.
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        from forge.adaptive import checkpoint_repository as _cr
+
+        async def _r36_lookup(run_id, **_):
+            return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+        monkeypatch.setattr(revival, "durable_checkpoint_outcome", _r36_lookup)
 
         service = make_service(
             db,

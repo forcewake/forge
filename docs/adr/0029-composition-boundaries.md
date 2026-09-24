@@ -193,3 +193,25 @@ how much of the repeated defect class it closes:
 - No behavior change ships in this slice: nothing imports the new types
   on the production path yet, so the full suite's 5462-green baseline is
   the proof the slice is additive.
+
+## Amendment — 2026-09-23, R36-20 (ADR-0030): the owner map is now a registry and a fence
+
+The §1 owner-map table above was PROSE; every R36 sibling since
+(#260–#281) landed one owning module per decision, and ADR-0030
+consolidated the result WITHOUT another extraction wave:
+
+- the owner map is now machine-readable
+  (`forge.adaptive.boundary_registry`) and mechanically enforced over
+  the production tree by `tests/test_architecture_boundaries.py`
+  (static import/call-graph checks plus negative trap tests) — a module
+  entering an owned decision without registration fails CI with an
+  instruction, and a stale registration fails too;
+- the compat-fixture contract (§4) grew the schemas the boundaries now
+  persist: `attempt_start` v1/v2, `continuation_decision` v1/v2 and
+  `checkpoint_lookup` v1/v2 — additive entries in the same
+  `compat_inventory()` surface;
+- the measured end state (duplicated decisions removed, counted, not
+  module count) is recorded in ADR-0030 §5.
+
+The five names, the matrix and the expand-contract rule are unchanged;
+this amendment adds enforcement and inventory, not new abstractions.

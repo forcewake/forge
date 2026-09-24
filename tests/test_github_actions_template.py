@@ -595,33 +595,53 @@ class TestImmutableResourcePinning:
     def test_the_install_provenance_record_carries_both_halves(self):
         """.forge/lane_install.json is what the provenance report's
         expected-vs-installed hash leg consumes — the template records
-        BOTH halves (wheel route) or names the unpinned git-ref route."""
+        BOTH halves (wheel routes) plus the R36-07 resolved route, or
+        names the unpinned git-ref route."""
         for path in (TEMPLATE, MIRROR):
             run = self.brief_step(path)["run"]
-            assert '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s"' in run
-            assert '"pin":"git-ref","ref":"%s"' in run
+            assert '"pin":"wheel","route":"%s","expected_sha256":"%s","actual_sha256":"%s"' in run
+            assert '"pin":"git-ref","route":"%s","ref":"%s"' in run
+            assert '"pin":"git-ref-dev","route":"dev-source","ref":"%s","qualified":false' in run
 
     def test_the_git_route_requires_a_resolved_ref_never_a_fallback(self):
         """Q35-08: the released-tag default is GONE — the git route installs
         the RESOLVED ref (the explicit FORGE_LANE_REF variable, else the
         GENERATED promoted pin) and refuses when neither resolves, with the
-        upgrade instruction naming the repair. The wheel route is still
-        taken first; the dev source override sits between them, explicitly
-        less-qualified."""
+        upgrade instruction naming the repair. R36-07: the resolution
+        happens FIRST and in ONE place — FORGE_INSTALL_MODE — with the dev
+        flag outranking the wheel pins (the always-non-empty promoted wheel
+        no longer hides an explicit dev/ref override) and the generated
+        default consulted LAST, never merged onto a user input."""
         run = self.brief_step(TEMPLATE)["run"]
         assert (
             'pip install "forge @ git+https://github.com/forcewake/forge@${FORGE_LANE_REF_RESOLVED}"'
             in run
         )
-        assert "${FORGE_LANE_REF:-$FORGE_LANE_PROMOTED_VERSION}" in run
+        assert 'FORGE_LANE_REF_RESOLVED="$FORGE_LANE_REF"' in run
+        assert 'FORGE_LANE_REF_RESOLVED="$FORGE_LANE_PROMOTED_VERSION"' in run
+        # The retired `:-` merge (an emptied user variable re-filling itself
+        # from the generated pin) is gone.
+        assert "${FORGE_LANE_REF:-$FORGE_LANE_PROMOTED_VERSION}" not in run
+        assert 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-' not in run
         # The refuse-unset gate precedes the install it guards.
         assert run.index("no lane version pinned") < run.index("forge@${FORGE_LANE_REF_RESOLVED}")
         assert "generate_template_pins.py" in run  # the upgrade instruction
-        # Route precedence: wheel first, dev override, qualified tag last.
-        assert run.index('if [ -n "$FORGE_WHEEL_URL" ]') < run.index(
-            "FORGE_LANE_DEV_SOURCE_INSTALL"
+        # R36-07 ladder order: the user inputs are consulted BEFORE the
+        # mode resolves, the generated pin during resolution, and the
+        # dispatch consumes only the resolved mode.
+        assert run.index('if [ "${FORGE_LANE_DEV_SOURCE_INSTALL+x}" = x ]') < run.index(
+            'FORGE_INSTALL_MODE=""'
         )
-        assert run.index("FORGE_LANE_DEV_SOURCE_INSTALL") < run.index("FORGE_LANE_REF_RESOLVED=")
+        assert run.index('FORGE_WHEEL_URL="$FORGE_LANE_PROMOTED_WHEEL_URL"') < run.index(
+            'case "$FORGE_INSTALL_MODE" in'
+        )
+        # Route precedence: dev flag, explicit wheel, explicit ref, then
+        # the generated default (wheel, tag fallback).
+        ladder = run.index('if [ -n "$FORGE_DEV_SOURCE_REQUESTED" ]; then')
+        assert ladder < run.index('elif [ -n "$FORGE_WHEEL_EXPLICIT" ]; then')
+        assert ladder < run.index('elif [ -n "$FORGE_REF_EXPLICIT" ]; then')
+        assert ladder < run.index('FORGE_INSTALL_MODE="default-wheel"')
+        assert ladder < run.index('FORGE_INSTALL_MODE="default-tag"')
 
     def test_the_codegraph_binary_installs_through_a_lock_not_a_bare_spec(self):
         """`npm ci` installs EXACTLY the materialized lock — npm verifies
@@ -705,25 +725,20 @@ def _synthetic_wheel(dest: Path, name: str = "forge_probe_example") -> tuple[Pat
 
 
 def _wheel_branch(path: Path) -> str:
-    """The shipped wheel-pin branch, verbatim, dedented to column 0 — from
-    the ``mkdir -p .forge`` preamble through the lane_install.json record.
-    The closing ``fi`` is appended by the harness: the template opens the
-    wheel route's ``if`` and closes it after the git-ref branches, so
-    selecting ONLY the wheel route means closing it here — everything
-    between is byte-verbatim shipped script (Q35-08: that now includes the
-    generated lane-pin assignments and the route-selection preamble; with
-    FORGE_LANE_WHEEL set they are inert)."""
+    """The shipped route-resolution + wheel-arm fragment, verbatim, dedented
+    to column 0 — from the ``mkdir -p .forge`` preamble through the whole
+    ``case "$FORGE_INSTALL_MODE"`` dispatch (R36-07: resolution and all
+    route arms, so the extracted script is complete and self-closing; the
+    identity-verification tail after it is not needed here). With
+    FORGE_LANE_WHEEL + FORGE_LANE_WHEEL_SHA256 set, resolution selects
+    explicit-wheel and everything byte-verbatim ships to the probe."""
     lines = path.read_text().splitlines()
     start = next(i for i, line in enumerate(lines) if line.strip() == "mkdir -p .forge")
-    end = next(
-        i
-        for i, line in enumerate(lines)
-        if line.strip() == 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-$FORGE_LANE_PROMOTED_WHEEL_URL}"'
-    )
-    stop = next(i for i, line in enumerate(lines[end:], end) if ".forge/lane_install.json" in line)
-    block = lines[start : stop + 1]
+    stop = next(i for i, line in enumerate(lines) if "INSTALLED_FORGE_VERSION=" in line)
+    block = lines[start:stop]
     indent = len(block[0]) - len(block[0].lstrip())
-    return "\n".join(line[indent:] if line.strip() else line for line in block) + "\nfi"
+    body = "\n".join(line[indent:] if line.strip() else line for line in block)
+    return body.rstrip() + "\n"
 
 
 @pytest.fixture(scope="session")
@@ -768,7 +783,10 @@ def _bootstrap_env(
 ) -> dict[str, str]:
     import os
 
-    env = dict(os.environ)
+    # Strip any ambient FORGE_* inputs (R36-07: the resolution consults
+    # them; a leaking FORGE_LANE_REF would turn the explicit-wheel probe
+    # into a conflict refusal).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FORGE_")}
     env.update(
         FORGE_LANE_WHEEL=wheel_url,
         FORGE_LANE_WHEEL_SHA256=wheel_sha,
@@ -807,11 +825,13 @@ class TestWheelBootstrapRunsOnRealPip:
         assert result.returncode == 0, result.stdout + result.stderr
 
         # The provenance record carries BOTH halves (expected = observed)
-        # plus the Q35-08 qualification facts (the wheel route is the
-        # qualified one; a non-forge probe wheel records no version).
+        # plus the Q35-08 qualification facts and the R36-07 resolved route
+        # (the wheel route is the qualified one; a non-forge probe wheel
+        # records no version).
         recorded = json.loads((workdir / ".forge" / "lane_install.json").read_text())
         assert recorded == {
             "pin": "wheel",
+            "route": "explicit-wheel",
             "expected_sha256": digest,
             "actual_sha256": digest,
             "qualified": True,

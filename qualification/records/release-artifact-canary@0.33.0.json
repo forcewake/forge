@@ -1,0 +1,52 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "release-artifact-canary",
+    "release-canary/previous-release-upgrade"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "none — disposable Postgres, LiteLLM reachability via in-image stub",
+  "evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "class": "binary-smoke",
+      "covers": "fresh stage: alembic chain at 026; boot gate ok; /health ok (version 0.33.0); /mcp 401; doctor 5 passed (promotion.json canary rows)",
+      "executed_at": "sha256:7a4ee44b1b8d07e5058fc6b8e0ff8bade9c97939b900201a4f2b5d732425391a",
+      "outcome": "pass"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "class": "binary-smoke",
+      "covers": "migrate stage: previous image (head 024) migrated a fresh DB; boot gate refused the stale schema; upgrade to 026; gate ok — schema-level only, NO seeded rows (seed-real-data landed in v0.34.0)",
+      "executed_at": "sha256:7a4ee44b1b8d07e5058fc6b8e0ff8bade9c97939b900201a4f2b5d732425391a",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.33.0/promotion.json"
+  ],
+  "harness_binary": "ghcr.io/forcewake/forge",
+  "harness_version": "sha256:7a4ee44b1b8d07e5058fc6b8e0ff8bade9c97939b900201a4f2b5d732425391a",
+  "image_digest": "sha256:7a4ee44b1b8d07e5058fc6b8e0ff8bade9c97939b900201a4f2b5d732425391a",
+  "note": "Image-only release (no wheel/sdist built — the promotion record says so); the release's promotion verdict was BLOCKED (typecheck failed on the sha) — this record carries the canary evidence that DID execute on the digest.",
+  "profile": "release-artifact-canary",
+  "provider": "*",
+  "provider_behavior_fingerprint": "",
+  "provider_version": "",
+  "record_id": "release-artifact-canary@0.33.0",
+  "release_version": "0.33.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "container image (Containerfile; python-3.13, disposable Postgres)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": {
+    "evidence_ref": "docs/releases/evidence/v0.33.0/promotion.json",
+    "preservation_checks": [],
+    "seeded_records": [],
+    "source_schema": "024",
+    "target_schema": "026"
+  },
+  "verification_contract": "canary stages: fresh (alembic chain, boot gate, /health, /mcp 401, doctor)",
+  "wheel_sha256": ""
+}

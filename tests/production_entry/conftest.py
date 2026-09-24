@@ -24,6 +24,7 @@ suppressed globally.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import socket
@@ -46,6 +47,7 @@ from forge.integrations.github import GitHubClient
 from forge.integrations.github_flow import GitHubAgents, GitHubPublishFlow
 from forge.models.base import Base
 from forge.runs.github_service import GitHubRunService
+from forge.runs.service import RunService
 from forge.runs.stubs import StubImplementer, StubPlanner
 
 # ----------------------------------------------------------------------
@@ -107,6 +109,16 @@ class FakeNative:
     def dispatch_inputs(self, *, ref: str) -> list[dict]:
         """The recorded dispatch INPUTS for one factory branch."""
         return [entry["inputs"] for entry in self.dispatches() if entry["ref"] == ref]
+
+    def executor_digests(self, *, ref: str) -> list[str]:
+        """The server-side executor-input fingerprints for one factory branch
+        (R36-13 / #272): what the SERVER computed from the inputs the
+        production client actually sent."""
+        return [
+            str(entry["executor_input_digest"])
+            for entry in self.dispatches()
+            if entry["ref"] == ref
+        ]
 
     def runs(self) -> list[dict]:
         return list(self.state()["runs"])
@@ -414,4 +426,236 @@ def make_service(
         ForgeConfig(),
         stack=stack,
         repo_full_name=PE_REPO,
+    )
+
+
+# ----------------------------------------------------------------------
+# The GitLab CE surface (issue #268 / R36-09): the REAL RunService and
+# GitLabClient against the fake native server's GitLab mode
+# ----------------------------------------------------------------------
+
+#: The GitLab project identity every CE trace runs against.
+GL_PROJECT_ID = 90210
+GL_BASE_BRANCH = "main"
+GL_BASE_SHA = "9" * 40
+GL_ISSUE_IID = 38
+GL_ISSUE_TITLE = "Add the CE qualification widget"
+GL_ISSUE_DESC = "A tiny change with independent verification."
+
+#: The verification contract the CE profile freezes (AT-10's independent
+#: pipeline): the required job name the project's CI must run green.
+GL_REQUIRED_JOB = "verify"
+
+
+class FakeGitLabNative:
+    """The typed control client over the fake GitLab server's ``/__ctl``."""
+
+    def __init__(self, process: subprocess.Popen, port: int) -> None:  # noqa: SIM115
+        self._process = process
+        self.base_url = f"http://127.0.0.1:{port}"
+        self._http = httpx.Client(timeout=10.0)
+
+    # -- reads -----------------------------------------------------------
+
+    def state(self) -> dict:
+        response = self._http.get(f"{self.base_url}/__ctl/state")
+        response.raise_for_status()
+        return response.json()
+
+    def dispatches(self) -> list[dict]:
+        """The harness dispatch ledger (every create_pipeline + variables)."""
+        return list(self.state()["dispatches"])
+
+    def dispatch_variables(self, *, ref: str) -> list[dict]:
+        return [d["variables"] for d in self.dispatches() if d["ref"] == ref]
+
+    def pipelines(self) -> list[dict]:
+        return list(self.state()["pipelines"])
+
+    def jobs(self, pipeline_id: int) -> list[dict]:
+        return list(self.state()["jobs"].get(str(pipeline_id), []))
+
+    def job(self, job_id: int) -> dict | None:
+        for jobs in self.state()["jobs"].values():
+            for entry in jobs:
+                if entry["id"] == job_id:
+                    return dict(entry)
+        return None
+
+    def branch_head(self, branch: str) -> str | None:
+        heads = {
+            name: (commits[0]["id"] if commits else None)
+            for name, commits in self.state()["branches"].items()
+        }
+        return heads.get(branch)
+
+    def merge_requests(self) -> dict[int, dict]:
+        return {int(iid): dict(mr) for iid, mr in self.state()["merge_requests"].items()}
+
+    def notes(self) -> list[str]:
+        return [entry["body"] for entry in self.state()["notes"]]
+
+    def job_cancels(self) -> list[dict]:
+        return list(self.state()["job_cancels"])
+
+    def unknown_paths(self) -> list[str]:
+        return list(self.state()["unknown_paths"])
+
+    # -- control ---------------------------------------------------------
+
+    def _ctl(self, endpoint: str, **payload: object) -> dict:
+        response = self._http.post(f"{self.base_url}/__ctl/{endpoint}", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def seed_issue(self, iid: int, title: str, description: str) -> None:
+        self._ctl("seed_issue", iid=iid, title=title, description=description)
+
+    def seed_file(self, path: str, content: str) -> None:
+        self._ctl("seed_file", path=path, content=content)
+
+    def seed_commit(self, branch: str, sha: str, message: str = "seeded") -> None:
+        """Pre-place a commit (newest-first) — aligning the native base
+        branch head with a REAL git checkout's frozen base oid."""
+        self._ctl("seed_commit", branch=branch, sha=sha, message=message)
+
+    def seed_pipeline(
+        self,
+        *,
+        ref: str,
+        sha: str,
+        status: str = "success",
+        source: str = "push",
+        jobs: list[dict] | None = None,
+    ) -> dict:
+        return self._ctl(
+            "seed_pipeline", ref=ref, sha=sha, status=status, source=source, jobs=jobs or []
+        )
+
+    def seed_artifact(self, job_id: int, path: str, content: bytes) -> None:
+        self._ctl(
+            "seed_artifact",
+            job_id=job_id,
+            path=path,
+            content_b64=base64.b64encode(content).decode("ascii"),
+        )
+
+    def mark_job(self, job_id: int, status: str, *, pipeline_status: str | None = None) -> None:
+        payload: dict[str, object] = {"job_id": job_id, "status": status}
+        if pipeline_status is not None:
+            payload["pipeline_status"] = pipeline_status
+        self._ctl("mark_terminal", **payload)
+
+    def cancel_job(self, job_id: int) -> None:
+        """The runner-loss primitive: the CI job is cancelled natively."""
+        self._ctl("cancel_job", job_id=job_id)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def close(self) -> None:
+        self._http.close()
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover — a wedged child
+            self._process.kill()
+            self._process.wait(timeout=10)
+
+
+@pytest.fixture()
+def gitlab_native(tmp_path: Path) -> FakeGitLabNative:
+    """The fake native server in GITLAB mode — a separate process whose
+    pipelines, dispatch ledger, branches, MRs and issue notes survive
+    worker death by construction."""
+    ready = tmp_path / "gitlab-native-ready.json"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(FAKE_NATIVE_SERVER),
+            "--ready-file",
+            str(ready),
+            "--api",
+            "gitlab",
+            "--repo",
+            str(GL_PROJECT_ID),
+            "--base-branch",
+            GL_BASE_BRANCH,
+            "--base-sha",
+            GL_BASE_SHA,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20.0
+    while not ready.is_file():
+        if process.poll() is not None:
+            raise AssertionError("the fake gitlab server died at startup")
+        if time.monotonic() > deadline:
+            process.kill()
+            raise AssertionError("the fake gitlab server never became ready")
+        time.sleep(0.02)
+    port = int(json.loads(ready.read_text())["port"])
+    server = FakeGitLabNative(process, port)
+    try:
+        yield server
+    finally:
+        server.close()
+
+
+@pytest.fixture()
+async def gitlab_client(gitlab_native: FakeGitLabNative):
+    """The REAL GitLabClient, pointed at the fake native server."""
+    from forge.gitlab.client import GitLabClient
+
+    client = GitLabClient(
+        base_url=gitlab_native.base_url,
+        token="pe-gitlab-native-token",  # noqa: S106 — a test fixture value
+    )
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+def gl_settings(**overrides) -> Settings:
+    """The CE profile's settings shape (the gitlab-ce-v1 profile document)."""
+    values = dict(
+        GITLAB_URL="https://gitlab.test",
+        GITLAB_TOKEN=SecretStr("glpat-test"),
+        GITLAB_WEBHOOK_SECRET=SecretStr("whsec"),
+        FORGE_APPROVERS="alice",
+        DATABASE_URL="sqlite+aiosqlite:///:memory:",
+        FORGE_IMPLEMENTER_BACKEND="ci_harness:claude-code",
+        FORGE_HARNESS_MODEL=PE_HARNESS_MODEL,
+        FORGE_REQUIRED_JOBS=GL_REQUIRED_JOB,
+        FORGE_VERIFICATION_GRACE_SECONDS=0,
+        FORGE_CHECKPOINT_MAX_BLOB_BYTES=str(8 * 1024 * 1024),
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+def make_gitlab_service(
+    session_factory,
+    gitlab,
+    *,
+    settings: Settings | None = None,
+) -> RunService:
+    """A REAL (GitLab) RunService whose every provider I/O is real HTTP.
+
+    The agents are the deterministic stubs (no LLM anywhere); the backend
+    is the production ``ci_harness`` leg — every pipeline dispatch, job
+    poll, artifact download, commit and MR travels the REAL GitLabClient
+    over HTTP to the fake native server.
+    """
+    from forge.runs.stubs import StubReviewer
+
+    return RunService(
+        session_factory,
+        gitlab=gitlab,
+        settings=settings or gl_settings(),
+        config=ForgeConfig(),
+        planner=StubPlanner(),
+        implementer=StubImplementer(),
+        reviewer=StubReviewer(),
     )

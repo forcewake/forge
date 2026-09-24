@@ -72,6 +72,7 @@ from forge.adaptive.pilot import (
     evaluate_stop,
     record_onboarding,
 )
+from forge.adaptive import pilot as pilot_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PILOT_JSON = REPO_ROOT / "evaluation" / "pilot" / "pilot-v1.json"
@@ -997,3 +998,136 @@ def test_report_refuses_a_tracker_bound_to_a_different_spec() -> None:
     tracker = _report_tracker(other)
     with pytest.raises(PilotError, match="different spec"):
         build_pilot_report(plan, tracker)
+
+
+# ---------------------------------------------------------------------------
+# R36-16 — the recording helpers the lab-pilot runner needs
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_record_roundtrips_and_can_never_be_accepted() -> None:
+    with pytest.raises(PilotError, match="blocked task cannot be accepted"):
+        TaskRecord(
+            task_id="PT-blocked",
+            started_at="2026-10-21T09:00:00+00:00",
+            accepted=True,
+            blocked="blocked: seam gap",
+        ).validate()
+
+    record = TaskRecord(
+        task_id="PT-blocked",
+        started_at="2026-10-21T09:00:00+00:00",
+        blocked="blocked: seam gap",
+    )
+    document = pilot_module._task_record_document(record)
+    assert document["blocked"] == "blocked: seam gap"
+    rebuilt = pilot_module.task_record_from_document(document)
+    assert rebuilt == record
+
+
+def test_record_blocked_task_prefixes_the_reason_and_keeps_denominators() -> None:
+    tracker = _tracker_with_tasks(())
+    pilot_module.record_blocked_task(
+        tracker, "PT-99", "2026-10-21T09:00:00+00:00", "seam gap: no driver"
+    )
+    (record,) = tracker.records
+    assert record.blocked == "blocked: seam gap: no driver"
+    assert record.accepted is False
+    metrics = tracker.metrics()
+    assert metrics.tasks_total == 1  # the denominator keeps it
+    assert metrics.tasks_accepted == 0
+    assert metrics.autonomy_rate == 0.0
+    assert metrics.cycle_time_vs_baseline is None  # no completion latency
+
+
+def test_task_record_from_document_roundtrips_every_field() -> None:
+    record = _record(
+        "PT-full",
+        "2026-10-21T09:00:00+00:00",
+        accepted=True,
+        human_code_change=False,
+        setup_minutes=3.5,
+        plan_corrections=2,
+        plan_correction_notes=("first", "second"),
+        manual_rescues=1,
+        rescue_notes=("operator fixed the branch",),
+        completion_latency_minutes=12.25,
+        attempts=(
+            AttemptUsage("a1", accepted=False),
+            AttemptUsage("a2", accepted=True, spend_usd=None),
+        ),
+        interventions=(InterventionEvent(kind="steer", note="tighten"),),
+        review_minutes=6.0,
+        defects=0,
+        rollbacks=1,
+        touched_repos=("acme/checkout", "acme/billing"),
+        blocked="",
+    )
+    rebuilt = pilot_module.task_record_from_document(pilot_module._task_record_document(record))
+    assert rebuilt == record
+
+
+def test_tracker_from_snapshot_rebuilds_the_report_identically() -> None:
+    plan = _plan()
+    records = (
+        _record("PT-01", "2026-10-21T09:00:00+00:00", completion_latency_minutes=100.0),
+        _record(
+            "PT-02",
+            "2026-10-21T10:00:00+00:00",
+            accepted=False,
+            manual_rescues=1,
+            rescue_notes=("rescue",),
+            interventions=(InterventionEvent(kind="pause"),),
+        ),
+        TaskRecord(task_id="PT-03", started_at="2026-10-21T11:00:00+00:00", blocked="blocked: x"),
+    )
+    tracker = _tracker_with_tasks(records)
+    snapshot = tracker.snapshot_document()
+    rebuilt = pilot_module.tracker_from_snapshot(tracker.spec, snapshot)
+    assert rebuilt.snapshot_document() == snapshot
+    # The reports agree byte-for-byte (the determinism proof the
+    # lab-pilot runner's --rebuild-from relies on).
+    first = build_pilot_report(plan, tracker, as_of="2026-10-28")
+    second = build_pilot_report(plan, rebuilt, as_of="2026-10-28")
+    assert first.document == second.document
+
+
+def test_tracker_from_snapshot_replays_a_stop_with_the_same_pointer() -> None:
+    records = (
+        _record(
+            "PT-out",
+            "2026-10-21T09:00:00+00:00",
+            touched_repos=("someone/elses-repo",),
+        ),
+    )
+    tracker = _tracker_with_tasks(records)
+    decision = evaluate_stop(tracker, as_of="2026-11-18")
+    assert decision.decision == DECISION_STOP
+    snapshot = tracker.snapshot_document()
+    rebuilt = pilot_module.tracker_from_snapshot(
+        tracker.spec, snapshot, stop_reason=tracker.diagnostics.stop_reason
+    )
+    assert rebuilt.diagnostics is not None
+    assert rebuilt.diagnostics.pointer == tracker.diagnostics.pointer
+    assert rebuilt.diagnostics.snapshot == tracker.diagnostics.snapshot
+
+
+def test_usage_ledger_rows_label_unknown_costs_never_zero() -> None:
+    unknown = pilot_module.usage_ledger_document(
+        "a1", source="lab-lane/vendor-wire", input_tokens=518, output_tokens=231, model_time_s=0.8
+    )
+    assert unknown["spend_usd"] is None
+    assert unknown["cost_state"] == "unknown"
+    assert "never zero" in unknown["cost_note"]
+    assert unknown["tokens"] == {"input": 518, "output": 231, "total_known": 749}
+
+    partial = pilot_module.usage_ledger_document("a2", source="s", input_tokens=10)
+    assert partial["tokens"]["total_known"] is None  # one-sided tokens stay unknown
+
+    known = pilot_module.usage_ledger_document("a3", source="s", spend_usd=1.5)
+    assert known["cost_state"] == "known"
+
+    with pytest.raises(PilotError, match="non-empty attempt_id"):
+        pilot_module.usage_ledger_document("", source="s")
+    with pytest.raises(PilotError, match="named source"):
+        pilot_module.usage_ledger_document("a4", source=" ")

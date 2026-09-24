@@ -1,0 +1,199 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "first-attempt.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-01-repair/a1",
+      "note": "first edit failed the independent compile check",
+      "wall_seconds": 0.832
+    },
+    {
+      "attempt_id": "t-01-repair/a2",
+      "note": "repaired edit",
+      "wall_seconds": 0.849
+    }
+  ],
+  "brief": "Repair the widget code so it compiles and prints the widget banner.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "30fbe1686bc4f3eb551f26ac5dbdcc3ec48b88bc6bbadf939efec57c4458d452",
+  "driver": "test_repair",
+  "evidence_class": "lab-operational",
+  "failed_first_attempt_diff_digest": "238fb9982d9df8da5aa6829a224dfe40674c9a744fdba9f2b6dda894ede76323",
+  "interventions": [],
+  "meta": {
+    "attempt_base": "24b10d6fc89453bb1455e8953efa8b3388a3676d",
+    "driver": "codex-sdk-lane",
+    "episode": {
+      "interrupt_grace_s": null,
+      "startup_s": 0.026205,
+      "teardown_s": 0.003404,
+      "turn_s": 0.252104
+    },
+    "exit": "completed",
+    "model": "",
+    "steering_journal": [],
+    "terminal_reason": "completed",
+    "usage": {
+      "completeness": "aggregate",
+      "driver": "codex-sdk-lane",
+      "input_tokens": 518,
+      "output_tokens": 231,
+      "source": "codex-app-server"
+    }
+  },
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:41:55.908362+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:41:55.908383+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "first-attempt-fails-independent-check=ok; candidate-compiles=ok; diff-applies-cleanly=ok; repaired-content-in-diff=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-01-repair/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-01-repair/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0546,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [
+      "the scripted vendor's first edit left a syntax error in src/app.py; the operator corrected the plan and re-ran (the failed attempt stays)"
+    ],
+    "plan_corrections": 1,
+    "rescue_notes": [],
+    "review_minutes": 0.001,
+    "rollbacks": 0,
+    "setup_minutes": 0.0477,
+    "started_at": "2026-09-24T01:41:52.632159+00:00",
+    "task_id": "t-01-repair",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "test_repair",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "the broken first edit FAILS py_compile (the forced correction is real)",
+      "name": "first-attempt-fails-independent-check",
+      "observed": "File \"/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-compile-e9n52x1r/clone/src/app.py\", line 1\n    print('widget banner'\n         ^\nSyntaxError: '(' was never closed",
+      "ok": true
+    },
+    {
+      "expected": "py_compile over the candidate",
+      "name": "candidate-compiles",
+      "observed": "compiles",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check onto the frozen base",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the repaired bytes ride the collected diff",
+      "name": "repaired-content-in-diff",
+      "observed": "diff_digest=30fbe1686bc4f3eb551f26ac5dbdcc3ec48b88bc6bbadf939efec57c4458d452 source=checkout",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "2 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "src/app.py compiles and prints the widget banner; the collected candidate diff carries exactly the repaired file; the first, broken attempt stays in the record with its failed independent check",
+    "group": "g2-fixes",
+    "non_goals": [
+      "no changes outside src/app.py",
+      "no dependency or tooling changes"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "test_repair",
+    "stage": "small_fixes",
+    "task_id": "t-01-repair",
+    "title": "Repair the widget code the scripted vendor initially breaks",
+    "verification": [
+      {
+        "method": "py_compile over the candidate's src/app.py applied in a fresh checkout of the frozen base \u2014 independent of the agent's self-report",
+        "name": "candidate-compiles"
+      },
+      {
+        "method": "git apply --check of the collected diff onto the frozen base in a fresh clone",
+        "name": "diff-applies-cleanly"
+      }
+    ]
+  },
+  "task_id": "t-01-repair",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-01-repair/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.832,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    },
+    {
+      "attempt_id": "t-01-repair/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.849,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 10
+    }
+  ]
+}

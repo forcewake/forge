@@ -187,6 +187,7 @@ from forge.runs.revival import (
     terminalize_failure,
     why_blocked_reply,
 )
+from forge.runs import revival
 from forge.runs.revival import RevivalInFlight
 from forge.runs.spec import (
     EXECUTABLE_SPEC_SCHEMA_VERSION,
@@ -1454,6 +1455,9 @@ class RunService:
                     if await open_revival_attempt(session, run_id=run.id) is not None:
                         rejection = retry_in_flight_rejection(run.id)
                 if not rejection:
+                    # R36-03: the typed refusal consumes the CONFIGURED
+                    # async checkpoint authority — never the retired
+                    # raw-index/legacy-token boolean.
                     rejection = retry_rejection(
                         run,
                         other_active=await has_active_run(
@@ -1463,6 +1467,9 @@ class RunService:
                             issue_iid=run.issue_iid,
                             repo_full_name=run.github_repo_full_name,
                             exclude_run_id=run.id,
+                        ),
+                        checkpoint=await revival.durable_checkpoint_outcome(
+                            run.id, session_factory=self._session_factory
                         ),
                     )
                 if not rejection:
@@ -1688,7 +1695,15 @@ class RunService:
                     repo_full_name=run.github_repo_full_name,
                     exclude_run_id=run.id,
                 )
-                body = why_blocked_reply(run, other_active=other_active)
+                body = why_blocked_reply(
+                    run,
+                    other_active=other_active,
+                    # R36-03: the read-only verdict reports what the
+                    # configured async authority answered.
+                    checkpoint=await revival.durable_checkpoint_outcome(
+                        run.id, session_factory=self._session_factory
+                    ),
+                )
                 run_id = run.id
         await self._post_journaled_note(
             project_id,

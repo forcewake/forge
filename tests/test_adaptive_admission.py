@@ -47,6 +47,7 @@ from forge.adaptive.admission import (
     register_native_probe,
     release_lease,
     release_run_leases,
+    saturation_report,
     try_acquire_lease,
 )
 from forge.durable import FlowRun
@@ -1510,3 +1511,82 @@ class TestMigration027:
                 assert conn.execute(text("SELECT count(*) FROM execution_leases")).scalar_one() == 1
         finally:
             engine.dispose()
+
+
+class TestSaturationReport:
+    """R36-21 (issue #280): the saturation signals — the operator's
+    "when does it queue / pause / refuse" view, derived from the same
+    durable occupancy columns every other report reads."""
+
+    async def test_occupied_vs_limit_counts_every_held_slot(self, db):
+        policy = AdmissionPolicy(max_active_per_project=2)
+        for index in range(2):
+            assert (await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex)) is not None
+        report = await saturation_report(policy, PROJECT_ID, db)
+        assert report["execution.occupied_vs_limit"] == {
+            "occupied": 2,
+            "limit": 2,
+            "available": 0,
+            "at_limit": True,
+        }
+
+    async def test_unknown_age_reads_the_oldest_dispatched_unknown(self, db):
+        from datetime import UTC, datetime, timedelta
+
+        policy = AdmissionPolicy(max_active_per_project=3)
+        run_id = uuid4().hex
+        assert await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id) is not None
+        past = datetime.now(UTC) - timedelta(minutes=10)
+        await record_native_start_intent(db, run_id, "github:workflow:o/r/w@b", now=past)
+        report = await saturation_report(
+            policy, PROJECT_ID, db, now=datetime.now(UTC) - timedelta(seconds=30)
+        )
+        assert report["native_start.unknown_count"] == 1
+        # ~9.5 minutes of unknown age at the report's clock.
+        assert 500 <= report["native_start.unknown_age"] <= 700
+
+    async def test_draining_counts_as_unknown_too(self, db):
+        policy = AdmissionPolicy(max_active_per_project=2)
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+        assert lease is not None
+        await record_native_start_intent(db, run_id, "gitlab:pipeline:42@b")
+        assert await release_lease(lease.lease_id, db, native_completed=False) is True
+        report = await saturation_report(policy, PROJECT_ID, db)
+        assert report["native_start.unknown_count"] == 1
+        assert report["native_start.unknown_age"] is not None
+
+    async def test_a_native_running_slot_is_occupied_but_not_unknown(self, db):
+        policy = AdmissionPolicy(max_active_per_project=2)
+        run_id = uuid4().hex
+        lease = await try_acquire_lease(policy, PROJECT_ID, db, run_id=run_id)
+        assert lease is not None
+        await record_native_start_intent(db, run_id, "azure:pipeline:P:1@b")
+        assert await record_native_handle(lease.lease_id, "azure:run:99", db) is True
+        report = await saturation_report(policy, PROJECT_ID, db)
+        assert report["execution.occupied_vs_limit"]["occupied"] == 1
+        assert report["native_start.unknown_count"] == 0
+        assert report["native_start.unknown_age"] is None
+
+    async def test_a_disabled_limit_reports_nulls_never_a_fake_number(self, db):
+        policy = AdmissionPolicy(max_active_per_project=0)
+        report = await saturation_report(policy, PROJECT_ID, db)
+        occupied = report["execution.occupied_vs_limit"]
+        assert occupied["limit"] is None and occupied["available"] is None
+        assert occupied["at_limit"] is False
+
+    async def test_the_escalation_path_is_named_not_left_to_guesswork(self, db):
+        report = await saturation_report(AdmissionPolicy(), PROJECT_ID, db)
+        assert "reconcile_draining" in report["escalation"]
+        assert "override" in report["escalation"]
+
+    async def test_provider_scoping_keeps_connections_independent(self, db):
+        policy = AdmissionPolicy(max_active_per_project=2)
+        assert (
+            await try_acquire_lease(policy, PROJECT_ID, db, run_id=uuid4().hex, provider="a")
+            is not None
+        )
+        scoped = await saturation_report(policy, PROJECT_ID, db, provider="a")
+        other = await saturation_report(policy, PROJECT_ID, db, provider="b")
+        assert scoped["execution.occupied_vs_limit"]["occupied"] == 1
+        assert other["execution.occupied_vs_limit"]["occupied"] == 0

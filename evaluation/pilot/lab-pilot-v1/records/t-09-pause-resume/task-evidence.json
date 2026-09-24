@@ -1,0 +1,288 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-09-pause-resume/a1",
+      "note": "pre-pause WIP leg + pause checkpoint (no model turn held while paused)",
+      "wall_seconds": 0.151
+    },
+    {
+      "attempt_id": "t-09-pause-resume/a2",
+      "note": "resumed turn (required restore)",
+      "wall_seconds": 0.839
+    }
+  ],
+  "brief": "Extend the widget implementation.",
+  "checkpoint_ids": [
+    "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b"
+  ],
+  "collector_source": "generation",
+  "diff_digest": "fb2fa820df492de63dc10a96971abfb0a69960169847f25854a03f0b26e982b7",
+  "driver": "intervention_pause_resume",
+  "evidence_class": "lab-operational",
+  "interventions": [
+    {
+      "kind": "pause",
+      "note": "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b"
+    },
+    {
+      "kind": "resume",
+      "note": "cross-runner resume"
+    }
+  ],
+  "meta": {
+    "attempt_base": "ed8113f87531d9b6ff0f9f7f2c34780ee050182c",
+    "driver": "codex-sdk-lane",
+    "episode": {
+      "interrupt_grace_s": null,
+      "startup_s": 0.028837,
+      "teardown_s": 0.003006,
+      "turn_s": 0.252114
+    },
+    "exit": "completed",
+    "model": "",
+    "steering_journal": [
+      {
+        "at": "2026-09-24T01:42:10.876043+00:00",
+        "command_id": "cmd-927de73b887c",
+        "delivery": "dispatching",
+        "detail": {},
+        "kind": "pause",
+        "outcome": "error",
+        "reason": "vendor effect failed: no active turn tracked on thread 'vendor-thread-30566' \u2014 a groundless or repeated turn/interrupt is the documented pending hang",
+        "sequence": 1
+      },
+      {
+        "at": "2026-09-24T01:42:10.876058+00:00",
+        "command_id": "cmd-d4689265512d",
+        "delivery": "",
+        "detail": {},
+        "kind": "resume",
+        "outcome": "refused",
+        "reason": "the lane is closing \u2014 a resume turn belongs to the next lane epoch or the reconciler, never to teardown",
+        "sequence": 2
+      }
+    ],
+    "terminal_reason": "completed",
+    "usage": {
+      "completeness": "aggregate",
+      "driver": "codex-sdk-lane",
+      "input_tokens": 518,
+      "output_tokens": 231,
+      "source": "codex-app-server"
+    },
+    "workspace_generation": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-t-09-pause-resume-i4sei4hr/.forge-workspace-gen-870dba3438d8"
+  },
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:09.867967+00:00",
+      "point": "pause",
+      "question": "Should the run pause and checkpoint its WIP?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:10.018858+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "paused",
+      "detail": "checkpoint 870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b verified+uploaded",
+      "point": "pause",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:10.018924+00:00",
+      "point": "resume",
+      "question": "Resume the paused work into a new runner?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:10.021987+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "resumed",
+      "detail": "durable resume command recorded",
+      "point": "resume",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:11.668040+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:11.668058+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "checkpoint-verified=ok; resume-command-recorded=ok; resume-restored-exact-wip=ok; collector-resolved-generation=ok; both-legs-in-diff=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-09-pause-resume/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-09-pause-resume/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0346,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [
+      {
+        "kind": "pause",
+        "note": "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b"
+      },
+      {
+        "kind": "resume",
+        "note": "cross-runner resume"
+      }
+    ],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0014,
+    "rollbacks": 0,
+    "setup_minutes": 0.0287,
+    "started_at": "2026-09-24T01:42:09.592826+00:00",
+    "task_id": "t-09-pause-resume",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "human_intervention",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "the pause's capture receipt is verified and its artifact id recorded",
+      "name": "checkpoint-verified",
+      "observed": "checkpoint_id=870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b pause_rows=1",
+      "ok": true
+    },
+    {
+      "expected": "the resume command row exists",
+      "name": "resume-command-recorded",
+      "observed": "True",
+      "ok": true
+    },
+    {
+      "expected": "the generation pointer names the checkpoint and the restored bytes ride the candidate",
+      "name": "resume-restored-exact-wip",
+      "observed": "pointer_checkpoint=870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b restored_bytes=True",
+      "ok": true
+    },
+    {
+      "expected": "the shipped collector resolved the ACTIVE workspace generation (AT-01)",
+      "name": "collector-resolved-generation",
+      "observed": "source=generation zero_change=False",
+      "ok": true
+    },
+    {
+      "expected": "the diff carries the pre-pause AND resumed-turn edits",
+      "name": "both-legs-in-diff",
+      "observed": "diff_digest=fb2fa820df492de63dc10a96971abfb0a69960169847f25854a03f0b26e982b7",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the pause is a durable command with a verified checkpoint uploaded over real HTTP; the resume command re-admits the work; the resumed lane completes and the final candidate carries BOTH the pre-pause and post-resume edits (AT-01 seam outcome)",
+    "group": "g4-operations",
+    "non_goals": [
+      "no fresh restart of the paused work (the resume must restore the exact WIP)",
+      "no edits after the collector ran"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "human_intervention",
+    "stage": "gate",
+    "task_id": "t-09-pause-resume",
+    "title": "Operator pause checkpoints the WIP; the resume completes the turn",
+    "verification": [
+      {
+        "method": "the pause's capture receipt is verified and its artifact id is recorded",
+        "name": "checkpoint-verified"
+      },
+      {
+        "method": "the resumed workspace-generation pointer names the checkpoint id and the restored pre-pause bytes are present in the candidate",
+        "name": "resume-restored-exact-wip"
+      },
+      {
+        "method": "the collected diff carries the pre-pause edit AND the resumed-turn edit",
+        "name": "both-legs-in-diff"
+      }
+    ]
+  },
+  "task_id": "t-09-pause-resume",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-09-pause-resume/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.151,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": 2
+    },
+    {
+      "attempt_id": "t-09-pause-resume/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.839,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 7
+    }
+  ],
+  "workspace_generation_pointer": {
+    "checkpoint_id": "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b",
+    "generation": ".forge-workspace-gen-870dba3438d8",
+    "generation_path": "/private/var/folders/20/3bfl0_d13jz26z_w4wx2s7hm0000gn/T/lab-pilot-t-09-pause-resume-i4sei4hr/.forge-workspace-gen-870dba3438d8",
+    "schema": "forge.workspace-generation/1",
+    "work_id": "lab-t-09-pause-resume"
+  }
+}

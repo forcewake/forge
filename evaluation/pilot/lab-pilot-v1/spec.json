@@ -1,0 +1,117 @@
+{
+  "schema": "forge.pilot.spec/1",
+  "pilot_id": "lab-pilot-v1",
+  "platform": "lab-offline-seams",
+  "recipe_id": "forge-recipe/lab-offline/codex-app/scripted-vendor",
+  "harness_id": "lab-lane-subprocess+shipped-collector",
+  "decision_owners": [
+    "Pavel Nasovich (forge maintainer — the lab operator this pilot records)"
+  ],
+  "fee_note": "UNPAID lab pilot: $0 exchanged. The fee-as-demand-test is deliberately NOT exercised — the lab is not a customer and no purchase decision existed to test. A paid design-partner pilot remains the next step (see unsupported features).",
+  "data_boundary": {
+    "writable_repos": [
+      "lab/checkout",
+      "acme/forge-pe"
+    ],
+    "neighbor_repos": [
+      "lab/neighbor-contracts"
+    ],
+    "secrets_scope": "sentinel lab tokens only: work-scoped HMAC fixture secrets and fake-native bearer tokens against loopback services; no production credential exists anywhere in this pilot",
+    "production_secrets": false,
+    "automatic_merge": false,
+    "automatic_deploy": false
+  },
+  "unsupported_features": [
+    "Paid model calls — the vendor is the controlled scripted vendor speaking the real codex app-server wire; token counts are real wire observations but no spend exists, so every cost metric is unknown by construction",
+    "A real design-partner customer — the named environment is the forge LAB, not a customer; no customer decided usefulness here and the decision owners are the maintainers",
+    "The live GitLab CE flow — refused by the #268 qualification (deployed control plane 0.28.0 vs the pinned v0.35.0 wheel; no budget caps; the GitLab dispatch seam carries no lane-resume contract); this pilot runs the offline production-entry seams instead",
+    "Cross-runner resume on the LIVE GitLab dispatch seam — the GitHub-lane parity gap recorded in qualification/profiles/gitlab-ce-v1.md section 8; exercised offline through the lane subprocess resume contract instead",
+    "Human review by partner engineers — acceptance is the lab operator's independent verification over seam artifacts (diffs, dispatch ledgers, checkpoint identities), never a model self-summary and never PR creation",
+    "The 4-8 week partner window — the lab window is its single execution day; the J-curve and adoption learning a real window buys do not exist here and are not claimed"
+  ],
+  "ladder": [
+    {
+      "stage": "read_plan",
+      "scope": "read-only over the fixture repositories; discovery questions and evidence-cited plans, no code changes land",
+      "authority": "read-only; open questions answered by the lab operator through the durable answer surface"
+    },
+    {
+      "stage": "small_fixes",
+      "scope": "single-area fixes inside lab/checkout verified by independent checks that do not trust the agent's self-report",
+      "authority": "work happens in the fixture checkout's workspace generation; the operator collects and verifies the candidate"
+    },
+    {
+      "stage": "branch_pr",
+      "scope": "multi-file changes inside lab/checkout whose decisive evidence cites the read-only neighbor lab/neighbor-contracts at exact OIDs",
+      "authority": "collected candidate diffs; the operator accepts on seam evidence; the neighbor stays read-only"
+    },
+    {
+      "stage": "gate",
+      "scope": "the full failure, resume and intervention flows across runners on the lab seams (checkpoint authority, native dispatch ledger, control plane)",
+      "authority": "ready_for_human gate: the operator decides on recorded seam artifacts before anything counts as delivered"
+    }
+  ],
+  "criteria": [
+    {
+      "criterion_id": "lab-autonomy",
+      "statement": "At least half the recorded tasks are accepted with zero human code change on the deliverable.",
+      "metric": "autonomy_rate",
+      "op": ">=",
+      "value": 0.5,
+      "method": "tracker fold over operator-recorded acceptance and human_code_change flags, judged at the named end date over all recorded tasks (blocked tasks included)",
+      "end_date": "2026-09-23"
+    },
+    {
+      "criterion_id": "lab-intervention-bounded",
+      "statement": "At most half the recorded tasks carry an intervention event (partial steering counted exactly like a takeover).",
+      "metric": "intervention_rate",
+      "op": "<=",
+      "value": 0.5,
+      "method": "tracker fold over recorded intervention events (steer/pause/resume/cancel/takeover/question_answer), judged at the named end date",
+      "end_date": "2026-09-23"
+    },
+    {
+      "criterion_id": "lab-cost-bounded",
+      "statement": "All-attempt spend per accepted task at or under $25 — expected UNJUDGEABLE at lab scope because no paid models run and spend is unknown, never zero.",
+      "metric": "cost_per_accepted_usd",
+      "op": "<=",
+      "value": 25.0,
+      "method": "tracker fold over the per-attempt usage ledger; any unrecorded spend keeps the criterion unjudgeable and named, never silently failed",
+      "end_date": "2026-09-23"
+    }
+  ],
+  "window": {
+    "start": "2026-09-22",
+    "end": "2026-09-23"
+  },
+  "baseline": {
+    "window_start": "2026-08-01",
+    "window_end": "2026-09-22",
+    "cycle_time_minutes": 30.0,
+    "dora": {
+      "note": "AUTHORED lab baseline, not a partner measurement: 30 minutes is the operator's planned manual time for one task of this shape (checkout, edit by hand, collect, verify by hand). No DORA four exist for the lab — there is no delivery pipeline history. cycle_time_vs_baseline is reported against this authored bound and never headlined.",
+      "deployment_frequency": null,
+      "lead_time_minutes": null,
+      "change_failure_rate": null,
+      "recovery_time_minutes": null
+    }
+  },
+  "review_groups": [
+    "g1-questions",
+    "g2-fixes",
+    "g3-neighbors",
+    "g4-operations"
+  ],
+  "review_cadence": "after each task group completes — the lab pilot runs in one session, so the weekly operator cadence degenerates honestly to a per-group review pass",
+  "exits": {
+    "allowed": ["expand", "extend_once", "stop"],
+    "extension_limit": 1
+  },
+  "provenance_labels": [
+    "lab-operational-pilot",
+    "evidence-class:lab-operational",
+    "scripted-vendor",
+    "no-paid-models"
+  ],
+  "measurement_window_note": "The window spans the spec freeze (2026-09-22, pre-kickoff) to the lab execution day (2026-09-23); criteria are judged at the named end date exactly as a partner pilot would judge them — but on lab-operational evidence only (see the provenance labels and the report's evidence class; the verdict bounds itself to the lab)."
+}

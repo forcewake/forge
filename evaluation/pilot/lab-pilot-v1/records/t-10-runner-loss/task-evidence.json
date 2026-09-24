@@ -1,0 +1,240 @@
+{
+  "attempts": [
+    {
+      "attempt_id": "t-10-runner-loss/a1",
+      "note": "bootstrap death: no vendor turn ever ran",
+      "wall_seconds": 0.0
+    },
+    {
+      "attempt_id": "t-10-runner-loss/a2",
+      "note": "retry dispatch: fresh mode demanded",
+      "wall_seconds": 0.0
+    }
+  ],
+  "brief": "Implement the widget (the runner dies at bootstrap before the vendor starts).",
+  "checkpoint_ids": [],
+  "continuation_evidence": {
+    "candidate_published": false,
+    "checkpoint_committed": false,
+    "checkpoint_digest": null,
+    "decided_at": "2026-09-24T01:42:11.963618+00:00",
+    "discard_authorized_by": null,
+    "evidence_digest": "a1022f590f50c91c431058089f32bf33936997e9f950027cda66c75b6c96c16f",
+    "evidence_version": 2,
+    "mode": "fresh",
+    "mode_selected": "fresh",
+    "native_command_id": "lab-t-10-runner-loss-retry-1",
+    "native_start_verdict": null,
+    "no_checkpoint_baseline": true,
+    "operator_discard_requested": false,
+    "prior_mode_selected": null,
+    "reason": "no vendor session ever started (recorded bootstrap classification) \u2014 no WIP can exist, so the retry continues from the committed baseline",
+    "source_attempt": 0,
+    "uncertain": false,
+    "vendor_started": false
+  },
+  "dispatch_ledger": [
+    {
+      "executor_input_digest": "ef2058ce2f7bb1687241eb554efd33cd0e2d61e7ecc18c10a8d4931641689c03",
+      "inputs": {
+        "attempt_base_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "driver": "claude-code",
+        "envelope_digest": "5b51144822bd0feb9fc3c9e4c6c948f44218cb87553d81290c80abcbae8f5368",
+        "issue_number": "42",
+        "lane_control_token": "3d0d0734164b590b01d82dce43f51b5267bbcdb47b3b488c62aee3b2d991ad8f",
+        "lane_resume_mode": "fresh",
+        "model": "glm-5.3-flash[1m]",
+        "plan_note_id": "9001",
+        "run_id": "40ad65c27a7b4b0bba3d92542a830df6",
+        "spec_digest": "e73afff364dbc820616eed7ff2f8fa7f74dd75d174e7afb9c6b10ee516f75332"
+      },
+      "ref": "forge/42/40ad65c2",
+      "run_id": 501,
+      "workflow": "forge-harness.github.yml"
+    },
+    {
+      "executor_input_digest": "ef2058ce2f7bb1687241eb554efd33cd0e2d61e7ecc18c10a8d4931641689c03",
+      "inputs": {
+        "attempt_base_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "driver": "claude-code",
+        "envelope_digest": "5b51144822bd0feb9fc3c9e4c6c948f44218cb87553d81290c80abcbae8f5368",
+        "issue_number": "42",
+        "lane_control_token": "a48b2804413aef29b238b820ae5821ac1b5ae3c859db72e64e96f73cb425a6fd",
+        "lane_resume_mode": "fresh",
+        "model": "glm-5.3-flash[1m]",
+        "plan_note_id": "9001",
+        "repair_context": "Why the previous attempt stopped: harness_infrastructure: harness_bootstrap_failed (node setup)",
+        "run_id": "40ad65c27a7b4b0bba3d92542a830df6",
+        "spec_digest": "e73afff364dbc820616eed7ff2f8fa7f74dd75d174e7afb9c6b10ee516f75332"
+      },
+      "ref": "forge/42/40ad65c2",
+      "run_id": 502,
+      "workflow": "forge-harness.github.yml"
+    }
+  ],
+  "driver": "runner_loss_retry",
+  "evidence_class": "lab-operational",
+  "interventions": [],
+  "native_comments": [
+    "## Forge plan \u2014 run `40ad65c2`\n\n<!-- forge:brief:plan -->\n## Implementation plan\n\n- **Issue:** t\n- **Request:** d\n- **Approach:** create a single demo file describing the change\n- **Verification:** project CI pipeline on the Draft MR\n- **Scope:** one file under `forge-demo/`, no CI or config changes\n\n<!-- forge:brief:task -->\nt\n<!-- forge:brief:task-description -->\nd\n<!-- forge:brief:end -->\n## Implementation\n- Harness: **claude-code** \u00b7 model glm-5.3-flash[1m]\n- Fallbacks: none\n- Budget class: standard\n- Commit cycles: 3\n- Selection reason: default\n\n---\n\n**Plan digest:** `c2cc916fc25ac8e983817309b3e127a921c71415583657183e523b8effbe4d51`\n\nApprove this exact plan by commenting ` /go 40ad65c27a7b4b0bba3d92542a830df6`.\n\nApprovers: @alice.\n\n*This is an automated message.*",
+    "## \ud83d\udd28 Run `40ad65c2` taken into work\n\n- Agent: **Claude Code** in GitHub Actions\n- Branch: `forge/42/40ad65c2`\n- [\u25b6 watch the run live](https://github.com/acme/forge-pe/actions/runs/501)\n\nThe full-fidelity log stays in the job; this issue gets the evidence comment when the run reaches a verdict.\n\n*This is an automated message.*",
+    "## \ud83d\udd01 Run `40ad65c2` retried by @alice\n\n- Branch: `forge/42/40ad65c2` \u2014 the work continues in place, no re-planning\n- Commit cycle: 2\n- Continuation: committed baseline (no WIP existed \u2014 no vendor session ever started)\n\n*This is an automated message.*",
+    "## \ud83d\udd28 Run `40ad65c2` taken into work\n\n- Agent: **Claude Code** in GitHub Actions\n- Branch: `forge/42/40ad65c2`\n- [\u25b6 watch the run live](https://github.com/acme/forge-pe/actions/runs/502)\n\nThe full-fidelity log stays in the job; this issue gets the evidence comment when the run reaches a verdict.\n\n*This is an automated message.*"
+  ],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:11.992347+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "retry (fresh)",
+      "detail": "no candidate and no checkpoint existed \u2014 the committed baseline",
+      "point": "retry-after-loss",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:12.149717+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:12.149728+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "ledger-carries-fresh-retry=ok; no-checkpoint-prerequisite=ok; decision-evidence-bound=ok; client-stayed-on-modeled-surface=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-10-runner-loss/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-10-runner-loss/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0078,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0,
+    "rollbacks": 0,
+    "setup_minutes": 0.0039,
+    "started_at": "2026-09-24T01:42:11.683897+00:00",
+    "task_id": "t-10-runner-loss",
+    "touched_repos": [
+      "acme/forge-pe"
+    ],
+    "unaccepted": false
+  },
+  "run_id": "40ad65c27a7b4b0bba3d92542a830df6",
+  "scenario": "runner_loss",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "exactly one NEW dispatch whose inputs carry lane_resume_mode=fresh",
+      "name": "ledger-carries-fresh-retry",
+      "observed": "dispatches=2 last_inputs={'run_id': '40ad65c27a7b4b0bba3d92542a830df6', 'attempt_base_oid': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'driver': 'claude-code', 'model': 'glm-5.3-flash[1m]', 'issue_number': '42', 'plan_note_id': '9001', 'lane_control_token': 'a48b2804413aef29b238b820ae5821ac1b5ae3c859db72e64e96f73cb425a6fd', 'envelope_digest': '5b51144822bd0feb9fc3c9e4c6c948f44218cb87553d81290c80abcbae8f5368', 'spec_digest': 'e73afff364dbc820616eed7ff2f8fa7f74dd75d174e7afb9c6b10ee516f75332', 'lane_resume_mode': 'fresh', 'repair_context': 'Why the previous attempt stopped: harness_infrastructure: harness_bootstrap_failed (node setup)'}",
+      "ok": true
+    },
+    {
+      "expected": "no checkpoint ref keys rode the retry dispatch",
+      "name": "no-checkpoint-prerequisite",
+      "observed": "inputs_keys=['attempt_base_oid', 'driver', 'envelope_digest', 'issue_number', 'lane_control_token', 'lane_resume_mode', 'model', 'plan_note_id', 'repair_context', 'run_id', 'spec_digest']",
+      "ok": true
+    },
+    {
+      "expected": "the run's continuation evidence names fresh + no_checkpoint_baseline",
+      "name": "decision-evidence-bound",
+      "observed": "continuation={'mode': 'fresh', 'mode_selected': 'fresh', 'reason': 'no vendor session ever started (recorded bootstrap classification) \u2014 no WIP can exist, so the retry continues from the committed baseline', 'decided_at': '2026-09-24T01:42:11.963618+00:00', 'evidence_digest': 'a1022f590f50c91c431058089f32bf33936997e9f950027cda66c75b6c96c16f', 'evidence_version': 2, 'uncertain': False, 'vendor_started': False, 'checkpoint_committed': False, 'candidate_published': False, 'operator_discard_requested': False, 'prior_mode_selected': None, 'source_attempt': 0, 'native_command_id': 'lab-t-10-runner-loss-retry-1', 'native_start_verdict': None, 'checkpoint_digest': None, 'discard_authorized_by': None, 'no_checkpoint_baseline': True}",
+      "ok": true
+    },
+    {
+      "expected": "the real client never fell off the modeled API",
+      "name": "client-stayed-on-modeled-surface",
+      "observed": "unknown_paths=[]",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the bootstrap death is journaled on the run row; the authenticated /retry through the real service produces exactly one new native dispatch whose recorded inputs carry lane_resume_mode=fresh with no checkpoint prerequisite (AT-02 seam outcome, asserted on the native server's dispatch ledger)",
+    "group": "g4-operations",
+    "non_goals": [
+      "no checkpoint may be demanded (no useful work existed)",
+      "no lane subprocess runs in this task (the death precedes the vendor)"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "runner_loss",
+    "stage": "gate",
+    "task_id": "t-10-runner-loss",
+    "title": "Runner lost before any useful work: the retry dispatches fresh",
+    "verification": [
+      {
+        "method": "the native server's dispatch ledger holds exactly two dispatches for the run and the last inputs carry lane_resume_mode=fresh",
+        "name": "ledger-carries-fresh-retry"
+      },
+      {
+        "method": "the run's continuation evidence names mode fresh and no_checkpoint_baseline true",
+        "name": "decision-evidence-bound"
+      },
+      {
+        "method": "the native server's unknown_paths list is empty",
+        "name": "client-stayed-on-modeled-surface"
+      }
+    ]
+  },
+  "task_id": "t-10-runner-loss",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-10-runner-loss/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.0,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": null
+    },
+    {
+      "attempt_id": "t-10-runner-loss/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.0,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": null
+    }
+  ]
+}

@@ -1,0 +1,208 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-08-offline-neighbor-deadline-policy",
+  "mode": "research",
+  "snapshot_digest": "f4243a4adbbd1aef8b2c484e3be153f7baefc8221beb6edda6362354179f9b5d",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 3,
+        "calls_executed": 3,
+        "wall_seconds_used": 1.75,
+        "tokens": {
+          "input": 1880,
+          "output": 270,
+          "input_lower_bound": 1880,
+          "output_lower_bound": 270,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "research_document": {
+    "schema": "forge.discovery.research/1",
+    "mode": "research-harness",
+    "complete": true,
+    "stopped_reason": "",
+    "iterations": 3,
+    "calls_proposed": 3,
+    "calls_executed": 3,
+    "observations": {
+      "count": 3,
+      "truncated": 0,
+      "errors": 0
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "wall_seconds_used": 1.75,
+    "tokens": {
+      "input": 1880,
+      "output": 270,
+      "input_lower_bound": 1880,
+      "output_lower_bound": 270,
+      "unknown_usage_calls": 0
+    },
+    "repos_consulted": [
+      "billing",
+      "orders"
+    ],
+    "repos_authorized": [
+      "billing",
+      "orders"
+    ],
+    "findings": [
+      {
+        "evidence_id": "ev-1",
+        "repo_key": "billing",
+        "repository_id": "gitlab-9202",
+        "path": "src/courier.py",
+        "line": 25,
+        "kind": "research_match",
+        "detail": "DEADLINE_POLICY"
+      },
+      {
+        "evidence_id": "ev-2",
+        "repo_key": "orders",
+        "repository_id": "github-4401",
+        "path": "src/dispatch.py",
+        "line": 1,
+        "kind": "research_read",
+        "detail": "read 545 chars from offset 0"
+      },
+      {
+        "evidence_id": "ev-3",
+        "repo_key": "billing",
+        "repository_id": "gitlab-9202",
+        "path": "src/courier.py",
+        "line": 606,
+        "kind": "research_read",
+        "detail": "read 92 chars from offset 605"
+      }
+    ],
+    "omissions": [],
+    "omissions_dropped": 0,
+    "summary": "Orders' dispatch imports COURIER_DEADLINE_POLICY from Billing (src/dispatch.py); Billing defines it in src/courier.py at a non-initial window \u2014 window_seconds 900, grace_seconds 60, version v3. The decisive contract lives only in the neighbor.",
+    "assumptions": [],
+    "contradictions": [],
+    "rules": "Bounded research pass over the authorized snapshot. complete=false means a budget stopped the investigation early \u2014 the findings are partial, not exhaustive. Findings cite evidence:<id> recorded by this discovery. tokens.input/output are the EXACT totals only when unknown_usage_calls is 0; otherwise the *_lower_bound fields are what was actually observed."
+  },
+  "observations": [
+    {
+      "tool": "grep",
+      "repo_key": "billing",
+      "call": "pattern DEADLINE_POLICY",
+      "content": "src/courier.py:25: COURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "orders",
+      "call": "src/dispatch.py offset 0 length 600",
+      "content": "\"\"\"Orders' dispatch retries (offline capture seed).\n\nThe courier deadline window is Billing's contract: Orders imports and\nenforces it, but never defines it. See billing/src/courier.py.\n\"\"\"\n\nfrom billing.courier import COURIER_DEADLINE_POLICY\n\n\ndef dispatch_within_deadline(order_id: str) -> str:\n    \"\"\"Dispatch an order inside Billing's courier deadline window.\"\"\"\n    window = COURIER_DEADLINE_POLICY[\"window_seconds\"]\n    grace = COURIER_DEADLINE_POLICY[\"grace_seconds\"]\n    return f\"dispatched {order_id} within {window}s (grace {grace}s)\"\n",
+      "error": "",
+      "truncated": false
+    },
+    {
+      "tool": "read_file",
+      "repo_key": "billing",
+      "call": "src/courier.py offset 605 length 92",
+      "content": "\n\nCOURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}\n\n\n",
+      "error": "",
+      "truncated": false
+    }
+  ],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address billing/src/courier.py (research_match: DEADLINE_POLICY)",
+        "evidence_refs": [
+          "ev-1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address orders/src/dispatch.py (research_read: read 545 chars from offset 0)",
+        "evidence_refs": [
+          "ev-2"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "billing",
+        "path": "src/courier.py",
+        "why": "research_match"
+      },
+      {
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "why": "research_read"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "COURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}",
+        "repo": "billing",
+        "path": "src/courier.py",
+        "line": 25,
+        "asserted_content": "COURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}",
+        "evidence": "evidence:ev-1"
+      },
+      {
+        "claim_id": "c2",
+        "text": "\"\"\"Orders' dispatch retries (offline capture seed).",
+        "repo": "orders",
+        "path": "src/dispatch.py",
+        "line": 1,
+        "asserted_content": "\"\"\"Orders' dispatch retries (offline capture seed).",
+        "evidence": "evidence:ev-2"
+      }
+    ],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "scripted:reactive-investigation/v1",
+    "route": "offline-scripted-over-real-tool-loop",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 3,
+      "calls_executed": 3,
+      "wall_seconds_used": 1.75,
+      "tokens": {
+        "input": 1880,
+        "output": 270,
+        "input_lower_bound": 1880,
+        "output_lower_bound": 270,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "forge.adaptive.research_planner.run_research_pass",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

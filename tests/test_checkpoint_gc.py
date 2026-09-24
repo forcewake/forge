@@ -30,6 +30,26 @@ The contract this suite pins:
   nothing owned by committed references, and an interrupted GC converges
   on the next pass without double deletion.
 
+R36-04 (probe P04) extends the contract past what a recheck can do: the
+Q35-05 SELECT only sees references committed BEFORE it ran, so a
+DIFFERENT work's landing could commit a reference to a shared digest
+between the collector's FINAL scan and its unlink. The suite pins the
+volume-wide reference/delete lock that closes it:
+
+- **P04 schedule** — B's landing begins strictly after A's final scan
+  (driven through the TEST-ONLY ``store.gc_after_final_scan`` barrier,
+  which fires between the scan and the unlink); B's committed reference
+  still reads verified bytes, for explicit retention, on-upload
+  cleanup and pending-GC recovery, on both authorities and against
+  real PostgreSQL with two engines; B-before-scan stays the control;
+- **the lock** — held from the final scan through the last unlink,
+  bounded (``GCLockTimeout``: a sweep aborts, deletes nothing and
+  retries later), and deadlock-free under two concurrent sweeps plus a
+  concurrent writer (one global lock order);
+- **the rollout fence** — ``FORGE_CHECKPOINT_SWEEP=off`` marks but
+  never unlinks; turning sweeping back on collects the marked set
+  against current reachability.
+
 The PostgreSQL proofs that need real isolation are gated on
 ``FORGE_PG_TEST_URL`` (the ADR-0017 failure-injection convention); the
 SQLite approximations run always.
@@ -41,13 +61,15 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from forge import api_checkpoint_channel as api_channel
 from forge.adaptive.checkpoint_repository import (
@@ -93,6 +115,28 @@ async def _sqlite_factory() -> tuple[Any, async_sessionmaker[AsyncSession]]:
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _sqlite_file_factory(
+    tmp_path: Path,
+) -> tuple[Any, async_sessionmaker[AsyncSession]]:
+    """A file-backed SQLite factory with REAL separate connections.
+
+    The in-memory ``StaticPool`` approximation hands every session the
+    SAME connection, so a session that closes without committing (the
+    retention MARK phase, deliberately outside the volume lock)
+    implicitly rolls back whatever uncommitted work shares that
+    connection — an artifact no deployment has. The concurrency proofs
+    below need genuinely independent connections to interleave the way
+    two processes would.
+    """
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'gc-concurrency.db'}",
+        poolclass=NullPool,
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -231,6 +275,141 @@ class TestP03SchedulePostgres:
             assert served_manifest == b_manifest
             assert served_blobs == {_digest(SHARED): SHARED}
             assert (tmp_path / "cas" / shared_digest[:2] / shared_digest).is_file()
+        finally:
+            await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 1.5 THE P04 SCHEDULE (R36-04) — a B reference landing AFTER A's FINAL
+#     reference scan, before A's unlink, keeps its bytes. The Q35-05
+#     recheck protected references committed BEFORE its SELECT; the
+#     remaining window (different work, per-work locks, unlink outside the
+#     metadata transaction) is closed by the volume-wide reference/delete
+#     lock: writers take it for their reference-recording transaction,
+#     sweeps hold it from the final scan through the last unlink.
+# ---------------------------------------------------------------------------
+
+
+def _cas_path_of(root: Path, digest: str) -> Path:
+    return root / digest[:2] / digest
+
+
+class TestP04ScheduleFilesystem:
+    def test_b_reference_after_the_final_scan_survives_the_sweep(self, tmp_path: Path) -> None:
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        shared_digest = _seed_two_checkpoints_with_shared_old_fs(store)
+        b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+        b_manifest_path = _cas_path_of(tmp_path / "cas", b_id)
+        landed = threading.Event()
+        put_error: list[BaseException] = []
+
+        def start_b_after_the_final_scan() -> None:
+            def run_b() -> None:
+                try:
+                    store.put_checkpoint(
+                        work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+                    )
+                except BaseException as exc:  # pragma: no cover — surfaced below
+                    put_error.append(exc)
+                finally:
+                    landed.set()
+
+            threading.Thread(target=run_b, daemon=True).start()
+            # B's REAL landing wrote its blobs and is now queued on the
+            # volume lock A holds: the manifest write is the landing's
+            # LAST step before that queue, so its existence is the
+            # deterministic rendezvous.
+            deadline = time.monotonic() + 10.0
+            while not b_manifest_path.is_file():
+                if time.monotonic() > deadline:
+                    raise AssertionError("work B never wrote its manifest bytes")
+                time.sleep(0.005)
+
+        store.gc_after_final_scan = start_b_after_the_final_scan
+
+        removed = store.apply_retention(WORK_A, keep_last=1)
+
+        assert removed == 1
+        assert landed.wait(10.0), "work B's landing never finished"
+        assert put_error == []
+        # THE P04 assertion: B's committed reference resolves verified
+        # bytes even though it began strictly after A's final scan.
+        entry = store.entry(WORK_B)
+        assert entry is not None and entry["checkpoint_id"] == b_id
+        served_manifest, served_blobs = store.read_checkpoint(entry)
+        assert served_manifest == b_manifest
+        assert served_blobs == {shared_digest: SHARED}
+        assert _cas_path_of(tmp_path / "cas", shared_digest).is_file()
+        # And A's active checkpoint is untouched.
+        new_manifest, _new_blobs, _new_id = _checkpoint(WORK_A, {"v2.txt": b"work a v2\n"}, 2)
+        assert store.read_checkpoint(store.entry(WORK_A))[0] == new_manifest
+
+    def test_b_reference_before_the_final_scan_is_spared_control(self, tmp_path: Path) -> None:
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        shared_digest = _seed_two_checkpoints_with_shared_old_fs(store)
+        b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+        # B commits FIRST — the already-safe order A's recheck sees.
+        store.put_checkpoint(work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1)
+
+        removed = store.apply_retention(WORK_A, keep_last=1)
+
+        assert removed == 1
+        entry = store.entry(WORK_B)
+        assert entry is not None and entry["checkpoint_id"] == b_id
+        served_manifest, served_blobs = store.read_checkpoint(entry)
+        assert served_manifest == b_manifest
+        assert served_blobs == {shared_digest: SHARED}
+        assert _cas_path_of(tmp_path / "cas", shared_digest).is_file()
+
+
+class TestP04SchedulePostgres:
+    async def test_b_reference_after_the_final_scan_survives_the_sweep(
+        self, tmp_path: Path
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            store = _pg_store(tmp_path / "cas", factory)
+            shared_digest = await _seed_two_checkpoints_with_shared_old_pg(store)
+            other = _pg_store(tmp_path / "cas", factory)  # a FRESH store over the same volume
+            b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+            b_manifest_path = _cas_path_of(tmp_path / "cas", b_id)
+            task: asyncio.Task[None] | None = None
+            put_error: list[BaseException] = []
+
+            async def start_b_after_the_final_scan() -> None:
+                async def run_b() -> None:
+                    try:
+                        await other.aput_checkpoint(
+                            work_id=WORK_B,
+                            manifest_bytes=b_manifest,
+                            blobs=b_blobs,
+                            sequence=1,
+                        )
+                    except BaseException as exc:  # pragma: no cover — surfaced below
+                        put_error.append(exc)
+
+                nonlocal task
+                task = asyncio.create_task(run_b())
+                deadline = asyncio.get_running_loop().time() + 10.0
+                while not b_manifest_path.is_file():
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise AssertionError("work B never wrote its manifest bytes")
+                    await asyncio.sleep(0.005)
+
+            store.gc_after_final_scan = start_b_after_the_final_scan
+
+            removed = await store.aapply_retention(WORK_A, keep_last=1)
+
+            assert removed == 1
+            assert task is not None
+            await asyncio.wait_for(task, 10.0)
+            assert put_error == []
+            entry = await store.aentry(WORK_B)
+            assert entry is not None and entry["checkpoint_id"] == b_id
+            served_manifest, served_blobs = store.read_checkpoint(entry)
+            assert served_manifest == b_manifest
+            assert served_blobs == {shared_digest: SHARED}
+            assert _cas_path_of(tmp_path / "cas", shared_digest).is_file()
         finally:
             await engine.dispose()
 
@@ -529,16 +708,16 @@ class TestInterruptedGcConverges:
             # doomed pair — no other work references them in this test.
             doomed_blob = shared_digest
 
-            async def crashing_sweep(digests: list[str]) -> None:
+            async def crashing_sweep(digests: list[str]) -> set[str]:
                 raise RuntimeError("killed between commit and unlink")
 
-            original_sweep = store._asweep
-            monkeypatch.setattr(store, "_asweep", crashing_sweep)
+            original_sweep = store._asweep_locked
+            monkeypatch.setattr(store, "_asweep_locked", crashing_sweep)
 
             with pytest.raises(RuntimeError, match="between commit and unlink"):
                 await store.aapply_retention(WORK_A, keep_last=1)
 
-            monkeypatch.setattr(store, "_asweep", original_sweep)
+            monkeypatch.setattr(store, "_asweep_locked", original_sweep)
             # The crash window left orphans (rows committed, blobs present).
             assert (tmp_path / "cas" / doomed_blob[:2] / doomed_blob).is_file()
 
@@ -566,10 +745,10 @@ class TestInterruptedGcConverges:
 
         # Kill the collector right after the tombstone (index save),
         # before one unlink ran — by crashing the sweep entrypoint.
-        def killed_before_sweep(digests: list[str]) -> None:
+        def killed_before_sweep(digests: list[str]) -> set[str]:
             raise OSError("killed before sweep")
 
-        monkeypatch.setattr(store, "_sweep", killed_before_sweep)
+        monkeypatch.setattr(store, "_sweep_locked", killed_before_sweep)
         with pytest.raises(OSError, match="killed before sweep"):
             store.apply_retention(WORK_A, keep_last=1)
         monkeypatch.undo()  # the collector restarts for the recovery pass
@@ -587,7 +766,442 @@ class TestInterruptedGcConverges:
 
 
 # ---------------------------------------------------------------------------
-# 6. DEDUPLICATED BLOBS — retention of one work never deletes a blob another
+# 6. THE SAME BARRIER ON EVERY SWEEP PATH (R36-04) — on-upload cleanup and
+#    pending-GC recovery obey the identical scan-to-unlink serialization.
+# ---------------------------------------------------------------------------
+
+
+def _start_b_thread(store: Any, b_manifest: bytes, b_blobs: dict[str, bytes]) -> threading.Event:
+    """B's REAL sync landing on its own thread; the event fires when done."""
+    landed = threading.Event()
+
+    def run_b() -> None:
+        try:
+            store.put_checkpoint(
+                work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+            )
+        except BaseException:  # pragma: no cover — surfaced by the caller's assertions
+            raise
+        finally:
+            landed.set()
+
+    threading.Thread(target=run_b, daemon=True).start()
+    return landed
+
+
+def _wait_for_file(path: Path, *, timeout: float = 10.0) -> None:
+    """Block until *path* exists — B wrote its blobs and queued on the lock."""
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{path} never appeared — work B never wrote its bytes")
+        time.sleep(0.005)
+
+
+class TestP04OnUploadCleanup:
+    async def test_b_reference_after_the_final_scan_survives_on_upload_cleanup(
+        self, tmp_path: Path
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            root = tmp_path / "cas"
+            seed = _pg_store(root, factory)  # keep-everything policy for seeding
+            shared_digest = await _seed_two_checkpoints_with_shared_old_pg(seed)
+            sweeping = _pg_store(
+                root,
+                factory,
+                policy=api_channel.StoragePolicy(
+                    max_checkpoints_per_work=1, cleanup_trigger="on_upload"
+                ),
+            )
+            other = _pg_store(root, factory)
+            b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+            b_manifest_path = _cas_path_of(root, b_id)
+            task: asyncio.Task[None] | None = None
+
+            async def start_b_after_the_final_scan() -> None:
+                async def run_b() -> None:
+                    await other.aput_checkpoint(
+                        work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+                    )
+
+                nonlocal task
+                task = asyncio.create_task(run_b())
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _wait_for_file, b_manifest_path
+                )
+
+            sweeping.gc_after_final_scan = start_b_after_the_final_scan
+            # A's THIRD landing triggers the on-upload retention inside the
+            # landing's own volume-lock section: scan (in txn) → commit →
+            # barrier → unlink.
+            v3 = _checkpoint(WORK_A, {"v3.txt": b"work a v3\n"}, 3)
+            await sweeping.aput_checkpoint(
+                work_id=WORK_A, manifest_bytes=v3[0], blobs=v3[1], sequence=3
+            )
+
+            assert task is not None
+            await asyncio.wait_for(task, 10.0)
+            entry = await sweeping.aentry(WORK_B)
+            assert entry is not None and entry["checkpoint_id"] == b_id
+            served_manifest, served_blobs = sweeping.read_checkpoint(entry)
+            assert served_manifest == b_manifest
+            assert served_blobs == {shared_digest: SHARED}
+        finally:
+            await engine.dispose()
+
+    def test_b_reference_after_the_final_scan_survives_on_upload_cleanup_filesystem(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "cas"
+        store = api_channel.CheckpointStore(root)
+        shared_digest = _seed_two_checkpoints_with_shared_old_fs(store)
+        sweeping = api_channel.CheckpointStore(
+            root,
+            policy=api_channel.StoragePolicy(
+                max_checkpoints_per_work=1, cleanup_trigger="on_upload"
+            ),
+        )
+        b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+        landed: list[threading.Event] = []
+
+        def start_b_after_the_final_scan() -> None:
+            landed.append(_start_b_thread(sweeping, b_manifest, b_blobs))
+            _wait_for_file(_cas_path_of(root, b_id))
+
+        sweeping.gc_after_final_scan = start_b_after_the_final_scan
+        v3 = _checkpoint(WORK_A, {"v3.txt": b"work a v3\n"}, 3)
+        sweeping.put_checkpoint(work_id=WORK_A, manifest_bytes=v3[0], blobs=v3[1], sequence=3)
+
+        assert landed and landed[0].wait(10.0)
+        entry = sweeping.entry(WORK_B)
+        assert entry is not None and entry["checkpoint_id"] == b_id
+        served_manifest, served_blobs = sweeping.read_checkpoint(entry)
+        assert served_manifest == b_manifest
+        assert served_blobs == {shared_digest: SHARED}
+
+
+class TestP04PendingGcRecovery:
+    async def test_b_reference_after_the_final_scan_survives_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            root = tmp_path / "cas"
+            store = _pg_store(root, factory)
+            shared_digest = await _seed_two_checkpoints_with_shared_old_pg(store)
+            other = _pg_store(root, factory)
+
+            # Crash the first pass between the metadata commit and the
+            # unlink — the journal keeps the deletion set pending.
+            async def crashed(digests: list[str]) -> set[str]:
+                raise RuntimeError("killed between commit and unlink")
+
+            monkeypatch.setattr(store, "_asweep_locked", crashed)
+            with pytest.raises(RuntimeError, match="between commit and unlink"):
+                await store.aapply_retention(WORK_A, keep_last=1)
+            monkeypatch.undo()  # the collector restarts
+
+            assert store.gc_journal.pending(WORK_A), "the interrupted pass journaled its set"
+            b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+            task: asyncio.Task[None] | None = None
+
+            async def start_b_after_the_final_scan() -> None:
+                async def run_b() -> None:
+                    await other.aput_checkpoint(
+                        work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+                    )
+
+                nonlocal task
+                task = asyncio.create_task(run_b())
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _wait_for_file, _cas_path_of(root, b_id)
+                )
+
+            store.gc_after_final_scan = start_b_after_the_final_scan
+            removed = await store.aapply_retention(WORK_A, keep_last=1)
+
+            assert removed == 0  # metadata already converged — recovery only
+            assert task is not None
+            await asyncio.wait_for(task, 10.0)
+            entry = await store.aentry(WORK_B)
+            assert entry is not None and entry["checkpoint_id"] == b_id
+            served_manifest, served_blobs = store.read_checkpoint(entry)
+            assert served_manifest == b_manifest
+            assert served_blobs == {shared_digest: SHARED}
+        finally:
+            await engine.dispose()
+
+    def test_b_reference_after_the_final_scan_survives_recovery_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "cas"
+        store = api_channel.CheckpointStore(root)
+        shared_digest = _seed_two_checkpoints_with_shared_old_fs(store)
+
+        def crashed(digests: list[str]) -> set[str]:
+            raise OSError("killed between tombstone and unlink")
+
+        monkeypatch.setattr(store, "_sweep_locked", crashed)
+        with pytest.raises(OSError, match="between tombstone and unlink"):
+            store.apply_retention(WORK_A, keep_last=1)
+        monkeypatch.undo()
+
+        b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+        landed: list[threading.Event] = []
+
+        def start_b_after_the_final_scan() -> None:
+            landed.append(_start_b_thread(store, b_manifest, b_blobs))
+            _wait_for_file(_cas_path_of(root, b_id))
+
+        store.gc_after_final_scan = start_b_after_the_final_scan
+        removed = store.apply_retention(WORK_A, keep_last=1)
+
+        assert removed == 0  # the tombstone stands — this pass only recovers
+        assert landed and landed[0].wait(10.0)
+        entry = store.entry(WORK_B)
+        assert entry is not None and entry["checkpoint_id"] == b_id
+        served_manifest, served_blobs = store.read_checkpoint(entry)
+        assert served_manifest == b_manifest
+        assert served_blobs == {shared_digest: SHARED}
+
+
+# ---------------------------------------------------------------------------
+# 7. THE LOCK ITSELF — held scan-to-unlink, bounded, single order, abortable.
+# ---------------------------------------------------------------------------
+
+try:  # POSIX flock — the volume lock's spine (matches the channel's import).
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
+
+
+def _flock_held(path: Path) -> bool:
+    """Whether another descriptor currently holds the volume lock."""
+    assert fcntl is not None, "POSIX flock required"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except OSError:
+            return True
+    finally:
+        os.close(fd)
+
+
+class TestVolumeLockMechanics:
+    def test_the_lock_spans_the_final_scan_through_the_unlink_filesystem(
+        self, tmp_path: Path
+    ) -> None:
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        _seed_two_checkpoints_with_shared_old_fs(store)
+        observed: list[bool] = []
+        store.gc_after_final_scan = lambda: observed.append(
+            _flock_held(store._cas_refs_lock_path())
+        )
+
+        removed = store.apply_retention(WORK_A, keep_last=1)
+
+        assert removed == 1
+        assert observed == [True], "the sweep must hold the volume lock at unlink time"
+
+    async def test_the_lock_spans_the_final_scan_through_the_unlink_postgres(
+        self, tmp_path: Path
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            store = _pg_store(tmp_path / "cas", factory)
+            await _seed_two_checkpoints_with_shared_old_pg(store)
+            observed: list[bool] = []
+            store.gc_after_final_scan = lambda: observed.append(
+                _flock_held(store._cas_refs_lock_path())
+            )
+
+            removed = await store.aapply_retention(WORK_A, keep_last=1)
+
+            assert removed == 1
+            assert observed == [True]
+        finally:
+            await engine.dispose()
+
+    async def test_a_contended_sweep_aborts_typed_and_retries_later_postgres(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            store = _pg_store(tmp_path / "cas", factory)
+            await _seed_two_checkpoints_with_shared_old_pg(store)
+            monkeypatch.setenv(api_channel.GC_LOCK_WAIT_SECONDS_ENV, "0.2")
+            # An external holder — another process's live sweep.
+            fd = os.open(str(store._cas_refs_lock_path()), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                with pytest.raises(api_channel.GCLockTimeout):
+                    await asyncio.wait_for(store.aapply_retention(WORK_A, keep_last=1), 30.0)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+            # The aborted sweep deleted NOTHING — both rows still stand.
+            old_id = _checkpoint(WORK_A, {"shared.txt": SHARED}, 1)[2]
+            assert await store.aentry(WORK_A, old_id) is not None
+            # Retried once the holder is gone, it converges.
+            assert await store.aapply_retention(WORK_A, keep_last=1) == 1
+            assert await store.aentry(WORK_A, old_id) is None
+        finally:
+            await engine.dispose()
+
+    def test_a_contended_sweep_aborts_typed_and_retries_later_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "cas"
+        store = api_channel.CheckpointStore(root)
+        shared_digest = _seed_two_checkpoints_with_shared_old_fs(store)
+        monkeypatch.setenv(api_channel.GC_LOCK_WAIT_SECONDS_ENV, "0.2")
+        fd = os.open(str(store._cas_refs_lock_path()), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with pytest.raises(api_channel.GCLockTimeout):
+                store.apply_retention(WORK_A, keep_last=1)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        # The aborted sweep unlinked NOTHING — the tombstone stands with
+        # the full pending set and every byte is still on disk (exactly
+        # the crash-after-tombstone window the completion pass recovers).
+        assert _cas_path_of(root, shared_digest).is_file()
+        index = json.loads((root / "works" / f"{WORK_A}.json").read_text())
+        assert index["retention"]["pending_gc"], "the aborted pass kept its marks"
+        # Retried once the holder is gone, it converges — and collects.
+        assert store.apply_retention(WORK_A, keep_last=1) == 0
+        assert not _cas_path_of(root, shared_digest).exists()
+        assert (
+            store.read_checkpoint(store.entry(WORK_A))[0]
+            == _checkpoint(WORK_A, {"v2.txt": b"work a v2\n"}, 2)[0]
+        )
+
+    async def test_two_sweeps_and_a_concurrent_writer_do_not_deadlock_postgres(
+        self, tmp_path: Path
+    ) -> None:
+        engine, factory = await _sqlite_file_factory(tmp_path)
+        try:
+            work_c = "wp-r36-04c"
+            store = _pg_store(tmp_path / "cas", factory)
+            await _seed_two_checkpoints_with_shared_old_pg(store)
+            await _put(_pg_repo(tmp_path, factory), WORK_B, {"b1.txt": b"b one\n"}, 1)
+            await _put(_pg_repo(tmp_path, factory), WORK_B, {"b2.txt": b"b two\n"}, 2)
+            c_manifest, c_blobs, c_id = _checkpoint(work_c, {"c.txt": b"see\n"}, 1)
+
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(
+                    store.aapply_retention(WORK_A, keep_last=1),
+                    store.aapply_retention(WORK_B, keep_last=1),
+                    store.aput_checkpoint(
+                        work_id=work_c,
+                        manifest_bytes=c_manifest,
+                        blobs=c_blobs,
+                        sequence=1,
+                    ),
+                ),
+                timeout=30.0,
+            )
+
+            assert outcomes[0] == 1 and outcomes[1] == 1  # both sweeps collected
+            entry = await store.aentry(work_c)
+            assert entry is not None and entry["checkpoint_id"] == c_id
+            store.read_checkpoint(entry)  # the concurrent writer's bytes are whole
+        finally:
+            await engine.dispose()
+
+    def test_two_sweeps_and_a_concurrent_writer_do_not_deadlock_filesystem(
+        self, tmp_path: Path
+    ) -> None:
+        import concurrent.futures
+
+        work_c = "wp-r36-04c"
+        store = api_channel.CheckpointStore(tmp_path / "cas")
+        _seed_two_checkpoints_with_shared_old_fs(store)
+        b1 = _checkpoint(WORK_B, {"b1.txt": b"b one\n"}, 1)
+        b2 = _checkpoint(WORK_B, {"b2.txt": b"b two\n"}, 2)
+        store.put_checkpoint(work_id=WORK_B, manifest_bytes=b1[0], blobs=b1[1], sequence=1)
+        store.put_checkpoint(work_id=WORK_B, manifest_bytes=b2[0], blobs=b2[1], sequence=2)
+        c = _checkpoint(work_c, {"c.txt": b"see\n"}, 1)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            sweep_a = pool.submit(store.apply_retention, WORK_A, 1)
+            sweep_b = pool.submit(store.apply_retention, WORK_B, 1)
+            writer = pool.submit(
+                store.put_checkpoint,
+                work_id=work_c,
+                manifest_bytes=c[0],
+                blobs=c[1],
+                sequence=1,
+            )
+            assert sweep_a.result(timeout=30.0) == 1
+            assert sweep_b.result(timeout=30.0) == 1
+            assert writer.result(timeout=30.0)["checkpoint_id"] == c[2]
+
+        entry = store.entry(work_c)
+        assert entry is not None
+        store.read_checkpoint(entry)  # the concurrent writer's bytes are whole
+
+
+# ---------------------------------------------------------------------------
+# 8. THE OPERATOR FENCE — FORGE_CHECKPOINT_SWEEP=off marks but never unlinks;
+#    turning sweeping back on collects the marked set safely.
+# ---------------------------------------------------------------------------
+
+
+class TestSweepDisabledRollout:
+    async def test_off_marks_but_never_unlinks_then_collects_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = _fs_repo(tmp_path)
+        old_id = await _put(repo, WORK_A, {"old.txt": b"old\n"}, 1)
+        await _put(repo, WORK_A, {"new.txt": b"new\n"}, 2)
+        old_blob = _digest(b"old\n")
+
+        monkeypatch.setenv(api_channel.SWEEP_ENV, "off")
+        assert await repo.apply_retention(WORK_A, keep_last=1) == 1  # metadata went
+        assert await repo.entry(WORK_A, old_id) is None
+        assert _cas_path_of(tmp_path / "cas", old_blob).is_file()  # bytes stayed
+        index = json.loads((tmp_path / "cas" / "works" / f"{WORK_A}.json").read_text())
+        assert index["retention"]["pending_gc"], "the tombstone stands while fenced"
+
+        monkeypatch.delenv(api_channel.SWEEP_ENV)
+        assert await repo.apply_retention(WORK_A, keep_last=1) == 0  # converged
+        assert not _cas_path_of(tmp_path / "cas", old_blob).exists()  # collected
+        assert await repo.read(WORK_A) is not None  # type: ignore[misc]
+
+    async def test_off_marks_but_never_unlinks_then_collects_postgres(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine, factory = await _sqlite_factory()
+        try:
+            repo = _pg_repo(tmp_path, factory)
+            old_id = await _put(repo, WORK_A, {"old.txt": b"pg old\n"}, 1)
+            await _put(repo, WORK_A, {"new.txt": b"pg new\n"}, 2)
+            old_blob = _digest(b"pg old\n")
+
+            monkeypatch.setenv(api_channel.SWEEP_ENV, "off")
+            assert await repo.apply_retention(WORK_A, keep_last=1) == 1
+            assert await repo.entry(WORK_A, old_id) is None
+            assert _cas_path_of(tmp_path / "cas", old_blob).is_file()
+            assert repo._store.gc_journal.pending(WORK_A), "the journal keeps the marked set"
+
+            monkeypatch.delenv(api_channel.SWEEP_ENV)
+            assert await repo.apply_retention(WORK_A, keep_last=1) == 0  # recovery only
+            assert not _cas_path_of(tmp_path / "cas", old_blob).exists()
+            assert repo._store.gc_journal.pending(WORK_A) == []
+            assert await repo.read(WORK_A) is not None  # type: ignore[misc]
+        finally:
+            await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 9. DEDUPLICATED BLOBS — retention of one work never deletes a blob another
 #    work's committed reference still needs.
 # ---------------------------------------------------------------------------
 
@@ -654,3 +1268,133 @@ class TestDeduplicatedBlobAcrossWorks:
             assert await repo.entry(WORK_A) is None  # refused before any write
         finally:
             await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 10. REAL POSTGRESQL, TWO ENGINES — the P04 barrier against the deployment
+#     topology the issue names: shared database, shared CAS volume, two
+#     independent processes (simulated with two engines/factories/stores).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not os.environ.get("FORGE_PG_TEST_URL"),
+    reason=(
+        "FORGE_PG_TEST_URL not set — the real-PostgreSQL P04 barrier proof "
+        "runs only against a disposable real Postgres (rows are deleted per test)"
+    ),
+)
+class TestP04ScheduleRealPostgres:
+    async def _lab(self, tmp_path: Path) -> tuple[Any, Any]:
+        url = os.environ["FORGE_PG_TEST_URL"]
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(delete(api_channel.CheckpointMetadataRow))
+        return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+    async def test_b_reference_after_the_final_scan_survives_two_engines(
+        self, tmp_path: Path
+    ) -> None:
+        engine_a, factory_a = await self._lab(tmp_path)
+        engine_b, factory_b = await self._lab(tmp_path)
+        shared_root = tmp_path / "shared-blobs"
+        try:
+            store_a = _pg_store(shared_root, factory_a)
+            store_b = _pg_store(shared_root, factory_b)  # the OTHER process
+            shared_digest = await _seed_two_checkpoints_with_shared_old_pg(store_a)
+            b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+            b_manifest_path = _cas_path_of(shared_root, b_id)
+            task: asyncio.Task[None] | None = None
+
+            async def start_b_after_the_final_scan() -> None:
+                async def run_b() -> None:
+                    await store_b.aput_checkpoint(
+                        work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+                    )
+
+                nonlocal task
+                task = asyncio.create_task(run_b())
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _wait_for_file, b_manifest_path
+                )
+
+            store_a.gc_after_final_scan = start_b_after_the_final_scan
+            removed = await store_a.aapply_retention(WORK_A, keep_last=1)
+
+            assert removed == 1
+            assert task is not None
+            await asyncio.wait_for(task, 15.0)
+            entry = await store_b.aentry(WORK_B)
+            assert entry is not None and entry["checkpoint_id"] == b_id
+            served_manifest, served_blobs = store_b.read_checkpoint(entry)
+            assert served_manifest == b_manifest
+            assert served_blobs == {shared_digest: SHARED}
+        finally:
+            await engine_a.dispose()
+            await engine_b.dispose()
+
+    async def test_b_reference_before_the_final_scan_is_spared_two_engines_control(
+        self, tmp_path: Path
+    ) -> None:
+        engine_a, factory_a = await self._lab(tmp_path)
+        engine_b, factory_b = await self._lab(tmp_path)
+        shared_root = tmp_path / "shared-blobs"
+        try:
+            store_a = _pg_store(shared_root, factory_a)
+            store_b = _pg_store(shared_root, factory_b)
+            shared_digest = await _seed_two_checkpoints_with_shared_old_pg(store_a)
+            b_manifest, b_blobs, b_id = _checkpoint(WORK_B, {"shared.txt": SHARED}, 1)
+            # B commits FIRST on its own engine — the already-safe order.
+            await store_b.aput_checkpoint(
+                work_id=WORK_B, manifest_bytes=b_manifest, blobs=b_blobs, sequence=1
+            )
+
+            removed = await store_a.aapply_retention(WORK_A, keep_last=1)
+
+            assert removed == 1
+            entry = await store_b.aentry(WORK_B)
+            assert entry is not None and entry["checkpoint_id"] == b_id
+            served_manifest, served_blobs = store_b.read_checkpoint(entry)
+            assert served_manifest == b_manifest
+            assert served_blobs == {shared_digest: SHARED}
+        finally:
+            await engine_a.dispose()
+            await engine_b.dispose()
+
+    async def test_the_advisory_twin_alone_blocks_a_sweep_and_is_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Where the blob root is NOT shared, the pg_advisory_lock twin is
+        the serializer: an external holder of the constant key blocks a
+        sweep (flock free) within the SAME bounded budget — never an
+        unbounded wait."""
+        from sqlalchemy import text
+
+        engine, factory = await self._lab(tmp_path)
+        holder_engine = create_async_engine(os.environ["FORGE_PG_TEST_URL"])
+        holder_factory = async_sessionmaker(holder_engine, expire_on_commit=False)
+        try:
+            store = _pg_store(tmp_path / "cas", factory)
+            await _seed_two_checkpoints_with_shared_old_pg(store)
+            assert await store._acas_refs_is_postgres() is True
+            monkeypatch.setenv(api_channel.GC_LOCK_WAIT_SECONDS_ENV, "0.5")
+
+            async with holder_factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        text("SELECT pg_advisory_lock(:k)"),
+                        {"k": api_channel._CAS_REFS_ADVISORY_KEY},
+                    )
+                    with pytest.raises(api_channel.GCLockTimeout):
+                        await asyncio.wait_for(store.aapply_retention(WORK_A, keep_last=1), 30.0)
+                    await session.execute(
+                        text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": api_channel._CAS_REFS_ADVISORY_KEY},
+                    )
+
+            # Released: the sweep retries and converges.
+            assert await store.aapply_retention(WORK_A, keep_last=1) == 1
+        finally:
+            await engine.dispose()
+            await holder_engine.dispose()

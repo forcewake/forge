@@ -1,0 +1,147 @@
+{
+  "schema": "forge.research.cohort.run/1",
+  "task_id": "RC-11-live-deep-lapse-handler",
+  "mode": "lexical",
+  "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "stopped_reason": "",
+      "cost": {
+        "calls_proposed": 0,
+        "calls_executed": 0,
+        "wall_seconds_used": 0.0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "input_lower_bound": 0,
+          "output_lower_bound": 0,
+          "unknown_usage_calls": 0
+        }
+      }
+    }
+  ],
+  "observations": [],
+  "plan": {
+    "steps": [
+      {
+        "step_id": "s1",
+        "objective": "address orders/src/handlers/expiry.py (symbol: handle_expiry)",
+        "evidence_refs": [
+          "lex-1"
+        ]
+      },
+      {
+        "step_id": "s2",
+        "objective": "address orders/src/timer.py (symbol: publish_expiry)",
+        "evidence_refs": [
+          "lex-2"
+        ]
+      },
+      {
+        "step_id": "s3",
+        "objective": "address orders/README.md (reference: expiry)",
+        "evidence_refs": [
+          "lex-3"
+        ]
+      },
+      {
+        "step_id": "s4",
+        "objective": "address orders/src/handlers/expiry.py (reference: expiry)",
+        "evidence_refs": [
+          "lex-4"
+        ]
+      }
+    ],
+    "surface": [
+      {
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "why": "symbol"
+      },
+      {
+        "repo": "orders",
+        "path": "src/timer.py",
+        "why": "symbol"
+      },
+      {
+        "repo": "orders",
+        "path": "README.md",
+        "why": "reference"
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c1",
+        "text": "def handle_expiry(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "line": 24,
+        "asserted_content": "def handle_expiry(order_id: str) -> str:"
+      },
+      {
+        "claim_id": "c2",
+        "text": "def publish_expiry(order_id: str) -> str:",
+        "repo": "orders",
+        "path": "src/timer.py",
+        "line": 12,
+        "asserted_content": "def publish_expiry(order_id: str) -> str:"
+      },
+      {
+        "claim_id": "c3",
+        "text": "Checkout and expiry domain.",
+        "repo": "orders",
+        "path": "README.md",
+        "line": 3,
+        "asserted_content": "Checkout and expiry domain."
+      },
+      {
+        "claim_id": "c4",
+        "text": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\"",
+        "repo": "orders",
+        "path": "src/handlers/expiry.py",
+        "line": 25,
+        "asserted_content": "\"\"\"Perform the lapse when the expiry timer fires for a pending order.\"\"\""
+      }
+    ],
+    "questions": [],
+    "assumptions": []
+  },
+  "reviewer": {
+    "notes": "captured offline-scripted-model under preregistration f33d55c5ae01\u2026 generation 1; blind review pending \u2014 no reviewer grades recorded yet"
+  },
+  "capture": {
+    "provenance": "offline-scripted-model",
+    "model_identity": "deterministic-lexical-probes/v1",
+    "route": "deterministic (no model calls)",
+    "live_provider": false,
+    "preregistration": {
+      "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc",
+      "generation": 1
+    },
+    "budget": {
+      "max_calls": 10,
+      "wall_seconds": 90.0
+    },
+    "budget_spent": {
+      "calls_proposed": 0,
+      "calls_executed": 0,
+      "wall_seconds_used": 0.0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "input_lower_bound": 0,
+        "output_lower_bound": 0,
+        "unknown_usage_calls": 0
+      }
+    },
+    "harness": "forge.adaptive.discovery_stage lexical probes",
+    "captured_at": "2026-09-24",
+    "review_state": "review_pending",
+    "issue": "R36-12 / #271"
+  }
+}

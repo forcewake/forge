@@ -53,9 +53,10 @@ back to the human?
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Any, Literal, Protocol
+from typing import Any, Iterable, Literal, Mapping, Protocol
 
 from forge.adaptive.models import PlanRevision, PlanStep, WorkContract
 
@@ -67,23 +68,39 @@ __all__ = [
     "ActivationRefused",
     "ActivationSession",
     "ActivePlanState",
+    "ArtifactReuseDecision",
+    "CHECKPOINT_KIND",
+    "CHECKPOINT_REUSE_DECISION_KEY",
+    "DISCARD_DECISION",
     "DispatchPlanBinding",
     "DurableActivationOutcome",
+    "EVIDENCE_KIND",
+    "EXECUTOR_DIGEST_SCHEMA",
+    "EXECUTOR_INPUT_FIELDS",
+    "INVALIDATE_DECISION",
     "PENDING_PROPOSAL_KEY",
     "PENDING_PROPOSAL_SCHEMA",
+    "PRESERVE_DECISION",
     "Question",
+    "REUSE_DECISION_SCHEMA",
     "REVISION_ACTIVATIONS_KEY",
+    "REVISION_EXECUTOR_DIGEST_KEY",
     "REVISION_NOTE_MARKER",
     "RevisionDecision",
     "TacticalPolicy",
+    "WorkArtifact",
+    "WipReuseDecision",
     "activate_pending_revision",
     "activate_revision",
     "active_plan_document_of",
     "apply_tactical",
     "change_log",
     "classify_revision",
+    "decide_wip_reuse",
     "decision_record",
     "dispatch_plan_binding",
+    "executor_digest_document",
+    "executor_input_digest",
     "fresh_session_brief",
     "invalidation_set",
     "parse_tactical_policy",
@@ -91,10 +108,13 @@ __all__ = [
     "plan_digest",
     "proposed_revision_identity",
     "read_active_plan",
+    "read_wip_reuse_decision",
+    "refused_wip_reuse",
     "route_question",
     "stage_pending_revision",
     "stale_callback_guard",
     "transformation_kinds",
+    "wip_artifacts_of_evidence",
 ]
 
 #: Impact classes a tactical edit may carry. This is an ALLOWLIST, not a
@@ -1025,6 +1045,8 @@ async def stage_pending_revision(
     decision: RevisionDecision,
     proposed: PlanRevision,
     current: ActivePlanState,
+    *,
+    old: PlanRevision | None = None,
 ) -> None:
     """Stage a PENDING material-revision decision for the human gate (R28-18).
 
@@ -1036,6 +1058,13 @@ async def stage_pending_revision(
     exactly as it was staged. Staging OVERWRITES a prior pending
     proposal of the same run (one live proposal per work at a time); the
     prior decision, if never consumed, simply expires unused.
+
+    R36-13 (#272): *old* optionally stages the SUPERSEDED revision's
+    content beside the proposal. The activation's WIP reuse decision
+    needs the old steps to decide checkpoint compatibility POSITIVELY;
+    without them the decision fails closed (an undecidable checkpoint is
+    never silently preserved). The staged bytes are audit material only —
+    the binding guards below never read them.
     """
     from forge.durable import FlowRun, Outbox
 
@@ -1064,6 +1093,7 @@ async def stage_pending_revision(
                 "authorization_epoch": current.authorization_epoch,
                 "publication_epoch": current.publication_epoch,
             },
+            **({"old": old.model_dump()} if old is not None else {}),
         }
         run.evidence = merged
         session.add(
@@ -1208,6 +1238,15 @@ async def activate_pending_revision(
     decision in the journal and returns ``already_active`` with the
     prior record — one revision switch, one continuation, no matter how
     many deliveries arrive. Every refusal consumes nothing.
+
+    R36-13 (#272): the SAME transaction also persists the WIP reuse
+    decision (:func:`decide_wip_reuse`) under
+    :data:`CHECKPOINT_REUSE_DECISION_KEY` with a
+    ``checkpoint.reuse_decision`` outbox row — the per-artifact
+    preserve/invalidate/discard verdict plus the checkpoint's ROUTE
+    (``preserve`` or an explicit ``fresh_attempt`` with its reason), so
+    the dispatch boundary can refuse a ``required`` resume whose
+    checkpoint the activation already routed away from the reuse.
     """
     from forge.durable import FlowRun, Outbox
 
@@ -1275,6 +1314,10 @@ async def activate_pending_revision(
                 ),
             )
             proposed = PlanRevision.model_validate(pending.get("proposed") or {})
+            old_raw = pending.get("old")
+            old_revision = (
+                PlanRevision.model_validate(old_raw) if isinstance(old_raw, dict) else None
+            )
         except (TypeError, ValueError) as exc:
             return _refused("malformed_pending_proposal", str(exc)[:200])
 
@@ -1306,6 +1349,26 @@ async def activate_pending_revision(
             revised_from_digest=str(active_raw.get("plan_digest") or ""),
         )
         merged.pop(PENDING_PROPOSAL_KEY, None)  # the decision is consumed
+        # R36-13 (#272): the WIP reuse decision lands in the SAME commit —
+        # which artifacts survive the switch, and the checkpoint's explicit
+        # route. Computed from the superseded digest the pointer carried and
+        # the run's own durable records; an unreachable checkpoint authority
+        # routes fresh_attempt (fail closed), never a silent preserve.
+        superseded_digest = str(active_raw.get("plan_digest") or "")
+        artifacts, uncertainty = await _durable_wip_artifacts(
+            session_factory, evidence, run_id=run_id, superseded_plan_digest=superseded_digest
+        )
+        reuse = decide_wip_reuse(old_revision, activated, artifacts)
+        if uncertainty:
+            # A checkpoint MAY exist behind an authority that could not be
+            # consulted — fail closed to the explicit fresh attempt, never
+            # a silent preserve.
+            reuse = replace(
+                reuse,
+                route=FRESH_ATTEMPT_ROUTE,
+                route_reason=f"the checkpoint authority could not be consulted: {uncertainty}",
+            )
+        merged[CHECKPOINT_REUSE_DECISION_KEY] = reuse.document()
         run.evidence = merged
         # R32-11: the durable row follows the switch — the plan digest the
         # gate validates and the dispatch claims is the ACTIVE plan's from
@@ -1329,6 +1392,24 @@ async def activate_pending_revision(
                     "plan_id": record.plan_id,
                     "decided_by": decided_by,
                     "publication_epoch": record.publication_epoch,
+                },
+            )
+        )
+        # R36-13 (#272): the reuse decision's own observability row — the
+        # route an operator (and the dispatch fence) reads without opening
+        # the evidence blob.
+        session.add(
+            Outbox(
+                flow_run_id=run_id,
+                event_type="checkpoint.reuse_decision",
+                payload={
+                    "run_id": run_id,
+                    "activated_revision": record.activated_revision,
+                    "route": reuse.route,
+                    "route_reason": reuse.route_reason[:200],
+                    "preserved": len(reuse.preserved),
+                    "invalidated": len(reuse.invalidated),
+                    "discarded": len(reuse.discarded),
                 },
             )
         )
@@ -1510,3 +1591,531 @@ async def dispatch_plan_binding(
         active=digest,
         revised_from=revised_from,
     )
+
+
+# ---------------------------------------------------------------------------
+# R36-13 (#272) — proving the revision through the next executor input
+# ---------------------------------------------------------------------------
+#
+# The review's finding: activation switches the durable pointer and the
+# dispatch reads it — but the customer guarantee is about the WORK: the
+# next REAL executor input carries the approved revision, compatible WIP
+# survives the switch, and superseded authority cannot reactivate. Two
+# pieces close that proof:
+#
+# - the WIP REUSE DECISION — when a material revision activates, ONE
+#   persisted verdict partitions the run's work artifacts into
+#   preserve / invalidate / discard and names the checkpoint's explicit
+#   ROUTE (``preserve`` or ``fresh_attempt`` + reason). Not every
+#   checkpoint is reusable; an undecidable one is never silently
+#   preserved. The dispatch boundary reads the route and refuses a
+#   ``required`` resume whose checkpoint was routed away.
+# - the EXECUTOR-INPUT DIGEST — the identity the next dispatch actually
+#   sends (run id + the ACTIVE plan digest + the brief envelope + the
+#   spec + the resume mode), hashed canonically so the native ledger's
+#   server-side fingerprint and the run's ``revision.executor_digest``
+#   evidence must AGREE — the "exact digest recorded" acceptance.
+
+
+#: The closed artifact-kind vocabulary the reuse decision speaks.
+CHECKPOINT_KIND = "checkpoint"
+VERIFICATION_KIND = "verification"
+EVIDENCE_KIND = "evidence"
+
+#: The closed decision vocabulary.
+PRESERVE_DECISION = "preserve"
+INVALIDATE_DECISION = "invalidate"
+DISCARD_DECISION = "discard"
+
+#: The checkpoint's explicit route: keep the WIP, or start over on record.
+PRESERVE_ROUTE = "preserve"
+FRESH_ATTEMPT_ROUTE = "fresh_attempt"
+
+#: Where the activation's reuse decision lives inside ``FlowRun.evidence``.
+CHECKPOINT_REUSE_DECISION_KEY = "checkpoint_reuse_decision"
+REUSE_DECISION_SCHEMA = "forge.checkpoint.reuse-decision/1"
+
+#: Where the dispatch's executor-input identity lives in the evidence.
+REVISION_EXECUTOR_DIGEST_KEY = "revision_executor_digest"
+EXECUTOR_DIGEST_SCHEMA = "forge.revision.executor-digest/1"
+
+#: The identity fields the executor-input digest is taken over — exactly
+#: the dispatch inputs a native job receives, so any ledger that recorded
+#: the inputs can recompute the digest and compare.
+EXECUTOR_INPUT_FIELDS: tuple[str, ...] = (
+    "run_id",
+    "plan_digest",
+    "envelope_digest",
+    "spec_digest",
+    "lane_resume_mode",
+)
+
+
+@dataclass(frozen=True)
+class WorkArtifact:
+    """One work artifact the reuse decision judges.
+
+    ``kind`` is the closed vocabulary above. ``step_id`` scopes the
+    artifact to one plan step (empty for plan-scoped artifacts — the
+    workspace checkpoint, the run's verification verdict).
+    ``applicability_digest`` is the plan digest the artifact was
+    PRODUCED under — the applicability axis: an artifact is only as
+    valid as the plan it was made for, and a revision that changed the
+    plan changes what the artifact applies to.
+    """
+
+    artifact_id: str
+    kind: str = EVIDENCE_KIND
+    step_id: str = ""
+    applicability_digest: str = ""
+
+
+@dataclass(frozen=True)
+class ArtifactReuseDecision:
+    """One artifact's verdict, with the durable reason a human can read."""
+
+    artifact_id: str
+    kind: str
+    decision: str
+    reason: str
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "artifact_id": self.artifact_id,
+            "kind": self.kind,
+            "decision": self.decision,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class WipReuseDecision:
+    """The partition a material revision's activation persists.
+
+    ``route`` is the CHECKPOINT's explicit route: ``preserve`` (the WIP
+    stands — a resume after the revision restores the exact bytes under
+    the NEW plan) or ``fresh_attempt`` (with the reason — an explicit
+    fresh attempt, never a silent reuse). ``decisions`` carries every
+    artifact's own verdict; invalidated artifacts are SUPERSEDED, never
+    deleted, and an invalidated verification never auto-returns to
+    passed — only a fresh verification under the new plan can.
+    """
+
+    activated_revision: int
+    plan_digest: str
+    decisions: tuple[ArtifactReuseDecision, ...]
+    route: str
+    route_reason: str
+
+    @property
+    def preserved(self) -> tuple[str, ...]:
+        return tuple(
+            decision.artifact_id
+            for decision in self.decisions
+            if decision.decision == PRESERVE_DECISION
+        )
+
+    @property
+    def invalidated(self) -> tuple[str, ...]:
+        return tuple(
+            decision.artifact_id
+            for decision in self.decisions
+            if decision.decision == INVALIDATE_DECISION
+        )
+
+    @property
+    def discarded(self) -> tuple[str, ...]:
+        return tuple(
+            decision.artifact_id
+            for decision in self.decisions
+            if decision.decision == DISCARD_DECISION
+        )
+
+    def document(self) -> dict[str, Any]:
+        """The durable shape frozen into the run's evidence."""
+        return {
+            "schema": REUSE_DECISION_SCHEMA,
+            "activated_revision": self.activated_revision,
+            "plan_digest": self.plan_digest,
+            "route": self.route,
+            "route_reason": self.route_reason,
+            "artifacts": [decision.document() for decision in self.decisions],
+        }
+
+
+def decide_wip_reuse(
+    old: PlanRevision | None,
+    new: PlanRevision,
+    artifacts: Iterable[WorkArtifact],
+) -> WipReuseDecision:
+    """Partition the work artifacts across a material revision's activation.
+
+    The rules, per artifact — kind first, then applicability:
+
+    - a STEP-SCOPED artifact whose step the new plan REMOVED is
+      ``discard``ed (the work is no longer pursued — the artifact leaves
+      the active set, still durable);
+    - a step-scoped artifact whose step CHANGED or the revision NAMES in
+      ``invalidated_step_ids`` is ``invalidate``d (superseded — its
+      authority is withdrawn, its bytes stay);
+    - a VERIFICATION artifact is only valid under the exact plan it
+      verified: an applicability digest that is not the NEW plan's
+      digest invalidates it. An invalidated verification NEVER
+      auto-returns to passed — only a fresh verification does;
+    - a CHECKPOINT artifact (plan-scoped workspace WIP) survives only
+      when compatibility is PROVEN: with the superseded content staged,
+      every write-carrying step the WIP anchors on must survive the
+      revision byte-for-byte and un-invalidated. All such steps removed
+      discards the checkpoint (the revision pursues different work);
+      any such step changed or invalidated invalidates it; without the
+      superseded content the decision FAILS CLOSED to invalidate — an
+      undecidable checkpoint is never silently preserved.
+
+    The ROUTE is the checkpoint verdict spelled for the dispatch
+    boundary: ``preserve`` keeps the resume path standing; anything
+    else is an explicit ``fresh_attempt`` with the reason.
+    """
+    new_by_id = {step.step_id: step for step in new.steps}
+    old_by_id = {step.step_id: step for step in old.steps} if old is not None else {}
+    removed_ids = {step_id for step_id in old_by_id if step_id not in new_by_id}
+    changed_ids = {step.step_id for step in new.steps if old_by_id.get(step.step_id) != step}
+    declared_invalid = set(new.invalidated_step_ids)
+    new_digest = plan_digest(new)
+
+    decisions: list[ArtifactReuseDecision] = []
+    for artifact in artifacts:
+        decisions.append(
+            _decide_artifact(
+                artifact,
+                old=old,
+                new=new,
+                removed_ids=removed_ids,
+                changed_ids=changed_ids,
+                declared_invalid=declared_invalid,
+                new_digest=new_digest,
+            )
+        )
+
+    checkpoint_decisions = [decision for decision in decisions if decision.kind == CHECKPOINT_KIND]
+    if not checkpoint_decisions:
+        route, reason = PRESERVE_ROUTE, "no workspace checkpoint on record"
+    elif all(decision.decision == PRESERVE_DECISION for decision in checkpoint_decisions):
+        route = PRESERVE_ROUTE
+        reason = "compatible revision: {} — the checkpoint stands under the new plan".format(
+            ", ".join(sorted(decision.artifact_id for decision in checkpoint_decisions))
+        )
+    else:
+        failing = next(
+            decision for decision in checkpoint_decisions if decision.decision != PRESERVE_DECISION
+        )
+        route = FRESH_ATTEMPT_ROUTE
+        reason = failing.reason
+    return WipReuseDecision(
+        activated_revision=new.revision,
+        plan_digest=new_digest,
+        decisions=tuple(decisions),
+        route=route,
+        route_reason=reason,
+    )
+
+
+def _decide_artifact(
+    artifact: WorkArtifact,
+    *,
+    old: PlanRevision | None,
+    new: PlanRevision,
+    removed_ids: set[str],
+    changed_ids: set[str],
+    declared_invalid: set[str],
+    new_digest: str,
+) -> ArtifactReuseDecision:
+    """One artifact's verdict (the rules table of :func:`decide_wip_reuse`)."""
+    if artifact.step_id:
+        if artifact.step_id in removed_ids:
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                DISCARD_DECISION,
+                f"step {artifact.step_id} was removed by revision {new.revision}"
+                " — the work is no longer pursued, the artifact leaves the active set",
+            )
+        if artifact.step_id in declared_invalid or artifact.step_id in changed_ids:
+            why = (
+                f"step {artifact.step_id} is named in revision {new.revision}'s invalidated steps"
+                if artifact.step_id in declared_invalid
+                else f"step {artifact.step_id} changed in revision {new.revision}"
+            )
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                INVALIDATE_DECISION,
+                f"{why} — superseded (invalidated verification never auto-returns to passed)",
+            )
+        return ArtifactReuseDecision(
+            artifact.artifact_id,
+            artifact.kind,
+            PRESERVE_DECISION,
+            f"step {artifact.step_id} survived revision {new.revision} unchanged",
+        )
+
+    if artifact.kind == VERIFICATION_KIND:
+        if artifact.applicability_digest and artifact.applicability_digest != new_digest:
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                INVALIDATE_DECISION,
+                "verified under the superseded plan digest "
+                f"{artifact.applicability_digest[:12]}… — superseded by revision "
+                f"{new.revision}; a fresh verification under the new plan is "
+                "required (never an automatic return to passed)",
+            )
+        return ArtifactReuseDecision(
+            artifact.artifact_id,
+            artifact.kind,
+            PRESERVE_DECISION,
+            f"verified under the active plan of revision {new.revision}",
+        )
+
+    if artifact.kind == CHECKPOINT_KIND:
+        if old is None:
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                INVALIDATE_DECISION,
+                "checkpoint compatibility is UNDECIDABLE — the superseded plan "
+                "content is not durable, and an undecidable checkpoint is never "
+                "silently preserved (fail closed)",
+            )
+        wip_steps = [step for step in old.steps if step.write_repository_id]
+        wip_ids = {step.step_id for step in wip_steps}
+        if wip_ids and wip_ids <= removed_ids:
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                DISCARD_DECISION,
+                "every write-carrying step the checkpoint's WIP anchored on was "
+                f"removed by revision {new.revision} — the revision pursues "
+                "different work",
+            )
+        churned = sorted(
+            step_id
+            for step_id in wip_ids
+            if step_id in removed_ids or step_id in changed_ids or step_id in declared_invalid
+        )
+        if churned:
+            return ArtifactReuseDecision(
+                artifact.artifact_id,
+                artifact.kind,
+                INVALIDATE_DECISION,
+                "write-carrying step(s) the checkpoint's WIP anchors on changed "
+                f"or were invalidated by revision {new.revision}: {churned} — "
+                "the restored bytes cannot stand under the new plan",
+            )
+        return ArtifactReuseDecision(
+            artifact.artifact_id,
+            artifact.kind,
+            PRESERVE_DECISION,
+            f"every write-carrying step survived revision {new.revision} "
+            "byte-for-byte — the restored WIP stands under the new plan",
+        )
+
+    # A generic plan-scoped artifact: applicability decides, when declared.
+    if artifact.applicability_digest and artifact.applicability_digest != new_digest:
+        return ArtifactReuseDecision(
+            artifact.artifact_id,
+            artifact.kind,
+            INVALIDATE_DECISION,
+            "produced under the superseded plan digest "
+            f"{artifact.applicability_digest[:12]}… — superseded by revision {new.revision}",
+        )
+    return ArtifactReuseDecision(
+        artifact.artifact_id,
+        artifact.kind,
+        PRESERVE_DECISION,
+        f"revision {new.revision} does not touch the artifact's applicability",
+    )
+
+
+def wip_artifacts_of_evidence(
+    evidence: Mapping[str, Any], *, superseded_plan_digest: str
+) -> list[WorkArtifact]:
+    """The run's PLAN-SCOPED artifacts, read from its own durable evidence.
+
+    - the ``continuation`` document's pinned ``checkpoint_digest`` (the
+      exact checkpoint a retry decision bound) — a CHECKPOINT artifact;
+    - the ``verification`` fragment (the unified R02 verdict shape) — a
+      VERIFICATION artifact whose applicability is the plan digest it
+      was recorded under.
+
+    Both carry ``applicability_digest=superseded_plan_digest``: they
+    were produced under the plan the revision replaces.
+    """
+    artifacts: list[WorkArtifact] = []
+    continuation = evidence.get("continuation")
+    checkpoint_id = (
+        str(continuation.get("checkpoint_digest") or "") if isinstance(continuation, dict) else ""
+    )
+    if checkpoint_id:
+        artifacts.append(
+            WorkArtifact(
+                artifact_id=checkpoint_id,
+                kind=CHECKPOINT_KIND,
+                applicability_digest=superseded_plan_digest,
+            )
+        )
+    verification = evidence.get("verification")
+    if isinstance(verification, dict):
+        tested = str(verification.get("tested_oid") or "")
+        artifacts.append(
+            WorkArtifact(
+                artifact_id=tested or "verification",
+                kind=VERIFICATION_KIND,
+                applicability_digest=superseded_plan_digest,
+            )
+        )
+    return artifacts
+
+
+async def _durable_wip_artifacts(
+    session_factory: _RevisionSessionFactory,
+    evidence: Mapping[str, Any],
+    *,
+    run_id: str,
+    superseded_plan_digest: str,
+) -> tuple[list[WorkArtifact], str]:
+    """The artifacts + an uncertainty sentence, from the durable authorities.
+
+    The run's own evidence contributes the plan-scoped artifacts; the
+    CHECKPOINT AUTHORITY (the one composition point upload and resume
+    share, resolved over the caller's factory so it opens its OWN short
+    read session — never the activation's transaction) contributes the
+    run's CURRENT held checkpoint when the evidence pins none. An
+    authority that cannot be consulted answers ``(artifacts,
+    uncertainty)`` — the caller routes fresh_attempt, never a silent
+    preserve.
+    """
+    artifacts = wip_artifacts_of_evidence(evidence, superseded_plan_digest=superseded_plan_digest)
+    if any(artifact.kind == CHECKPOINT_KIND for artifact in artifacts):
+        return artifacts, ""
+    try:
+        from forge.adaptive.checkpoint_repository import resolve_repository
+
+        repository = resolve_repository(session_factory=session_factory)
+        entry = await repository.entry(run_id)
+    except Exception as exc:  # noqa: BLE001 — typed unavailable, never fatal here
+        return artifacts, f"{type(exc).__name__}: {exc}"[:200]
+    checkpoint_id = str((entry or {}).get("checkpoint_id") or "")
+    if not checkpoint_id:
+        return artifacts, ""
+    artifacts.append(
+        WorkArtifact(
+            artifact_id=checkpoint_id,
+            kind=CHECKPOINT_KIND,
+            applicability_digest=superseded_plan_digest,
+        )
+    )
+    return artifacts, ""
+
+
+def _factory_of(session: Any) -> Any:
+    """The zero-arg callable handing the repository THIS transaction's session.
+
+    The activation's artifact read shares the activation's transaction:
+    an ``async with factory() as session`` over this closure re-enters
+    the session the activation already holds (AsyncSession is its own
+    async context manager), so the reuse decision and the switch commit
+    together or not at all.
+    """
+    return lambda: session
+
+
+async def read_wip_reuse_decision(
+    session_factory: _RevisionSessionFactory, run_id: str
+) -> dict[str, Any] | None:
+    """The run's persisted reuse-decision document, or ``None``."""
+    from forge.durable import FlowRun
+
+    async with session_factory() as session:
+        run = await session.get(FlowRun, run_id)
+        document = (
+            (run.evidence or {}).get(CHECKPOINT_REUSE_DECISION_KEY) if run is not None else None
+        )
+    return dict(document) if isinstance(document, dict) else None
+
+
+async def refused_wip_reuse(
+    session_factory: _RevisionSessionFactory,
+    run_id: str,
+    *,
+    resume_mode: str,
+) -> dict[str, Any] | None:
+    """The recorded fresh-attempt route when THIS dispatch would reuse the checkpoint.
+
+    Returns the reuse-decision document when the dispatch carries the
+    ``required`` resume contract (the mandated WIP restore) and the
+    activation routed that checkpoint to an explicit ``fresh_attempt``
+    — the silent reuse this fence exists to prevent. ``None`` in every
+    other case: no recorded decision, a ``preserve`` route, or a
+    dispatch that restores nothing (``fresh``) or discards on the
+    operator's explicit instruction (``restart`` — the way out this
+    fence points at).
+    """
+    if resume_mode != "required":
+        return None
+    document = await read_wip_reuse_decision(session_factory, run_id)
+    if document is not None and document.get("route") == FRESH_ATTEMPT_ROUTE:
+        return document
+    return None
+
+
+def executor_input_digest(identity: Mapping[str, Any]) -> str:
+    """The canonical digest of one dispatch's executor-input identity.
+
+    Hashed over EXACTLY :data:`EXECUTOR_INPUT_FIELDS` — the identity
+    inputs a native job receives — canonicalized field-sorted, so the
+    producer (the dispatch), the receiver's ledger (the native server's
+    recorded inputs) and the auditor (the run's evidence) all compute
+    the same digest over the same bytes, and any disagreement is drift
+    by construction.
+    """
+    canonical = json.dumps(
+        {name: str(identity.get(name) or "") for name in EXECUTOR_INPUT_FIELDS},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def executor_digest_document(
+    *,
+    run_id: str,
+    plan_digest: str,
+    active_revision: int,
+    envelope_digest: str = "",
+    spec_digest: str = "",
+    lane_resume_mode: str = "",
+    revised_from_digest: str = "",
+    activated_by_decision: str = "",
+) -> dict[str, Any]:
+    """The ``revision.executor_digest`` evidence document (R36-13).
+
+    Freezes WHAT the dispatched executor runs under: the ACTIVE plan's
+    digest (never the superseded comment's), the revision number, the
+    digest it replaced, and the executor-input digest recomputable from
+    the native ledger's recorded inputs.
+    """
+    identity = {
+        "run_id": run_id,
+        "plan_digest": plan_digest,
+        "envelope_digest": envelope_digest,
+        "spec_digest": spec_digest,
+        "lane_resume_mode": lane_resume_mode,
+    }
+    return {
+        "schema": EXECUTOR_DIGEST_SCHEMA,
+        **identity,
+        "active_revision": active_revision,
+        "revised_from_digest": revised_from_digest,
+        "activated_by_decision": activated_by_decision,
+        "executor_input_digest": executor_input_digest(identity),
+    }

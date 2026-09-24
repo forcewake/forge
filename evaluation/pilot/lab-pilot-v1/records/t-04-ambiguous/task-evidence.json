@@ -1,0 +1,222 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-04-ambiguous/a1",
+      "note": "waiting_question: no runner held while the human answered",
+      "wall_seconds": 0.0
+    },
+    {
+      "attempt_id": "t-04-ambiguous/a2",
+      "note": "post-answer turn",
+      "wall_seconds": 0.857
+    }
+  ],
+  "brief": "Rename the helper.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "6fbeaf4c509344fbb1f219a4941a3bc638ad5bf98bff68d785971ba41effbb2d",
+  "discovery": {
+    "discovery_id": "lab-t-04-ambiguous:discovery",
+    "evidence_bundle": [
+      "read:src/app.py@b89603542c2e"
+    ],
+    "snapshot_set_digest": "b2b7d2376698859cfde14a1fdd02cfbb20ad0eeb395a01b85715ac5f8c23d2c9",
+    "status": "complete"
+  },
+  "driver": "question_first",
+  "evidence_class": "lab-operational",
+  "interventions": [
+    {
+      "kind": "question_answer",
+      "note": "q-which-helper-what-name"
+    }
+  ],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:00.099805+00:00",
+      "point": "q-which-helper-what-name",
+      "question": "The brief says 'rename the helper' but names neither which helper nor the new name. Which function in src/app.py, and to what?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:00.124002+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "Rename helper() in src/app.py to render_widget(). Nothing else changes.",
+      "detail": "the durable answer command that unblocked the wait",
+      "point": "q-which-helper-what-name",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:01.580517+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:01.580534+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "question-before-edits=ok; discovery-waiting=ok; answer-durable=ok; rename-landed=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "question": {
+    "answer": "Rename helper() in src/app.py to render_widget(). Nothing else changes.",
+    "critical": false,
+    "id": "q-which-helper-what-name",
+    "text": "The brief says 'rename the helper' but names neither which helper nor the new name. Which function in src/app.py, and to what?"
+  },
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-04-ambiguous/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-04-ambiguous/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0306,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [
+      {
+        "kind": "question_answer",
+        "note": "q-which-helper-what-name"
+      }
+    ],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.001,
+    "rollbacks": 0,
+    "setup_minutes": 0.0266,
+    "started_at": "2026-09-24T01:41:59.742681+00:00",
+    "task_id": "t-04-ambiguous",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "ambiguous_task",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "zero vendor events and a byte-identical checkout on the waiting attempt",
+      "name": "question-before-edits",
+      "observed": "events=0",
+      "ok": true
+    },
+    {
+      "expected": "the discovery record waits on the named question",
+      "name": "discovery-waiting",
+      "observed": "status=waiting_question open=['q-which-helper-what-name']",
+      "ok": true
+    },
+    {
+      "expected": "the answer exists as a control_commands row of kind answer",
+      "name": "answer-durable",
+      "observed": "rows=[{'command_id': 'cmd-c69dd8db682d', 'work_id': 'lab-t-04-ambiguous', 'kind': 'answer', 'status': 'received', 'actor_ref': 'human:lab-operator', 'payload': {'question_id': 'q-which-helper-what-name', 'text': 'Rename helper() in src/app.py to render_widget(). Nothing else changes.'}}]",
+      "ok": true
+    },
+    {
+      "expected": "the answered task's edit rides the collected diff",
+      "name": "rename-landed",
+      "observed": "diff_digest=6fbeaf4c509344fbb1f219a4941a3bc638ad5bf98bff68d785971ba41effbb2d",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the brief 'rename the helper' is ambiguous (which helper, to what name); the discovery stage raises the named question and waits \u2014 zero vendor turns and zero file edits on the first attempt, because asking is the CORRECT behavior; after the operator's durable answer the task completes the rename",
+    "group": "g1-questions",
+    "non_goals": [
+      "no speculative edits before the answer lands",
+      "no renaming anything other than the single named function"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "ambiguous_task",
+    "stage": "read_plan",
+    "task_id": "t-04-ambiguous",
+    "title": "Ambiguous rename request asks before editing",
+    "verification": [
+      {
+        "method": "the first attempt's vendor event log holds no turn events and the checkout is byte-identical to its frozen base",
+        "name": "question-before-edits"
+      },
+      {
+        "method": "the operator's answer exists as a durable control_commands row of kind answer",
+        "name": "answer-durable"
+      },
+      {
+        "method": "the final candidate renames exactly the named function in src/app.py",
+        "name": "rename-landed"
+      }
+    ]
+  },
+  "task_id": "t-04-ambiguous",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-04-ambiguous/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.0,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": null
+    },
+    {
+      "attempt_id": "t-04-ambiguous/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.857,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

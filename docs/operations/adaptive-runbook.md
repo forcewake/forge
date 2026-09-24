@@ -134,9 +134,10 @@ Operator rules:
   postgres index starts EMPTY (no backfill from the JSON files — see
   the alembic 026 note). Use the Q35-21 command set above
   (`inventory` → `import` → `verify` → `cutover`) instead of manual
-  re-uploads: it is idempotent, restartable and gated, and
-  `enforce_authority_marker` keeps exactly one backend accepting
-  mutations after the cutover.
+  re-uploads: it is idempotent, restartable and gated, and since R36-05
+  the STANDARD `resolve_repository()` composition carries the mutation
+  fence — exactly one backend accepts metadata mutations after the
+  cutover, old processes included (see the migration section below).
 - **Half-configurations refuse at startup.** `postgres` without a
   session factory (or an unknown mode value) makes
   `control_service_from_env` raise `CheckpointRepositoryMisconfigured`
@@ -150,7 +151,7 @@ Operator rules:
 - **Which mode am I on?** `GET /lane/checkpoints/health` names
   `durability` and `authority` for the configured deployment.
 
-### Migrating checkpoint metadata to the postgres authority (Q35-21)
+### Migrating checkpoint metadata to the postgres authority (Q35-21, R36-05)
 
 Adopting `FORGE_CHECKPOINT_DURABILITY=postgres` for an installation
 that already holds checkpoints is an EXPLICIT migration — a bare schema
@@ -163,8 +164,8 @@ import / 1 refused):
 uv run python -m forge.adaptive.checkpoint_migration inventory
 uv run python -m forge.adaptive.checkpoint_migration import   --database-url "$DATABASE_URL"
 uv run python -m forge.adaptive.checkpoint_migration verify   --database-url "$DATABASE_URL"
-uv run python -m forge.adaptive.checkpoint_migration cutover
-uv run python -m forge.adaptive.checkpoint_migration rollback --verify-report <path>
+uv run python -m forge.adaptive.checkpoint_migration cutover  --database-url "$DATABASE_URL"
+uv run python -m forge.adaptive.checkpoint_migration rollback --database-url "$DATABASE_URL" --verify-report <path>
 ```
 
 - **`inventory`** scans `works/<id>.json`, every manifest and referenced
@@ -186,32 +187,81 @@ uv run python -m forge.adaptive.checkpoint_migration rollback --verify-report <p
   through the new backend, and re-checks blob reachability through the
   configured root. A disagreement (JSON says A, DB says B) is reported
   with BOTH actives — the operator resolves it; no timestamp ever picks
-  a winner. Exit 1 while anything disagrees.
+  a winner. Exit 1 while anything disagrees. **R36-05:** the report also
+  BINDS both inventories by content digest
+  (`migration.inventory_generation` — one sha256 per authority over its
+  entries, derived actives and, on the filesystem side, the pins), and
+  both flips re-derive those digests from the CURRENT state: a stale or
+  tampered report can never authorize a changed inventory on EITHER
+  side, and a timestamp alone authorizes nothing.
 - **`cutover`** flips the deployment authority MARKER — the state file
   `<store-root>/migration/authority.json`, written atomically under an
   exclusive fence (`<store-root>/migration/cutover.lock`) — ONLY when
-  the verify report is clean AND the index has not moved since it was
-  taken. Then set `FORGE_CHECKPOINT_DURABILITY=postgres` and restart.
-- **Exactly one mutator afterwards**: wrap the composed repository —
-  `enforce_authority_marker(resolve_repository(...))` from
-  `forge.adaptive.checkpoint_migration` — and the authority the marker
-  does NOT name refuses every mutation with the typed
-  `MutationsFencedError` while its immutable READS through the old root
-  stay available. While a cutover holds the fence, mutations are
-  refused on BOTH sides.
+  the verify report is clean AND BOTH inventories still hash to the
+  generations the report bound (`--database-url` re-binds the target;
+  an unreachable target database is a typed refusal, never a flip).
+  The marker carries its flip `generation` (1, 2, … — reported at
+  startup and by doctor).
+- **The fence is STANDARD since R36-05 — no wrapper to compose.**
+  `resolve_repository()` (the one composition point the upload route,
+  the resume producer, workers and retention share) attaches the
+  mutation fence by DEFAULT: the marker is read at construction and
+  re-checked before every metadata mutation (`put`, retention/delete
+  family). An already-running old-authority process refuses its NEXT
+  mutation with the typed `MutationsFencedError` naming
+  configured-vs-active once the flip lands — no restart needed to STOP
+  the writes. Immutable reads through the retired process stay
+  available and distinguishable (`authority()` keeps naming the
+  authority that answered; `GET /lane/checkpoints/health` names the
+  configured deployment). The HTTP upload route answers a fenced
+  upload with 503 carrying the fence message. Repositories constructed
+  DIRECTLY (the migration tool's own imports) stay unfenced;
+  `enforce_authority_marker(repository, root)` remains the documented
+  wrapper for them — ONE fence implementation shared with the standard
+  composition. The pin overlay (`pin`/`unpin`) is deliberately not
+  fenced: it is the shared blob-volume protection, not the retired
+  metadata authority, and every deletion path IS fenced.
+- **Operating mode (stated honestly): drained-offline cutover is the
+  FIRST supported mode.** Stop the old-authority processes (or accept
+  that they refuse mutations from the flip onward), run the migration
+  commands, set `FORGE_CHECKPOINT_DURABILITY=postgres`, and start the
+  new processes. The fence makes concurrent processes SAFE TO REFUSE —
+  it does NOT promise an online zero-downtime migration: a mutation
+  that already passed the fence check instants before the flip may
+  still commit to the retired authority (the very next mutation is
+  refused). Lock order, stated once: every fenced mutation checks the
+  marker BEFORE taking the store's volume-wide GC lock
+  (`cas-refs.lock` / its postgres advisory twin) and before any
+  per-work lock — a fence refusal never waits on a contended volume,
+  no path holds the volume lock while waiting for the cutover fence,
+  and the orders cannot cycle (both waits are bounded).
+- **Startup observability (R36-05).** Wherever the app composes the
+  repository (the app lifespan, the control service's
+  `control_service_from_env`), one line reports
+  `migration.configured_vs_active_authority` with the state
+  (`unmarked` / `aligned` / `mismatch`), both authorities and the
+  marker generation; a mismatch is a WARNING. Every refusal logs
+  `migration.mutation_refused`.
 - **Rollback is forward-only by default.** `rollback` refuses unless a
   CLEAN verify report for the CURRENT data state is supplied
   (`--verify-report`, taken after the cutover; a report that predates
-  the flip or the store's current shape is refused). Checkpoints
+  the flip, the store's current shape, OR the target inventory's
+  current generation is refused — a post-report database upload blocks
+  the rollback exactly as a filesystem change would). Checkpoints
   uploaded after the cutover exist only in the database — the
   documented recovery is `import --reverse` (database entries back into
   the filesystem index; the blobs are shared CAS bytes), then `verify`,
-  then `rollback`. The old inventory is NEVER deleted by any step.
+  then `rollback`. The old inventory is NEVER deleted by any step. The
+  fence recovers symmetrically: after a rollback the still-running new
+  process's next mutation is refused while the old one's works again.
 - **`forge doctor` preflight** (read-only): `checkpoint.migration_coverage`
   (works still only on the filesystem while postgres is active — with
   the `import` command named), `checkpoint.pointer_conflicts`
-  (disagreeing actives → operator resolution), and
-  `checkpoint.blob_topology`.
+  (disagreeing actives → operator resolution),
+  `checkpoint.blob_topology`, and `checkpoint.authority_marker` (R36-05:
+  the marker's authority and generation, the CONFIGURED repository, and
+  a MISMATCH verdict — failing with both remedies named when the process
+  is configured for the retired authority).
 
 **Blob volumes and replicas (the unsupported topology).** The CAS blobs
 are content-addressed filesystem bytes under BOTH contracts: a shared
@@ -283,6 +333,7 @@ mutates permissions or creates infrastructure):
 | `credential.legacy_deadline` | The legacy-credential window's anchor, deadline and drain count (Q35-06) |
 | `checkpoint.migration_coverage` | Not-yet-migrated works while the postgres authority is active (Q35-21) |
 | `checkpoint.pointer_conflicts` | JSON/DB active-pointer disagreements → operator resolution, never timestamp selection |
+| `checkpoint.authority_marker` | The cutover marker's authority + generation, the configured repository, mismatch → the two remedies (R36-05) |
 | `checkpoint.blob_topology` | The blob root does not look node-local (heuristic warning; a shared DB does not share blobs) |
 
 **The adaptive doctor additions** (in the substrate):

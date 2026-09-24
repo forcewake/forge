@@ -125,6 +125,7 @@ FINDING_MARKERS: dict[str, str] = {
     "OPS-06": "TestEvidenceClasses",
     "OPS-08": "Postgres controller",
     "OPS-07": "checks passed",
+    "R36-22": "test_fixture_only_evidence_caps_the_record_at_declared_only",
 }
 
 #: The known unknowns: capabilities the manifest must keep as explicit
@@ -343,6 +344,23 @@ def test_closure_capabilities_exist_in_the_registry() -> None:
             assert closure.capability in capabilities, (
                 f"{closure.finding}: capability {closure.capability!r} is not in ENTRIES"
             )
+
+
+# ---------------------------------------------------------------------------
+# R36-22: the profile-qualification record store is a manifest entry
+# ---------------------------------------------------------------------------
+
+
+def test_the_profile_qualification_entry_points_at_the_record_store() -> None:
+    entry = next(e for e in ENTRIES if e.capability == "profile-qualification-records")
+    assert entry.evidence_class == "contract_suite"
+    assert entry.level == "contract_tested"
+    # the entry points at the IMPLEMENTATION, its tests, the store's docs and
+    # committed records — the store is in-tree evidence, not prose:
+    for pointer in entry.evidence:
+        assert (ROOT / pointer).is_file(), f"missing evidence pointer {pointer}"
+    assert any(pointer.startswith("qualification/records/") for pointer in entry.evidence)
+    assert any(pointer.startswith("tests/") for pointer in entry.evidence)
 
 
 # ---------------------------------------------------------------------------

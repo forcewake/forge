@@ -1697,7 +1697,12 @@ class TestR32EDispatchSelectsTheRequiredResumeMode:
         # the authorized continuation, so this shape holds one.
         from forge.runs import revival
 
-        monkeypatch.setattr(revival, "_has_durable_checkpoint", lambda run_id: True)
+        from forge.adaptive import checkpoint_repository as _cr
+
+        async def _r36_lookup(run_id, **_):
+            return _cr.CheckpointLookupOutcome.exact("e" * 64, authority="test")
+
+        monkeypatch.setattr(revival, "durable_checkpoint_outcome", _r36_lookup)
         failed = await self._drive_to_failed_with_candidate(db, fake, service)
         fake.dispatch_inputs.clear()
         await service.handle_retry(

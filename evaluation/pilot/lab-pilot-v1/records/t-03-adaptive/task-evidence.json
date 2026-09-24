@@ -1,0 +1,144 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-03-adaptive/a1",
+      "note": "",
+      "wall_seconds": 0.817
+    }
+  ],
+  "brief": "Update the banner implementation in src/app.py.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "a7365bb9c46f1eca9909e78269d239be3f4ec2421639c7ce058b2e2fcca430ec",
+  "driver": "adaptive_idle",
+  "evidence_class": "lab-operational",
+  "interventions": [],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:41:59.736918+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:41:59.736938+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "steering-attached-idle=ok; edit-landed=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": true,
+        "attempt_id": "t-03-adaptive/a1",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.029,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0009,
+    "rollbacks": 0,
+    "setup_minutes": 0.0251,
+    "started_at": "2026-09-24T01:41:57.999806+00:00",
+    "task_id": "t-03-adaptive",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "adaptive_control",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "the steering journal is an honest EMPTY list (attached, nothing routed)",
+      "name": "steering-attached-idle",
+      "observed": "steering_journal=[]",
+      "ok": true
+    },
+    {
+      "expected": "the src/app.py change rides the collected diff",
+      "name": "edit-landed",
+      "observed": "diff_digest=a7365bb9c46f1eca9909e78269d239be3f4ec2421639c7ce058b2e2fcca430ec",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "2 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "steering_journal": [],
+  "task": {
+    "budget": {
+      "max_attempts": 1,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "src/app.py is updated while the lane's steering bridge stays attached to the control plane over real HTTP with an honest EMPTY journal (zero commands pending) and the turn completes",
+    "group": "g2-fixes",
+    "non_goals": [
+      "no operator commands are issued in this task",
+      "no changes outside src/app.py"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "adaptive_control",
+    "stage": "small_fixes",
+    "task_id": "t-03-adaptive",
+    "title": "Ordinary change with the adaptive control path attached and idle",
+    "verification": [
+      {
+        "method": "the lane meta carries a steering_journal that is an honest empty list (attached, nothing routed)",
+        "name": "steering-attached-idle"
+      },
+      {
+        "method": "the collected diff carries the src/app.py change",
+        "name": "edit-landed"
+      }
+    ]
+  },
+  "task_id": "t-03-adaptive",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-03-adaptive/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.817,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

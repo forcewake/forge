@@ -1,0 +1,178 @@
+{
+  "capacity": {
+    "basis": "measured model-span service times only",
+    "bound_kind": "upper",
+    "fully_linked_works": 2,
+    "model_service_seconds_per_task": 224.1,
+    "note": "an upper bound from service time alone \u2014 queue, verification and human-wait populations are excluded by construction; not a forecast",
+    "serial_upper_bound_tasks_per_day": 385.542169
+  },
+  "cohort": {
+    "accepted_outcomes": 2,
+    "attempts": 5,
+    "by_outcome": {
+      "accepted": 2,
+      "rejected": 1
+    },
+    "works": 3
+  },
+  "conflicts": [],
+  "counter_resets": [],
+  "delivery": {
+    "accepted_unit_costs_usd": {
+      "FX-01": 1.47,
+      "FX-03": null
+    },
+    "delivery.accepted_cost_distribution": {
+      "count": 1,
+      "max": 1.47,
+      "median": 1.47,
+      "min": 1.47
+    },
+    "notes": [
+      "rejected/cancelled/superseded/abandoned spend stays in the programme total and in the per-accepted denominator (R36-17)"
+    ],
+    "programme_cost_known_lower_bound_usd": 2.62,
+    "programme_cost_per_accepted_lower_bound_usd": 1.31,
+    "programme_cost_per_accepted_usd": null,
+    "programme_cost_usd": null
+  },
+  "duplicate_calls": [],
+  "latency": {
+    "latency.population_identity": [
+      "latency.human_wait:operator:works=936d5b702bc1329e",
+      "latency.model:harness:works=936d5b702bc1329e",
+      "latency.model:planner:works=27ee87f3edd0cc26",
+      "latency.queue:harness:works=0ab568016dc7594e",
+      "latency.restore_collection:harness:works=2c1a40dbfc7b1cc2",
+      "latency.tool:harness:works=936d5b702bc1329e",
+      "latency.verification:harness:works=936d5b702bc1329e"
+    ],
+    "populations": [
+      {
+        "origin": "operator",
+        "population_identity": "latency.human_wait:operator:works=936d5b702bc1329e",
+        "span_type": "human_wait",
+        "spans": 1,
+        "total_seconds": 5400.0,
+        "total_seconds_lower_bound": 5400.0,
+        "unknown_spans": 0,
+        "works": [
+          "FX-01"
+        ]
+      },
+      {
+        "origin": "harness",
+        "population_identity": "latency.model:harness:works=936d5b702bc1329e",
+        "span_type": "model",
+        "spans": 1,
+        "total_seconds": 41.2,
+        "total_seconds_lower_bound": 41.2,
+        "unknown_spans": 0,
+        "works": [
+          "FX-01"
+        ]
+      },
+      {
+        "origin": "planner",
+        "population_identity": "latency.model:planner:works=27ee87f3edd0cc26",
+        "span_type": "model",
+        "spans": 5,
+        "total_seconds": null,
+        "total_seconds_lower_bound": 574.0,
+        "unknown_spans": 1,
+        "works": [
+          "FX-01",
+          "FX-02",
+          "FX-03"
+        ]
+      },
+      {
+        "origin": "harness",
+        "population_identity": "latency.queue:harness:works=0ab568016dc7594e",
+        "span_type": "queue",
+        "spans": 2,
+        "total_seconds": 99.0,
+        "total_seconds_lower_bound": 99.0,
+        "unknown_spans": 0,
+        "works": [
+          "FX-01",
+          "FX-03"
+        ]
+      },
+      {
+        "origin": "harness",
+        "population_identity": "latency.restore_collection:harness:works=2c1a40dbfc7b1cc2",
+        "span_type": "restore_collection",
+        "spans": 1,
+        "total_seconds": 19.0,
+        "total_seconds_lower_bound": 19.0,
+        "unknown_spans": 0,
+        "works": [
+          "FX-02"
+        ]
+      },
+      {
+        "origin": "harness",
+        "population_identity": "latency.tool:harness:works=936d5b702bc1329e",
+        "span_type": "tool",
+        "spans": 1,
+        "total_seconds": 63.0,
+        "total_seconds_lower_bound": 63.0,
+        "unknown_spans": 0,
+        "works": [
+          "FX-01"
+        ]
+      },
+      {
+        "origin": "harness",
+        "population_identity": "latency.verification:harness:works=936d5b702bc1329e",
+        "span_type": "verification",
+        "spans": 1,
+        "total_seconds": 412.0,
+        "total_seconds_lower_bound": 412.0,
+        "unknown_spans": 0,
+        "works": [
+          "FX-01"
+        ]
+      }
+    ]
+  },
+  "notes": [
+    "FX-03:FX-03:1: no usage receipt and no call telemetry \u2014 usage unknown, never zero",
+    "latency populations never mix: planner-only model time, harness-wide spans and operator-side waits are separate populations, each named by its population_identity (AT-12)"
+  ],
+  "observability": {
+    "delivery.accepted_cost_distribution": {
+      "count": 1,
+      "max": 1.47,
+      "median": 1.47,
+      "min": 1.47
+    },
+    "latency.population_identity": [
+      "latency.human_wait:operator:works=936d5b702bc1329e",
+      "latency.model:harness:works=936d5b702bc1329e",
+      "latency.model:planner:works=27ee87f3edd0cc26",
+      "latency.queue:harness:works=0ab568016dc7594e",
+      "latency.restore_collection:harness:works=2c1a40dbfc7b1cc2",
+      "latency.tool:harness:works=936d5b702bc1329e",
+      "latency.verification:harness:works=936d5b702bc1329e"
+    ],
+    "usage.exact_coverage": 0.8,
+    "usage.known_cost_lower_bound": 2.62
+  },
+  "schema": "forge.delivery.measurement/1",
+  "usage": {
+    "conventions": [
+      "input_tokens_inclusive: OpenAI-compatible shapes count cached tokens INSIDE input_tokens (cached is a breakdown, never added on top); Anthropic-compatible shapes carry DISJOINT counters and inclusive input is input + cache_read + cache_write",
+      "cached_input_tokens / cache_write_tokens: separate sums, never folded into an OpenAI-shaped inclusive input",
+      "reasoning_tokens: a breakdown inside the inclusive OUTPUT on every shape forge sees (OpenAI reasoning_tokens / Anthropic thinking) \u2014 recorded, never added on top of output",
+      "unknown counters stay unknown: an absent vendor field contributes nothing to exact totals and is counted in the unknown columns, never zero-filled"
+    ],
+    "exact_coverage": 0.8,
+    "exact_programme_cost_usd": null,
+    "known_cost_lower_bound_usd": 2.62,
+    "receipt_coverage": 0.8,
+    "unknown_receipt_attempts": 1
+  }
+}

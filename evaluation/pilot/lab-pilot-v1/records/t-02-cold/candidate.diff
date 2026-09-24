@@ -1,0 +1,16 @@
+diff --git a/README.md b/README.md
+index 0c4320311e1d25a48fa0a21cc085267f1b6aab55..d486fcbedc46d6121aed8ae87d0b6a5a094ded35 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ base readme
++See notes/USAGE.md for usage.
+diff --git a/notes/USAGE.md b/notes/USAGE.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..94b10df1ed094175ff528c9958603f0d82d14b79
+--- /dev/null
++++ b/notes/USAGE.md
+@@ -0,0 +1,3 @@
++# Usage
++
++Run the widget via src/app.py.

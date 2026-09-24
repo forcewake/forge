@@ -1,7 +1,8 @@
 # Qualification profile spec (R32-13)
 
 Status: implemented (2026-09-23) · Module: `src/forge/adaptive/qualification.py` ·
-Tests: `tests/test_adaptive_qualification.py` (+ `tests/fixtures/qualification/`) ·
+Tests: `tests/test_adaptive_qualification.py` (+ `tests/fixtures/qualification/`,
+`tests/test_lane_closure.py` for the R36-10 closure legs) ·
 Research: [research/2026-09-23-e2e-qualification/](../research/2026-09-23-e2e-qualification/) ·
 Builds on: `forge.runs.execution_profile` (recipes/harnesses, `profile_digest`,
 `verify_network_egress`) and `forge.adaptive.capability_profiles` (CAPABILITIES).
@@ -21,6 +22,7 @@ QualificationProfile
   bootstrap_closure                    # resolved pins: name → exact version
   feature_support                      # interrupt/steer/restore, ALL explicit
   layer_bindings                       # smoke → contract → … evidence bindings
+  dependency_closure_digest            # R36-10 (optional): the wheelhouse identity
 ```
 
 `recipe_digest` is the canonical-JSON sha256 over the recipe's `to_document()`
@@ -31,6 +33,15 @@ statement, never an absence) over the CAPABILITIES vocabulary (steer =
 name. `profile_staleness` compares the pinned ids/digests against the shipped
 vocabularies: a recipe that changed since qualification (or a harness that no
 longer ships) is a staleness problem — re-qualify, never drift silently.
+
+`dependency_closure_digest` (R36-10, additive — `""` keeps the pre-R36-10
+meaning exactly, and archived documents without the field thaw to `""`) pins
+the hash-locked wheelhouse the qualification installed from: the
+`LaneClosureManifest.closure_digest` of a lane closure built by
+`scripts/build_lane_closure.py`. A profile that pins it demands the
+`closure-wheel` install route; one that leaves it empty is wheel-pinned, not
+closure-pinned — pip resolved the runtime dependencies at install time — and
+the runtime boundary report says so honestly.
 
 ## The digest contract
 
@@ -136,3 +147,56 @@ environment:
    both legs (env hook present AND enforcement observed).
 4. Reconcile the reports (identity sidecars bound to this candidate/bundle).
 5. Assemble the trace; the promotion reads the trace, it never re-runs suites.
+
+## The runtime dependency closure and the boundary (R36-10)
+
+The wheel pin alone is a reproducible-FILE guarantee — pip still resolves
+the runtime dependencies at install. The closure legs close that, and state
+the security boundary outside the model (operations runbook:
+[lane-closure.md](../operations/lane-closure.md)):
+
+- **`LaneClosureManifest`** (`forge.lane.closure/1`) — the wheelhouse
+  contract: every artifact name + sha256 (wheels only, sorted — order is
+  not a digest axis), the forge wheel identity (name/version/source:
+  `local-uv-build` | `pinned-url` | `promotion-record`), and the canonical
+  path-free resolution command. `closure_digest` = canonical-JSON sha256
+  over `to_document()`; deterministic over identical closures, different
+  on ANY change. The forge wheel must be a member of its own closure and
+  the declared version must agree with the wheel name.
+- **`verify_closure_dir`** — a staged wheelhouse against its manifest:
+  every artifact present and hash-matching, NOTHING undeclared beside
+  them (a poisoned-cache file is a typed `ClosureVerificationError`), and
+  the stored digest must reproduce from the manifest body. Pre-execution,
+  pure filesystem + hashlib.
+- **`verify_artifact_supply_chain(manifest, release_record)`** — the
+  forge wheel in the closure must be the wheel the promotion record
+  vouches for (by sha256, and by name when the record names it). An
+  image-only record refuses with `not_built` — honestly, never a
+  fabricated green; different bytes refuse with `digest_mismatch`.
+- **Credential scope receipts** — `verify_credential_isolation(staged,
+  forbidden)` is pure name-set arithmetic: any forbidden (publisher)
+  name among the staged ones raises
+  `CredentialIsolationViolation` carrying NAMES ONLY, never values. The
+  `CredentialScopeReceipt` freezes what the lane stages plus the
+  isolated verdict — and is only constructible through the check, so a
+  self-declared "isolated" receipt cannot exist.
+- **The `closure-wheel` install route** (`resolve_closure_install_route`,
+  additive to the R36-07 ladder) — `FORGE_LANE_CLOSURE_SHA256` (the
+  expected digest) + `FORGE_LANE_CLOSURE_DIR` select an offline install
+  (`pip install --no-index --find-links <dir> forge==<version>`); the pin
+  beside any other explicit route input (dev flag / explicit wheel /
+  explicit ref) refuses naming both variables; set-but-empty is unset.
+  `enforce_closure_install(expected_digest, manifest, installed)` is the
+  identity gate: the verified manifest must BE the pinned closure, and
+  the installed set must match the manifest pins exactly — under
+  `--no-index` a target-repo lockfile cannot replace the collector
+  runtime.
+- **`runtime_boundary_report(profile, egress_pair, closure_manifest,
+  installed=…, credential_receipt=…)`** — the one document (schema
+  `forge.qualification.boundary/1`) with the R36-10 observability keys:
+  `runtime.installed_fingerprint`, `security.egress_probe_results`,
+  `credential.staged_scope_receipt`, plus the closure binding
+  (`bound`/`unpinned`/`mismatch`). The verdict is derived:
+  `within_boundary` only when every leg is complete and passing; any leg
+  unknown or partial keeps `outside_boundary` with a problem line saying
+  why — the trace's honesty discipline, boundary edition.

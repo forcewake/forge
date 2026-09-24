@@ -1,0 +1,83 @@
+{
+  "schema": "forge.research.preregistration/1",
+  "cohort_id": "research-cohort-live-v1",
+  "registered_at": "2026-09-24T00:00:00+00:00",
+  "generation": 1,
+  "supersedes": "",
+  "change_reason": "",
+  "prompt_policy_digest": "eaac60df3b008c1f2d184139fd398e38467fc07e2e817e3e1914f17ef0fa830c",
+  "task_bindings": [
+    {
+      "task_id": "RC-08-offline-neighbor-deadline-policy",
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "f4243a4adbbd1aef8b2c484e3be153f7baefc8221beb6edda6362354179f9b5d",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites Billing's courier policy at its actual bytes (a non-initial window of the neighbor file)",
+        "the plan keeps the policy OWNED by Billing (imported, never redefined in Orders)"
+      ]
+    },
+    {
+      "task_id": "RC-09-live-ambiguous-refund-grace",
+      "archetype": "ambiguous_requirement",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "acceptance_criteria": [
+        "the plan asks a SPECIFIC question naming the grace-window decision and the fee owner \u2014 an invented default fails the criterion"
+      ]
+    },
+    {
+      "task_id": "RC-10-live-irrelevant-docs-site",
+      "archetype": "irrelevant_repository",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "acceptance_criteria": [
+        "the plan's impacted surface stays inside orders; dragging the docs site in expands scope"
+      ]
+    },
+    {
+      "task_id": "RC-11-live-deep-lapse-handler",
+      "archetype": "deep_file_evidence",
+      "snapshot_digest": "81d32fd42beecf004a018148749eef8c6d5666be9da0ef4aa0a55f0a3ef5784e",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites the deep handler window, not the file head"
+      ]
+    },
+    {
+      "task_id": "RC-12-live-holdout-neighbor-retry",
+      "archetype": "neighbor_dependency",
+      "snapshot_digest": "b0960eb80d20b26fce6ca7737199d1de5bc9e8330ed376fb87ba985ad574257e",
+      "acceptance_criteria": [
+        "the plan's decisive claim cites Billing's retry policy bytes in the neighbor"
+      ]
+    }
+  ],
+  "eligibility": {
+    "reviewer_role": "code owner (adaptive)",
+    "independent_of_capture": true,
+    "capture_author_ineligible": true
+  },
+  "budget": {
+    "max_calls": 10,
+    "wall_seconds": 90.0
+  },
+  "arms": [
+    "none",
+    "lexical",
+    "research"
+  ],
+  "review_procedure": {
+    "blind": true,
+    "counterbalanced": true,
+    "ordering_seed": 20260924,
+    "correction_effort_procedure": "the reviewer edits each plan to acceptance and records wall-clock minutes; the procedure is identical for every mode; a missing reviewer leaves correction unknown, never estimated",
+    "rubric_forms": "task-specific acceptance criteria frozen in this preregistration",
+    "evidence_checker_role": "consistency check only \u2014 token overlap is not semantic entailment"
+  },
+  "promotion_criteria": {
+    "margin": 0.05,
+    "accuracy_floor": 0.8,
+    "max_invented_default_delta": 0,
+    "cost_bound": {
+      "max_calls_total_per_mode": 60
+    }
+  },
+  "digest": "f33d55c5ae0187b289b5270ce1b6b1096ba700ff9a769f78ba53ad4445af29fc"
+}

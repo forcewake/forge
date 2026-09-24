@@ -18,8 +18,10 @@ This module is that procedure, as explicit commands::
         --database-url "$DATABASE_URL"
     uv run python -m forge.adaptive.checkpoint_migration verify \
         --database-url "$DATABASE_URL"
-    uv run python -m forge.adaptive.checkpoint_migration cutover
+    uv run python -m forge.adaptive.checkpoint_migration cutover \
+        --database-url "$DATABASE_URL"
     uv run python -m forge.adaptive.checkpoint_migration rollback \
+        --database-url "$DATABASE_URL" \
         --verify-report <path>          # the controlled reverse
 
 The command set and its gates:
@@ -44,16 +46,28 @@ The command set and its gates:
   the configured root. A disagreement is a DISAGREEMENT — both actives
   are reported and the operator resolves it; arrival time is never
   authority and no timestamp ever picks a winner (R28-06 discipline).
+  R36-05 strengthening: the report binds the SOURCE and TARGET
+  inventories it compared by CONTENT DIGEST (``inventory_generation``:
+  one sha256 over each authority's entries, derived actives and — on
+  the filesystem side — the pin overlay), and both flips re-derive
+  those digests from the CURRENT state before writing the marker — a
+  stale or tampered report can never authorize a changed inventory, and
+  a timestamp alone authorizes nothing.
 - **cutover** — flips the deployment's authority MARKER (a state file
   the deployment reads: ``<store-root>/migration/authority.json``) —
   only after verify passes, only under an exclusive fence on the shared
   blob volume (``<store-root>/migration/cutover.lock``), never deleting
-  the old inventory. After cutover exactly ONE backend accepts
-  mutations: wrap the resolved repository with
-  :func:`enforce_authority_marker` (the documented composition for
-  deployments) and the other authority refuses every mutation with the
-  typed :class:`MutationsFencedError` while its immutable READS stay
-  available.
+  the old inventory. Since R36-05 the STANDARD composition enforces the
+  marker: :func:`forge.adaptive.checkpoint_repository.resolve_repository`
+  attaches the fence by DEFAULT, so every ordinary process (API,
+  workers, resume, retention) refuses its next mutation after the flip
+  with the typed :class:`MutationsFencedError` while its immutable
+  reads stay available — :func:`enforce_authority_marker` remains the
+  wrapper for DIRECTLY constructed repositories, sharing that ONE fence
+  implementation. The ROLLOUT MODE is drained-offline cutover first:
+  the fence makes concurrent processes SAFE TO REFUSE (an old process
+  refuses mutations after the flip, without a restart), and no online
+  zero-downtime migration is claimed.
 - **rollback** — forward-only by default: the reverse is REFUSED unless
   a clean verify report for the CURRENT data state is supplied
   (``--verify-report <path>``). Checkpoints uploaded after cutover
@@ -63,14 +77,26 @@ The command set and its gates:
 
 The observability names the issue asks for ride in the reports:
 ``migration.checkpoint_coverage``, ``migration.conflicts``,
-``storage.blob_reachability`` (see :func:`run_verify` and
-:func:`preflight`).
+``migration.inventory_generation``, ``storage.blob_reachability`` (see
+:func:`run_verify` and :func:`preflight`); the composition-root fence
+reports ``migration.configured_vs_active_authority`` and
+``migration.mutation_refused`` from
+:mod:`forge.adaptive.checkpoint_repository`.
 
 Blob volumes: the CAS blobs are content-addressed filesystem bytes
 under BOTH contracts, so a shared database does NOT make node-local
 content shared. :func:`preflight` (wired into ``forge doctor``) warns —
 never blocks — when the configured root looks node-local, and the
 runbook documents the heuristic and the two-replica requirement.
+
+LOCK ORDER, stated once and shared with the fence's docstring in
+:mod:`forge.adaptive.checkpoint_repository`: every fenced mutation
+checks the marker BEFORE taking the store's volume-wide GC lock
+(``<root>/cas-refs.lock`` and its postgres advisory twin) and before
+any per-work lock, while this module's flips take ONLY the cutover
+fence (``<root>/migration/cutover.lock``) — a fence refusal never waits
+on the volume lock, no path holds the volume lock while waiting for the
+cutover fence, and the orders cannot cycle.
 """
 
 from __future__ import annotations
@@ -94,6 +120,21 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from forge.adaptive.checkpoint_repository import (
+    AUTHORITY_MARKER_SCHEMA,
+    METRIC_CONFIGURED_VS_ACTIVE,
+    METRIC_MUTATION_REFUSED,
+    MutationsFencedError,
+    SingleAuthorityRepository,
+    authority_marker_path,
+    authority_state_report,
+    cutover_fence_path,
+    cutover_in_progress,
+    enforce_authority_marker,
+    migration_dir,
+    read_authority_marker,
+)
+
 try:  # POSIX process-level advisory locking (Linux CI, macOS dev boxes).
     import fcntl
 except ImportError:  # pragma: no cover — non-POSIX platform without flock
@@ -106,15 +147,22 @@ __all__ = [
     "EXIT_REFUSED",
     "IMPORT_SCHEMA",
     "INVENTORY_SCHEMA",
+    "METRIC_CONFIGURED_VS_ACTIVE",
+    "METRIC_INVENTORY_GENERATION",
+    "METRIC_MUTATION_REFUSED",
     "MigrationCommandError",
     "MutationsFencedError",
     "SingleAuthorityRepository",
     "VERIFY_SCHEMA",
     "authority_marker_path",
+    "authority_state_report",
     "cutover_fence",
     "cutover_in_progress",
+    "database_inventory_generation",
     "enforce_authority_marker",
+    "filesystem_inventory_generation",
     "main",
+    "migration_dir",
     "preflight",
     "read_authority_marker",
     "run_cutover",
@@ -135,12 +183,14 @@ EXIT_PARTIAL: Final = 3
 INVENTORY_SCHEMA: Final = "forge.checkpoint.migration.inventory/1"
 IMPORT_SCHEMA: Final = "forge.checkpoint.migration.import/1"
 VERIFY_SCHEMA: Final = "forge.checkpoint.migration.verify/1"
-AUTHORITY_MARKER_SCHEMA: Final = "forge.checkpoint.authority/1"
 
-#: The observability metric names (Q35-21's observability section).
+#: The observability metric names (Q35-21's observability section; the
+#: R36-05 fence's two live in :mod:`forge.adaptive.checkpoint_repository`
+#: and are re-exported above).
 METRIC_COVERAGE: Final = "migration.checkpoint_coverage"
 METRIC_CONFLICTS: Final = "migration.conflicts"
 METRIC_REACHABILITY: Final = "storage.blob_reachability"
+METRIC_INVENTORY_GENERATION: Final = "migration.inventory_generation"
 
 #: How long a fence taker retries (jittered) before refusing — the same
 #: budget class as the index/pin locks (NEXT-06); cutover writes are rare.
@@ -158,18 +208,6 @@ class MigrationCommandError(Exception):
     The message is the operator's instruction — which gate failed and
     the documented recovery path. Raised by the command functions; the
     CLI prints it and exits :data:`EXIT_REFUSED`.
-    """
-
-
-class MutationsFencedError(RuntimeError):
-    """A metadata mutation refused: another authority owns the store.
-
-    The SPECIFIC refusal the fenced backend answers with after a
-    cutover (or while a cutover holds the fence): exactly one backend
-    accepts mutations, the other refuses with this error while its
-    immutable READS stay available. Never retried automatically — the
-    operator either cut back (``rollback --verify-report ...``) or fixes
-    the deployment's configured authority.
     """
 
 
@@ -208,26 +246,6 @@ def _is_address(digest: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def migration_dir(root: Path | str) -> Path:
-    """The migration's state directory: ``<store-root>/migration``."""
-    return Path(root) / "migration"
-
-
-def authority_marker_path(root: Path | str) -> Path:
-    """The deployment authority marker: ``<store-root>/migration/authority.json``.
-
-    The state file CUTOVER writes atomically and the deployment READS
-    (through :func:`enforce_authority_marker` at composition time): it
-    names the ONE authority that accepts metadata mutations. It is a
-    marker, not an index — it never decides which checkpoint is active.
-    """
-    return migration_dir(root) / "authority.json"
-
-
-def _fence_path(root: Path | str) -> Path:
-    return migration_dir(root) / "cutover.lock"
-
-
 def _write_json_atomic(path: Path, document: Mapping[str, Any]) -> None:
     """Land *document* atomically (temp + rename + fsync) — never torn."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,18 +278,6 @@ def _load_document(path: Path, expected_schema: str) -> dict[str, Any]:
     return document
 
 
-def read_authority_marker(root: Path | str) -> dict[str, Any] | None:
-    """The authority marker document, or ``None`` when none exists."""
-    path = authority_marker_path(root)
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if isinstance(document, dict) and document.get("schema") == AUTHORITY_MARKER_SCHEMA:
-        return document
-    return None
-
-
 # ---------------------------------------------------------------------------
 # The cutover fence — an explicit advisory lock on the shared blob volume
 # ---------------------------------------------------------------------------
@@ -287,15 +293,20 @@ def cutover_fence(root: Path | str, *, wait_seconds: float = _FENCE_WAIT_SECONDS
     exists only under the postgres dialect; the fence must serialize
     BOTH authorities, and every durability contract already requires
     the blob volume to be shared, so the lock lives there). While it is
-    held, every repository wrapped by
-    :func:`enforce_authority_marker` refuses metadata mutations on both
-    sides; the marker write itself happens inside it, so no reader can
-    observe a half-flipped authority.
+    held, every repository carrying the composition-root fence
+    (:func:`forge.adaptive.checkpoint_repository.resolve_repository`
+    attaches it by default; :func:`enforce_authority_marker` wraps the
+    directly constructed ones with the SAME implementation) refuses
+    metadata mutations on both sides; the marker write itself happens
+    inside it, so no reader can observe a half-flipped authority. Lock
+    order: this fence is taken WITHOUT any store lock held, and fenced
+    mutations never hold store locks while probing it — see the module
+    docstring's LOCK ORDER paragraph.
     """
     if fcntl is None:  # pragma: no cover — non-POSIX without flock
         yield
         return
-    path = _fence_path(root)
+    path = cutover_fence_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + max(0.0, wait_seconds)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
@@ -316,28 +327,6 @@ def cutover_fence(root: Path | str, *, wait_seconds: float = _FENCE_WAIT_SECONDS
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
-def cutover_in_progress(root: Path | str) -> bool:
-    """Whether a cutover/rollback currently holds the fence (a probe)."""
-    if fcntl is None:  # pragma: no cover — non-POSIX without flock
-        return False
-    path = _fence_path(root)
-    if not path.is_file():
-        return False
-    try:
-        fd = os.open(path, os.O_RDWR)
-    except OSError:
-        return False
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True  # held by the cutover process
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
     finally:
         os.close(fd)
 
@@ -920,6 +909,13 @@ async def run_verify(
             pins_failed += 1
         pin_reports.append(record)
     clean = not any(work["disagreements"] for work in works_reports) and pins_failed == 0
+    # R36-05: the report BINDS the inventories it compared by content
+    # digest — the generation both flips re-derive before touching the
+    # marker. A timestamp alone can never authorize a changed inventory.
+    inventory_generation = {
+        "filesystem": _filesystem_generation_of(inventory),
+        "database": _database_generation_of(db_rows),
+    }
     report = {
         "schema": VERIFY_SCHEMA,
         "generated_at": _now_iso(),
@@ -927,6 +923,7 @@ async def run_verify(
         "clean": clean,
         "works": works_reports,
         "pins": pin_reports,
+        "inventory_generation": inventory_generation,
         "metrics": {
             METRIC_COVERAGE: {
                 "works_filesystem": sum(1 for w in inventory["works"] if w["entries"]),
@@ -936,6 +933,7 @@ async def run_verify(
             },
             METRIC_CONFLICTS: {"count": len(conflicts), "active_disagreements": conflicts},
             METRIC_REACHABILITY: {"checked": len(db_rows), "unreachable_count": len(unreachable)},
+            METRIC_INVENTORY_GENERATION: inventory_generation,
         },
         "unreachable": unreachable,
     }
@@ -1000,19 +998,97 @@ def _require_current_index(root: Path, report: dict[str, Any]) -> None:
         )
 
 
+def _next_marker_generation(marker: dict[str, Any] | None) -> int:
+    """The marker's flip counter — one more than the previous marker's.
+
+    The ``generation`` the startup observability reports: a CONTENT
+    identity (which flip of the marker this is), never a timestamp and
+    never an authorization — the verify report's INVENTORY generations
+    are the authorization, and they are content digests.
+    """
+    previous = marker.get("generation") if marker is not None else None
+    return previous + 1 if isinstance(previous, int) else 1
+
+
+def _require_inventory_generation(
+    root: Path, report: dict[str, Any], current_database_generation: str | None, *, path: Path
+) -> None:
+    """The R36-05 generation gate: the report must bind TODAY's inventories.
+
+    The verify report carries ``inventory_generation`` — a content
+    digest per authority over its entries, derived actives and (the
+    filesystem side) the pin overlay. Both flips re-derive those
+    digests from the CURRENT state before touching the marker: a stale
+    or tampered report can never authorize a changed inventory, on
+    EITHER side — a filesystem upload OR a database landing after the
+    report was taken refuses the flip until a fresh verify re-binds
+    the state. Content digests, never timestamps: ``generated_at``
+    orders nothing here (the rollback's time half above is a SEPARATE,
+    weaker guard kept for pre-generation reports' honesty).
+    """
+    recorded = report.get("inventory_generation")
+    if (
+        not isinstance(recorded, dict)
+        or not isinstance(recorded.get("filesystem"), str)
+        or not isinstance(recorded.get("database"), str)
+    ):
+        raise MigrationCommandError(
+            f"the verify report at {path} predates inventory-generation binding — "
+            "a flip must gate on the CURRENT data state; re-run `python -m "
+            "forge.adaptive.checkpoint_migration verify` and retry with the fresh report"
+        )
+    current_filesystem = filesystem_inventory_generation(root)
+    if current_filesystem != recorded["filesystem"]:
+        raise MigrationCommandError(
+            "the FILESYSTEM inventory changed since the verify report was taken "
+            f"(content digest {current_filesystem[:12]}… now vs "
+            f"{str(recorded['filesystem'])[:12]}… reported) — a flip must gate on the "
+            "CURRENT data state; re-run `python -m forge.adaptive.checkpoint_migration "
+            "verify` and retry with the fresh report"
+        )
+    if current_database_generation is None:
+        raise MigrationCommandError(
+            "the verify report binds the TARGET (database) inventory's generation, and "
+            "the current generation cannot be re-derived without the metadata database "
+            "— pass --database-url (or set DATABASE_URL) so the flip can prove the "
+            "target has not moved since the report"
+        )
+    if current_database_generation != recorded["database"]:
+        raise MigrationCommandError(
+            "the DATABASE inventory changed since the verify report was taken "
+            f"(content digest {current_database_generation[:12]}… now vs "
+            f"{str(recorded['database'])[:12]}… reported) — a flip must gate on the "
+            "CURRENT data state; re-run `python -m forge.adaptive.checkpoint_migration "
+            "verify` and retry with the fresh report"
+        )
+
+
 def run_cutover(
-    root: Path | str, *, verify_report: Path | None = None, to: str = "postgres"
+    root: Path | str,
+    *,
+    verify_report: Path | None = None,
+    to: str = "postgres",
+    current_database_generation: str | None = None,
 ) -> dict[str, Any]:
     """Flip the deployment authority marker — only after verify passes.
 
     Writes ``<store-root>/migration/authority.json`` atomically under
-    the cutover fence. The marker is the state file the DEPLOYMENT
-    reads: wrap the resolved repository with
-    :func:`enforce_authority_marker` and the named authority becomes
-    the only backend whose mutations succeed. The flip itself does not
-    change which checkpoint is active anywhere — selection is derived
-    per authority from unchanged data. The old inventory is NEVER
-    deleted; the reverse is :func:`run_rollback`, gated the same way.
+    the cutover fence. The marker is the state file the STANDARD
+    composition reads (``resolve_repository`` attaches the fence by
+    default since R36-05; ``enforce_authority_marker`` wraps the
+    directly constructed repositories with the SAME implementation):
+    after the flip the named authority is the only one whose mutations
+    succeed — an already-running old-authority process refuses its NEXT
+    mutation with :class:`MutationsFencedError`, without a restart. The
+    flip itself does not change which checkpoint is active anywhere —
+    selection is derived per authority from unchanged data. The old
+    inventory is NEVER deleted; the reverse is :func:`run_rollback`,
+    gated the same way.
+
+    *current_database_generation* is the CURRENT target-inventory
+    digest (:func:`database_inventory_generation` over the caller's
+    factory; the CLI derives it from ``--database-url``) — the R36-05
+    gate re-binds BOTH inventories by content digest before the flip.
     """
     # Resolved once: the marker's path must be spelling-independent, so a
     # cutover run with a relative --root and a rollback run with the
@@ -1027,6 +1103,7 @@ def run_cutover(
     )
     document = _require_clean_report(report_path, root)
     _require_current_index(root, document)
+    _require_inventory_generation(root, document, current_database_generation, path=report_path)
     marker = read_authority_marker(root)
     if marker is not None and marker.get("authority") == to:
         raise MigrationCommandError(
@@ -1042,6 +1119,7 @@ def run_cutover(
         "schema": AUTHORITY_MARKER_SCHEMA,
         "authority": to,
         "previous_authority": previous,
+        "generation": _next_marker_generation(marker),
         "flipped_at": _now_iso(),
         "store_root": str(root),
         "verify_report": str(report_path),
@@ -1052,7 +1130,12 @@ def run_cutover(
     return document
 
 
-def run_rollback(root: Path | str, *, verify_report: Path) -> dict[str, Any]:
+def run_rollback(
+    root: Path | str,
+    *,
+    verify_report: Path,
+    current_database_generation: str | None = None,
+) -> dict[str, Any]:
     """The controlled reverse: restore the previous authority marker.
 
     Forward-only by default — the rollback is REFUSED unless a CLEAN
@@ -1063,7 +1146,11 @@ def run_rollback(root: Path | str, *, verify_report: Path) -> dict[str, Any]:
     documented recovery path is ``import --reverse`` (database entries
     back into the filesystem index), then ``verify``, then this
     command. The old inventory was never deleted; nothing here deletes
-    anything either.
+    anything either. R36-05: the generation gate re-binds BOTH
+    inventories by content digest — a database upload that landed after
+    the report (invisible to the index-half gate, and NOT covered by
+    the time half) refuses the rollback exactly as a filesystem change
+    would.
     """
     root = Path(root).resolve()  # the same spelling-independent marker path
     marker = read_authority_marker(root)
@@ -1094,10 +1181,12 @@ def run_rollback(root: Path | str, *, verify_report: Path) -> dict[str, Any]:
             "`import --reverse` (the documented recovery path), then verify, then retry"
         )
     _require_current_index(root, report)
+    _require_inventory_generation(root, report, current_database_generation, path=report_path)
     document = {
         "schema": AUTHORITY_MARKER_SCHEMA,
         "authority": "filesystem",
         "previous_authority": "postgres",
+        "generation": _next_marker_generation(marker),
         "flipped_at": _now_iso(),
         "store_root": str(root),
         "verify_report": str(report_path),
@@ -1112,129 +1201,95 @@ def run_rollback(root: Path | str, *, verify_report: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Exactly one mutation authority — the deployment-side guard
 # ---------------------------------------------------------------------------
+#
+# R36-05 (issue #264): the guard MOVED. ``SingleAuthorityRepository``,
+# ``enforce_authority_marker``, ``MutationsFencedError``, the marker
+# readers and the fence probe now live in
+# :mod:`forge.adaptive.checkpoint_repository` — the STANDARD composition
+# point — and are re-exported above, so the migration CLI, the
+# deployment documentation and every existing import share ONE fence
+# implementation with ``resolve_repository(...)`` (which attaches it by
+# DEFAULT since R36-05). Nothing about the contract changed: mutations
+# fence, reads never do, and the marker is re-read before every
+# mutation.
 
 
-class SingleAuthorityRepository:
-    """One repository, mutation-fenced by the deployment authority marker.
+# ---------------------------------------------------------------------------
+# Inventory generations — content digests, never timestamps (R36-05)
+# ---------------------------------------------------------------------------
 
-    The wrapper deployments compose per the cutover documentation:
-    ``enforce_authority_marker(resolve_repository(...))``. Mutations
-    (``put``/``put_checkpoint``/``apply_retention``) are refused with
-    the typed :class:`MutationsFencedError` when the marker at
-    ``<store-root>/migration/authority.json`` names a DIFFERENT
-    authority, or while a cutover holds the fence; immutable reads
-    (``entry``, ``read``, ``read_entry``, ``pins``, listings, health)
-    pass through untouched, so the old root stays readable exactly as
-    documented. The marker is re-read on every mutation — a running
-    process switches behavior when the cutover lands, without a
-    restart of the guard itself.
+
+def _generation_digest(
+    entries: list[tuple[str, str, int]],
+    actives: Mapping[str, str],
+    pins: list[tuple[str, str]],
+) -> str:
+    """One sha256 over an authority's inventory — content, never time.
+
+    The canonical document covers the entry identities with their
+    sequences, the DERIVED actives (selection is computed, never
+    stored, so a flipped active changes the digest even when the entry
+    set does not) and — where the authority has one — the pin overlay.
+    Two inventories with the same digest hold the same logical
+    content, whatever their timestamps say.
     """
+    document = {
+        "entries": sorted(entries),
+        "actives": dict(sorted(actives.items())),
+        "pinned": sorted(pins),
+    }
+    return _sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
-    def __init__(self, repository: Any, root: Path | str | None = None) -> None:
-        self._repository = repository
-        self._root = Path(root) if root is not None else _default_store_root()
 
-    async def _refuse_if_fenced(self) -> None:
-        if cutover_in_progress(self._root):
-            raise MutationsFencedError(
-                "a checkpoint authority cutover is in progress (fence at "
-                f"{_fence_path(self._root)}) — mutations are fenced on both sides; "
-                "retry once the cutover completes"
+def _filesystem_generation_of(inventory: Mapping[str, Any]) -> str:
+    """The filesystem inventory's generation, from a scan's report."""
+    entries: list[tuple[str, str, int]] = []
+    actives: dict[str, str] = {}
+    pins: list[tuple[str, str]] = []
+    for work in inventory["works"]:
+        work_id = str(work["work_id"])
+        for entry in work["entries"]:
+            sequence = entry.get("sequence")
+            entries.append(
+                (work_id, str(entry["checkpoint_id"]), sequence if isinstance(sequence, int) else 0)
             )
-        marker = read_authority_marker(self._root)
-        if marker is None:
-            return
-        named = str(marker.get("authority") or "")
-        if named and named != await self._repository.authority():
-            raise MutationsFencedError(
-                f"the checkpoint authority marker at {authority_marker_path(self._root)} names "
-                f"{named!r}; this repository refuses metadata mutations — immutable reads "
-                "stay available; recovery: `python -m forge.adaptive.checkpoint_migration "
-                "rollback --verify-report <path>`"
-            )
-
-    # -- fenced mutations -----------------------------------------------------
-
-    async def put(
-        self,
-        work_id: str,
-        checkpoint_id: str,
-        manifest_bytes: bytes,
-        blobs: dict[str, bytes],
-    ) -> None:
-        await self._refuse_if_fenced()
-        return await self._repository.put(work_id, checkpoint_id, manifest_bytes, blobs)
-
-    async def put_checkpoint(
-        self,
-        *,
-        work_id: str,
-        manifest_bytes: bytes,
-        blobs: dict[str, bytes],
-        sequence: int,
-    ) -> dict[str, Any]:
-        await self._refuse_if_fenced()
-        return await self._repository.put_checkpoint(
-            work_id=work_id, manifest_bytes=manifest_bytes, blobs=blobs, sequence=sequence
-        )
-
-    async def apply_retention(self, work_id: str, keep_last: int) -> int:
-        await self._refuse_if_fenced()
-        return await self._repository.apply_retention(work_id, keep_last)
-
-    # -- passthrough (reads, pins, listings) ------------------------------------
-
-    async def entry(self, work_id: str, checkpoint_id: str | None = None) -> dict[str, Any] | None:
-        return await self._repository.entry(work_id, checkpoint_id)
-
-    async def read(self, work_id: str) -> tuple[bytes, list[bytes]] | None:
-        return await self._repository.read(work_id)
-
-    async def read_entry(self, entry: dict[str, Any]) -> tuple[bytes, dict[str, bytes]]:
-        return await self._repository.read_entry(entry)
-
-    async def authority(self) -> str:
-        return await self._repository.authority()
-
-    async def pin(self, work_id: str, checkpoint_id: str, reason: str = "") -> bool:
-        return await self._repository.pin(work_id, checkpoint_id, reason)
-
-    async def unpin(self, work_id: str, checkpoint_id: str, reason: str | None = None) -> int:
-        return await self._repository.unpin(work_id, checkpoint_id, reason)
-
-    async def pins(self, work_id: str | None = None) -> list[dict[str, Any]]:
-        return await self._repository.pins(work_id)
-
-    async def list_entries(self) -> list[dict[str, Any]]:
-        return await self._repository.list_entries()
-
-    async def storage_health_report(self, policy: Any = None) -> dict[str, Any]:
-        return await self._repository.storage_health_report(policy)
-
-    def __getattr__(self, name: str) -> Any:
-        # Forward-compat passthrough (first_upload_lock and whatever the
-        # protocol grows next): the guard fences mutations, never reads.
-        return getattr(self._repository, name)
+        active = work.get("active")
+        if isinstance(active, dict) and active.get("checkpoint_id"):
+            actives[work_id] = str(active["checkpoint_id"])
+        pins.extend((work_id, str(pinned)) for pinned in work.get("pinned", []))
+    return _generation_digest(entries, actives, pins)
 
 
-def _default_store_root() -> Path:
-    from forge.api_checkpoint_channel import CHECKPOINT_STORE_DIR_ENV, DEFAULT_CHECKPOINT_ROOT
+def filesystem_inventory_generation(root: Path | str) -> str:
+    """The CURRENT filesystem inventory's generation (a fresh light scan)."""
+    return _filesystem_generation_of(scan_inventory(root, verify_digests=False))
 
-    return Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "").strip() or DEFAULT_CHECKPOINT_ROOT)
+
+def _database_generation_of(rows: list[Mapping[str, Any]]) -> str:
+    """The database inventory's generation, from ``list_entries`` rows."""
+    entries: list[tuple[str, str, int]] = []
+    by_work: dict[str, dict[str, int]] = {}
+    for row in rows:
+        work_id, checkpoint_id = str(row["work_id"]), str(row["checkpoint_id"])
+        sequence = row.get("sequence")
+        rank = sequence if isinstance(sequence, int) else 0
+        entries.append((work_id, checkpoint_id, rank))
+        by_work.setdefault(work_id, {})[checkpoint_id] = rank
+    actives = {
+        work_id: max(rows_.items(), key=lambda item: (item[1], item[0]))[0]
+        for work_id, rows_ in by_work.items()
+    }
+    return _generation_digest(entries, actives, [])
 
 
-def enforce_authority_marker(
-    repository: Any, root: Path | str | None = None
-) -> SingleAuthorityRepository:
-    """Wrap *repository* so exactly ONE authority accepts mutations.
+async def database_inventory_generation(
+    root: Path | str, session_factory: async_sessionmaker[AsyncSession]
+) -> str:
+    """The CURRENT database inventory's generation (a fresh read-only walk)."""
+    from forge.adaptive.checkpoint_repository import PostgresCheckpointRepository
 
-    The documented deployment composition after a cutover (the marker's
-    reader): ``enforce_authority_marker(resolve_repository(...))``. The
-    marker lives at ``<store-root>/migration/authority.json`` and is
-    written only by :func:`run_cutover`/:func:`run_rollback` under the
-    cutover fence. Reads never fence.
-    """
-    return SingleAuthorityRepository(repository, root)
+    rows = await PostgresCheckpointRepository(root, session_factory).list_entries()
+    return _database_generation_of(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1286,12 +1341,12 @@ async def _async_db_entry_map(
 
 
 async def preflight(
-    root: Path | str | None = None,
+    root: Path | None = None,
     *,
     env: Mapping[str, str] | None = None,
     database_url: str = "",
 ) -> dict[str, Any]:
-    """The doctor's three migration preflight views (read-only).
+    """The doctor's migration preflight views (read-only).
 
     - **coverage** — while the postgres authority is ACTIVE: how many
       works still live only on the filesystem index (not yet migrated
@@ -1308,6 +1363,12 @@ async def preflight(
       configured store root looks node-local (the heuristic above),
       and the note that a shared database does not make node-local
       blobs shared. A warning, never a block.
+    - **authority_marker** (R36-05) — the composition-root fence's own
+      state, read exactly the way the fence reads it: the marker's
+      authority and generation (or its absence — the fence dormant),
+      the CONFIGURED repository, a mismatch verdict, and whether a
+      cutover currently holds the fence. Read-only — the preflight
+      never flips anything.
     """
     from forge.api_checkpoint_channel import (
         CHECKPOINT_STORE_DIR_ENV,
@@ -1395,6 +1456,12 @@ async def preflight(
             "elsewhere is ASSUMED shared — confirm every replica mounts it"
         ),
     }
+    # -- the authority marker (R36-05) -------------------------------------------
+    # The composition-root fence's own state, read the SAME way the fence
+    # reads it: which authority the marker names (if any), its generation,
+    # whether the configured repository is that authority, and whether a
+    # cutover currently holds the fence. Read-only — doctor never flips.
+    marker_view = authority_state_report(env=source, root=store_root)
     return {
         "coverage": coverage,
         "conflicts": {
@@ -1403,10 +1470,12 @@ async def preflight(
             "post_cutover_drift": drift_count,
         },
         "topology": topology,
+        "authority_marker": marker_view,
         "metrics": {
             METRIC_COVERAGE: coverage,
             METRIC_CONFLICTS: {"count": len(conflicts)},
             METRIC_REACHABILITY: {"blob_problems": int(blob_problems)},
+            METRIC_CONFIGURED_VS_ACTIVE: marker_view,
         },
     }
 
@@ -1497,7 +1566,11 @@ def _cli_database_url(args: argparse.Namespace) -> str:
 
 def _cli_root(args: argparse.Namespace) -> Path:
     root = str(getattr(args, "root", "") or "").strip()
-    return Path(root) if root else _default_store_root()
+    if root:
+        return Path(root)
+    from forge.api_checkpoint_channel import CHECKPOINT_STORE_DIR_ENV, DEFAULT_CHECKPOINT_ROOT
+
+    return Path(os.environ.get(CHECKPOINT_STORE_DIR_ENV, "").strip() or DEFAULT_CHECKPOINT_ROOT)
 
 
 def run_inventory(root: Path | str, *, out: Path | None = None) -> dict[str, Any]:
@@ -1614,14 +1687,59 @@ async def _cmd_verify(args: argparse.Namespace) -> int:
     return exit_code
 
 
+async def _current_database_generation(root: Path, database_url: str) -> str:
+    """The CURRENT target-inventory digest — a fresh read-only DB walk.
+
+    Opens its OWN engine (``bootstrap=False``: the flip observes the
+    metadata table, it never creates schema) and disposes it — the same
+    one-command-one-engine discipline the other database-touching
+    commands follow. An unreachable database is the CLI's typed refusal
+    (``EXIT_REFUSED`` with the operator's remedy), never a traceback:
+    a flip that cannot re-bind the target generation does not run.
+    """
+    try:
+        engine = await open_metadata_engine(database_url, bootstrap=False)
+    except MigrationCommandError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the CLI refuses, never crashes
+        raise MigrationCommandError(
+            "the TARGET (database) inventory's generation cannot be re-derived — "
+            f"the metadata database at the configured URL is unreachable ({exc.__class__.__name__})"
+        ) from exc
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        return await database_inventory_generation(
+            root, async_sessionmaker(engine, expire_on_commit=False)
+        )
+    except MigrationCommandError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise MigrationCommandError(
+            "the TARGET (database) inventory's generation cannot be re-derived — "
+            f"the metadata database refused the read ({exc.__class__.__name__}: {exc})"
+        ) from exc
+    finally:
+        await engine.dispose()
+
+
 async def _cmd_cutover(args: argparse.Namespace) -> int:
     root = _cli_root(args)
+    url = _cli_database_url(args)
+    current_db = await _current_database_generation(root, url)
     marker = run_cutover(
-        root, verify_report=Path(args.verify_report) if args.verify_report else None
+        root,
+        verify_report=Path(args.verify_report) if args.verify_report else None,
+        current_database_generation=current_db,
     )
     print(f"cutover complete: the authority marker now names {marker['authority']!r}")
-    print(f"  marker: {authority_marker_path(root)}")
+    print(f"  marker: {authority_marker_path(root)} (generation {marker['generation']})")
     print("  next: set FORGE_CHECKPOINT_DURABILITY=postgres and restart the deployment")
+    print(
+        "  drained-offline mode: stop the old-authority processes (their mutations are "
+        "fenced already), then start the new ones — the fence refuses, it never promises "
+        "an online zero-downtime flip"
+    )
     print(
         "  the old filesystem inventory is preserved (rollback: python -m "
         "forge.adaptive.checkpoint_migration rollback --verify-report <path>)"
@@ -1631,9 +1749,13 @@ async def _cmd_cutover(args: argparse.Namespace) -> int:
 
 async def _cmd_rollback(args: argparse.Namespace) -> int:
     root = _cli_root(args)
-    marker = run_rollback(root, verify_report=Path(args.verify_report))
+    url = _cli_database_url(args)
+    current_db = await _current_database_generation(root, url)
+    marker = run_rollback(
+        root, verify_report=Path(args.verify_report), current_database_generation=current_db
+    )
     print(f"rollback complete: the authority marker now names {marker['authority']!r}")
-    print(f"  marker: {authority_marker_path(root)}")
+    print(f"  marker: {authority_marker_path(root)} (generation {marker['generation']})")
     print("  next: set FORGE_CHECKPOINT_DURABILITY=best_effort and restart the deployment")
     return EXIT_OK
 
@@ -1698,6 +1820,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="the clean verify report (default: <root>/migration/verify.json)",
     )
+    cutover_parser.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "the metadata database URL (default: DATABASE_URL) — the flip re-binds the "
+            "target inventory's content digest before writing the marker"
+        ),
+    )
     cutover_parser.set_defaults(handler=_cmd_cutover)
 
     rollback_parser = subparsers.add_parser(
@@ -1707,6 +1837,14 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-report",
         required=True,
         help="a CLEAN verify report for the CURRENT data state — the rollback gate",
+    )
+    rollback_parser.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "the metadata database URL (default: DATABASE_URL) — the flip re-binds the "
+            "target inventory's content digest before writing the marker"
+        ),
     )
     rollback_parser.set_defaults(handler=_cmd_rollback)
 

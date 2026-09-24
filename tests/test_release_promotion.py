@@ -600,6 +600,31 @@ def test_cli_gaps_exports_the_real_archive(tmp_path: Path) -> None:
     assert code == 1  # the real archive has gaps (blocked v0.33.0 + manual e2e lanes)
 
 
+def test_cli_gaps_joins_the_profile_qualification_records(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """R36-22: the gaps query reads the committed profile records too —
+    the gitlab lane's gap names its declared_only record (fixtures executed,
+    live evidence absent) instead of a bare 'no evidence' line, and the
+    uncovered providers are named per provider."""
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = rp.main(["gaps", "--root", str(ROOT)])
+    assert code == 0
+    document = json.loads(buf.getvalue())
+    reasons = {(gap["capability"], gap["provider"]): gap["reason"] for gap in document["gaps"]}
+    gitlab = reasons[("real-provider-e2e", "gitlab")]
+    assert "declared_only" in gitlab and "gitlab-ce-v1@0.35.0" in gitlab
+    for provider in ("github", "azure"):
+        assert "no profile-qualification record covers" in reasons[("real-provider-e2e", provider)]
+    # the promotion-side (boot_canary) capabilities keep their pre-R36-22
+    # behavior: the v0.35.0 record's canary tags clear them.
+    assert not [key for key in reasons if key[0] == "release-artifact-canary"]
+
+
 # ---------------------------------------------------------------------------
 # scripts/generate_template_pins.py — idempotent, drift-detecting
 # ---------------------------------------------------------------------------

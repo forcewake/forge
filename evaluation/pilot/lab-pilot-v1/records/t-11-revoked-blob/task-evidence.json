@@ -1,0 +1,202 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-11-revoked-blob/a1",
+      "note": "required resume halted: wip_restore_failed (zero vendor events)",
+      "wall_seconds": 0.516
+    },
+    {
+      "attempt_id": "t-11-revoked-blob/a2",
+      "note": "operator-authorized fresh retry",
+      "wall_seconds": 0.803
+    }
+  ],
+  "brief": "Implement the widget (the checkpoint authority rots before the required resume).",
+  "checkpoint_ids": [
+    "78d30534272079040a614b430de6e665e2f678a88a93cc973f33b8e3d114f992"
+  ],
+  "collector_source": "checkout",
+  "diff_digest": "09734e62943db65bba2a90fd874acc42278052e1990444e4b3a263ed92cc9479",
+  "driver": "resource_revocation",
+  "evidence_class": "lab-operational",
+  "halt_terminal_reason": "wip_restore_failed",
+  "interventions": [],
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:13.061458+00:00",
+      "point": "recovery-after-revocation",
+      "question": "The required resume cannot restore (revoked blob). Retry fresh?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:13.061468+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "retry fresh",
+      "detail": "the rotted checkpoint is unrecoverable; the committed baseline is the honest restart",
+      "point": "recovery-after-revocation",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:14.506133+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:14.506156+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "halt-was-loud=ok; zero-vendor-events-after-pause=ok; nothing-published=ok; fresh-retry-completed=ok; diff-applies-cleanly=ok; reviewer-recount=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": false,
+        "attempt_id": "t-11-revoked-blob/a1",
+        "spend_usd": null
+      },
+      {
+        "accepted": true,
+        "attempt_id": "t-11-revoked-blob/a2",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0393,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0011,
+    "rollbacks": 0,
+    "setup_minutes": 0.0352,
+    "started_at": "2026-09-24T01:42:12.151071+00:00",
+    "task_id": "t-11-revoked-blob",
+    "touched_repos": [
+      "lab/checkout"
+    ],
+    "unaccepted": false
+  },
+  "rotted_blob": "0ea80fc9c5e6723865af81e83158d2c144f6c27430dd7a3849baa32b39693f25",
+  "scenario": "resource_revocation",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "the resumed lane exits non-zero with wip_restore_failed and a failed meta",
+      "name": "halt-was-loud",
+      "observed": "returncode=1 exit=failed terminal=wip_restore_failed",
+      "ok": true
+    },
+    {
+      "expected": "no vendor event follows the pause leg",
+      "name": "zero-vendor-events-after-pause",
+      "observed": "post_pause=[]",
+      "ok": true
+    },
+    {
+      "expected": "the checkout stays clean and nothing was published",
+      "name": "nothing-published",
+      "observed": "clean=True",
+      "ok": true
+    },
+    {
+      "expected": "the retry attempt's collector reports the intended edit",
+      "name": "fresh-retry-completed",
+      "observed": "diff_digest=09734e62943db65bba2a90fd874acc42278052e1990444e4b3a263ed92cc9479 source=checkout",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "the reviewer independently re-applied the recorded diff onto a fresh clone",
+      "name": "reviewer-recount",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 2,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the rotted referenced blob makes the required-continuation lane halt wip_restore_failed with ZERO vendor events after the pause leg and zero publication (AT-03 seam outcome); the operator's fresh retry then completes the task with the same intended edit",
+    "group": "g4-operations",
+    "non_goals": [
+      "no silent fresh restart may replace the failed required resume",
+      "no vendor turn may run against the rotted authority"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "resource_revocation",
+    "stage": "gate",
+    "task_id": "t-11-revoked-blob",
+    "title": "Revoked checkpoint blob halts loudly; the operator retry recovers fresh",
+    "verification": [
+      {
+        "method": "the first resumed lane exits non-zero with wip_restore_failed and a failed candidate.meta.json",
+        "name": "halt-was-loud"
+      },
+      {
+        "method": "the vendor event log holds no events after the pre-pause leg",
+        "name": "zero-vendor-events-after-pause"
+      },
+      {
+        "method": "the retry attempt's collector reports a non-empty generation diff with the intended edit",
+        "name": "fresh-retry-completed"
+      }
+    ]
+  },
+  "task_id": "t-11-revoked-blob",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-11-revoked-blob/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.516,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": null,
+        "output": null,
+        "total_known": null
+      },
+      "tool_call_count": 2
+    },
+    {
+      "attempt_id": "t-11-revoked-blob/a2",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.803,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 7
+    }
+  ]
+}

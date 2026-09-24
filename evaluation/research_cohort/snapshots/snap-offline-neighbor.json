@@ -1,0 +1,20 @@
+{
+  "repos": {
+    "orders": {
+      "repository_id": "github-4401",
+      "source_oid": "1a4c0e0000000000000000000000000000000001",
+      "files": {
+        "README.md": "# orders (offline capture seed)\n\nDispatch domain. The courier deadline window is Billing's contract.\n",
+        "src/dispatch.py": "\"\"\"Orders' dispatch retries (offline capture seed).\n\nThe courier deadline window is Billing's contract: Orders imports and\nenforces it, but never defines it. See billing/src/courier.py.\n\"\"\"\n\nfrom billing.courier import COURIER_DEADLINE_POLICY\n\n\ndef dispatch_within_deadline(order_id: str) -> str:\n    \"\"\"Dispatch an order inside Billing's courier deadline window.\"\"\"\n    window = COURIER_DEADLINE_POLICY[\"window_seconds\"]\n    grace = COURIER_DEADLINE_POLICY[\"grace_seconds\"]\n    return f\"dispatched {order_id} within {window}s (grace {grace}s)\"\n"
+      }
+    },
+    "billing": {
+      "repository_id": "gitlab-9202",
+      "source_oid": "2b5d1f0000000000000000000000000000000002",
+      "files": {
+        "README.md": "# billing (offline capture seed)\n\nCourier deadline contract owner.\n",
+        "src/courier.py": "\"\"\"Billing's courier deadline contract (offline capture seed).\n\nOrders' dispatch enforces the window Billing owns; the policy is\ndefined HERE, behind a few helpers, on purpose — the decisive bytes\nsit at a NON-INITIAL window of the file.\n\"\"\"\n\nimport logging\n\nlogger = logging.getLogger(__name__)\n\n\ndef _format_deadline(order_id: str) -> str:\n    return f\"deadline:{order_id}\"\n\n\ndef _load_order_window(order_id: str) -> dict:\n    return {\"order_id\": order_id, \"state\": \"dispatching\"}\n\n\ndef _notify_courier(order_id: str, channel: str) -> None:\n    logger.info(\"notify courier %s on %s\", order_id, channel)\n\n\nCOURIER_DEADLINE_POLICY = {\"window_seconds\": 900, \"grace_seconds\": 60, \"version\": \"v3\"}\n\n\ndef enforce_deadline(order_id: str) -> str:\n    \"\"\"Hold the dispatch inside Billing's courier deadline window.\"\"\"\n    order = _load_order_window(order_id)\n    if order[\"state\"] != \"dispatching\":\n        return \"ignored\"\n    _notify_courier(order_id, \"email\")\n    return f\"enforced {_format_deadline(order_id)}\"\n"
+      }
+    }
+  }
+}

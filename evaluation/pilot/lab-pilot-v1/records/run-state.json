@@ -1,0 +1,8 @@
+{
+  "as_of": "2026-09-23",
+  "note": "records precede the decision by construction; rebuild with --rebuild-from to reproduce report.json byte-identically",
+  "plan_id": "lab-pilot-v1",
+  "schema": "forge.lab-pilot.run-state/1",
+  "spec_digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+  "stop_reason": ""
+}

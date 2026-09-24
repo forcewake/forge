@@ -1,0 +1,423 @@
+{
+  "extensions": [],
+  "onboarding": {
+    "recorded_at": "2026-09-24T01:41:52.631872+00:00",
+    "spec_digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+    "unsupported_features": [
+      "Paid model calls \u2014 the vendor is the controlled scripted vendor speaking the real codex app-server wire; token counts are real wire observations but no spend exists, so every cost metric is unknown by construction",
+      "A real design-partner customer \u2014 the named environment is the forge LAB, not a customer; no customer decided usefulness here and the decision owners are the maintainers",
+      "The live GitLab CE flow \u2014 refused by the #268 qualification (deployed control plane 0.28.0 vs the pinned v0.35.0 wheel; no budget caps; the GitLab dispatch seam carries no lane-resume contract); this pilot runs the offline production-entry seams instead",
+      "Cross-runner resume on the LIVE GitLab dispatch seam \u2014 the GitHub-lane parity gap recorded in qualification/profiles/gitlab-ce-v1.md section 8; exercised offline through the lane subprocess resume contract instead",
+      "Human review by partner engineers \u2014 acceptance is the lab operator's independent verification over seam artifacts (diffs, dispatch ledgers, checkpoint identities), never a model self-summary and never PR creation",
+      "The 4-8 week partner window \u2014 the lab window is its single execution day; the J-curve and adoption learning a real window buys do not exist here and are not claimed"
+    ]
+  },
+  "spec_digest": "4116f29b069d25de78e2d88fa030ce2953e587c342b8e8f98c4214160ee6d76d",
+  "tasks": [
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-01-repair/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-01-repair/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0546,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [
+        "the scripted vendor's first edit left a syntax error in src/app.py; the operator corrected the plan and re-ran (the failed attempt stays)"
+      ],
+      "plan_corrections": 1,
+      "rescue_notes": [],
+      "review_minutes": 0.001,
+      "rollbacks": 0,
+      "setup_minutes": 0.0477,
+      "started_at": "2026-09-24T01:41:52.632159+00:00",
+      "task_id": "t-01-repair",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": true,
+          "attempt_id": "t-02-cold/a1",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0346,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0016,
+      "rollbacks": 0,
+      "setup_minutes": 0.0299,
+      "started_at": "2026-09-24T01:41:55.915393+00:00",
+      "task_id": "t-02-cold",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": true,
+          "attempt_id": "t-03-adaptive/a1",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.029,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0009,
+      "rollbacks": 0,
+      "setup_minutes": 0.0251,
+      "started_at": "2026-09-24T01:41:57.999806+00:00",
+      "task_id": "t-03-adaptive",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-04-ambiguous/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-04-ambiguous/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0306,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [
+        {
+          "kind": "question_answer",
+          "note": "q-which-helper-what-name"
+        }
+      ],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.001,
+      "rollbacks": 0,
+      "setup_minutes": 0.0266,
+      "started_at": "2026-09-24T01:41:59.742681+00:00",
+      "task_id": "t-04-ambiguous",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-05-missing/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-05-missing/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0336,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [
+        {
+          "kind": "question_answer",
+          "note": "q-retry-limit-value"
+        }
+      ],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0022,
+      "rollbacks": 0,
+      "setup_minutes": 0.0271,
+      "started_at": "2026-09-24T01:42:01.587171+00:00",
+      "task_id": "t-05-missing",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": true,
+          "attempt_id": "t-06-neighbor-schema/a1",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0352,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0,
+      "rollbacks": 0,
+      "setup_minutes": 0.0318,
+      "started_at": "2026-09-24T01:42:03.613314+00:00",
+      "task_id": "t-06-neighbor-schema",
+      "touched_repos": [
+        "lab/checkout",
+        "lab/neighbor-contracts"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": true,
+          "attempt_id": "t-07-neighbor-changelog/a1",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0331,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0,
+      "rollbacks": 0,
+      "setup_minutes": 0.0297,
+      "started_at": "2026-09-24T01:42:05.736983+00:00",
+      "task_id": "t-07-neighbor-changelog",
+      "touched_repos": [
+        "lab/checkout",
+        "lab/neighbor-contracts"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": true,
+          "attempt_id": "t-08-steer/a1",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0309,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [
+        {
+          "kind": "steer",
+          "note": "Put the rollout notes in docs/rollout.md and mention the paused-checkpoint restore."
+        }
+      ],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0013,
+      "rollbacks": 0,
+      "setup_minutes": 0.0264,
+      "started_at": "2026-09-24T01:42:07.731960+00:00",
+      "task_id": "t-08-steer",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-09-pause-resume/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-09-pause-resume/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0346,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [
+        {
+          "kind": "pause",
+          "note": "870dba3438d8f4fe6886f7f7e1362f5ab523ae1bc0842c0dac4ce441f0a1f70b"
+        },
+        {
+          "kind": "resume",
+          "note": "cross-runner resume"
+        }
+      ],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0014,
+      "rollbacks": 0,
+      "setup_minutes": 0.0287,
+      "started_at": "2026-09-24T01:42:09.592826+00:00",
+      "task_id": "t-09-pause-resume",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-10-runner-loss/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-10-runner-loss/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0078,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0,
+      "rollbacks": 0,
+      "setup_minutes": 0.0039,
+      "started_at": "2026-09-24T01:42:11.683897+00:00",
+      "task_id": "t-10-runner-loss",
+      "touched_repos": [
+        "acme/forge-pe"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-11-revoked-blob/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-11-revoked-blob/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0393,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0011,
+      "rollbacks": 0,
+      "setup_minutes": 0.0352,
+      "started_at": "2026-09-24T01:42:12.151071+00:00",
+      "task_id": "t-11-revoked-blob",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    },
+    {
+      "accepted": true,
+      "attempts": [
+        {
+          "accepted": false,
+          "attempt_id": "t-12-cross-runner/a1",
+          "spend_usd": null
+        },
+        {
+          "accepted": true,
+          "attempt_id": "t-12-cross-runner/a2",
+          "spend_usd": null
+        }
+      ],
+      "blocked": "",
+      "completion_latency_minutes": 0.0384,
+      "defects": 0,
+      "human_code_change": false,
+      "interventions": [
+        {
+          "kind": "resume",
+          "note": "cross-runner resume"
+        }
+      ],
+      "manual_rescues": 0,
+      "plan_correction_notes": [],
+      "plan_corrections": 0,
+      "rescue_notes": [],
+      "review_minutes": 0.0036,
+      "rollbacks": 0,
+      "setup_minutes": 0.0314,
+      "started_at": "2026-09-24T01:42:14.539069+00:00",
+      "task_id": "t-12-cross-runner",
+      "touched_repos": [
+        "lab/checkout"
+      ],
+      "unaccepted": false
+    }
+  ],
+  "violations": []
+}

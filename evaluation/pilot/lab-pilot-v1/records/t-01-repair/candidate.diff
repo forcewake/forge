@@ -1,0 +1,8 @@
+diff --git a/src/app.py b/src/app.py
+index 262fc93ffc66da17422a110ce0a2ac7e1850b3b0..5eed894ce8d1a481056510c67f0ad333af4d5236 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+-print('base')
++print('widget banner')
++print('widget: ok')

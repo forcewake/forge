@@ -53,16 +53,52 @@ environment:
   said so in :attr:`QualificationTrace.problems`, and the verdict is
   ``qualified`` ONLY when every leg carries passing, complete evidence.
 
+R36-10 (#269) extends the same doctrine from the wheel FILE to the
+runtime dependency CLOSURE and to the security boundary OUTSIDE the
+model:
+
+- :class:`LaneClosureManifest` — the hash-locked wheelhouse contract
+  (``forge.lane.closure/1``): every artifact name + sha256, the forge
+  wheel identity, the canonical resolution command.
+  :attr:`LaneClosureManifest.closure_digest` is the sha256 over the
+  manifest's canonical JSON — the closure's IDENTITY, so a pinned
+  digest and the closure it names cannot drift apart silently.
+  :func:`verify_closure_dir` verifies a wheelhouse against its
+  manifest: every artifact present and hash-matching, NO undeclared
+  files (a poisoned cache fixture is a typed refusal).
+- :func:`verify_artifact_supply_chain` — the promotion-record binding:
+  the forge wheel inside the closure must be the wheel the release
+  record vouches for; an image-only record refuses wheel claims
+  HONESTLY (``not_built``), a different digest refuses.
+- :func:`verify_credential_isolation` /
+  :class:`CredentialScopeReceipt` — WHICH credential names the lane
+  stages (names only, never values) plus the assertion that publisher
+  credentials are absent from the agent workspace; a forbidden name
+  among the staged ones is a :class:`CredentialIsolationViolation`.
+- :func:`resolve_closure_install_route` /
+  :func:`enforce_closure_install` — the OPTIONAL ``closure-wheel``
+  install route (additive to the R36-07 template ladder): a staged
+  wheelhouse installs with ``--no-index --find-links``, so a
+  target-repo lockfile cannot replace the collector runtime, and the
+  identity gate compares the INSTALLED set against the closure
+  manifest.
+- :func:`runtime_boundary_report` — the one document that says what
+  the execution environment IS: closure digest binding, installed
+  fingerprint verdict, both egress legs, credential isolation — the
+  ``runtime.installed_fingerprint`` evidence, honestly partial when a
+  leg never ran.
+
 Pure stdlib at module scope; frozen data throughout (a qualification
 record must never mutate under the promotion that cites it).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -105,6 +141,7 @@ __all__ = [
     "REPORT_VERDICT_VALUES",
     "ExpectedReport",
     "ExpectedReports",
+    "REPORT_INVENTORY_SCHEMA",
     "ReportReconciliation",
     "ReportVerdict",
     "TRACE_SCHEMA",
@@ -112,11 +149,55 @@ __all__ = [
     "TRACE_VERDICT_QUALIFIED",
     "acceptance_within_budget",
     "assemble_qualification_trace",
+    "freeze_report_inventory",
     "probe_egress_pair",
     "profile_staleness",
     "reconcile_reports",
     "recipe_document_digest",
     "verify_installed_fingerprints",
+    "BOUNDARY_OUTSIDE",
+    "BOUNDARY_WITHIN",
+    "BOUNDARY_VERDICT_VALUES",
+    "CLOSURE_ARTIFACT_SUFFIX",
+    "CLOSURE_BOUND",
+    "CLOSURE_BINDING_STATUS_VALUES",
+    "CLOSURE_FORGE_WHEEL_SOURCES",
+    "CLOSURE_INSTALL_ROUTE",
+    "CLOSURE_MANIFEST_FILENAME",
+    "CLOSURE_MISMATCH",
+    "CLOSURE_UNPINNED",
+    "CLOSURE_MANIFEST_SCHEMA",
+    "CREDENTIAL_RECEIPT_SCHEMA",
+    "FORGE_LANE_CLOSURE_SHA256_ENV",
+    "FORGE_LANE_CLOSURE_DIR_ENV",
+    "CREDENTIAL_ISOLATED",
+    "CREDENTIAL_ISOLATION_VIOLATED",
+    "CREDENTIAL_NOT_RECEIVED",
+    "ClosureArtifact",
+    "ClosureInstallRoute",
+    "ClosureVerificationError",
+    "CredentialIsolationViolation",
+    "CredentialScopeReceipt",
+    "LaneClosureManifest",
+    "LaneInstallRouteConflict",
+    "RUNTIME_BOUNDARY_SCHEMA",
+    "RuntimeBoundaryReport",
+    "SUPPLY_CHAIN_BOUND",
+    "SUPPLY_CHAIN_REFUSAL_REASONS",
+    "SupplyChainBinding",
+    "SupplyChainVerificationError",
+    "closure_digest_of_document",
+    "closure_install_argv",
+    "closure_pin_of_wheel_name",
+    "enforce_closure_install",
+    "hash_file_sha256",
+    "read_closure_manifest_file",
+    "resolve_closure_install_route",
+    "runtime_boundary_report",
+    "verify_artifact_supply_chain",
+    "verify_closure_dir",
+    "verify_credential_isolation",
+    "write_closure_manifest_file",
 ]
 
 #: The versioned discriminator every qualification trace carries. A
@@ -321,7 +402,17 @@ class QualificationProfile:
     :func:`verify_installed_fingerprints` checks the runner against.
     ``feature_support`` states every harness feature explicitly.
     ``layer_bindings`` bind the qualification layers this combination's
-    evidence promotes.
+    evidence promotes. ``dependency_closure_digest`` (R36-10, optional
+    — empty on pre-R36-10 records) pins the hash-locked wheelhouse the
+    qualification installed FROM: the :attr:`LaneClosureManifest
+    .closure_digest` of the lane closure. A profile that pins it
+    demands the ``closure-wheel`` install route (``--no-index
+    --find-links``); a profile that leaves it empty is wheel-pinned,
+    not closure-pinned, and the boundary report says so honestly.
+
+    .. versionchanged:: R36-10
+       ``dependency_closure_digest`` added (additive; ``""`` keeps the
+       pre-R36-10 meaning exactly).
     """
 
     lane_code_ref: str
@@ -334,6 +425,7 @@ class QualificationProfile:
     bootstrap_closure: tuple[tuple[str, str], ...]
     feature_support: HarnessFeatureSupport
     layer_bindings: tuple[LayerBinding, ...]
+    dependency_closure_digest: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -350,6 +442,12 @@ class QualificationProfile:
             raise ValueError(
                 f"recipe_digest must be a sha256 digest over the recipe's canonical "
                 f"JSON (see recipe_document_digest), got {self.recipe_digest[:16]!r}"
+            )
+        if self.dependency_closure_digest and not _is_sha256(self.dependency_closure_digest):
+            raise ValueError(
+                "dependency_closure_digest must be the sha256 closure digest of a "
+                "LaneClosureManifest (see build_lane_closure.py), or empty for a "
+                "wheel-pinned profile — never a partial or foreign digest"
             )
         if not self.test_invocation or any(not str(part).strip() for part in self.test_invocation):
             raise ValueError(
@@ -400,6 +498,7 @@ class QualificationProfile:
                 {"layer": binding.layer.value, "evidence": list(binding.evidence)}
                 for binding in self.layer_bindings
             ],
+            "dependency_closure_digest": self.dependency_closure_digest,
         }
 
     @property
@@ -437,6 +536,7 @@ class QualificationProfile:
                     )
                     for binding in layers
                 ),
+                dependency_closure_digest=str(document.get("dependency_closure_digest") or ""),
             )
         except (KeyError, TypeError) as exc:
             raise ValueError(f"not a qualification profile document: {exc}") from None
@@ -939,6 +1039,54 @@ def reconcile_reports(expected: ExpectedReports, found_dir: Path) -> ReportRecon
                 )
             )
     return ReportReconciliation(verdicts=tuple(verdicts))
+
+
+#: The versioned discriminator of a frozen report inventory (R36-14):
+#: the expected-report set recorded on the run AT DISPATCH, together
+#: with the work-contract digest it was frozen under. A breaking change
+#: to the inventory's meaning bumps the tag.
+REPORT_INVENTORY_SCHEMA = "forge.verification.report-inventory/1"
+
+
+def freeze_report_inventory(expected: ExpectedReports, *, contract_digest: str) -> dict:
+    """Freeze the expected-report inventory WITH the work contract.
+
+    R36-14: the report set a verified verdict must show is decided at
+    DISPATCH time — from the qualification's :class:`ExpectedReports`
+    machinery and the digest of the work contract (the executable
+    spec) it ships with — and recorded as one document on the run. At
+    VERDICT time the observed reports reconcile against THIS frozen
+    document, never against a live recomputation: a post-hoc recipe
+    edit cannot shrink the expected set under a verdict, and a missing
+    report / skipped required check / report from an older attempt can
+    never produce ``verified_ready``.
+
+    The document carries its own ``inventory_digest`` (canonical-JSON
+    sha256 over schema + contract digest + rows) so a tampered row is
+    detectable against the digest that was recorded with it.
+    """
+    rows = [
+        {
+            "test_project": report.test_project,
+            "report_path": report.report_path,
+            "candidate_id": report.candidate_id,
+            "bundle_digest": report.bundle_digest,
+        }
+        for report in expected.reports
+    ]
+    inventory_digest = canonical_json_digest(
+        {
+            "schema": REPORT_INVENTORY_SCHEMA,
+            "contract_digest": str(contract_digest or ""),
+            "reports": rows,
+        }
+    )
+    return {
+        "schema": REPORT_INVENTORY_SCHEMA,
+        "contract_digest": str(contract_digest or ""),
+        "reports": rows,
+        "inventory_digest": inventory_digest,
+    }
 
 
 # -- the egress control-probe PAIR ------------------------------------------------
@@ -1535,4 +1683,984 @@ def assemble_qualification_trace(
         layer_bindings=profile.layer_bindings,
         started_at=started_at,
         finished_at=finished_at,
+    )
+
+
+# -- R36-10: the hash-locked lane closure (#269) ---------------------------------
+#
+# The Forge WHEEL is hash-pinned (the R36-07 ladder), but pip still
+# resolves the wheel's RUNTIME dependencies at install time — a
+# reproducible-FILE guarantee, not a reproducible-ENVIRONMENT one. The
+# closure pins the whole wheelhouse: every artifact the lane runtime
+# consists of, by name and sha256, in ONE manifest whose canonical-JSON
+# digest IS the closure identity. The builder is
+# scripts/build_lane_closure.py (uv export from the frozen lock → pip
+# download with --require-hashes); this module owns the CONTRACT so the
+# runtime can verify a staged wheelhouse without importing a script.
+
+#: The versioned discriminator every lane-closure manifest carries. A
+#: breaking change to the manifest's meaning bumps the tag; pinned
+#: closures keep the version they were built with.
+CLOSURE_MANIFEST_SCHEMA = "forge.lane.closure/1"
+
+#: The manifest's file name inside the wheelhouse directory — the one
+#: file beside the artifacts themselves.
+CLOSURE_MANIFEST_FILENAME = "closure-manifest.json"
+
+#: The closure is a WHEELhouse: every artifact is a wheel. (The builder
+#: downloads with ``--only-binary :all:``, so an sdist in the directory
+#: is a foreign artifact, not a closure member.)
+CLOSURE_ARTIFACT_SUFFIX = ".whl"
+
+#: Where the forge wheel inside the closure came from — the manifest
+#: states it, never infers it. ``local-uv-build`` is the development
+#: shape (a moving source ref, honestly less qualified, exactly like
+#: the ladder's dev-source route); ``pinned-url`` is an explicitly
+#: pinned artifact URL; ``promotion-record`` is the wheel the archived
+#: release record vouches for (the authoritative route).
+CLOSURE_FORGE_WHEEL_SOURCES = (
+    "local-uv-build",
+    "pinned-url",
+    "promotion-record",
+)
+
+
+def closure_pin_of_wheel_name(name: str) -> tuple[str, str]:
+    """The ``(name, version)`` pin a wheel FILE name carries.
+
+    Wheel file names are ``name-version[-build]-python-abi-platform.whl``
+    with dashes inside *name* escaped to underscores, so the first two
+    ``-``-separated segments ARE the pin (PEP 427/440). Anything that
+    does not parse as at least ``name-version`` is refused — a closure
+    member that cannot be named cannot be pinned, and unpinned members
+    are what this whole section exists to refuse.
+    """
+    stem = (
+        str(name)[: -len(CLOSURE_ARTIFACT_SUFFIX)]
+        if str(name).endswith(CLOSURE_ARTIFACT_SUFFIX)
+        else str(name)
+    )
+    parts = stem.split("-")
+    if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+        raise ValueError(
+            f"artifact name {name!r} does not carry a name-version wheel pin — "
+            "a closure member that cannot be pinned is not a closure member"
+        )
+    return parts[0].replace("_", "-").lower(), parts[1]
+
+
+def hash_file_sha256(path: Path) -> str:
+    """The sha256 of a file's bytes, chunked (closure artifacts are tens
+    of megabytes; the digest must not slurp them)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class ClosureArtifact:
+    """One wheelhouse member: file name + sha256 (the pin pair)."""
+
+    name: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.name.endswith(CLOSURE_ARTIFACT_SUFFIX):
+            raise ValueError(
+                f"closure artifact {self.name!r} is not a wheel — the closure is a "
+                f"wheelhouse ({CLOSURE_ARTIFACT_SUFFIX} members only)"
+            )
+        if not _is_sha256(self.sha256):
+            raise ValueError(
+                f"closure artifact {self.name!r} carries a non-sha256 digest — an "
+                "unhashable member is an unverifiable member"
+            )
+
+    @property
+    def pin(self) -> tuple[str, str]:
+        """The ``(name, version)`` pin the artifact's file name states."""
+        return closure_pin_of_wheel_name(self.name)
+
+
+@dataclass(frozen=True)
+class LaneClosureManifest:
+    """The hash-locked wheelhouse contract (``forge.lane.closure/1``).
+
+    ``forge_wheel``/``forge_version``/``forge_source`` name the forge
+    wheel inside the closure and where it came from.
+    ``resolution_command`` is the CANONICAL command pair that produced
+    the dependency set (the frozen-lock export plus the hash-checked
+    download — a logical command, no absolute paths, so the digest is
+    reproducible wherever the wheelhouse is built).
+    ``artifacts`` lists EVERY wheel in the wheelhouse, forge included,
+    sorted by name. :attr:`closure_digest` — the sha256 over the
+    canonical JSON of :meth:`to_document` — is the closure IDENTITY:
+    the digest a :class:`QualificationProfile` pins as
+    ``dependency_closure_digest`` and the lane install route demands.
+    """
+
+    forge_wheel: ClosureArtifact
+    forge_version: str
+    forge_source: str
+    resolution_command: str
+    artifacts: tuple[ClosureArtifact, ...]
+
+    def __post_init__(self) -> None:
+        if self.forge_source not in CLOSURE_FORGE_WHEEL_SOURCES:
+            raise ValueError(
+                f"unknown forge wheel source {self.forge_source!r}; vocabulary is "
+                f"{CLOSURE_FORGE_WHEEL_SOURCES}"
+            )
+        if not self.forge_version.strip():
+            raise ValueError("the manifest names the forge wheel's version")
+        if not str(self.resolution_command).strip():
+            raise ValueError(
+                "the manifest records the resolution command that produced the "
+                "closure — an unrecorded resolution is an unauditable one"
+            )
+        if not self.artifacts:
+            raise ValueError("a closure carries at least the forge wheel")
+        names = [artifact.name for artifact in self.artifacts]
+        if len(names) != len(set(names)):
+            raise ValueError("one pin per closure artifact, no duplicate names")
+        if sorted(names) != names:
+            raise ValueError(
+                "closure artifacts are sorted by name — the manifest is a digest "
+                "target, and order is not allowed to be a digest axis"
+            )
+        if self.forge_wheel.name not in names:
+            raise ValueError(
+                f"the declared forge wheel {self.forge_wheel.name!r} is not among "
+                "the closure artifacts — the runtime being closed over must be a "
+                "member of its own closure"
+            )
+        if closure_pin_of_wheel_name(self.forge_wheel.name)[1] != self.forge_version:
+            raise ValueError(
+                f"the declared forge version {self.forge_version!r} disagrees with "
+                f"the wheel name {self.forge_wheel.name!r}"
+            )
+
+    @property
+    def pins(self) -> tuple[tuple[str, str], ...]:
+        """Every artifact's ``(name, version)`` pin — the declared set
+        :func:`verify_installed_fingerprints` checks an installation
+        against (the exact-set contract, closure edition)."""
+        return tuple(artifact.pin for artifact in self.artifacts)
+
+    def to_document(self) -> dict:
+        """The canonical digest target (sorted-key JSON over this dict,
+        WITHOUT the digest — :meth:`closure_digest` adds it over the
+        result)."""
+        return {
+            "schema": CLOSURE_MANIFEST_SCHEMA,
+            "forge": {
+                "wheel": {"name": self.forge_wheel.name, "sha256": self.forge_wheel.sha256},
+                "version": self.forge_version,
+                "source": self.forge_source,
+            },
+            "resolution": {"command": self.resolution_command},
+            "artifacts": [
+                {"name": artifact.name, "sha256": artifact.sha256} for artifact in self.artifacts
+            ],
+        }
+
+    @property
+    def closure_digest(self) -> str:
+        """sha256 over the manifest's canonical JSON — the closure
+        identity. Deterministic over identical closures; ANY change to
+        any artifact, pin or the resolution command is a different
+        digest, so a pinned digest and the closure it names cannot drift
+        apart silently."""
+        return closure_digest_of_document(self.to_document())
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> LaneClosureManifest:
+        """Rebuild the manifest from its canonical document (the freeze
+        round-trip; a document with the wrong schema tag is refused —
+        it is not this contract)."""
+        try:
+            if document.get("schema") != CLOSURE_MANIFEST_SCHEMA:
+                raise ValueError(
+                    f"schema must be {CLOSURE_MANIFEST_SCHEMA!r}, got {document.get('schema')!r}"
+                )
+            forge = document["forge"]
+            wheel = forge["wheel"]
+            artifacts = document["artifacts"]
+            if not isinstance(artifacts, list) or not artifacts:
+                raise ValueError("artifacts must be a non-empty list")
+            parsed = [
+                ClosureArtifact(name=str(a["name"]), sha256=str(a["sha256"])) for a in artifacts
+            ]
+            manifest = cls(
+                forge_wheel=ClosureArtifact(name=str(wheel["name"]), sha256=str(wheel["sha256"])),
+                forge_version=str(forge["version"]),
+                forge_source=str(forge["source"]),
+                resolution_command=str(document["resolution"]["command"]),
+                artifacts=tuple(sorted(parsed, key=lambda a: a.name)),
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"not a lane closure manifest document: {exc}") from None
+        if tuple(a.name for a in parsed) != tuple(a.name for a in manifest.artifacts):
+            raise ValueError(
+                "closure artifacts must arrive sorted by name — the document is a "
+                "digest target and the order is part of the bytes"
+            )
+        return manifest
+
+
+def closure_digest_of_document(document: Mapping[str, Any]) -> str:
+    """The closure digest of a manifest document: sha256 over its
+    canonical (sorted-key) JSON — the same pattern
+    :attr:`QualificationProfile.qualification_digest` uses. The stored
+    ``closure_digest`` key, when present, is EXCLUDED: a digest never
+    covers itself."""
+    body = {key: value for key, value in document.items() if key != "closure_digest"}
+    return canonical_json_digest(dict(body))
+
+
+def read_closure_manifest_file(path: Path) -> tuple[LaneClosureManifest, str]:
+    """Read a ``closure-manifest.json`` from disk.
+
+    Returns ``(manifest, stored_digest)`` — the rebuilt manifest and the
+    digest the file CLAIMS for itself. Malformed JSON, a non-dict
+    document or a non-sha256 stored digest raises :class:`ValueError`:
+    the caller (the verify route) converts each into its typed refusal.
+    """
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("a closure manifest document is a JSON object")
+    stored = str(document.get("closure_digest") or "")
+    if stored and not _is_sha256(stored):
+        raise ValueError(
+            f"the stored closure_digest {stored[:16]!r} is not a sha256 — the "
+            "manifest cannot vouch for itself"
+        )
+    return LaneClosureManifest.from_document(document), stored
+
+
+def write_closure_manifest_file(path: Path, manifest: LaneClosureManifest) -> str:
+    """Write the manifest (with its self-declared ``closure_digest``)
+    to *path* as sorted-key JSON. Returns the digest."""
+    document = dict(manifest.to_document())
+    digest = manifest.closure_digest
+    document["closure_digest"] = digest
+    Path(path).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return digest
+
+
+class ClosureVerificationError(ValueError):
+    """A wheelhouse refuses its own manifest — raised by
+    :func:`verify_closure_dir` (and the closure install enforcement)
+    when the directory and the manifest disagree.
+
+    ``problems`` lists each one: a MISSING artifact, a TAMPERED one
+    (hash mismatch), an UNDECLARED file (the poisoned-cache fixture —
+    a foreign wheel planted beside the closure), or a manifest that
+    cannot vouch for itself (absent, unparseable, digest mismatch).
+    The refusal is total and PRE-EXECUTION: nothing from the directory
+    is installed or imported once it fires."""
+
+    def __init__(self, problems: Sequence[str]) -> None:
+        self.problems = tuple(problems)
+        listing = "; ".join(self.problems)
+        super().__init__(
+            f"the lane closure refuses verification ({len(self.problems)} problem(s)): {listing}"
+        )
+
+
+def verify_closure_dir(closure_dir: Path) -> LaneClosureManifest:
+    """Verify a staged wheelhouse against its own manifest.
+
+    Exact-set semantics (the refuse doctrine, wheelhouse edition):
+
+    - the manifest file is present and parses, its schema tag is the
+      closure contract, and its stored ``closure_digest`` reproduces
+      from the manifest body (a tampered manifest is detectable against
+      the digest recorded beside it);
+    - EVERY declared artifact is present with the exact sha256;
+    - the directory carries NOTHING else besides the manifest and the
+      declared artifacts — an undeclared file is a poisoned cache, and
+      a poisoned cache is a refusal, not a warning.
+
+    Any problem raises :class:`ClosureVerificationError` listing each
+    one; a return value means the wheelhouse IS the closure its digest
+    names. Pure filesystem + hashlib — no network, no imports from the
+    directory (refusal happens before execution).
+    """
+    closure_dir = Path(closure_dir)
+    problems: list[str] = []
+    manifest_path = closure_dir / CLOSURE_MANIFEST_FILENAME
+    manifest: LaneClosureManifest | None = None
+    stored_digest = ""
+    if not manifest_path.is_file():
+        problems.append(
+            f"{CLOSURE_MANIFEST_FILENAME} is absent from {closure_dir} — a "
+            "wheelhouse without its manifest is a pile of wheels, not a closure"
+        )
+    else:
+        try:
+            manifest, stored_digest = read_closure_manifest_file(manifest_path)
+        except (OSError, ValueError) as exc:
+            problems.append(f"{CLOSURE_MANIFEST_FILENAME} is unreadable: {exc}")
+            manifest = None
+        if manifest is not None:
+            recomputed = closure_digest_of_document(manifest.to_document())
+            if stored_digest and stored_digest != recomputed:
+                problems.append(
+                    f"the manifest's stored closure_digest {stored_digest[:12]} does "
+                    f"not reproduce from its own body ({recomputed[:12]}) — the "
+                    "manifest was tampered with or is corrupt"
+                )
+    present = {entry.name for entry in closure_dir.iterdir()} if closure_dir.is_dir() else set()
+    if manifest is not None:
+        for artifact in manifest.artifacts:
+            path = closure_dir / artifact.name
+            if not path.is_file():
+                problems.append(f"missing artifact: {artifact.name} is not in the closure")
+                continue
+            actual = hash_file_sha256(path)
+            if actual != artifact.sha256:
+                problems.append(
+                    f"tampered artifact: {artifact.name} hashes {actual[:12]}, the "
+                    f"manifest pins {artifact.sha256[:12]} — the bytes are not the "
+                    "qualified ones"
+                )
+        undeclared = sorted(
+            present - {CLOSURE_MANIFEST_FILENAME} - {a.name for a in manifest.artifacts}
+        )
+        for name in undeclared:
+            problems.append(
+                f"undeclared file: {name} is in the wheelhouse but not in the "
+                "manifest — a poisoned cache, not a closure member"
+            )
+    if problems:
+        raise ClosureVerificationError(problems)
+    assert manifest is not None  # no problems ⇒ the manifest parsed
+    return manifest
+
+
+# -- the promotion-record supply-chain binding -----------------------------------
+
+
+#: The supply-chain verdicts: the closure's forge wheel IS the wheel
+#: the release record vouches for (``bound``), or the check refused.
+SUPPLY_CHAIN_BOUND = "bound"
+
+#: Why a supply-chain check refuses — a closed vocabulary so the
+#: refusal is classifiable, not free text. ``not_built`` is the honest
+#: image-only-record refusal: the record cannot vouch for a wheel it
+#: never built, and pretending otherwise is fabrication.
+SUPPLY_CHAIN_REFUSAL_REASONS = (
+    "not_built",
+    "digest_mismatch",
+    "identity_mismatch",
+    "unreadable_record",
+)
+
+
+class SupplyChainVerificationError(ValueError):
+    """The closure's forge wheel is not the artifact the promotion
+    record vouches for — refused BEFORE execution (the manifest hash
+    check already refuses tampered bytes; this composes the RECORD
+    binding: the right bytes from the wrong release are still wrong).
+
+    ``reason`` is one of :data:`SUPPLY_CHAIN_REFUSAL_REASONS`."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        if reason not in SUPPLY_CHAIN_REFUSAL_REASONS:
+            raise ValueError(
+                f"unknown supply-chain refusal reason {reason!r}; vocabulary is "
+                f"{SUPPLY_CHAIN_REFUSAL_REASONS}"
+            )
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"supply-chain verification refused ({reason}): {detail}")
+
+
+@dataclass(frozen=True)
+class SupplyChainBinding:
+    """The green outcome: the closure's forge wheel bound to the
+    promotion record that vouches for it."""
+
+    record_version: str
+    record_wheel_sha256: str
+    manifest_wheel_sha256: str
+    verdict: str = SUPPLY_CHAIN_BOUND
+
+    def to_document(self) -> dict:
+        return {
+            "verdict": self.verdict,
+            "record_version": self.record_version,
+            "record_wheel_sha256": self.record_wheel_sha256,
+            "manifest_wheel_sha256": self.manifest_wheel_sha256,
+        }
+
+
+def _release_wheel_identity(release_record: Any) -> tuple[str, str | None, str | None]:
+    """``(version, wheel_name, wheel_sha256)`` from a release record —
+    the archived promotion.json document shape (a Mapping) or the
+    :class:`forge.release_promotion.PromotionRecord` object shape."""
+    if isinstance(release_record, Mapping):
+        version = str(release_record.get("version") or "")
+        sha = release_record.get("wheel_sha256")
+        wheel = release_record.get("wheel")
+        name = None
+        if isinstance(wheel, Mapping) and isinstance(wheel.get("wheel"), Mapping):
+            name = wheel["wheel"].get("name")
+            sha = sha or wheel["wheel"].get("sha256")
+        return version, (str(name) if name else None), (str(sha) if sha else None)
+    version = str(getattr(release_record, "version", "") or "")
+    sha = getattr(release_record, "wheel_sha256", None)
+    wheel = getattr(getattr(release_record, "wheel", None), "wheel", None)
+    name = getattr(wheel, "name", None) if wheel is not None else None
+    return version, (str(name) if name else None), (str(sha) if sha else None)
+
+
+def verify_artifact_supply_chain(
+    closure_manifest: LaneClosureManifest, release_record: Any
+) -> SupplyChainBinding:
+    """Bind the closure's forge wheel to the promotion record.
+
+    The wheel inside the closure must be the wheel the record
+    vouches for — by sha256 (the authority) and, when the record names
+    it, by file name. Refusals (all :class:`SupplyChainVerificationError`,
+    all pre-execution):
+
+    - ``not_built`` — the record built no wheel (an image-only
+      release). HONEST refusal: the record cannot vouch for a wheel
+      claim, so none is verified — never a fabricated green;
+    - ``digest_mismatch`` — the closure carries different bytes than
+      the record pinned (the right name, the wrong release — or a
+      wheel from nowhere the record ever saw);
+    - ``identity_mismatch`` — the digests agree but the file identity
+      (name) does not;
+    - ``unreadable_record`` — the record carries no version at all.
+    """
+    version, name, sha = _release_wheel_identity(release_record)
+    if not version.strip():
+        raise SupplyChainVerificationError(
+            "unreadable_record",
+            "the release record carries no version — it is not a promotion record "
+            "and can vouch for nothing",
+        )
+    if not sha:
+        raise SupplyChainVerificationError(
+            "not_built",
+            f"the promotion record for v{version} built no wheel (image-only "
+            "release) — it cannot vouch for the wheel the closure carries; build "
+            "and record a wheel release before claiming a wheel closure",
+        )
+    if closure_manifest.forge_wheel.sha256 != sha:
+        raise SupplyChainVerificationError(
+            "digest_mismatch",
+            f"the closure's forge wheel {closure_manifest.forge_wheel.name} hashes "
+            f"{closure_manifest.forge_wheel.sha256[:12]}, but the v{version} "
+            f"promotion record pins {sha[:12]} — a wheel the release never "
+            "qualified is in the lane runtime",
+        )
+    if name and name != closure_manifest.forge_wheel.name:
+        raise SupplyChainVerificationError(
+            "identity_mismatch",
+            f"the promotion record names wheel {name!r}, the closure carries "
+            f"{closure_manifest.forge_wheel.name!r} — same digest, different "
+            "identity is a modelling error, not a pass",
+        )
+    return SupplyChainBinding(
+        record_version=version,
+        record_wheel_sha256=sha,
+        manifest_wheel_sha256=closure_manifest.forge_wheel.sha256,
+    )
+
+
+# -- credential scope receipts (names only, never values) ------------------------
+
+
+#: The versioned discriminator of a frozen credential scope receipt.
+CREDENTIAL_RECEIPT_SCHEMA = "forge.qualification.credential-scope/1"
+
+#: The receipt verdicts: every forbidden name absent (``isolated``) or
+#: the receipt was never constructible (``violated`` — the violation
+#: carries the evidence instead); ``not_received`` is the honest leg
+#: status when no receipt was produced at all.
+CREDENTIAL_ISOLATED = "isolated"
+CREDENTIAL_ISOLATION_VIOLATED = "violated"
+CREDENTIAL_NOT_RECEIVED = "not_received"
+
+
+class CredentialIsolationViolation(ValueError):
+    """A forbidden credential name is staged into the lane — raised by
+    :func:`verify_credential_isolation`.
+
+    The message carries NAMES ONLY, never values: a refusal that
+    quoted a secret to explain itself would leak the thing it exists
+    to keep out of the workspace."""
+
+    def __init__(self, leaked: Sequence[str]) -> None:
+        self.leaked = tuple(sorted(leaked))
+        listing = ", ".join(self.leaked)
+        super().__init__(
+            f"credential isolation violated: {len(self.leaked)} forbidden name(s) "
+            f"staged into the lane ({listing}) — names only, never values; the "
+            "lane must not receive publisher credentials"
+        )
+
+
+@dataclass(frozen=True)
+class CredentialScopeReceipt:
+    """WHAT the lane stages, by name only: the credential names the
+    lane's environment carries, the names forbidden from it, and the
+    isolated verdict. Constructed via :func:`verify_credential_isolation`
+    (the only route to a receipt — a self-declared "isolated" receipt
+    is exactly the fabrication this record refuses)."""
+
+    staged_names: tuple[str, ...]
+    forbidden_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.forbidden_names:
+            raise ValueError(
+                "a scope receipt asserts an isolation boundary — an empty "
+                "forbidden set asserts nothing and proves nothing"
+            )
+        if len(set(self.staged_names)) != len(self.staged_names) or len(
+            set(self.forbidden_names)
+        ) != len(self.forbidden_names):
+            raise ValueError("credential names appear once per receipt, no duplicates")
+
+    @property
+    def verdict(self) -> str:
+        """``isolated`` — the only verdict a constructible receipt can
+        carry (a violation raises instead of constructing one)."""
+        return CREDENTIAL_ISOLATED
+
+    def to_document(self) -> dict:
+        return {
+            "schema": CREDENTIAL_RECEIPT_SCHEMA,
+            "verdict": self.verdict,
+            "staged_names": list(self.staged_names),
+            "forbidden_names": list(self.forbidden_names),
+        }
+
+
+def verify_credential_isolation(
+    staged_names: Iterable[str], forbidden_names: Iterable[str]
+) -> CredentialScopeReceipt:
+    """Verify that NO forbidden credential name is among the staged
+    ones.
+
+    *staged_names* are the credential (env) names the lane's process
+    environment actually carries; *forbidden_names* are the publisher /
+    control-plane credentials that must NEVER reach an agent workspace.
+    Pure name-set arithmetic — values never enter this function, so
+    they can never leave it through a log, an exception or a receipt.
+    Any intersection raises :class:`CredentialIsolationViolation`
+    naming each leaked NAME; a return value is the freezable receipt.
+    """
+    staged = sorted({str(name).strip() for name in staged_names if str(name).strip()})
+    forbidden = sorted({str(name).strip() for name in forbidden_names if str(name).strip()})
+    if not forbidden:
+        raise ValueError(
+            "an isolation assertion with no forbidden names proves nothing — name "
+            "the credentials that must stay out of the agent workspace"
+        )
+    leaked = sorted(set(staged) & set(forbidden))
+    if leaked:
+        raise CredentialIsolationViolation(leaked)
+    return CredentialScopeReceipt(staged_names=tuple(staged), forbidden_names=tuple(forbidden))
+
+
+# -- the optional closure-wheel install route (additive to the R36-07 ladder) -----
+
+
+#: The env pair the closure route rides (mirrored in lockstep with the
+#: template's R36-07 ladder — see docs/operations/lane-closure.md).
+#: ``FORGE_LANE_CLOSURE_SHA256`` is the closure digest the staged
+#: wheelhouse must reproduce; ``FORGE_LANE_CLOSURE_DIR`` names the
+#: wheelhouse directory. Set-but-empty behaves as unset (the R36-07
+#: normalization — an emptied Actions variable selects no route).
+FORGE_LANE_CLOSURE_SHA256_ENV = "FORGE_LANE_CLOSURE_SHA256"
+FORGE_LANE_CLOSURE_DIR_ENV = "FORGE_LANE_CLOSURE_DIR"
+
+#: The route name this section adds to the install ladder. It is the
+#: MOST qualified wheel route: the promoted wheel plus its whole
+#: dependency closure, hash-locked in one manifest.
+CLOSURE_INSTALL_ROUTE = "closure-wheel"
+
+#: The route inputs the closure pin conflicts with — every OTHER
+#: explicit source in the R36-07 ladder.
+_LANE_DEV_FLAG_ENV = "FORGE_LANE_DEV_SOURCE_INSTALL"
+_LANE_WHEEL_ENV = "FORGE_LANE_WHEEL"
+_LANE_REF_ENV = "FORGE_LANE_REF"
+
+
+class LaneInstallRouteConflict(ValueError):
+    """The closure pin was declared beside another explicit install
+    route — refused BEFORE any download or install (the R36-07
+    doctrine: a declared override is applied or rejected, never
+    silently ignored)."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"contradictory lane install routes: {detail}")
+
+
+@dataclass(frozen=True)
+class ClosureInstallRoute:
+    """The resolved install route for the closure question.
+
+    ``selected`` False means the closure inputs are absent/unset-shaped
+    and the ladder proceeds exactly as before (this route is OPTIONAL
+    and additive — nothing about the existing routes changes). True
+    means the lane installs from the staged wheelhouse with
+    :attr:`install_argv` — ``--no-index`` so pip can never consult a
+    registry, and the target repository's own lockfile cannot replace
+    the collector runtime: the ONLY forge pip can see is the hashed
+    wheel inside the verified closure."""
+
+    selected: bool
+    mode: str
+    closure_dir: str
+    closure_digest: str
+    install_argv: tuple[str, ...]
+
+    @property
+    def receipt_route(self) -> str:
+        """The route name a lane install receipt records."""
+        return CLOSURE_INSTALL_ROUTE if self.selected else ""
+
+
+def closure_install_argv(closure_dir: str, forge_version: str) -> tuple[str, ...]:
+    """The pip argv the closure route installs with: ``--no-index`` +
+    ``--find-links`` over the wheelhouse — no registry, no resolution,
+    the manifest's hashed artifacts or nothing."""
+    return (
+        "pip",
+        "install",
+        "--no-index",
+        "--find-links",
+        str(closure_dir),
+        f"forge=={forge_version}",
+    )
+
+
+def resolve_closure_install_route(
+    env: Mapping[str, str], *, forge_version: str
+) -> ClosureInstallRoute:
+    """Resolve the OPTIONAL closure-wheel route from the lane env.
+
+    Selected when :data:`FORGE_LANE_CLOSURE_SHA256_ENV` is set
+    non-empty (and names the wheelhouse via
+    :data:`FORGE_LANE_CLOSURE_DIR_ENV`); the digest must be a sha256.
+    It CONFLICTS with every other explicit route input — the dev source
+    flag, an explicit wheel pin, an explicit ref — and each conflict
+    raises :class:`LaneInstallRouteConflict` naming both variables,
+    before anything downloads or installs. Unselected is the honest
+    default: the ladder's own routes proceed unchanged."""
+    digest = str(env.get(FORGE_LANE_CLOSURE_SHA256_ENV) or "").strip()
+    if not digest:
+        return ClosureInstallRoute(
+            selected=False, mode="", closure_dir="", closure_digest="", install_argv=()
+        )
+    if not _is_sha256(digest):
+        raise ValueError(
+            f"{FORGE_LANE_CLOSURE_SHA256_ENV} must be a 64-hex sha256 closure digest "
+            f"(see build_lane_closure.py), got {digest[:16]!r}"
+        )
+    closure_dir = str(env.get(FORGE_LANE_CLOSURE_DIR_ENV) or "").strip()
+    if not closure_dir:
+        raise ValueError(
+            f"{FORGE_LANE_CLOSURE_SHA256_ENV} is set but {FORGE_LANE_CLOSURE_DIR_ENV} "
+            "does not name the wheelhouse directory — the closure route has nothing "
+            "to install from"
+        )
+    explicit: list[tuple[str, str]] = []
+    dev_flag = str(env.get(_LANE_DEV_FLAG_ENV) or "").strip()
+    if dev_flag and dev_flag not in ("false", "0"):
+        explicit.append((_LANE_DEV_FLAG_ENV, dev_flag))
+    wheel = str(env.get(_LANE_WHEEL_ENV) or "").strip()
+    if wheel:
+        explicit.append((_LANE_WHEEL_ENV, wheel))
+    ref = str(env.get(_LANE_REF_ENV) or "").strip()
+    if ref:
+        explicit.append((_LANE_REF_ENV, ref))
+    if explicit:
+        listing = ", ".join(f"{name}={value!r}" for name, value in explicit)
+        raise LaneInstallRouteConflict(
+            f"{FORGE_LANE_CLOSURE_SHA256_ENV}={digest[:12]!r} beside {listing} — "
+            "the closure route IS the wheel route (the promoted wheel ships inside "
+            "the closure); pick one explicit source, never silently ignore one"
+        )
+    if not str(forge_version).strip():
+        raise ValueError("the closure route needs the forge version to pin the install")
+    return ClosureInstallRoute(
+        selected=True,
+        mode=CLOSURE_INSTALL_ROUTE,
+        closure_dir=closure_dir,
+        closure_digest=digest,
+        install_argv=closure_install_argv(closure_dir, str(forge_version)),
+    )
+
+
+def enforce_closure_install(
+    expected_digest: str,
+    closure_manifest: LaneClosureManifest,
+    installed: Mapping[str, str],
+) -> FingerprintMatch:
+    """The closure edition of the identity gate: the manifest the lane
+    verified must be the closure the profile PINNED, and the set that
+    landed must be the manifest's exact pin set.
+
+    1. ``closure_manifest.closure_digest`` must equal *expected_digest*
+       (the profile's ``dependency_closure_digest`` / the route's staged
+       pin) — else :class:`ClosureVerificationError`: a verified
+       wheelhouse that is not the pinned closure is a different
+       runtime.
+    2. :func:`verify_installed_fingerprints` over the manifest's pins
+       vs *installed* (name → version, e.g. from
+       ``importlib.metadata``) — exact-set semantics, divergences
+       listed, nothing partial. Under ``--no-index --find-links`` a
+       target-repo lockfile cannot replace the collector runtime:
+       pip never sees an index, and any drift that STILL lands is
+       refused here, before the first model call.
+    """
+    if not _is_sha256(str(expected_digest)):
+        raise ValueError(
+            "the expected closure digest must be a sha256 — an unpinnable closure "
+            "is not an enforceable one"
+        )
+    if closure_manifest.closure_digest != expected_digest:
+        raise ClosureVerificationError(
+            [
+                f"the verified closure {closure_manifest.closure_digest[:12]} is not "
+                f"the pinned closure {expected_digest[:12]} — a different runtime "
+                "than the one the profile qualified"
+            ]
+        )
+    return verify_installed_fingerprints(dict(closure_manifest.pins), installed)
+
+
+# -- the composite runtime boundary report ---------------------------------------
+
+
+#: The versioned discriminator of the runtime boundary report.
+RUNTIME_BOUNDARY_SCHEMA = "forge.qualification.boundary/1"
+
+#: The report verdicts: every leg complete and within its boundary
+#: (``within_boundary``), or anything less (``outside_boundary`` — the
+#: honest catch-all: a missing leg never reads as within).
+BOUNDARY_WITHIN = "within_boundary"
+BOUNDARY_OUTSIDE = "outside_boundary"
+BOUNDARY_VERDICT_VALUES = (BOUNDARY_WITHIN, BOUNDARY_OUTSIDE)
+
+#: How the profile binds to the closure manifest: the profile pins the
+#: manifest's digest (``bound``), pins none — wheel-pinned, not
+#: closure-pinned (``unpinned``), or pins a different one
+#: (``mismatch``).
+CLOSURE_BOUND = "bound"
+CLOSURE_UNPINNED = "unpinned"
+CLOSURE_MISMATCH = "mismatch"
+CLOSURE_BINDING_STATUS_VALUES = (CLOSURE_BOUND, CLOSURE_UNPINNED, CLOSURE_MISMATCH)
+
+
+@dataclass(frozen=True)
+class RuntimeBoundaryReport:
+    """ONE document stating what the execution environment IS: the
+    closure identity it installed from, the fingerprints that landed,
+    both egress legs, and the credential isolation — the
+    ``runtime.installed_fingerprint`` evidence (R36-10's
+    observability: ``runtime.installed_fingerprint``,
+    ``security.egress_probe_results``, ``credential.staged_scope_receipt``).
+
+    Honest by construction, the trace's discipline: a leg that never
+    ran keeps its ``not_*`` status, lands in :attr:`problems`, and
+    holds the verdict at ``outside_boundary``. A partial boundary
+    report is an honest report, never a green one.
+    """
+
+    schema: str
+    profile_digest: str
+    closure_binding: str
+    dependency_closure_digest: str
+    fingerprint_status: str
+    fingerprint_divergences: tuple[FingerprintDivergence, ...] = ()
+    egress_status: str = EGRESS_NOT_PROBED
+    egress_permitted_status: str = ""
+    egress_denied_status: str = ""
+    egress_problems: tuple[str, ...] = ()
+    credential_status: str = CREDENTIAL_NOT_RECEIVED
+    credential_staged_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.schema != RUNTIME_BOUNDARY_SCHEMA:
+            raise ValueError(f"schema must be {RUNTIME_BOUNDARY_SCHEMA!r}, got {self.schema!r}")
+        if self.closure_binding not in CLOSURE_BINDING_STATUS_VALUES:
+            raise ValueError(
+                f"unknown closure binding {self.closure_binding!r}; vocabulary is "
+                f"{CLOSURE_BINDING_STATUS_VALUES}"
+            )
+        if self.fingerprint_status not in FINGERPRINT_STATUS_VALUES:
+            raise ValueError(
+                f"unknown fingerprint status {self.fingerprint_status!r}; "
+                f"vocabulary is {FINGERPRINT_STATUS_VALUES}"
+            )
+        if self.egress_status not in EGRESS_STATUS_VALUES:
+            raise ValueError(
+                f"unknown egress status {self.egress_status!r}; "
+                f"vocabulary is {EGRESS_STATUS_VALUES}"
+            )
+
+    @property
+    def problems(self) -> tuple[str, ...]:
+        problems: list[str] = []
+        if self.closure_binding == CLOSURE_UNPINNED:
+            problems.append(
+                "the profile pins no dependency closure digest — the install is "
+                "wheel-pinned, not closure-pinned; pip resolved the runtime "
+                "dependencies at install time"
+            )
+        elif self.closure_binding == CLOSURE_MISMATCH:
+            problems.append(
+                f"the profile pins closure {self.dependency_closure_digest[:12]} but "
+                "the manifest under the report is a different closure — the runtime "
+                "is not the one the profile qualified"
+            )
+        if self.fingerprint_status == FINGERPRINT_MISMATCHED:
+            problems.extend(f"fingerprint: {d}" for d in self.fingerprint_divergences)
+        elif self.fingerprint_status == FINGERPRINT_NOT_CHECKED:
+            problems.append(
+                "the installed set was not checked against the closure — an "
+                "unchecked installation is not a verified boundary"
+            )
+        if self.egress_status == EGRESS_INCONSISTENT:
+            problems.extend(f"egress: {problem}" for problem in self.egress_problems)
+        elif self.egress_status == EGRESS_NOT_PROBED:
+            problems.append(
+                "the egress pair was not probed — an unprobed boundary is an unknown boundary"
+            )
+        if self.credential_status != CREDENTIAL_ISOLATED:
+            problems.append(
+                "no credential scope receipt — what the lane stages is unstated, "
+                "and unstated is not isolated"
+            )
+        return tuple(problems)
+
+    @property
+    def verdict(self) -> str:
+        """``within_boundary`` iff :attr:`problems` is empty."""
+        return BOUNDARY_WITHIN if not self.problems else BOUNDARY_OUTSIDE
+
+    def to_document(self) -> dict:
+        return {
+            "schema": self.schema,
+            "verdict": self.verdict,
+            "profile_digest": self.profile_digest,
+            "dependency.closure": {
+                "binding": self.closure_binding,
+                "closure_digest": self.dependency_closure_digest,
+            },
+            "runtime.installed_fingerprint": {
+                "status": self.fingerprint_status,
+                "divergences": [
+                    {
+                        "kind": d.kind,
+                        "name": d.name,
+                        "declared": d.declared,
+                        "installed": d.installed,
+                    }
+                    for d in self.fingerprint_divergences
+                ],
+            },
+            "security.egress_probe_results": {
+                "status": self.egress_status,
+                "permitted_status": self.egress_permitted_status,
+                "denied_status": self.egress_denied_status,
+                "problems": list(self.egress_problems),
+            },
+            "credential.staged_scope_receipt": {
+                "status": self.credential_status,
+                "staged_names": list(self.credential_staged_names),
+            },
+            "problems": list(self.problems),
+        }
+
+
+def runtime_boundary_report(
+    profile: QualificationProfile,
+    egress: EgressProbePair | None,
+    closure_manifest: LaneClosureManifest | None,
+    *,
+    installed: Mapping[str, str] | None = None,
+    credential_receipt: CredentialScopeReceipt | None = None,
+) -> RuntimeBoundaryReport:
+    """Assemble the runtime boundary report — one document binding the
+    closure, the installed fingerprints, both egress legs and the
+    credential isolation to the profile.
+
+    Each leg accepts its typed evidence or ``None`` (a leg that never
+    ran stays honestly partial). The closure binding compares the
+    profile's ``dependency_closure_digest`` against
+    *closure_manifest*; the fingerprint leg checks the INSTALLED set
+    (name → version) against the manifest's pins via
+    :func:`verify_installed_fingerprints` — a caught
+    :class:`FingerprintMismatch` is RECORDED (refusal is evidence),
+    never swallowed. The verdict is derived: ``within_boundary`` only
+    when every leg is complete and passing."""
+    if closure_manifest is None:
+        binding = CLOSURE_UNPINNED if not profile.dependency_closure_digest else CLOSURE_MISMATCH
+        closure_digest = profile.dependency_closure_digest
+    elif not profile.dependency_closure_digest:
+        binding = CLOSURE_UNPINNED
+        closure_digest = closure_manifest.closure_digest
+    elif profile.dependency_closure_digest == closure_manifest.closure_digest:
+        binding = CLOSURE_BOUND
+        closure_digest = closure_manifest.closure_digest
+    else:
+        binding = CLOSURE_MISMATCH
+        closure_digest = profile.dependency_closure_digest
+
+    if installed is None or closure_manifest is None:
+        fingerprint_status = FINGERPRINT_NOT_CHECKED
+        divergences: tuple[FingerprintDivergence, ...] = ()
+    else:
+        try:
+            verify_installed_fingerprints(dict(closure_manifest.pins), installed)
+            fingerprint_status = FINGERPRINT_MATCHED
+            divergences = ()
+        except FingerprintMismatch as mismatch:
+            fingerprint_status = FINGERPRINT_MISMATCHED
+            divergences = mismatch.divergences
+
+    if egress is None:
+        egress_status = EGRESS_NOT_PROBED
+        egress_permitted = ""
+        egress_denied = ""
+        egress_problems: tuple[str, ...] = ()
+    else:
+        egress_status = EGRESS_CONSISTENT if egress.consistent else EGRESS_INCONSISTENT
+        egress_permitted = egress.permitted.status
+        egress_denied = egress.denied.status
+        egress_problems = egress.problems
+
+    if credential_receipt is None:
+        credential_status = CREDENTIAL_NOT_RECEIVED
+        staged: tuple[str, ...] = ()
+    else:
+        credential_status = credential_receipt.verdict
+        staged = credential_receipt.staged_names
+
+    return RuntimeBoundaryReport(
+        schema=RUNTIME_BOUNDARY_SCHEMA,
+        profile_digest=profile.qualification_digest,
+        closure_binding=binding,
+        dependency_closure_digest=closure_digest,
+        fingerprint_status=fingerprint_status,
+        fingerprint_divergences=divergences,
+        egress_status=egress_status,
+        egress_permitted_status=egress_permitted,
+        egress_denied_status=egress_denied,
+        egress_problems=egress_problems,
+        credential_status=credential_status,
+        credential_staged_names=staged,
     )

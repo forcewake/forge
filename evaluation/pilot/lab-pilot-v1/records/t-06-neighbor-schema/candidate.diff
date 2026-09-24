@@ -1,0 +1,7 @@
+diff --git a/src/schema.py b/src/schema.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..102886c75f1fde6fea91ef336470a998c287b2e6
+--- /dev/null
++++ b/src/schema.py
+@@ -0,0 +1 @@
++MAX_ITEMS = 8

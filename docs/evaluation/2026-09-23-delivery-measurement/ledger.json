@@ -1,0 +1,503 @@
+{
+  "conflicts": [],
+  "counter_resets": [],
+  "duplicate_calls": [],
+  "notes": [],
+  "schema": "forge.delivery.measurement/1",
+  "works": [
+    {
+      "acceptance_contract": "forge.delivery-cohort/1",
+      "attempts": [
+        {
+          "attempt_id": "FX-01:1",
+          "call_ids": [],
+          "outcome": "superseded",
+          "receipts": [
+            {
+              "attempt_id": "FX-01:1",
+              "cache_write_tokens": null,
+              "cached_input_tokens": 1800,
+              "completeness": "exact",
+              "cost_usd": 0.42,
+              "input_tokens": 3200,
+              "output_tokens": 640,
+              "reasoning_tokens": 210,
+              "receipt_id": "fx-r-011",
+              "route": {
+                "model": "gpt-5",
+                "provider": "grok-build"
+              },
+              "source": "usage",
+              "work_id": "FX-01"
+            }
+          ],
+          "routes": [
+            {
+              "model": "gpt-5",
+              "provider": "grok-build"
+            }
+          ],
+          "sources": [
+            "usage"
+          ],
+          "spans": [
+            {
+              "attempt_id": "FX-01:1",
+              "origin": "planner",
+              "seconds": 118.0,
+              "span_id": "span:model:planner:FX-01:FX-01:1:98c6ea047f3811f5",
+              "span_type": "model",
+              "work_id": "FX-01"
+            },
+            {
+              "attempt_id": "FX-01:1",
+              "origin": "harness",
+              "seconds": 47.0,
+              "span_id": "span:queue:harness:FX-01:FX-01:1:b10ec6ddfac01c08",
+              "span_type": "queue",
+              "work_id": "FX-01"
+            }
+          ],
+          "usage": {
+            "cache_write_tokens": null,
+            "cached_input_tokens": 1800,
+            "call_derived": false,
+            "completeness": "exact",
+            "cost_usd": 0.42,
+            "coverage": 1.0,
+            "exact": true,
+            "input_tokens_inclusive": 3200,
+            "input_tokens_inclusive_lower_bound": 3200,
+            "known_cost_lower_bound_usd": 0.42,
+            "notes": [],
+            "output_tokens": 640,
+            "output_tokens_lower_bound": 640,
+            "reasoning_tokens": 210,
+            "receipts_expected": 1,
+            "receipts_received": 1
+          },
+          "work_id": "FX-01"
+        },
+        {
+          "attempt_id": "FX-01:2",
+          "call_ids": [
+            "fx-c-101"
+          ],
+          "outcome": "accepted",
+          "receipts": [
+            {
+              "attempt_id": "FX-01:2",
+              "cache_write_tokens": 700,
+              "cached_input_tokens": 2900,
+              "completeness": "exact",
+              "cost_usd": 1.05,
+              "input_tokens": 5200,
+              "output_tokens": 980,
+              "reasoning_tokens": 0,
+              "receipt_id": "fx-r-012",
+              "route": {
+                "model": "claude-sonnet-4-5",
+                "provider": "claude-code"
+              },
+              "source": "usage",
+              "work_id": "FX-01"
+            }
+          ],
+          "routes": [
+            {
+              "model": "claude-sonnet-4-5",
+              "provider": "claude-code"
+            }
+          ],
+          "sources": [
+            "usage"
+          ],
+          "spans": [
+            {
+              "attempt_id": "FX-01:2",
+              "origin": "harness",
+              "seconds": 41.2,
+              "span_id": "call:fx-c-101",
+              "span_type": "model",
+              "work_id": "FX-01"
+            },
+            {
+              "attempt_id": "FX-01:2",
+              "origin": "operator",
+              "seconds": 5400.0,
+              "span_id": "span:human_wait:operator:FX-01:FX-01:2:5d188b32fbc83b6c",
+              "span_type": "human_wait",
+              "work_id": "FX-01"
+            },
+            {
+              "attempt_id": "FX-01:2",
+              "origin": "planner",
+              "seconds": 205.0,
+              "span_id": "span:model:planner:FX-01:FX-01:2:0f24cab4e8793dcb",
+              "span_type": "model",
+              "work_id": "FX-01"
+            },
+            {
+              "attempt_id": "FX-01:2",
+              "origin": "harness",
+              "seconds": 63.0,
+              "span_id": "span:tool:harness:FX-01:FX-01:2:deb9e86253d5a10f",
+              "span_type": "tool",
+              "work_id": "FX-01"
+            },
+            {
+              "attempt_id": "FX-01:2",
+              "origin": "harness",
+              "seconds": 412.0,
+              "span_id": "span:verification:harness:FX-01:FX-01:2:248e432e98fbd8d9",
+              "span_type": "verification",
+              "work_id": "FX-01"
+            }
+          ],
+          "usage": {
+            "cache_write_tokens": 700,
+            "cached_input_tokens": 2900,
+            "call_derived": false,
+            "completeness": "exact",
+            "cost_usd": 1.05,
+            "coverage": 1.0,
+            "exact": true,
+            "input_tokens_inclusive": 8800,
+            "input_tokens_inclusive_lower_bound": 8800,
+            "known_cost_lower_bound_usd": 1.05,
+            "notes": [],
+            "output_tokens": 980,
+            "output_tokens_lower_bound": 980,
+            "reasoning_tokens": 0,
+            "receipts_expected": 1,
+            "receipts_received": 1
+          },
+          "work_id": "FX-01"
+        }
+      ],
+      "fully_linked": true,
+      "harness_version": "forge-v0.36.0",
+      "model_version": "glm-5.3",
+      "notes": [],
+      "orphan_receipt_ids": [],
+      "outcome": "accepted",
+      "own_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": null,
+        "call_derived": false,
+        "completeness": "exact",
+        "cost_usd": 1.47,
+        "coverage": 1.0,
+        "exact": true,
+        "input_tokens_inclusive": 12000,
+        "input_tokens_inclusive_lower_bound": 12000,
+        "known_cost_lower_bound_usd": 1.47,
+        "notes": [],
+        "output_tokens": 1620,
+        "output_tokens_lower_bound": 1620,
+        "reasoning_tokens": null,
+        "receipts_expected": 2,
+        "receipts_received": 2
+      },
+      "planner_call_ids": [],
+      "planner_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": null,
+        "call_derived": false,
+        "completeness": "unknown",
+        "cost_usd": null,
+        "coverage": null,
+        "exact": false,
+        "input_tokens_inclusive": null,
+        "input_tokens_inclusive_lower_bound": 0,
+        "known_cost_lower_bound_usd": 0.0,
+        "notes": [],
+        "output_tokens": null,
+        "output_tokens_lower_bound": 0,
+        "reasoning_tokens": null,
+        "receipts_expected": 0,
+        "receipts_received": 0
+      },
+      "work_id": "FX-01"
+    },
+    {
+      "acceptance_contract": "forge.delivery-cohort/1",
+      "attempts": [
+        {
+          "attempt_id": "FX-02:1",
+          "call_ids": [],
+          "outcome": "rejected",
+          "receipts": [
+            {
+              "attempt_id": "FX-02:1",
+              "cache_write_tokens": null,
+              "cached_input_tokens": 400,
+              "completeness": "exact",
+              "cost_usd": 0.3,
+              "input_tokens": 2100,
+              "output_tokens": 350,
+              "reasoning_tokens": null,
+              "receipt_id": "fx-r-021",
+              "route": {
+                "model": "gpt-5",
+                "provider": "grok-build"
+              },
+              "source": "usage",
+              "work_id": "FX-02"
+            }
+          ],
+          "routes": [
+            {
+              "model": "gpt-5",
+              "provider": "grok-build"
+            }
+          ],
+          "sources": [
+            "usage"
+          ],
+          "spans": [
+            {
+              "attempt_id": "FX-02:1",
+              "origin": "planner",
+              "seconds": 84.0,
+              "span_id": "span:model:planner:FX-02:FX-02:1:f5d0f03dd295fbc5",
+              "span_type": "model",
+              "work_id": "FX-02"
+            },
+            {
+              "attempt_id": "FX-02:1",
+              "origin": "harness",
+              "seconds": 19.0,
+              "span_id": "span:restore_collection:harness:FX-02:FX-02:1:2cded806e7ae7ef5",
+              "span_type": "restore_collection",
+              "work_id": "FX-02"
+            }
+          ],
+          "usage": {
+            "cache_write_tokens": null,
+            "cached_input_tokens": 400,
+            "call_derived": false,
+            "completeness": "exact",
+            "cost_usd": 0.3,
+            "coverage": 1.0,
+            "exact": true,
+            "input_tokens_inclusive": 2100,
+            "input_tokens_inclusive_lower_bound": 2100,
+            "known_cost_lower_bound_usd": 0.3,
+            "notes": [],
+            "output_tokens": 350,
+            "output_tokens_lower_bound": 350,
+            "reasoning_tokens": null,
+            "receipts_expected": 1,
+            "receipts_received": 1
+          },
+          "work_id": "FX-02"
+        }
+      ],
+      "fully_linked": true,
+      "harness_version": "forge-v0.36.0",
+      "model_version": "glm-5.3",
+      "notes": [],
+      "orphan_receipt_ids": [],
+      "outcome": "rejected",
+      "own_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": 400,
+        "call_derived": false,
+        "completeness": "exact",
+        "cost_usd": 0.3,
+        "coverage": 1.0,
+        "exact": true,
+        "input_tokens_inclusive": 2100,
+        "input_tokens_inclusive_lower_bound": 2100,
+        "known_cost_lower_bound_usd": 0.3,
+        "notes": [],
+        "output_tokens": 350,
+        "output_tokens_lower_bound": 350,
+        "reasoning_tokens": null,
+        "receipts_expected": 1,
+        "receipts_received": 1
+      },
+      "planner_call_ids": [],
+      "planner_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": null,
+        "call_derived": false,
+        "completeness": "unknown",
+        "cost_usd": null,
+        "coverage": null,
+        "exact": false,
+        "input_tokens_inclusive": null,
+        "input_tokens_inclusive_lower_bound": 0,
+        "known_cost_lower_bound_usd": 0.0,
+        "notes": [],
+        "output_tokens": null,
+        "output_tokens_lower_bound": 0,
+        "reasoning_tokens": null,
+        "receipts_expected": 0,
+        "receipts_received": 0
+      },
+      "work_id": "FX-02"
+    },
+    {
+      "acceptance_contract": "forge.delivery-cohort/1",
+      "attempts": [
+        {
+          "attempt_id": "FX-03:1",
+          "call_ids": [],
+          "outcome": "abandoned",
+          "receipts": [],
+          "routes": [],
+          "sources": [],
+          "spans": [
+            {
+              "attempt_id": "FX-03:1",
+              "origin": "planner",
+              "seconds": null,
+              "span_id": "span:model:planner:FX-03:FX-03:1:2dd26f9581669ef5",
+              "span_type": "model",
+              "work_id": "FX-03"
+            }
+          ],
+          "usage": {
+            "cache_write_tokens": null,
+            "cached_input_tokens": null,
+            "call_derived": false,
+            "completeness": "unknown",
+            "cost_usd": null,
+            "coverage": 0.0,
+            "exact": true,
+            "input_tokens_inclusive": null,
+            "input_tokens_inclusive_lower_bound": 0,
+            "known_cost_lower_bound_usd": 0.0,
+            "notes": [
+              "FX-03:FX-03:1: no usage receipt and no call telemetry \u2014 usage unknown, never zero"
+            ],
+            "output_tokens": null,
+            "output_tokens_lower_bound": 0,
+            "reasoning_tokens": null,
+            "receipts_expected": 1,
+            "receipts_received": 0
+          },
+          "work_id": "FX-03"
+        },
+        {
+          "attempt_id": "FX-03:2",
+          "call_ids": [],
+          "outcome": "accepted",
+          "receipts": [
+            {
+              "attempt_id": "FX-03:2",
+              "cache_write_tokens": null,
+              "cached_input_tokens": 1500,
+              "completeness": "exact",
+              "cost_usd": 0.85,
+              "input_tokens": 4300,
+              "output_tokens": 720,
+              "reasoning_tokens": 180,
+              "receipt_id": "fx-r-032",
+              "route": {
+                "model": "gpt-5",
+                "provider": "grok-build"
+              },
+              "source": "usage",
+              "work_id": "FX-03"
+            }
+          ],
+          "routes": [
+            {
+              "model": "gpt-5",
+              "provider": "grok-build"
+            }
+          ],
+          "sources": [
+            "usage"
+          ],
+          "spans": [
+            {
+              "attempt_id": "FX-03:2",
+              "origin": "planner",
+              "seconds": 167.0,
+              "span_id": "span:model:planner:FX-03:FX-03:2:f05960995e1dd970",
+              "span_type": "model",
+              "work_id": "FX-03"
+            },
+            {
+              "attempt_id": "FX-03:2",
+              "origin": "harness",
+              "seconds": 52.0,
+              "span_id": "span:queue:harness:FX-03:FX-03:2:c781261946be0714",
+              "span_type": "queue",
+              "work_id": "FX-03"
+            }
+          ],
+          "usage": {
+            "cache_write_tokens": null,
+            "cached_input_tokens": 1500,
+            "call_derived": false,
+            "completeness": "exact",
+            "cost_usd": 0.85,
+            "coverage": 1.0,
+            "exact": true,
+            "input_tokens_inclusive": 4300,
+            "input_tokens_inclusive_lower_bound": 4300,
+            "known_cost_lower_bound_usd": 0.85,
+            "notes": [],
+            "output_tokens": 720,
+            "output_tokens_lower_bound": 720,
+            "reasoning_tokens": 180,
+            "receipts_expected": 1,
+            "receipts_received": 1
+          },
+          "work_id": "FX-03"
+        }
+      ],
+      "fully_linked": false,
+      "harness_version": "forge-v0.36.0",
+      "model_version": "glm-5.3",
+      "notes": [],
+      "orphan_receipt_ids": [],
+      "outcome": "accepted",
+      "own_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": null,
+        "call_derived": false,
+        "completeness": "aggregate",
+        "cost_usd": null,
+        "coverage": 0.5,
+        "exact": false,
+        "input_tokens_inclusive": null,
+        "input_tokens_inclusive_lower_bound": 4300,
+        "known_cost_lower_bound_usd": 0.85,
+        "notes": [
+          "FX-03:FX-03:1: no usage receipt and no call telemetry \u2014 usage unknown, never zero"
+        ],
+        "output_tokens": null,
+        "output_tokens_lower_bound": 720,
+        "reasoning_tokens": null,
+        "receipts_expected": 2,
+        "receipts_received": 1
+      },
+      "planner_call_ids": [],
+      "planner_usage": {
+        "cache_write_tokens": null,
+        "cached_input_tokens": null,
+        "call_derived": false,
+        "completeness": "unknown",
+        "cost_usd": null,
+        "coverage": null,
+        "exact": false,
+        "input_tokens_inclusive": null,
+        "input_tokens_inclusive_lower_bound": 0,
+        "known_cost_lower_bound_usd": 0.0,
+        "notes": [],
+        "output_tokens": null,
+        "output_tokens_lower_bound": 0,
+        "reasoning_tokens": null,
+        "receipts_expected": 0,
+        "receipts_received": 0
+      },
+      "work_id": "FX-03"
+    }
+  ]
+}

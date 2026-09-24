@@ -165,6 +165,11 @@ def _lab_sync(
     return root, url, actives
 
 
+async def _generation(root: Path, factory: async_sessionmaker[AsyncSession]) -> str:
+    """The CURRENT database-inventory digest — the flip gate's input."""
+    return await migration.database_inventory_generation(root, factory)
+
+
 async def _row_count(factory: async_sessionmaker[AsyncSession]) -> int:
     from sqlalchemy import func, select
 
@@ -267,11 +272,12 @@ class TestHappyPathCli:
         root, url, _actives = _lab_sync(tmp_path)
 
         assert read_authority_marker(root) is None
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_OK
+        assert migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_OK
 
         marker = read_authority_marker(root)
         assert marker is not None and marker["authority"] == "postgres"
         assert marker["previous_authority"] == "filesystem"
+        assert marker["generation"] == 1  # R36-05: the flip counter, reported at startup
         assert marker["verify_report"] == str(migration_dir(root) / "verify.json")
         assert "FORGE_CHECKPOINT_DURABILITY=postgres" in capsys.readouterr().out
         # The old inventory is never deleted.
@@ -291,7 +297,12 @@ class TestPausedWorkResumesPostMigration:
     async def test_a_new_process_resumes_the_paused_work_after_cutover(self, tmp_path):
         root, url, actives, engine, factory = await _lab_async(tmp_path)
         try:
-            assert run_cutover(root)["authority"] == "postgres"
+            assert (
+                run_cutover(root, current_database_generation=await _generation(root, factory))[
+                    "authority"
+                ]
+                == "postgres"
+            )
         finally:
             await engine.dispose()
 
@@ -459,11 +470,13 @@ class TestInterruptConvergence:
     def test_post_import_pre_verify_the_cutover_refuses_until_verified(self, tmp_path):
         root, url, _actives = _lab_sync(tmp_path, verify=False)
 
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_REFUSED
+        assert (
+            migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_REFUSED
+        )
         assert read_authority_marker(root) is None  # nothing flipped
 
         assert migration.main(["--root", str(root), "verify", "--database-url", url]) == EXIT_OK
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_OK
+        assert migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_OK
         assert read_authority_marker(root)["authority"] == "postgres"
 
     def test_post_verify_pre_cutover_the_old_authority_still_stands(self, tmp_path):
@@ -480,10 +493,12 @@ class TestInterruptConvergence:
         assert (root / "works" / "wp-new.json").is_file()
 
         # ... and the un-imported work is exactly what the cutover gate catches.
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_REFUSED
+        assert (
+            migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_REFUSED
+        )
         assert migration.main(["--root", str(root), "import", "--database-url", url]) == EXIT_OK
         assert migration.main(["--root", str(root), "verify", "--database-url", url]) == EXIT_OK
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_OK
+        assert migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_OK
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +558,7 @@ class TestPostCutoverSingleMutator:
     async def test_the_fenced_authority_refuses_mutations_with_the_specific_error(self, tmp_path):
         root, url, actives, engine, _factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, _factory))
             fs = enforce_authority_marker(FilesystemCheckpointRepository(root), root)
             manifest, blobs, checkpoint_id = _checkpoint("wp-a", {"a": b"post\n"}, 6)
 
@@ -566,7 +581,7 @@ class TestPostCutoverSingleMutator:
     async def test_the_owning_authority_accepts_mutations_post_cutover(self, tmp_path):
         root, url, _actives, engine, factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, factory))
             pg = enforce_authority_marker(PostgresCheckpointRepository(root, factory), root)
             manifest, blobs, checkpoint_id = _checkpoint("wp-a", {"a": b"post-cutover\n"}, 6)
 
@@ -591,20 +606,23 @@ class TestPostCutoverSingleMutator:
                 with pytest.raises(MutationsFencedError, match="cutover is in progress"):
                     await pg.put("wp-a", checkpoint_id, manifest, blobs)
                 with pytest.raises(MigrationCommandError, match="single-flight"):
-                    run_cutover(root)  # the flip itself waits for the fence
+                    # the flip itself waits for the fence (generation bound — the
+                    # refusal is the FENCE's, not a skipped gate)
+                    run_cutover(root, current_database_generation=await _generation(root, factory))
 
             assert not cutover_in_progress(root)
-            run_cutover(root)  # converged after the fence released
+            # converged after the fence released
+            run_cutover(root, current_database_generation=await _generation(root, factory))
         finally:
             await engine.dispose()
 
     async def test_a_second_cutover_to_the_same_authority_refuses(self, tmp_path):
         root, url, _actives, engine, _factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, _factory))
 
             with pytest.raises(MigrationCommandError, match="already names"):
-                run_cutover(root)
+                run_cutover(root, current_database_generation=await _generation(root, _factory))
         finally:
             await engine.dispose()
 
@@ -618,7 +636,7 @@ class TestRollback:
     async def test_a_stale_clean_report_refuses_and_the_marker_stands(self, tmp_path):
         root, url, actives, engine, factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, factory))
             # Post-cutover upload: exists ONLY in the database.
             manifest, blobs, checkpoint_id = _checkpoint("wp-a", {"a": b"post\n"}, 6)
             await PostgresCheckpointRepository(root, factory).put(
@@ -640,6 +658,7 @@ class TestRollback:
         finally:
             await engine.dispose()
         assert verify_exit == EXIT_REFUSED
+        # The not-clean gate fires before the generation gate — no digest needed.
         with pytest.raises(MigrationCommandError, match="not clean"):
             run_rollback(root, verify_report=migration_dir(root) / "verify.json")
         assert read_authority_marker(root)["authority"] == "postgres"  # unchanged
@@ -647,7 +666,7 @@ class TestRollback:
     async def test_the_documented_recovery_path_then_rollback_restores_the_marker(self, tmp_path):
         root, url, _actives, engine, factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, factory))
             manifest, blobs, _id = _checkpoint("wp-a", {"a": b"post\n"}, 6)
             await PostgresCheckpointRepository(root, factory).put("wp-a", _id, manifest, blobs)
 
@@ -663,19 +682,28 @@ class TestRollback:
             )
             assert verify_exit == EXIT_OK
 
-            marker = run_rollback(root, verify_report=migration_dir(root) / "verify.json")
+            marker = run_rollback(
+                root,
+                verify_report=migration_dir(root) / "verify.json",
+                current_database_generation=await _generation(root, factory),
+            )
             assert marker["authority"] == "filesystem"
             assert marker["previous_authority"] == "postgres"
+            assert marker["generation"] == 2  # the second flip of the same marker
         finally:
             await engine.dispose()
 
     async def test_post_rollback_the_filesystem_authority_accepts_mutations_again(self, tmp_path):
         root, url, _actives, engine, factory = await _lab_async(tmp_path)
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, factory))
             # A post-cutover verify (the rollback gate's CURRENT-data-state half).
             await run_verify(root, factory, out=migration_dir(root) / "verify.json")
-            run_rollback(root, verify_report=migration_dir(root) / "verify.json")
+            run_rollback(
+                root,
+                verify_report=migration_dir(root) / "verify.json",
+                current_database_generation=await _generation(root, factory),
+            )
 
             fs = enforce_authority_marker(FilesystemCheckpointRepository(root), root)
             pg = enforce_authority_marker(PostgresCheckpointRepository(root, factory), root)
@@ -700,9 +728,13 @@ class TestRollback:
         index = root / "works" / "wp-a.json"
         before = index.read_bytes()
         try:
-            run_cutover(root)
+            run_cutover(root, current_database_generation=await _generation(root, factory))
             await run_verify(root, factory, out=migration_dir(root) / "verify.json")
-            run_rollback(root, verify_report=migration_dir(root) / "verify.json")
+            run_rollback(
+                root,
+                verify_report=migration_dir(root) / "verify.json",
+                current_database_generation=await _generation(root, factory),
+            )
         finally:
             await engine.dispose()
 
@@ -710,7 +742,7 @@ class TestRollback:
 
     def test_the_cli_rollback_gates_the_same_way(self, tmp_path, capsys):
         root, url, _actives = _lab_sync(tmp_path)
-        assert migration.main(["--root", str(root), "cutover"]) == EXIT_OK
+        assert migration.main(["--root", str(root), "cutover", "--database-url", url]) == EXIT_OK
 
         # The pre-cutover report predates the flip: refused even though clean.
         code = migration.main(
@@ -718,6 +750,8 @@ class TestRollback:
                 "--root",
                 str(root),
                 "rollback",
+                "--database-url",
+                url,
                 "--verify-report",
                 str(migration_dir(root) / "verify.json"),
             ]
@@ -732,6 +766,8 @@ class TestRollback:
                     "--root",
                     str(root),
                     "rollback",
+                    "--database-url",
+                    url,
                     "--verify-report",
                     str(migration_dir(root) / "verify.json"),
                 ]
@@ -740,6 +776,214 @@ class TestRollback:
         )
         assert read_authority_marker(root)["authority"] == "filesystem"
         assert "FORGE_CHECKPOINT_DURABILITY=best_effort" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# R36-05: inventory-generation binding — content digests, never timestamps
+# ---------------------------------------------------------------------------
+
+
+class TestInventoryGenerationBinding:
+    async def test_the_report_carries_content_digests_of_both_inventories(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            report_path = migration_dir(root) / "verify.json"
+            verify, _exit = await run_verify(root, factory, out=report_path)
+
+            generation = verify["inventory_generation"]
+            assert generation["filesystem"] == migration.filesystem_inventory_generation(root)
+            assert generation["database"] == await migration.database_inventory_generation(
+                root, factory
+            )
+            assert verify["metrics"][migration.METRIC_INVENTORY_GENERATION] is generation
+            # The digest is CONTENT: an identical re-verify derives the same one.
+            verify2, _exit2 = await run_verify(root, factory)
+            assert verify2["inventory_generation"] == generation
+        finally:
+            await engine.dispose()
+
+    async def test_a_database_landing_after_the_report_refuses_the_cutover(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            # A checkpoint lands in the database AFTER the clean report was
+            # taken — invisible to the index-half gate, caught by the
+            # generation binding (the TARGET moved).
+            drift_manifest, drift_blobs, drift_id = _checkpoint("wp-a", {"a": b"drift\n"}, 9)
+            await PostgresCheckpointRepository(root, factory).put(
+                "wp-a", drift_id, drift_manifest, drift_blobs
+            )
+
+            with pytest.raises(MigrationCommandError, match="DATABASE inventory changed"):
+                run_cutover(
+                    root,
+                    current_database_generation=await migration.database_inventory_generation(
+                        root, factory
+                    ),
+                )
+            assert read_authority_marker(root) is None  # nothing flipped
+
+            # The remedy the refusal names: a fresh verify (which reports the
+            # disagreement honestly) and, once resolved, the flip proceeds.
+            _report, verify_exit = await run_verify(root, factory)
+            assert verify_exit == EXIT_REFUSED
+        finally:
+            await engine.dispose()
+
+    async def test_a_tampered_timestamp_cannot_authorize_a_changed_inventory(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            report_path = migration_dir(root) / "verify.json"
+
+            # The FILESYSTEM inventory moves after the clean report...
+            late_manifest, late_blobs, late_id = _checkpoint("wp-late", {"l": b"late\n"}, 1)
+            await FilesystemCheckpointRepository(root).put(
+                "wp-late", late_id, late_manifest, late_blobs
+            )
+            # ...and the tamperer rewrites generated_at to NOW. A timestamp
+            # authorizes nothing: the content digest still refuses the flip.
+            document = json.loads(report_path.read_text())
+            document["generated_at"] = _now_like_iso()
+            report_path.write_text(json.dumps(document))
+
+            with pytest.raises(MigrationCommandError, match="changed since the verify report"):
+                run_cutover(
+                    root,
+                    current_database_generation=await migration.database_inventory_generation(
+                        root, factory
+                    ),
+                )
+            assert read_authority_marker(root) is None
+        finally:
+            await engine.dispose()
+
+    async def test_a_pre_generation_report_is_refused_not_reinterpreted(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            report_path = migration_dir(root) / "verify.json"
+            document = json.loads(report_path.read_text())
+            document.pop("inventory_generation")
+            report_path.write_text(json.dumps(document))
+
+            with pytest.raises(MigrationCommandError, match="predates inventory-generation"):
+                run_cutover(root, current_database_generation="0" * 64)
+        finally:
+            await engine.dispose()
+
+    async def test_the_flip_refuses_when_it_cannot_re_bind_the_target(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            with pytest.raises(MigrationCommandError, match="pass --database-url"):
+                run_cutover(root)  # a clean report, but no target binding available
+            assert read_authority_marker(root) is None
+        finally:
+            await engine.dispose()
+
+
+def _now_like_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat(timespec="microseconds")
+
+
+# ---------------------------------------------------------------------------
+# R36-05: the rollback boundary under the generation gate
+# ---------------------------------------------------------------------------
+
+
+class TestRollbackGenerationBoundary:
+    async def test_a_stale_clean_post_flip_report_refuses_after_a_new_upload(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            run_cutover(root, current_database_generation=await _generation(root, factory))
+            # The documented post-cutover verify — clean, CURRENT at this moment.
+            _report, verify_exit = await run_verify(
+                root, factory, out=migration_dir(root) / "verify.json"
+            )
+            assert verify_exit == EXIT_OK
+
+            # THEN a new checkpoint lands in the database only. The report is
+            # still clean-looking and post-flip — the TIME gate passes, the
+            # index-half gate passes (the filesystem did not move) — and the
+            # generation gate is the one that refuses: rolling back now would
+            # strand the new checkpoint behind an index that cannot see it.
+            late_manifest, late_blobs, late_id = _checkpoint("wp-a", {"a": b"later\n"}, 7)
+            await PostgresCheckpointRepository(root, factory).put(
+                "wp-a", late_id, late_manifest, late_blobs
+            )
+
+            with pytest.raises(MigrationCommandError, match="DATABASE inventory changed"):
+                run_rollback(
+                    root,
+                    verify_report=migration_dir(root) / "verify.json",
+                    current_database_generation=await _generation(root, factory),
+                )
+            assert read_authority_marker(root)["authority"] == "postgres"
+
+            # The documented recovery: reverse transfer -> verify -> rollback.
+            reverse, reverse_exit = await run_import(root, factory, reverse=True)
+            assert reverse_exit == EXIT_OK and reverse["summary"]["imported"] == 1
+            _report2, verify_exit2 = await run_verify(
+                root, factory, out=migration_dir(root) / "verify.json"
+            )
+            assert verify_exit2 == EXIT_OK
+            marker = run_rollback(
+                root,
+                verify_report=migration_dir(root) / "verify.json",
+                current_database_generation=await _generation(root, factory),
+            )
+            assert marker["authority"] == "filesystem"
+        finally:
+            await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# R36-05 crash-window completion: the reverse import's interrupt boundary
+# ---------------------------------------------------------------------------
+
+
+class TestReverseImportInterruptConvergence:
+    async def test_an_interrupted_reverse_import_converges_on_rerun(self, tmp_path):
+        root, url, _actives, engine, factory = await _lab_async(tmp_path)
+        try:
+            run_cutover(root, current_database_generation=await _generation(root, factory))
+            post_manifest, post_blobs, post_id = _checkpoint("wp-a", {"a": b"post\n"}, 6)
+            await PostgresCheckpointRepository(root, factory).put(
+                "wp-a", post_id, post_manifest, post_blobs
+            )
+        finally:
+            await engine.dispose()
+
+        # Crash mid-reverse-import: exactly one landing survived.
+        engine, factory = await _factory_over(url)
+        try:
+            with pytest.raises(migration._InterruptedMigration):
+                await run_import(root, factory, reverse=True, fail_after=1)
+            index = json.loads((root / "works" / "wp-a.json").read_text())
+            landed = [e for e in index["checkpoints"] if e["checkpoint_id"] == post_id]
+            assert len(landed) == 1  # the crash's survivor — no duplicate reference
+
+            resume, resume_exit = await run_import(root, factory, reverse=True)
+            _verify, verify_exit = await run_verify(
+                root, factory, out=migration_dir(root) / "verify.json"
+            )
+            assert resume_exit == EXIT_OK
+            assert resume["summary"]["imported"] == 0  # the survivor is skipped, not repeated
+            assert any(
+                entry["checkpoint_id"] == post_id for entry in resume["skipped_already_present"]
+            )
+            index_after = json.loads((root / "works" / "wp-a.json").read_text())
+            assert (
+                len([e for e in index_after["checkpoints"] if e["checkpoint_id"] == post_id]) == 1
+            )  # still exactly one reference — no duplicate from the resume
+            assert verify_exit == EXIT_OK and _verify["clean"] is True
+            marker = run_rollback(
+                root,
+                verify_report=migration_dir(root) / "verify.json",
+                current_database_generation=await _generation(root, factory),
+            )
+            assert marker["authority"] == "filesystem"
+        finally:
+            await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +1090,7 @@ class TestDoctorPreflight:
             "checkpoint.migration_coverage",
             "checkpoint.pointer_conflicts",
             "checkpoint.blob_topology",
+            "checkpoint.authority_marker",  # R36-05: the fence's own state
         }
         assert by_name["checkpoint.migration_coverage"].status == "warn"  # wp-late remains
         assert "wp-late" in by_name["checkpoint.migration_coverage"].detail
@@ -970,7 +1215,12 @@ class TestMigrationOverRealPostgres:
             )
             assert verify_exit == EXIT_OK and verified["clean"] is True
 
-            assert run_cutover(root)["authority"] == "postgres"
+            assert (
+                run_cutover(root, current_database_generation=await _generation(root, factory))[
+                    "authority"
+                ]
+                == "postgres"
+            )
 
             # The fresh instance: its own factory over the same database.
             engine_b, factory_b = await self._fresh_factory()

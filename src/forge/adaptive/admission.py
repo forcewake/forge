@@ -155,6 +155,7 @@ __all__ = [
     "release_lease",
     "release_lease_with_evidence",
     "release_run_leases",
+    "saturation_report",
     "try_acquire_lease",
 ]
 
@@ -1553,4 +1554,94 @@ async def admission_report(
             policy, project_id, session_factory, provider=provider
         ),
         "terminal_runs": sum(1 for status, _reason in rows if status in terminal),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R36-21 (issue #280): saturation signals — the operator's "when does it
+# queue / pause / refuse" view, derived from the same durable rows
+# ---------------------------------------------------------------------------
+
+
+async def saturation_report(
+    policy: AdmissionPolicy,
+    project_id: int,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    provider: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """The R36-21 saturation signals over the project's live lease rows.
+
+    One read, three low-cardinality signals (no secrets, no prompts —
+    counts and ages over the durable occupancy columns only):
+
+    - ``execution.occupied_vs_limit`` — how many slots the project
+      OCCUPIES (open leases, draining included: an uncertain slot is a
+      genuinely occupied one) against the configured limit, plus
+      ``at_limit`` — the moment new dispatches start parking
+      (``blocked(execution_capacity)``) rather than executing;
+    - ``native_start.unknown_age`` — the OLDEST age, in seconds, of an
+      open lease whose native occupancy is NOT proven
+      (``dispatched_unknown`` or ``draining``): the number an operator
+      watches after a lost-response incident. ``None`` when nothing is
+      unknown. Unknown occupancy never frees itself: the bounded
+      escalation is the reconciler's probe
+      (:func:`reconcile_draining`) or an EXPLICIT audited override —
+      the report names that path so "wait" is never the only answer;
+    - ``native_start.unknown_count`` — how many such leases there are.
+
+    The ages are read against *now* (the caller's clock or the real
+    one); naive timestamps from SQLite are interpreted as UTC, the
+    lease clocks' zone.
+    """
+
+    moment = now or _utcnow()
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ExecutionLease).where(ExecutionLease.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if provider:
+        rows = [row for row in rows if not row.provider or row.provider == provider]
+    open_rows = [row for row in rows if row.released_at is None]
+    held = len(open_rows)
+    limit = policy.max_active_per_project
+
+    def _aware(value: datetime) -> datetime:
+        # SQLite returns naive datetimes; the lease clocks are UTC.
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+    unknown_ages: list[int] = []
+    for row in open_rows:
+        occupancy = lease_occupancy(row)
+        if occupancy is LeaseOccupancy.DISPATCHED_UNKNOWN:
+            stamp = row.native_intent_at
+        elif occupancy is LeaseOccupancy.DRAINING:
+            stamp = row.draining_at
+        else:
+            continue
+        if stamp is not None:
+            unknown_ages.append(max(0, int((moment - _aware(stamp)).total_seconds())))
+    return {
+        "project_id": project_id,
+        "provider": provider or None,
+        "execution.occupied_vs_limit": {
+            "occupied": held,
+            "limit": limit if limit > 0 else None,
+            "available": max(0, limit - held) if limit > 0 else None,
+            "at_limit": bool(limit > 0 and held >= limit),
+        },
+        "native_start.unknown_count": len(unknown_ages),
+        "native_start.unknown_age": max(unknown_ages) if unknown_ages else None,
+        "escalation": (
+            "unknown occupancy holds its slot until the reconciler's native probe "
+            "observes terminal (reconcile_draining) or an operator applies an "
+            "explicit audited override — it never frees itself"
+        ),
     }

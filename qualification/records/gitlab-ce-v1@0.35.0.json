@@ -1,0 +1,50 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "real-provider-e2e"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer"
+  ],
+  "credential_route": "bot PAT for the control plane; read-only PAT for the lane clone (proposal-only, ADR-0016); BYOK env token for the harness model route",
+  "evidence": [
+    {
+      "capability": "control-plane-install",
+      "class": "binary-smoke",
+      "covers": "cold install receipt: promoted wheel forge-0.35.0-py3-none-any.whl sha256 verified, identity gate installed==0.35.0 (gitlab-ce-v1-evidence.json install-check)",
+      "executed_at": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+      "outcome": "pass"
+    },
+    {
+      "capability": "real-provider-e2e",
+      "class": "model-fixture",
+      "covers": "production-entry offline trace CE-2 (issue -> plan -> /go -> dispatch -> candidate -> Draft MR): env-stripped pytest tests/production_entry/test_gitlab_ce_entry.py, 6 passed — authored scenario against fakes, NO live provider or model",
+      "executed_at": "16339c2d0e667111972c47ccf0a370b888ca0635",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.35.0/promotion.json",
+    "qualification/profiles/gitlab-ce-v1-evidence.json",
+    "qualification/profiles/gitlab-ce-v1.md"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+  "note": "The live flow stage was REFUSED at preflight (deployed control plane reports 0.28.0 while the profile pins the promoted wheel v0.35.0; no budget caps configured) — a paid flow against another build qualifies nothing, so no live-provider entry exists. Cross-runner resume is offline-only (the GitLab dispatch seam carries no lane-resume contract). closure_digest is empty: wheel-pinned, not closure-pinned (R36-10 wheelhouse pending).",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False)",
+  "record_id": "gitlab-ce-v1@0.35.0",
+  "release_version": "0.35.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "python-3.13 (uv standalone, lane venv at /tmp/forge-lane-venv)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": null,
+  "verification_contract": "one required job named smoke (FORGE_REQUIRED_JOBS=smoke) on the current candidate sha",
+  "wheel_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9"
+}

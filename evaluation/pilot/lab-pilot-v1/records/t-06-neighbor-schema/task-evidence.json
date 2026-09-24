@@ -1,0 +1,186 @@
+{
+  "artifact_files": [
+    "candidate.diff",
+    "vendor-events.jsonl"
+  ],
+  "attempts": [
+    {
+      "attempt_id": "t-06-neighbor-schema/a1",
+      "note": "",
+      "wall_seconds": 0.846
+    }
+  ],
+  "brief": "Land MAX_ITEMS in src/schema.py to match the widget schema contract.",
+  "checkpoint_ids": [],
+  "collector_source": "checkout",
+  "diff_digest": "e9d451d53d862bfd6b35f9f6689f23be4ccf8f9d926495d84548dd3a489b4e36",
+  "driver": "neighbor",
+  "evidence_class": "lab-operational",
+  "interventions": [],
+  "neighbor": {
+    "head_after": "aa79ee3510923bb78446adc54a165b2e002a27bc",
+    "head_before": "aa79ee3510923bb78446adc54a165b2e002a27bc",
+    "path": "contracts/widget.schema.json",
+    "repo": "lab/neighbor-contracts",
+    "source_oid": "9bc917341ee8d412056b8d6c33eb9d6bb7879964"
+  },
+  "operator_decisions": [
+    {
+      "at": "2026-09-24T01:42:03.977733+00:00",
+      "point": "plan-approval",
+      "question": "Does the plan cite the neighbor decision at 9bc917341ee8\u2026?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:03.977757+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "approved",
+      "detail": "citations resolve to lab/neighbor-contracts@9bc917341ee8\u2026:contracts/widget.schema.json",
+      "point": "plan-approval",
+      "state": "DECIDED"
+    },
+    {
+      "at": "2026-09-24T01:42:05.727642+00:00",
+      "point": "acceptance",
+      "question": "Does the candidate satisfy the task's contracted verification?",
+      "state": "PENDING"
+    },
+    {
+      "at": "2026-09-24T01:42:05.727654+00:00",
+      "decided_by": "human:lab-operator",
+      "decision": "accepted",
+      "detail": "citations-resolve=ok; neighbor-read-only=ok; value-from-contract=ok; diff-applies-cleanly=ok; verification-coverage=ok",
+      "point": "acceptance",
+      "state": "DECIDED"
+    }
+  ],
+  "plan": {
+    "assumptions": [],
+    "decision_requests": [],
+    "schema": "forge.plan.evidence-backed/1",
+    "steps": [
+      {
+        "action": "write src/schema.py with the cited value",
+        "evidence_refs": [
+          "neighbor-decision"
+        ],
+        "step_id": "land-constant"
+      }
+    ],
+    "summary": "Land the constant from the neighbor decision (contracts/widget.schema.json).",
+    "unknowns": []
+  },
+  "plan_digest": "642c4c1e8997ba82e998c255880ecee610d08b55ee0a9076a00f3d8b0adb8306",
+  "record": {
+    "accepted": true,
+    "attempts": [
+      {
+        "accepted": true,
+        "attempt_id": "t-06-neighbor-schema/a1",
+        "spend_usd": null
+      }
+    ],
+    "blocked": "",
+    "completion_latency_minutes": 0.0352,
+    "defects": 0,
+    "human_code_change": false,
+    "interventions": [],
+    "manual_rescues": 0,
+    "plan_correction_notes": [],
+    "plan_corrections": 0,
+    "rescue_notes": [],
+    "review_minutes": 0.0,
+    "rollbacks": 0,
+    "setup_minutes": 0.0318,
+    "started_at": "2026-09-24T01:42:03.613314+00:00",
+    "task_id": "t-06-neighbor-schema",
+    "touched_repos": [
+      "lab/checkout",
+      "lab/neighbor-contracts"
+    ],
+    "unaccepted": false
+  },
+  "scenario": "neighbor_evidence",
+  "schema": "forge.lab-pilot.task-evidence/1",
+  "seam_checks": [
+    {
+      "expected": "every plan citation resolves to repository + OID + path",
+      "name": "citations-resolve",
+      "observed": "violations=[] oid=9bc917341ee8d412056b8d6c33eb9d6bb7879964",
+      "ok": true
+    },
+    {
+      "expected": "the neighbor stays read-only (clean status, unchanged head)",
+      "name": "neighbor-read-only",
+      "observed": "status='' head_unchanged=True",
+      "ok": true
+    },
+    {
+      "expected": "the landed constant equals the cited value 8",
+      "name": "value-from-contract",
+      "observed": "diff_digest=e9d451d53d862bfd6b35f9f6689f23be4ccf8f9d926495d84548dd3a489b4e36",
+      "ok": true
+    },
+    {
+      "expected": "git apply --check",
+      "name": "diff-applies-cleanly",
+      "observed": "applies cleanly",
+      "ok": true
+    },
+    {
+      "expected": "every contracted verification check ran",
+      "name": "verification-coverage",
+      "observed": "3 contracted checks all executed",
+      "ok": true
+    }
+  ],
+  "task": {
+    "budget": {
+      "max_attempts": 1,
+      "max_spend_usd": 5.0
+    },
+    "expected_outcome": "the plan's citation resolves to lab/neighbor-contracts at the pinned OID and path (validate_plan_citations over the real neighbor git repo); the writable-repo edit implements the cited contract value; the neighbor stays read-only (clean status, unchanged head)",
+    "group": "g3-neighbors",
+    "non_goals": [
+      "no writes to the neighbor repository",
+      "no hard-coding values the contract does not state"
+    ],
+    "owner": "Pavel Nasovich (lab operator)",
+    "scenario": "neighbor_evidence",
+    "stage": "branch_pr",
+    "task_id": "t-06-neighbor-schema",
+    "title": "Schema constant cited from the neighbor contract at its exact OID",
+    "verification": [
+      {
+        "method": "every plan citation resolves to repository + OID + path in the neighbor (the kit's citation validator)",
+        "name": "citations-resolve"
+      },
+      {
+        "method": "git status of the neighbor is clean and its head is unchanged after the run",
+        "name": "neighbor-read-only"
+      },
+      {
+        "method": "the landed constant equals the value read from the cited neighbor file at the cited OID",
+        "name": "value-from-contract"
+      }
+    ]
+  },
+  "task_id": "t-06-neighbor-schema",
+  "usage_ledger": [
+    {
+      "attempt_id": "t-06-neighbor-schema/a1",
+      "cost_note": "spend unknown \u2014 never zero",
+      "cost_state": "unknown",
+      "latency_breakdown": {},
+      "model_time_s": 0.846,
+      "source": "lab-lane/vendor-wire",
+      "spend_usd": null,
+      "tokens": {
+        "input": 518,
+        "output": 231,
+        "total_known": 749
+      },
+      "tool_call_count": 5
+    }
+  ]
+}

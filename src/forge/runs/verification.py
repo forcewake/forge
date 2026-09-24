@@ -34,13 +34,25 @@ from forge.runs.ci_contract import evaluate_quality_contract
 DEFAULT_FRESHNESS_WINDOW_SECONDS = 60
 
 #: The unified verdict vocabulary (R02). ``passed`` is the ONLY verified
-#: status; ``unverified``/``not_configured`` are the honest no-CI forms.
+#: status; ``unverified``/``not_configured`` are the honest no-CI forms;
+#: ``stale`` (R36-14) is the re-rendering of a verdict whose subject no
+#: longer binds the current candidate — retained evidence, withdrawn
+#: authority, never ``verified_ready``.
 STATUS_PENDING = "pending"
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
 STATUS_UNKNOWN = "unknown"
 STATUS_NOT_CONFIGURED = "not_configured"
 STATUS_UNVERIFIED = "unverified"
+STATUS_STALE = "stale"
+
+#: The subject freshness vocabulary (R36-14): a recorded verdict is
+#: ``current`` for the candidate it names, ``stale`` for any other, and
+#: ``unknown`` when it carries no subject identity at all (a row written
+#: before the binding landed — its legacy sha binding still decides).
+FRESHNESS_CURRENT = "current"
+FRESHNESS_STALE = "stale"
+FRESHNESS_UNKNOWN = "unknown"
 
 #: The reporting system behind a verdict — part of the evidence so an
 #: operator can tell WHO claimed a check passed.
@@ -76,6 +88,12 @@ class VerificationResult:
     summary: str = ""
     #: Optional per-check details (name/status or name/result entries).
     surface: tuple[dict, ...] = field(default=())
+    #: R36-14: the subject the verdict vouches for — the candidate
+    #: digest / source OID / tested OID / generation / plan+environment
+    #: digests, as the ``verification.subject_identity`` evidence
+    #: fragment. ``None`` (the default) keeps pre-R36-14 verdicts
+    #: byte-identical; a verdict that names its subject renders it.
+    subject_identity: Mapping[str, Any] | None = None
 
     def as_evidence(self) -> dict:
         """The evidence-fragment dict (the unified R02 shape)."""
@@ -89,6 +107,8 @@ class VerificationResult:
             evidence["summary"] = self.summary
         if self.surface:
             evidence["surface"] = [dict(entry) for entry in self.surface]
+        if self.subject_identity is not None:
+            evidence["subject_identity"] = dict(self.subject_identity)
         return evidence
 
     @property
@@ -110,8 +130,17 @@ class VerificationResult:
         *,
         summary: str = "",
         surface: tuple[dict, ...] = (),
+        subject_identity: Mapping[str, Any] | None = None,
     ) -> VerificationResult:
-        return cls(STATUS_PASSED, tested_oid, _utc_now_iso(), producer, summary, surface)
+        return cls(
+            STATUS_PASSED,
+            tested_oid,
+            _utc_now_iso(),
+            producer,
+            summary,
+            surface,
+            subject_identity,
+        )
 
     @classmethod
     def failed(
@@ -414,3 +443,84 @@ def evaluate_positive_proof(
         infra_failures=tuple(infra_failures),
         ambiguous=tuple(sorted(ambiguous)),
     )
+
+
+# ----------------------------------------------------------------------
+# R36-14: subject binding + freshness — a verdict is applicable ONLY to
+# the EXACT candidate (and tested world) its subject names. The subject
+# record itself lives with the collector-side machinery
+# (:mod:`forge.adaptive.verification_binding`); these core helpers read
+# the PERSISTED evidence shape so every provider can apply the gate
+# without importing the adaptive package.
+# ----------------------------------------------------------------------
+
+
+def subject_digest_of_evidence(verification: Mapping[str, Any] | None) -> str:
+    """The candidate digest a persisted verdict's subject claims ("" when
+    the verdict carries no usable subject identity)."""
+    if not isinstance(verification, Mapping):
+        return ""
+    subject = verification.get("subject_identity")
+    if not isinstance(subject, Mapping):
+        return ""
+    return str(subject.get("candidate_digest") or "")
+
+
+def verdict_freshness(
+    verification: Mapping[str, Any] | None,
+    candidate_digest: str,
+    *,
+    environment_profile_digest: str = "",
+) -> str:
+    """The freshness status of a PERSISTED verdict for the current
+    candidate (one of the ``FRESHNESS_*`` constants).
+
+    ``current`` — the verdict's subject binds this exact candidate (and,
+    when both sides record one, this environment profile). ``stale`` —
+    the subject names another candidate/world: a passed record renders
+    :data:`STATUS_STALE` and never counts as verified for this one
+    (fresh verification is required). ``unknown`` — the verdict carries
+    no subject identity (``verification.freshness_unknown``): its legacy
+    ADR-0008 sha binding decides, exactly as before.
+    """
+    if not isinstance(verification, Mapping):
+        return FRESHNESS_UNKNOWN
+    subject = verification.get("subject_identity")
+    if not isinstance(subject, Mapping):
+        return FRESHNESS_UNKNOWN
+    recorded_candidate = str(subject.get("candidate_digest") or "")
+    if not recorded_candidate:
+        return FRESHNESS_UNKNOWN
+    if not candidate_digest or recorded_candidate != candidate_digest:
+        return FRESHNESS_STALE
+    recorded_env = str(subject.get("environment_profile_digest") or "")
+    if recorded_env and environment_profile_digest and recorded_env != environment_profile_digest:
+        return FRESHNESS_STALE
+    return FRESHNESS_CURRENT
+
+
+def render_stale(
+    verification: Mapping[str, Any],
+    reason: str,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Re-render a persisted verdict whose subject no longer binds.
+
+    The record is RETAINED (producer, observed surface and the subject
+    it names stay inspectable for audit) while its authority is
+    withdrawn: the status becomes :data:`STATUS_STALE` and the summary
+    says why. A stale verdict is never ``verified_ready`` — the ready
+    decision requires fresh verification of the current candidate."""
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    rendered: dict = {
+        "status": STATUS_STALE,
+        "tested_oid": str(verification.get("tested_oid") or ""),
+        "observed_at": stamp,
+        "producer": str(verification.get("producer") or ""),
+        "summary": f"stale: {reason}",
+    }
+    subject = verification.get("subject_identity")
+    if isinstance(subject, Mapping):
+        rendered["subject_identity"] = dict(subject)
+    return rendered

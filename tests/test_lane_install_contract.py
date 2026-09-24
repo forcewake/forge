@@ -1,4 +1,5 @@
-"""Q35-08 — clean lane installation is reproducible from the promoted release.
+"""Q35-08/R36-07 — clean lane installation is explicit, reproducible and
+conflict-rejecting.
 
 The shipped GitHub lane template (and its dogfood mirror) may no longer pair
 a current controller with a historical lane: the lane version is the pin
@@ -6,6 +7,16 @@ GENERATED from the latest archived promotion record, an unset pin refuses
 with an upgrade instruction, source installs ride only the explicitly
 less-qualified dev override, and the installed identity is verified BEFORE
 any model call.
+
+R36-07 (review 16339c2, probe P05): the install fragment resolves exactly
+ONE route FIRST — ``FORGE_INSTALL_MODE`` is one of dev-source |
+explicit-wheel | explicit-tag | default-wheel | default-tag — before any
+download or install. The retired shape computed the wheel URL first, so the
+always-non-empty promoted pin (since v0.35.0) hid every dev/ref override,
+and an explicitly EMPTIED ``FORGE_LANE_WHEEL`` re-filled itself through
+``:-`` substitution. A declared override is now applied or rejected —
+never silently ignored — and contradictory inputs refuse before any
+package executes.
 
 These are TEMPLATE-LEVEL contract tests plus real-bash route executions of
 the SHIPPED install fragment (a stubbed pip — the network routes and the
@@ -124,20 +135,22 @@ class TestDevOverrideIsExplicitlyLessQualified:
         for path in (TEMPLATE, MIRROR):
             run = _brief_run(path)
             assert '"pin":"git-ref-dev"' in run
+            assert '"route":"dev-source"' in run
             assert '"qualified":false' in run
 
     def test_the_qualified_routes_record_qualified_true(self):
         for path in (TEMPLATE, MIRROR):
             run = _brief_run(path)
-            assert '"pin":"git-ref","ref":"%s","qualified":true' in run
+            assert '"pin":"git-ref","route":"%s","ref":"%s","qualified":true' in run
             assert (
-                '"pin":"wheel","expected_sha256":"%s","actual_sha256":"%s","qualified":true' in run
+                '"pin":"wheel","route":"%s","expected_sha256":"%s","actual_sha256":"%s",'
+                '"qualified":true' in run
             )
 
     def test_the_dev_route_demands_an_explicit_ref(self):
         for path in (TEMPLATE, MIRROR):
             run = _brief_run(path)
-            assert "FORGE_LANE_DEV_SOURCE_INSTALL=true requires FORGE_LANE_REF" in run
+            assert "requires FORGE_LANE_REF to name the source ref" in run
 
     def test_a_non_tag_ref_without_the_override_is_refused(self):
         for path in (TEMPLATE, MIRROR):
@@ -191,11 +204,77 @@ class TestWheelSha256Verification:
     def test_the_promoted_wheel_pin_is_the_default_route(self):
         for path in (TEMPLATE, MIRROR):
             run = _brief_run(path)
-            assert 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-$FORGE_LANE_PROMOTED_WHEEL_URL}"' in run
-            assert (
-                'FORGE_WHEEL_SHA="${FORGE_LANE_WHEEL_SHA256:-$FORGE_LANE_PROMOTED_WHEEL_SHA256}"'
-                in run
+            # R36-07: the GENERATED pin feeds the default-wheel route
+            # directly — the retired `:-` merge (an emptied user variable
+            # re-filling itself from the pin, hiding a set dev flag) is
+            # gone from the fragment entirely.
+            assert 'FORGE_WHEEL_URL="$FORGE_LANE_PROMOTED_WHEEL_URL"' in run
+            assert 'FORGE_WHEEL_SHA="$FORGE_LANE_PROMOTED_WHEEL_SHA256"' in run
+            assert 'FORGE_WHEEL_URL="${FORGE_LANE_WHEEL:-' not in run
+            assert 'FORGE_WHEEL_SHA="${FORGE_LANE_WHEEL_SHA256:-' not in run
+
+
+class TestRouteResolutionIsExplicitAndConflictRejecting:
+    """R36-07: the fragment resolves FORGE_INSTALL_MODE FIRST — dev flag,
+    explicit wheel, explicit ref, then the generated default — and refuses
+    contradictory inputs before any download or install."""
+
+    def test_the_mode_variable_names_the_five_routes(self):
+        for path in (TEMPLATE, MIRROR):
+            run = _brief_run(path)
+            for mode in (
+                "dev-source",
+                "explicit-wheel",
+                "explicit-tag",
+                "default-wheel",
+                "default-tag",
+            ):
+                assert f'FORGE_INSTALL_MODE="{mode}"' in run
+
+    def test_the_ladder_consults_the_user_inputs_before_the_generated_default(self):
+        for path in (TEMPLATE, MIRROR):
+            run = _brief_run(path)
+            # Normalization (${VAR+x} set-tests, no `:-` re-defaulting) in
+            # ladder order: dev flag, wheel, ref — then the mode resolves.
+            dev = run.index('if [ "${FORGE_LANE_DEV_SOURCE_INSTALL+x}" = x ]')
+            wheel = run.index('if [ "${FORGE_LANE_WHEEL+x}" = x ]')
+            ref = run.index('if [ "${FORGE_LANE_REF+x}" = x ]')
+            assert dev < wheel < ref
+            assert run.index("FORGE_DEV_SOURCE_REQUESTED=1") < run.index('FORGE_INSTALL_MODE=""')
+            # The generated promoted pin is consulted LAST (the default
+            # routes), never merged onto a user input.
+            assert run.index('FORGE_INSTALL_MODE=""') < run.index(
+                'FORGE_WHEEL_URL="$FORGE_LANE_PROMOTED_WHEEL_URL"'
             )
+            # The install dispatch consumes ONLY the resolved mode.
+            assert 'case "$FORGE_INSTALL_MODE" in' in run
+
+    def test_contradictory_inputs_refuse_with_both_variables_named(self):
+        for path in (TEMPLATE, MIRROR):
+            run = _brief_run(path)
+            assert run.count("contradictory lane install routes") == 2
+            assert "never silently ignored" in run
+            # Both refusals precede the dispatch (zero package execution).
+            assert run.index("contradictory lane install routes") < run.index(
+                'case "$FORGE_INSTALL_MODE" in'
+            )
+
+    def test_the_dev_flag_honors_the_off_spellings(self):
+        """The mirror documents 'false' as its opt-out; '0' is the same
+        class. Every other non-empty value is an explicit dev request —
+        no value is silently ignored."""
+        for path in (TEMPLATE, MIRROR):
+            run = _brief_run(path)
+            assert '[ "$FORGE_LANE_DEV_SOURCE_INSTALL" != "false" ]' in run
+            assert '[ "$FORGE_LANE_DEV_SOURCE_INSTALL" != "0" ]' in run
+
+    def test_an_explicit_wheel_requires_its_own_digest(self):
+        for path in (TEMPLATE, MIRROR):
+            run = _brief_run(path)
+            assert "an explicit wheel pin requires its sha256" in run
+            # No re-default onto the promoted digest: the sha is read from
+            # the user pair or the generated pin, never merged.
+            assert 'FORGE_WHEEL_SHA="${FORGE_LANE_WHEEL_SHA256:-' not in run
 
 
 class TestReleaseWorkflowBuildsTheLaneWheelSet:
@@ -506,7 +585,35 @@ def _run_fragment(
     )
 
 
+def _plant_wheel(workdir: Path, name: str, payload: bytes) -> str:
+    """Plant the artifact the stubbed ``pip download`` would have fetched;
+    returns the payload's sha256 (the pin the route must reproduce)."""
+    import hashlib
+
+    wheelhouse = workdir / ".forge" / "wheel"
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    (wheelhouse / name).write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _version_shim(tmp_path: Path, version: str) -> str:
+    """A PYTHONPATH stand-in for the installed package, so the identity
+    gate's expected-vs-installed comparison is deterministic in any
+    environment (the comparison honors the INSTALLED bytes, not the pin)."""
+    shim = tmp_path / f"shim-{version.replace('.', '-')}"
+    (shim / "forge").mkdir(parents=True, exist_ok=True)
+    (shim / "forge" / "__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    return str(shim)
+
+
 class TestInstallFragmentRoutesOnRealBash:
+    """AT-08: the SHIPPED fragment, rendered from CONTROLLED archives (each
+    test pins the record its route needs — never the live archive), run in
+    real Bash against a stubbed pip. The receipt (.forge/lane_install.json)
+    and the identity record (.forge/install-identity.json) name the route
+    that actually executed; refusals are asserted to leave no receipt and
+    no wheelhouse (zero package execution)."""
+
     def test_a_stripped_pin_with_no_variable_refuses_before_any_install(
         self, tmp_path, lane_runner
     ):
@@ -527,51 +634,230 @@ class TestInstallFragmentRoutesOnRealBash:
         assert "generate_template_pins.py" in out
         assert (workdir / ".forge" / "bootstrap").read_text() == "failed\n"
 
-    def test_the_qualified_default_installs_the_promoted_tag(self, tmp_path, lane_runner):
-        """No overrides at all: the install takes the GENERATED pin's tag,
-        records the qualified git-ref route, and — when the importable forge
-        reports exactly the pinned version — the identity gate stays open
-        (a PYTHONPATH shim stands in for the installed package so the
-        comparison is deterministic in any environment)."""
+    def test_the_image_only_default_falls_back_to_the_promoted_tag(self, tmp_path, lane_runner):
+        """An older, image-only archive (no promoted wheel built): the
+        default route is the generated promoted TAG — the preserved
+        pre-wheel fallback — recorded as default-tag, qualified."""
         fragment = _rendered_fragment(tmp_path, "default-root", wheel_name=None)
         pin = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', fragment)
         assert pin is not None
-        shim = tmp_path / "shim-default"
-        (shim / "forge").mkdir(parents=True)
-        (shim / "forge" / "__init__.py").write_text(
-            f'__version__ = "{pin.group(1)}"\n', encoding="utf-8"
-        )
         workdir = tmp_path / "default"
         workdir.mkdir()
-        result = _run_fragment(lane_runner, workdir, fragment, {"PYTHONPATH": str(shim)})
+        result = _run_fragment(
+            lane_runner, workdir, fragment, {"PYTHONPATH": _version_shim(tmp_path, pin.group(1))}
+        )
         assert result.returncode == 0, result.stdout + result.stderr
         record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
-        assert record["pin"] == "git-ref"
-        assert record["qualified"] is True
-        assert record["ref"] == f"v{pin.group(1)}"
+        assert record == {
+            "pin": "git-ref",
+            "route": "default-tag",
+            "ref": f"v{pin.group(1)}",
+            "qualified": True,
+        }
         identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
-        assert identity["route"] == "git-ref"
-        assert identity["expected_version"] == identity["installed_version"] == pin.group(1)
+        assert identity == {
+            "route": "default-tag",
+            "expected_version": pin.group(1),
+            "installed_version": pin.group(1),
+        }
 
-    def test_the_dev_override_installs_source_and_skips_the_version_gate(
+    def test_the_generated_default_selects_the_promoted_wheel(self, tmp_path, lane_runner):
+        """A wheel-bearing archive (v0.35.0-style record): no overrides at
+        all — the install takes the GENERATED promoted wheel, verifies its
+        digest and records route default-wheel, qualified."""
+        workdir = tmp_path / "default-wheel"
+        workdir.mkdir()
+        sha = _plant_wheel(workdir, "forge-9.8.7-py3-none-any.whl", b"promoted-wheel-bytes")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(
+                tmp_path,
+                "default-wheel-root",
+                version="9.8.7",
+                wheel_name="forge-9.8.7-py3-none-any.whl",
+                wheel_sha=sha,
+            ),
+            {"PYTHONPATH": _version_shim(tmp_path, "9.8.7")},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record == {
+            "pin": "wheel",
+            "route": "default-wheel",
+            "expected_sha256": sha,
+            "actual_sha256": sha,
+            "qualified": True,
+            "version": "9.8.7",
+        }
+        identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
+        assert identity == {
+            "route": "default-wheel",
+            "expected_version": "9.8.7",
+            "installed_version": "9.8.7",
+        }
+
+    def test_an_explicit_alternate_wheel_selects_the_explicit_wheel_route(
         self, tmp_path, lane_runner
     ):
-        workdir = tmp_path / "dev"
+        """FORGE_LANE_WHEEL + its sha256 override the generated pin: the
+        receipt carries the ALTERNATE artifact's digest (never the promoted
+        one) and route explicit-wheel."""
+        workdir = tmp_path / "explicit-wheel"
+        workdir.mkdir()
+        alternate_sha = _plant_wheel(workdir, "forge-8.8.8-py3-none-any.whl", b"alternate-bytes")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "explicit-wheel-root"),
+            {
+                "FORGE_LANE_WHEEL": "https://example.invalid/forge-8.8.8-py3-none-any.whl",
+                "FORGE_LANE_WHEEL_SHA256": alternate_sha,
+                "PYTHONPATH": _version_shim(tmp_path, "8.8.8"),
+            },
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record == {
+            "pin": "wheel",
+            "route": "explicit-wheel",
+            "expected_sha256": alternate_sha,
+            "actual_sha256": alternate_sha,
+            "qualified": True,
+            "version": "8.8.8",
+        }
+
+    def test_an_explicit_dev_source_request_beats_the_wheel_default(self, tmp_path, lane_runner):
+        """THE R36-07 acceptance (review probe P05): a wheel-bearing record
+        renders an always-non-empty generated wheel pin — an explicit dev
+        request still selects dev-source, visibly less qualified, and the
+        wheel route never starts (no wheelhouse materializes)."""
+        workdir = tmp_path / "dev-beats-wheel"
         workdir.mkdir()
         result = _run_fragment(
             lane_runner,
             workdir,
-            _rendered_fragment(tmp_path, "dev-root", wheel_name=None),
+            _rendered_fragment(tmp_path, "dev-beats-wheel-root"),
             {"FORGE_LANE_DEV_SOURCE_INSTALL": "true", "FORGE_LANE_REF": "feature-x"},
         )
         assert result.returncode == 0, result.stdout + result.stderr
         record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
-        assert record == {"pin": "git-ref-dev", "ref": "feature-x", "qualified": False}
+        assert record == {
+            "pin": "git-ref-dev",
+            "route": "dev-source",
+            "ref": "feature-x",
+            "qualified": False,
+        }
         identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
-        assert identity["route"] == "git-ref-dev"
+        assert identity["route"] == "dev-source"
         assert identity["expected_version"] == ""  # a moving ref is never a pinned identity
+        # The wheel route never started.
+        assert not (workdir / ".forge" / "wheel").exists()
 
-    def test_the_dev_override_without_a_ref_refuses(self, tmp_path, lane_runner):
+    def test_an_explicit_released_tag_beats_the_wheel_default(self, tmp_path, lane_runner):
+        """An explicit released-version override is never silently ignored
+        in favor of the generated wheel: route explicit-tag runs instead."""
+        workdir = tmp_path / "tag-beats-wheel"
+        workdir.mkdir()
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "tag-beats-wheel-root"),
+            {"FORGE_LANE_REF": "v9.9.9", "PYTHONPATH": _version_shim(tmp_path, "9.9.9")},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record == {
+            "pin": "git-ref",
+            "route": "explicit-tag",
+            "ref": "v9.9.9",
+            "qualified": True,
+        }
+        identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
+        assert identity == {
+            "route": "explicit-tag",
+            "expected_version": "9.9.9",
+            "installed_version": "9.9.9",
+        }
+        assert not (workdir / ".forge" / "wheel").exists()
+
+    def test_set_but_empty_inputs_behave_as_unset(self, tmp_path, lane_runner):
+        """R36-07 empty-vs-unset: every route input SET-BUT-EMPTY (how an
+        unset Actions variable arrives on the runner) selects no route and
+        raises no conflict — the generated default wheel still runs."""
+        workdir = tmp_path / "empty-inputs"
+        workdir.mkdir()
+        sha = _plant_wheel(workdir, "forge-9.8.7-py3-none-any.whl", b"promoted-wheel-bytes")
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(
+                tmp_path,
+                "empty-inputs-root",
+                version="9.8.7",
+                wheel_name="forge-9.8.7-py3-none-any.whl",
+                wheel_sha=sha,
+            ),
+            {
+                "FORGE_LANE_DEV_SOURCE_INSTALL": "",
+                "FORGE_LANE_WHEEL": "",
+                "FORGE_LANE_WHEEL_SHA256": "",
+                "FORGE_LANE_REF": "",
+                "PYTHONPATH": _version_shim(tmp_path, "9.8.7"),
+            },
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record["route"] == "default-wheel"
+        assert record["qualified"] is True
+
+    def test_an_emptied_wheel_does_not_shadow_a_set_dev_flag(self, tmp_path, lane_runner):
+        """The retired `:-` trap, inverted: an explicitly EMPTIED
+        FORGE_LANE_WHEEL must not re-fill itself from the promoted pin and
+        hide the dev flag that IS set — dev-source wins, not a refusal."""
+        workdir = tmp_path / "empty-wheel-dev-flag"
+        workdir.mkdir()
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "empty-wheel-dev-root"),
+            {
+                "FORGE_LANE_WHEEL": "",
+                "FORGE_LANE_DEV_SOURCE_INSTALL": "true",
+                "FORGE_LANE_REF": "feature-x",
+            },
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+        assert record == {
+            "pin": "git-ref-dev",
+            "route": "dev-source",
+            "ref": "feature-x",
+            "qualified": False,
+        }
+
+    @pytest.mark.parametrize("off", ["false", "0"])
+    def test_the_off_spellings_of_the_dev_flag_select_no_dev_route(
+        self, tmp_path, lane_runner, off
+    ):
+        """The documented opt-out spellings: with the flag off, a branch
+        ref reaches the QUALIFIED tag route and is refused there (had the
+        off-spelling selected dev, the stubbed install of 'main' would
+        have succeeded instead)."""
+        workdir = tmp_path / f"dev-off-{off}"
+        workdir.mkdir()
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, f"dev-off-{off}-root", wheel_name=None),
+            {"FORGE_LANE_DEV_SOURCE_INSTALL": off, "FORGE_LANE_REF": "main"},
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "is not a released version tag" in out
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+
+    def test_the_dev_route_without_a_ref_refuses(self, tmp_path, lane_runner):
         workdir = tmp_path / "dev-noref"
         workdir.mkdir()
         result = _run_fragment(
@@ -581,7 +867,8 @@ class TestInstallFragmentRoutesOnRealBash:
             {"FORGE_LANE_DEV_SOURCE_INSTALL": "true"},
         )
         assert result.returncode != 0
-        assert "requires FORGE_LANE_REF" in result.stdout + result.stderr
+        assert "requires FORGE_LANE_REF to name the source ref" in result.stdout + result.stderr
+        assert not (workdir / ".forge" / "lane_install.json").exists()
 
     def test_a_non_tag_ref_without_the_override_is_refused(self, tmp_path, lane_runner):
         workdir = tmp_path / "branch"
@@ -596,9 +883,107 @@ class TestInstallFragmentRoutesOnRealBash:
         out = result.stdout + result.stderr
         assert "is not a released version tag" in out
         assert "FORGE_LANE_DEV_SOURCE_INSTALL=true" in out  # the escape hatch is named
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+
+    def test_the_dev_flag_plus_an_explicit_wheel_refuses_before_execution(
+        self, tmp_path, lane_runner
+    ):
+        """Conflict 1: the dev flag and an explicit wheel are both
+        declared. The refusal names BOTH variables and fires before any
+        download (no wheelhouse) or install (no receipt)."""
+        workdir = tmp_path / "conflict-dev-wheel"
+        workdir.mkdir()
+        wheel_url = "https://example.invalid/forge-8.8.8-py3-none-any.whl"
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "conflict-dev-wheel-root"),
+            {
+                "FORGE_LANE_DEV_SOURCE_INSTALL": "true",
+                "FORGE_LANE_REF": "feature-x",
+                "FORGE_LANE_WHEEL": wheel_url,
+                "FORGE_LANE_WHEEL_SHA256": "e" * 64,
+            },
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "contradictory lane install routes" in out
+        assert "FORGE_LANE_DEV_SOURCE_INSTALL='true'" in out
+        assert f"FORGE_LANE_WHEEL='{wheel_url}'" in out
+        assert (workdir / ".forge" / "bootstrap").read_text() == "failed\n"
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        assert not (workdir / ".forge" / "wheel").exists()
+
+    def test_an_explicit_wheel_plus_an_explicit_ref_refuses_before_execution(
+        self, tmp_path, lane_runner
+    ):
+        """Conflict 2: an explicit wheel and an explicit ref are both
+        declared — the ref is never silently ignored beside the wheel."""
+        workdir = tmp_path / "conflict-wheel-ref"
+        workdir.mkdir()
+        wheel_url = "https://example.invalid/forge-8.8.8-py3-none-any.whl"
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "conflict-wheel-ref-root"),
+            {
+                "FORGE_LANE_WHEEL": wheel_url,
+                "FORGE_LANE_WHEEL_SHA256": "e" * 64,
+                "FORGE_LANE_REF": "v9.9.9",
+            },
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "contradictory lane install routes" in out
+        assert "a ref beside a wheel is never silently ignored" in out
+        assert (workdir / ".forge" / "bootstrap").read_text() == "failed\n"
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        assert not (workdir / ".forge" / "wheel").exists()
+
+    def test_an_explicit_wheel_without_its_sha_refuses_before_any_download(
+        self, tmp_path, lane_runner
+    ):
+        """An explicit wheel pin is incomplete without its digest — an
+        actionable refusal naming the repair, before the download (the
+        old shape silently re-used the promoted sha and died later on a
+        confusing hash mismatch)."""
+        workdir = tmp_path / "wheel-nosha"
+        workdir.mkdir()
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "wheel-nosha-root"),
+            {"FORGE_LANE_WHEEL": "https://example.invalid/forge-8.8.8-py3-none-any.whl"},
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "an explicit wheel pin requires its sha256" in out
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        assert not (workdir / ".forge" / "wheel").exists()
+
+    def test_a_malformed_wheel_digest_refuses_before_the_download(self, tmp_path, lane_runner):
+        """AT-08 negative: a non-64-hex digest refuses before any wheel is
+        fetched or executed."""
+        workdir = tmp_path / "wheel-badsha-shape"
+        workdir.mkdir()
+        result = _run_fragment(
+            lane_runner,
+            workdir,
+            _rendered_fragment(tmp_path, "wheel-badsha-shape-root"),
+            {
+                "FORGE_LANE_WHEEL": "https://example.invalid/forge-8.8.8-py3-none-any.whl",
+                "FORGE_LANE_WHEEL_SHA256": "deadbeef",
+            },
+        )
+        assert result.returncode != 0
+        out = result.stdout + result.stderr
+        assert "must be a 64-hex sha256" in out
+        assert "FORGE_BOOTSTRAP_FAILED" in out
+        assert not (workdir / ".forge" / "lane_install.json").exists()
+        assert not (workdir / ".forge" / "wheel").exists()
 
     def test_an_installed_version_mismatch_fails_before_model_calls(self, tmp_path, lane_runner):
-        """The acceptance negative: the pin names v9.9.9 but the importable
+        """The acceptance negative: the ref names v9.9.9 but the importable
         lane reports something else — the job fails HERE, in the brief step,
         never in the driver step's model calls."""
         workdir = tmp_path / "mismatch"
@@ -615,41 +1000,62 @@ class TestInstallFragmentRoutesOnRealBash:
         assert "never code repair" in out
         identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
         assert identity["expected_version"] == "9.9.9"
+        assert identity["route"] == "explicit-tag"
 
     def test_a_matching_identity_passes_the_gate(self, tmp_path, lane_runner):
         """Positive control: when the importable forge reports the pinned
         version, the gate stays open. A real forge wheel is not needed — a
         PYTHONPATH shim providing ``forge.__version__`` proves the
         comparison honors the INSTALLED bytes, not the pin alone."""
-        shim = tmp_path / "shim"
-        (shim / "forge").mkdir(parents=True)
-        (shim / "forge" / "__init__.py").write_text('__version__ = "9.9.9"\n', encoding="utf-8")
         workdir = tmp_path / "match"
         workdir.mkdir()
         result = _run_fragment(
             lane_runner,
             workdir,
             _rendered_fragment(tmp_path, "match-root", wheel_name=None),
-            {"FORGE_LANE_REF": "v9.9.9", "PYTHONPATH": str(shim)},
+            {"FORGE_LANE_REF": "v9.9.9", "PYTHONPATH": _version_shim(tmp_path, "9.9.9")},
         )
         assert result.returncode == 0, result.stdout + result.stderr
         identity = json.loads((workdir / ".forge" / "install-identity.json").read_text())
         assert identity == {
-            "route": "git-ref",
+            "route": "explicit-tag",
             "expected_version": "9.9.9",
             "installed_version": "9.9.9",
         }
 
     def test_the_mirror_fragment_carries_the_same_route_logic(self, tmp_path, lane_runner):
+        """Parity on the SHIPPED bytes of BOTH files: the dev request beats
+        the always-non-empty generated wheel pin on the template AND the
+        mirror (the R36-07 defect, probed on the live fragments), and a
+        fully stripped pin still refuses with the upgrade instruction on
+        both."""
         for fragment_owner in (TEMPLATE, MIRROR):
-            workdir = tmp_path / f"mirror-{fragment_owner.name}"
-            workdir.mkdir()
+            label = fragment_owner.name
             live = _install_fragment(fragment_owner)
             promoted = re.search(r'FORGE_LANE_PROMOTED_VERSION="v([0-9.]+)"', live)
             assert promoted is not None, "the live pin must always name a version"
-            # Strip the WHOLE generated pin (version + wheel identity): the
-            # route refusal differs (tag route vs wheel route), the
-            # no-pin refusal must fire either way.
+            # 1) The dev request selects its route despite the generated
+            #    wheel default being present and non-empty.
+            workdir = tmp_path / f"mirror-dev-{label}"
+            workdir.mkdir()
+            result = _run_fragment(
+                lane_runner,
+                workdir,
+                live,
+                {"FORGE_LANE_DEV_SOURCE_INSTALL": "true", "FORGE_LANE_REF": "feature-x"},
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
+            assert record == {
+                "pin": "git-ref-dev",
+                "route": "dev-source",
+                "ref": "feature-x",
+                "qualified": False,
+            }
+            # 2) Strip the WHOLE generated pin (version + wheel identity):
+            #    the no-pin refusal must fire either way.
+            workdir = tmp_path / f"mirror-stripped-{label}"
+            workdir.mkdir()
             stripped = live.replace(
                 f'FORGE_LANE_PROMOTED_VERSION="v{promoted.group(1)}"',
                 'FORGE_LANE_PROMOTED_VERSION=""',
@@ -739,9 +1145,11 @@ class TestPromotionRecordLaneArtifactFields:
 
 
 class TestInstallFragmentWheelRouteOnRealBash:
-    """The wheel route — exercised the moment the live archive carries a
-    wheel-bearing record (as v0.35.0 does): exactly-one-wheel, sha256
-    verification, the sdist refusal, and the identity gate."""
+    """The wheel arms (explicit-wheel and default-wheel share one guarded
+    install path) — exactly-one-wheel, sha256 verification, the sdist
+    refusal, and the identity gate. These renders carry the DEFAULT
+    (wheel-bearing) record, so with no overrides they select
+    default-wheel; the explicit-wheel route is covered above."""
 
     def test_a_matching_wheel_sha_installs_qualified(self, tmp_path, lane_runner):
         import hashlib
@@ -770,6 +1178,7 @@ class TestInstallFragmentWheelRouteOnRealBash:
         assert result.returncode == 0, result.stdout + result.stderr
         record = json.loads((workdir / ".forge" / "lane_install.json").read_text())
         assert record["pin"] == "wheel"
+        assert record["route"] == "default-wheel"
         assert record["qualified"] is True
 
     def test_zero_wheels_refuses(self, tmp_path, lane_runner):
