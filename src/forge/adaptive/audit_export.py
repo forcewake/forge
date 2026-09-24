@@ -25,6 +25,10 @@ exportable JSON. Two invariants the tests pin:
 - NO CREDENTIAL VALUES: every detail dict passes a redaction guard that
   drops token/secret/password/key-looking VALUES (issue 183's
   secret-scanning canary) — refs and names survive, values never do;
+  NEXT-19 (#207) adds the SCHEMA-BASED allowlist above the redaction:
+  a credential binding/proof/receipt document serializes ONLY its
+  declared fields, and every dropped field is named as a
+  ``credential.export_field_dropped`` finding at the trail level;
 - honest unknowns: an outcome forge cannot prove (publication
   ``unknown``, action ``unknown_outcome``) is EXPORTED as unknown,
   never normalized to success.
@@ -46,6 +50,8 @@ from forge.durable import ActionLog, FlowRun, GateApproval, Outbox, PublicationI
 
 __all__ = [
     "AUDIT_SCHEMA",
+    "CREDENTIAL_DOCUMENT_FIELDS",
+    "EXPORT_FIELD_DROPPED",
     "AuditEntry",
     "AuditTrail",
     "audit_trail_for_project",
@@ -63,12 +69,172 @@ _REDACTED_KEY_RE = re.compile(
 )
 _SECRET_VALUE_RE = re.compile(r"(Bearer\s+\S|sk-[A-Za-z0-9]{8,}|ghp_[A-Za-z0-9]{8,}|glpat-)")
 
+#: The named finding every dropped field leaves behind (NEXT-19/#207).
+EXPORT_FIELD_DROPPED = "credential.export_field_dropped"
+
+#: The per-schema EXPORT ALLOWLISTS (NEXT-19/#207): a document carrying
+#: one of these schema discriminators serializes ONLY its declared
+#: fields — an unknown or nested secret-shaped field is DROPPED with the
+#: named finding, never rescued by a regex. This is the schema-based
+#: half of the export guard; :func:`_redact` stays beneath it as the
+#: value-shaped backstop (a sentinel smuggled into a DECLARED field —
+#: e.g. a receipt whose ``resolved_version`` carries a pasted key — is
+#: still redacted there).
+CREDENTIAL_DOCUMENT_FIELDS: dict[str, frozenset[str]] = {
+    "forge.project.credential-binding/1": frozenset(
+        {
+            "schema",
+            "project_id",
+            "provider",
+            "credential_ref",
+            "env_var",
+            "bound_at",
+            "bound_by",
+            "revoked_at",
+        }
+    ),
+    "forge.project.credential-binding/2": frozenset(
+        {
+            "schema",
+            "subject",
+            "provider",
+            "credential_ref",
+            "env_var",
+            "bound_at",
+            "bound_by",
+            "revision",
+            "project_id",
+            "revoked_at",
+        }
+    ),
+    "forge.project.dispatch-credential-proof/1": frozenset(
+        {
+            "schema",
+            "project_id",
+            "provider",
+            "credential_ref",
+            "env_var",
+            "resolved_at",
+            "bound_at",
+            "bound_by",
+        }
+    ),
+    "forge.project.dispatch-credential-proof/2": frozenset(
+        {
+            "schema",
+            "subject",
+            "provider",
+            "credential_ref",
+            "env_var",
+            "binding_revision",
+            "resolved_at",
+            "bound_at",
+            "bound_by",
+            "resolver_identity",
+            "resolved_version",
+            "grant",
+            "receipt",
+            "attempt_generation",
+        }
+    ),
+    "forge.credential.broker-receipt/1": frozenset(
+        {
+            "schema",
+            "resolver_identity",
+            "provider_route",
+            "credential_ref",
+            "env_var",
+            "env_present",
+            "resolved_version",
+            "resolved_at",
+        }
+    ),
+}
+
+#: Fields the allowlisted documents promote to ``unknown`` when absent —
+#: unresolved attribution stays unknown in exports, never promoted to a
+#: claim (and never silently omitted either).
+_UNKNOWN_PROMOTIONS: dict[str, tuple[str, ...]] = {
+    "forge.project.dispatch-credential-proof/2": ("resolver_identity", "resolved_version"),
+    "forge.credential.broker-receipt/1": (
+        "resolver_identity",
+        "resolved_version",
+        "provider_route",
+    ),
+}
+
+
+def _apply_document_allowlist(value: Any, findings: list[str]) -> Any:
+    """The schema-based export guard (recursive, copy-on-write).
+
+    A dict whose ``schema`` key names an allowlisted document keeps ONLY
+    its declared fields — every other key (an injected sentinel under an
+    unexpected nested name, an error payload smuggled beside the record,
+    a value-shaped surprise inside the receipt itself) is DROPPED and
+    named as a ``credential.export_field_dropped`` finding. Absent
+    attribution fields are promoted to ``unknown``. Documents without a
+    known schema discriminator pass through untouched (the redaction
+    backstop below still applies to them).
+    """
+    if isinstance(value, dict):
+        schema = str(value.get("schema") or "")
+        declared = CREDENTIAL_DOCUMENT_FIELDS.get(schema)
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if declared is not None and str(key) not in declared:
+                findings.append(f"{EXPORT_FIELD_DROPPED}:{schema}:{key}")
+                continue
+            cleaned[key] = _apply_document_allowlist(item, findings)
+        if declared is not None:
+            for field in _UNKNOWN_PROMOTIONS.get(schema, ()):
+                if not str(cleaned.get(field) or "").strip():
+                    cleaned[field] = "unknown"
+        return cleaned
+    if isinstance(value, list):
+        return [_apply_document_allowlist(item, findings) for item in value]
+    return value
+
+
+def _export_detail(detail: dict[str, Any], findings: list[str] | None = None) -> dict[str, Any]:
+    """One entry's detail as exportable: allowlist first, redaction second."""
+    collected: list[str] = findings if findings is not None else []
+    return _redact(_apply_document_allowlist(detail, collected))
+
+
+def _is_credential_document(value: Any) -> bool:
+    """Whether *value* is an ALREADY-ALLOWLISTED schema-discriminated
+    credential document — a known schema discriminator AND no keys
+    beyond the declared set (:func:`_export_detail` guarantees that
+    upstream; a raw doc smuggled to :func:`_redact` from another caller
+    fails this check and falls to the ordinary key regex, conservative
+    exactly as before)."""
+    if not isinstance(value, dict):
+        return False
+    declared = CREDENTIAL_DOCUMENT_FIELDS.get(str(value.get("schema") or ""))
+    return declared is not None and set(value) <= set(declared)
+
 
 def _redact(value: Any) -> Any:
-    """The export-side credential guard (recursive, copy-on-write)."""
+    """The export-side credential guard (recursive, copy-on-write).
+
+    NEXT-19 (#207): a schema-discriminated credential document is
+    refs/metadata by construction and was already trimmed to its
+    DECLARED fields by the allowlist — the KEY regex does not apply to
+    it (its keys are declared field names like ``credential_ref``, and a
+    parent key like ``dispatch_credential`` must not erase the whole
+    audit record), while the VALUE regex still runs on every string it
+    carries: a sentinel smuggled into a declared field is redacted
+    exactly like anywhere else.
+    """
+    if isinstance(value, dict) and _is_credential_document(value):
+        return {key: _redact(item) for key, item in value.items()}
     if isinstance(value, dict):
         return {
-            key: ("[redacted]" if _REDACTED_KEY_RE.search(str(key)) else _redact(item))
+            key: (
+                "[redacted]"
+                if _REDACTED_KEY_RE.search(str(key)) and not _is_credential_document(item)
+                else _redact(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -116,7 +282,7 @@ class AuditEntry:
             "outcome": self.outcome,
             "run_id": self.run_id,
             "source": self.source,
-            "detail": _redact(self.detail),
+            "detail": _export_detail(self.detail),
         }
 
 
@@ -129,12 +295,32 @@ class AuditTrail:
     generated_at: str
 
     def as_document(self) -> dict[str, Any]:
+        findings: list[str] = []
+        entries = []
+        for entry in self.entries:
+            entry_findings: list[str] = []
+            document = {
+                "timestamp": entry.timestamp,
+                "actor": entry.actor,
+                "action": entry.action,
+                "outcome": entry.outcome,
+                "run_id": entry.run_id,
+                "source": entry.source,
+                "detail": _export_detail(entry.detail, entry_findings),
+            }
+            findings.extend(entry_findings)
+            entries.append(document)
         return {
             "schema": AUDIT_SCHEMA,
             "project_id": self.project_id,
             "generated_at": self.generated_at,
             "entry_count": len(self.entries),
-            "entries": [entry.as_document() for entry in self.entries],
+            "entries": entries,
+            # NEXT-19 (#207): the named export findings — every field the
+            # schema allowlist dropped (``credential.export_field_
+            # dropped:<schema>:<field>``). Names only: a finding never
+            # carries the dropped content.
+            "findings": sorted(set(findings)),
         }
 
     def to_json(self) -> str:

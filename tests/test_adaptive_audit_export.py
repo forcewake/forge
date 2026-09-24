@@ -1,10 +1,14 @@
-"""R28-25: the exportable audit trail — the SIEM-ready surface.
+"""R28-25 + NEXT-19 (#207): the exportable audit trail — the SIEM-ready
+surface.
 
 A full run lifecycle (creation, transitions, gate approval + consumption,
 pause/resume steering, publication intent with an honest UNKNOWN
 outcome, an external-write action) must come out as ONE chronological
 trail with per-entry actor/action/timestamp/outcome, valid JSON, no
-other project's rows, and no credential values.
+other project's rows, and no credential values. NEXT-19 adds the
+schema-based allowlist: a credential binding/proof/receipt document
+serializes ONLY its declared fields, and every dropped field is named as
+a ``credential.export_field_dropped`` finding.
 """
 
 from __future__ import annotations
@@ -18,7 +22,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import forge.adaptive.audit_export  # noqa: F401 — pulls mailbox_db (control_commands) into metadata
-from forge.adaptive.audit_export import AUDIT_SCHEMA, SYSTEM_ACTOR, audit_trail_for_project
+from forge.adaptive.audit_export import (
+    AUDIT_SCHEMA,
+    EXPORT_FIELD_DROPPED,
+    SYSTEM_ACTOR,
+    audit_trail_for_project,
+)
 from forge.adaptive.mailbox_db import ControlCommandRow
 from forge.durable import ActionLog, FlowRun, GateApproval, Outbox, PublicationIntent
 from forge.models.base import Base
@@ -29,6 +38,8 @@ OTHER_PROJECT_ID = 999
 #: Planted credential canaries — must survive NOWHERE in the export.
 CANARY_VALUE = "sk-canary-0123456789abcdef"
 CANARY_TOKEN = "glpat-canary-0123456789"
+#: A sentinel under an unexpected NESTED key inside a schema'd document.
+CANARY_NESTED = "ghp_nestedcanary0123456789"
 
 RUN_ID = "run-" + uuid4().hex[:12]
 T0 = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -157,6 +168,170 @@ async def _seed_lifecycle(db) -> None:
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat()
+
+
+#: The adversarial credential run's id (separate from the happy run).
+CRED_RUN_ID = "run-cred-" + uuid4().hex[:8]
+
+
+async def _seed_adversarial_credentials(db) -> None:
+    """A run whose evidence carries schema'd credential documents under
+    adversarial pressure: sentinels under UNEXPECTED nested keys, inside
+    an error payload, in the broker receipt itself — and once inside a
+    DECLARED field (the redaction backstop's arm)."""
+    async with db() as session:
+        session.add(
+            FlowRun(
+                id=CRED_RUN_ID,
+                project_id=PROJECT_ID,
+                issue_iid=9,
+                provider="gitlab",
+                status="waiting_harness",
+                evidence={
+                    "harness": {
+                        "dispatch_credential": {
+                            "schema": "forge.project.dispatch-credential-proof/2",
+                            "subject": "gitlab/gitlab.example/90210",
+                            "provider": "anthropic-gateway",
+                            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+                            "env_var": "ANTHROPIC_AUTH_TOKEN",
+                            "binding_revision": 2,
+                            "bound_at": _iso(T0),
+                            "bound_by": "ops@a",
+                            "resolved_at": _iso(T0),
+                            # A sentinel under an unexpected nested key…
+                            "debug_echo": CANARY_VALUE,
+                            # …inside an error payload…
+                            "error": {"message": f"boom: {CANARY_TOKEN}", "retry": True},
+                            # …and in the broker receipt itself.
+                            "receipt": {
+                                "schema": "forge.credential.broker-receipt/1",
+                                "resolver_identity": "env",
+                                "provider_route": "anthropic-gateway",
+                                "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+                                "env_var": "ANTHROPIC_AUTH_TOKEN",
+                                "env_present": True,
+                                "resolved_at": _iso(T0),
+                                # undeclared key carrying the sentinel…
+                                "resolved_value": CANARY_NESTED,
+                                # …and a declared field the backstop must
+                                # still redact when someone pastes a value
+                                # into it (the ghp_ shape is what the
+                                # value regex provably catches).
+                                "resolved_version": "v-ghp_canary12345678",
+                            },
+                        },
+                        "dispatch_envelope": {
+                            "credential_ref": "env:ANTHROPIC_AUTH_TOKEN",
+                            "credential_resolved_version": "env:ANTHROPIC_AUTH_TOKEN:present",
+                        },
+                    }
+                },
+                created_at=_at(3),
+            )
+        )
+        await session.commit()
+
+
+class TestSchemaAllowlist:
+    async def test_schema_documents_serialize_only_declared_fields(self, db):
+        await _seed_adversarial_credentials(db)
+        trail = await audit_trail_for_project(PROJECT_ID, db)
+        exported = json.loads(trail.to_json())
+        proof = next(
+            entry["detail"]["evidence"]["harness"]["dispatch_credential"]
+            for entry in exported["entries"]
+            if entry["run_id"] == CRED_RUN_ID
+        )
+        assert proof["subject"] == "gitlab/gitlab.example/90210"
+        assert proof["binding_revision"] == 2
+        assert proof["resolver_identity"] == "unknown"  # absent → honest unknown
+        assert set(proof) == {
+            "schema",
+            "subject",
+            "provider",
+            "credential_ref",
+            "env_var",
+            "binding_revision",
+            "resolved_at",
+            "bound_at",
+            "bound_by",
+            "resolver_identity",
+            "resolved_version",
+            "receipt",
+        }
+        receipt = proof["receipt"]
+        assert set(receipt) == {
+            "schema",
+            "resolver_identity",
+            "provider_route",
+            "credential_ref",
+            "env_var",
+            "env_present",
+            "resolved_version",
+            "resolved_at",
+        }
+
+    async def test_every_dropped_field_is_a_named_finding(self, db):
+        await _seed_adversarial_credentials(db)
+        trail = await audit_trail_for_project(PROJECT_ID, db)
+        document = trail.as_document()
+        findings = document["findings"]
+        assert findings
+        for finding in findings:
+            assert finding.startswith(EXPORT_FIELD_DROPPED + ":")
+        assert (
+            "credential.export_field_dropped:forge.project.dispatch-credential-proof/2:debug_echo"
+            in findings
+        )
+        assert (
+            "credential.export_field_dropped:forge.project.dispatch-credential-proof/2:error"
+            in findings
+        )
+        assert (
+            "credential.export_field_dropped:forge.credential.broker-receipt/1:resolved_value"
+            in (findings)
+        )
+        # The findings name FIELDS, never content.
+        assert CANARY_VALUE not in json.dumps(findings)
+
+    async def test_adversarial_sentinels_never_appear_anywhere(self, db):
+        """The layered guard: the allowlist drops the unexpected keys,
+        the redaction backstop catches a sentinel pasted into a DECLARED
+        field — none of the three canaries survives the export."""
+        await _seed_adversarial_credentials(db)
+        trail = await audit_trail_for_project(PROJECT_ID, db)
+        exported = trail.to_json()
+        assert CANARY_VALUE not in exported
+        assert CANARY_TOKEN not in exported
+        assert CANARY_NESTED not in exported
+
+    async def test_a_sentinel_in_a_declared_field_is_redacted_not_dropped(self, db):
+        await _seed_adversarial_credentials(db)
+        trail = await audit_trail_for_project(PROJECT_ID, db)
+        exported = json.loads(trail.to_json())
+        proof = next(
+            entry["detail"]["evidence"]["harness"]["dispatch_credential"]
+            for entry in exported["entries"]
+            if entry["run_id"] == CRED_RUN_ID
+        )
+        # The declared field survives (as a field), its VALUE does not.
+        assert proof["receipt"]["resolved_version"] == "[redacted]"
+        assert "ghp_canary" not in json.dumps(proof)
+
+    async def test_unresolved_attribution_stays_unknown(self, db):
+        """A proof with no resolver/version exports them as ``unknown`` —
+        never promoted to a claim, never silently omitted."""
+        await _seed_adversarial_credentials(db)
+        trail = await audit_trail_for_project(PROJECT_ID, db)
+        exported = json.loads(trail.to_json())
+        proof = next(
+            entry["detail"]["evidence"]["harness"]["dispatch_credential"]
+            for entry in exported["entries"]
+            if entry["run_id"] == CRED_RUN_ID
+        )
+        assert proof["resolver_identity"] == "unknown"
+        assert proof["resolved_version"] == "unknown"
 
 
 class TestCompleteness:

@@ -113,6 +113,12 @@ from forge.factory.llm import LLMError, LLMResponseError
 # Q35-02: the continuation decision model (pure over an evidence snapshot);
 # module-level so the retry/revival regions stay typed.
 from forge.adaptive import continuation
+from forge.adaptive.credential_broker import (
+    CredentialBroker,
+    EnvBroker,
+    StagedDispatchCredential,
+    stage_dispatch_credential,
+)
 
 # Q35-07: the composition-boundary adoption (ADR-0029) — the narrow seam
 # the dispatch entry composes the frozen AttemptStartSpec envelope through.
@@ -127,6 +133,13 @@ from forge.adaptive.discovery_stage import (
     record_answers,
 )
 from forge.adaptive.pause_fence import pause_fence_decision
+from forge.adaptive.project_credentials import (
+    CredentialRefusal,
+    ProjectCredentialRegistry,
+    binding_subject_of_run,
+    provider_route_for_driver,
+    registry_from_env,
+)
 from forge.adaptive.research_planner import (
     RESEARCH_HARNESS_MODE,
     ResearchHarness,
@@ -431,12 +444,23 @@ class GitHubRunService:
         repo_full_name: str,
         control: Any | None = None,
         neighbor_reader_factory: Callable[[NeighborRepository], Any] | None = None,
+        credential_registry: ProjectCredentialRegistry | None = None,
+        credential_broker: CredentialBroker | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._config = config or ForgeConfig()
         self._stack = stack
         self._repo_full_name = repo_full_name
+        # NEXT-19 (#207): the credential binding registry + broker the
+        # dispatch seam resolves under (defaults: the deployment's
+        # FORGE_CREDENTIAL_BINDINGS document, the ambient EnvBroker).
+        self._credential_registry = (
+            credential_registry if credential_registry is not None else registry_from_env()
+        )
+        self._credential_broker = (
+            credential_broker if credential_broker is not None else EnvBroker()
+        )
         # R28-17: the operator-control seam the question-resumption pass
         # drains /answer records from. Defaults to the process-shared
         # control service (the SAME mailbox the command router records
@@ -3880,6 +3904,21 @@ class GitHubRunService:
             prior_attempt_start = (run.evidence or {}).get(
                 composition_adoption.ATTEMPT_START_EVIDENCE_KEY
             )
+            # NEXT-19 (#207): the credential generation THIS attempt
+            # already dispatched under (a fallback/repair re-dispatch
+            # presents it — a rotation in between is a typed refusal,
+            # never a silent substitution; a NEW attempt generation
+            # re-resolves fresh).
+            prior_credential = dict(
+                (run.evidence or {}).get("harness", {}).get("dispatch_credential") or {}
+            )
+            prior_credential_generation = prior_credential.get("attempt_generation")
+            prior_credential_ref = (
+                str(prior_credential.get("credential_ref") or "")
+                if prior_credential_generation is not None
+                and int(prior_credential_generation) == generation
+                else ""
+            )
         # R32-11 (NEXT-20): the dispatch consumes the durable ACTIVE plan
         # revision — the plan this lane runs under is read from the
         # run's ``active_plan`` pointer, never assumed from the comment
@@ -4032,6 +4071,53 @@ class GitHubRunService:
         )
         if driver is None:
             driver = spec.harness_driver
+        # NEXT-19 (#207): broker resolution under the active execution
+        # lease (opened above for the composition boundary) — BEFORE any
+        # provider call. A subject the deployment never bound stages
+        # nothing (today's ambient behavior, attribution unknown); a
+        # bound subject resolves through the registry's fail-closed
+        # checks and the broker, and the workflow inputs gain ONLY the
+        # broker's staged slot for the credential route (the same
+        # input channel lane_control_token already rides; a template
+        # without the declared input drops it, harmlessly). Any typed
+        # refusal parks the run with ZERO provider dispatches — exactly
+        # like the composition-boundary refusal above.
+        credential_subject = binding_subject_of_run(run)
+        staged_credential: StagedDispatchCredential | None = None
+        if credential_subject is not None:
+            try:
+                staged_credential = await stage_dispatch_credential(
+                    self._credential_registry,
+                    self._credential_broker,
+                    subject=credential_subject,
+                    provider=provider_route_for_driver(driver),
+                    presented_ref=prior_credential_ref,
+                    grant={
+                        "run_id": run_id,
+                        "attempt_generation": generation,
+                        **({"lease_id": lease.lease_id} if lease is not None else {}),
+                    },
+                )
+            except CredentialRefusal as exc:
+                logger.warning(
+                    "credential.%s: run %s dispatch refused at the credential seam — %s",
+                    "rotation_refusal" if exc.reason == "rotated" else "refusal",
+                    run_id[:8],
+                    exc,
+                )
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"credential_refused: {exc}")
+                return
+            if staged_credential is not None:
+                logger.info(
+                    "credential.binding_subject: run %s subject %s provider %s revision %d — "
+                    "credential.resolved_version %s, credential.resolver_identity %s",
+                    run_id[:8],
+                    staged_credential.subject,
+                    staged_credential.provider,
+                    staged_credential.binding_revision,
+                    staged_credential.resolved_version,
+                    staged_credential.resolver_identity,
+                )
         branch = github_factory_branch(issue_number, run_id)
         executor = GitHubActionsExecutor(self._stack.client, self._settings)
         handle = ActionsHandle(
@@ -4124,6 +4210,11 @@ class GitHubRunService:
                     # reason) on a repair re-dispatch; cycle 1 dispatches
                     # the same shape as always.
                     **({"repair_context": repair_context[:2000]} if repair_context else {}),
+                    # NEXT-19 (#207): the broker's staged credential slot
+                    # (the binding's env var name as the input key — the
+                    # same channel lane_control_token rides; the shipped
+                    # template maps declared inputs onto the lane env).
+                    **(dict(staged_credential.staged_env) if staged_credential is not None else {}),
                 },
             )
         except GitHubAPIError as exc:
@@ -4199,6 +4290,21 @@ class GitHubRunService:
                         "attempt_base": attempt_base,
                         "driver": correlated.driver,
                         "started_at": correlated.started_at,
+                        # NEXT-19 (#207): the extended dispatch-credential
+                        # proof (/2) beside the harness handle — binding
+                        # subject, ref, revision, resolver identity,
+                        # resolved version, grant refs and the broker
+                        # receipt. Refs and metadata only, never the value.
+                        **(
+                            {
+                                "dispatch_credential": {
+                                    **staged_credential.proof,
+                                    "attempt_generation": generation,
+                                }
+                            }
+                            if staged_credential is not None
+                            else {}
+                        ),
                     },
                     # R32-11: the dispatched lane's plan binding — which
                     # revision/digest it runs under, frozen beside the

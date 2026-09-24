@@ -72,7 +72,20 @@ from forge.adaptive.admission import (
     release_lease_with_evidence,
     try_acquire_lease,
 )
+from forge.adaptive.credential_broker import (
+    CredentialBroker,
+    EnvBroker,
+    StagedDispatchCredential,
+    stage_dispatch_credential,
+)
 from forge.adaptive.pause_fence import pause_fence_decision
+from forge.adaptive.project_credentials import (
+    CredentialRefusal,
+    ProjectCredentialRegistry,
+    binding_subject_of_run,
+    provider_route_for_driver,
+    registry_from_env,
+)
 from forge.config import ForgeConfig, Settings, parse_budget_profiles
 from forge.durable import (
     DEFAULT_SETTLE_WINDOW_SECONDS,
@@ -660,12 +673,23 @@ class RunService:
         planner: Any | None = None,
         implementer: Any | None = None,
         reviewer: Any | None = None,
+        credential_registry: ProjectCredentialRegistry | None = None,
+        credential_broker: CredentialBroker | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._gitlab = gitlab
         self._settings = settings
         self._config = config or ForgeConfig()
         self._writer_class = writer_class
+        # NEXT-19 (#207): the credential binding registry + broker the
+        # dispatch seam resolves under (defaults: the deployment's
+        # FORGE_CREDENTIAL_BINDINGS document, the ambient EnvBroker).
+        self._credential_registry = (
+            credential_registry if credential_registry is not None else registry_from_env()
+        )
+        self._credential_broker = (
+            credential_broker if credential_broker is not None else EnvBroker()
+        )
         if planner is None or implementer is None or reviewer is None:
             default_planner, default_implementer, default_reviewer = build_default_agents(
                 settings, gitlab, session_factory
@@ -3276,6 +3300,20 @@ class RunService:
                 if isinstance(continuation_document, dict)
                 else ""
             )
+            # NEXT-19 (#207): the credential generation THIS attempt
+            # already dispatched under (a repair re-dispatch presents it
+            # — a rotation in between is a typed refusal, never a silent
+            # substitution; a NEW attempt generation re-resolves fresh).
+            prior_credential = dict(
+                (run.evidence or {}).get("harness", {}).get("dispatch_credential") or {}
+            )
+            prior_credential_generation = prior_credential.get("attempt_generation")
+            prior_credential_ref = (
+                str(prior_credential.get("credential_ref") or "")
+                if prior_credential_generation is not None
+                and int(prior_credential_generation) == generation
+                else ""
+            )
 
         if resume_mode == LANE_RESUME_MODE_REQUIRED and not continuation_ref_digest:
             # The dispatch-side half of the zero-model-turns contract: a
@@ -3307,6 +3345,47 @@ class RunService:
         issue_title = spec.task_title
         if driver is None:
             driver = spec.harness_driver
+        # NEXT-19 (#207): broker resolution under the active execution
+        # lease — BEFORE the provider call, beside the reserved capacity
+        # this leg opened at the top. A subject the deployment never
+        # bound stages nothing (today's ambient behavior, attribution
+        # unknown); a bound subject resolves through the registry's
+        # fail-closed checks and the broker, and the lane's env gains
+        # ONLY the broker's staged slot. Any typed refusal parks the run
+        # with ZERO provider dispatches (fail closed, exactly like the
+        # continuation fence above).
+        credential_subject = binding_subject_of_run(run)
+        staged_credential: StagedDispatchCredential | None = None
+        if credential_subject is not None:
+            try:
+                staged_credential = await stage_dispatch_credential(
+                    self._credential_registry,
+                    self._credential_broker,
+                    subject=credential_subject,
+                    provider=provider_route_for_driver(driver),
+                    presented_ref=prior_credential_ref,
+                    grant={"run_id": run_id, "attempt_generation": generation},
+                )
+            except CredentialRefusal as exc:
+                logger.warning(
+                    "credential.%s: run %s dispatch refused at the credential seam — %s",
+                    "rotation_refusal" if exc.reason == "rotated" else "refusal",
+                    run_id[:8],
+                    exc,
+                )
+                await self._to_terminal(run_id, FlowStatus.BLOCKED, f"credential_refused: {exc}")
+                return
+            if staged_credential is not None:
+                logger.info(
+                    "credential.binding_subject: run %s subject %s provider %s revision %d — "
+                    "credential.resolved_version %s, credential.resolver_identity %s",
+                    run_id[:8],
+                    staged_credential.subject,
+                    staged_credential.provider,
+                    staged_credential.binding_revision,
+                    staged_credential.resolved_version,
+                    staged_credential.resolver_identity,
+                )
         # R37-07 (#288): the dispatch ENVELOPE — the lane-resume/continuity
         # contract plus the attempt-scoped lane-control credentials, riding
         # the pipeline variables the job exports into every step's env. The
@@ -3336,6 +3415,15 @@ class RunService:
             {"key": LANE_CONTROL_URL_VARIABLE, "value": control_url},
             {"key": LANE_CONTROL_TOKEN_VARIABLE, "value": lane_token},
         ]
+        if staged_credential is not None:
+            # NEXT-19 (#207): the lane env gains ONLY the broker's staged
+            # slot for the credential route — a masked CI variable, one
+            # key, the binding's exact env var (the slot check upstream
+            # already refused anything else).
+            envelope_variables.extend(
+                {"key": name, "value": value}
+                for name, value in staged_credential.staged_env.items()
+            )
         # `gitlab.dispatch_envelope_digest` — a stable fingerprint over the
         # identity fields (the token only enters as a boolean: digests are
         # journaled, credentials are not).
@@ -3474,9 +3562,37 @@ class RunService:
                             "attempt_generation": generation,
                             "control_url": control_url,
                             "token_dispatched": bool(lane_token),
+                            # NEXT-19 (#207): the broker receipt riding
+                            # the envelope proof — WHICH ref/revision/
+                            # version/resolver the lane's credential slot
+                            # resolved, never the value.
+                            "credential_ref": (
+                                staged_credential.credential_ref if staged_credential else ""
+                            ),
+                            "credential_resolved_version": (
+                                staged_credential.resolved_version if staged_credential else ""
+                            ),
+                            "credential_resolver": (
+                                staged_credential.resolver_identity if staged_credential else ""
+                            ),
                             "variable_keys": [entry["key"] for entry in envelope_variables],
                             "digest": dispatch_envelope_digest,
                         },
+                        # NEXT-19 (#207): the extended dispatch-credential
+                        # proof (/2) beside the envelope — binding subject,
+                        # ref, revision, resolver identity, resolved
+                        # version, grant refs and the broker receipt.
+                        # Refs and metadata only, never the value.
+                        **(
+                            {
+                                "dispatch_credential": {
+                                    **staged_credential.proof,
+                                    "attempt_generation": generation,
+                                }
+                            }
+                            if staged_credential is not None
+                            else {}
+                        ),
                     },
                 },
             )

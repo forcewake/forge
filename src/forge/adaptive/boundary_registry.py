@@ -319,6 +319,13 @@ BOUNDARIES: tuple[AuthorityBoundary, ...] = (
             "forge.adaptive.operator_snapshot",
         ),
         allowed_dependents=(
+            # NEXT-19 (#207): the credential binding/broker substrate
+            # composes the owner's CanonicalSubject — the identity axis
+            # binding keys are keyed by (family + connection + native
+            # id). It consumes the subject TYPE and subject_of_run, it
+            # never reads rows around the authorized snapshot reader.
+            "forge.adaptive.credential_broker",
+            "forge.adaptive.project_credentials",
             "forge.adaptive.support_bundle",
             "forge.api_operator",
         ),
