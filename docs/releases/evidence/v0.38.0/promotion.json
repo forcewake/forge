@@ -1,0 +1,141 @@
+{
+  "canary": [
+    {
+      "capability": "release-artifact-canary",
+      "detail": "migrate, boot gate, /health, /mcp 401, doctor",
+      "outcome": "pass",
+      "stage": "fresh"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "seeded at previous head 027",
+      "outcome": "pass",
+      "stage": "seed-real-data"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "upgrade preserved counts + digests",
+      "outcome": "pass",
+      "stage": "seed-real-data"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "detail": "prev head 027 -> 027; gate ok",
+      "outcome": "pass",
+      "stage": "migrate"
+    }
+  ],
+  "ci_run_id": "36094439964",
+  "decision": {
+    "checks": [
+      {
+        "name": "lint",
+        "reason": "required check 'lint' (.github/workflows/ci.yml#jobs.lint) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "typecheck",
+        "reason": "required check 'typecheck' (.github/workflows/ci.yml#jobs.typecheck) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "test (3.13)",
+        "reason": "required check 'test (3.13)' (.github/workflows/ci.yml#jobs.test[3.13]) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "test (3.14)",
+        "reason": "required check 'test (3.14)' (.github/workflows/ci.yml#jobs.test[3.14]) passed",
+        "verdict": "pass"
+      },
+      {
+        "name": "integration",
+        "reason": "required check 'integration' (.github/workflows/ci.yml#jobs.integration) passed",
+        "verdict": "pass"
+      }
+    ],
+    "reasons": [
+      "all required checks passed; canary stages passed"
+    ],
+    "verdict": "promote"
+  },
+  "head_sha": "854a5f4ac5ffdebf562eb85ead21d03d742371bb",
+  "image_digest": "sha256:d9bb946510b69a80bf0b47049e2553d70f4bea7354630d1d63d95660f5314a5a",
+  "image_ref": "ghcr.io/forcewake/forge",
+  "note": "",
+  "promoted_at": "2026-09-25T04:29:18Z",
+  "required_checks": [
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-25T04:12:53Z",
+          "conclusion": "success",
+          "run_id": "36093506032"
+        }
+      ],
+      "name": "lint",
+      "provenance": ".github/workflows/ci.yml#jobs.lint"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-25T04:13:34Z",
+          "conclusion": "success",
+          "run_id": "36093506032"
+        }
+      ],
+      "name": "typecheck",
+      "provenance": ".github/workflows/ci.yml#jobs.typecheck"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-25T04:24:06Z",
+          "conclusion": "success",
+          "run_id": "36093506032"
+        }
+      ],
+      "name": "test (3.13)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.13]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-25T04:26:03Z",
+          "conclusion": "success",
+          "run_id": "36093506032"
+        }
+      ],
+      "name": "test (3.14)",
+      "provenance": ".github/workflows/ci.yml#jobs.test[3.14]"
+    },
+    {
+      "attempts": [
+        {
+          "completed_at": "2026-09-25T04:16:34Z",
+          "conclusion": "success",
+          "run_id": "36093506032"
+        }
+      ],
+      "name": "integration",
+      "provenance": ".github/workflows/ci.yml#jobs.integration"
+    }
+  ],
+  "sdist_sha256": "ba06beb3480a0bcbd688df41b93d7c78f5ef943443c4de73165ae689dddcf93f",
+  "sdist_url": "https://github.com/forcewake/forge/releases/download/v0.38.0/forge-0.38.0.tar.gz",
+  "stamp": "forge.release.promotion/1",
+  "version": "0.38.0",
+  "wheel": {
+    "note": "",
+    "sdist": {
+      "name": "forge-0.38.0.tar.gz",
+      "sha256": "ba06beb3480a0bcbd688df41b93d7c78f5ef943443c4de73165ae689dddcf93f"
+    },
+    "wheel": {
+      "name": "forge-0.38.0-py3-none-any.whl",
+      "sha256": "404a1fef0b81bf923b0c8abf5a7e32bdfc76bfa57ed2ad00c1a2bfa50de7f6b7"
+    }
+  },
+  "wheel_sha256": "404a1fef0b81bf923b0c8abf5a7e32bdfc76bfa57ed2ad00c1a2bfa50de7f6b7",
+  "wheel_url": "https://github.com/forcewake/forge/releases/download/v0.38.0/forge-0.38.0-py3-none-any.whl"
+}

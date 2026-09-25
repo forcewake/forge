@@ -24,11 +24,11 @@
     }
   ],
   "evidence_refs": [
-    "docs/evaluation/2026-09-25-useful-wip-resume/alignment-receipts.json"
+    "docs/releases/evidence/v0.38.0/promotion.json"
   ],
   "harness_binary": "ghcr.io/forcewake/forge",
   "harness_version": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
-  "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+  "image_digest": "sha256:d9bb946510b69a80bf0b47049e2553d70f4bea7354630d1d63d95660f5314a5a",
   "note": "First wheel-bearing release: the lane wheel identity is pinned by the referenced promotion record (wheel_sha256 recorded here for the join). The migrate stage ran 027 -> 027: a SAME-HEAD preservation \u2014 the derived upgrade claim never labels it a schema transition.",
   "profile": "release-artifact-canary",
   "provider": "*",

@@ -36,13 +36,13 @@
     }
   ],
   "evidence_refs": [
-    "docs/evaluation/2026-09-25-useful-wip-resume/README.md",
+    "docs/releases/evidence/v0.38.0/promotion.json",
     "qualification/profiles/supported-gitlab-ce-v1.json",
-    "qualification/profiles/gitlab-ce-v1.md"
+    "docs/evaluation/2026-09-25-useful-wip-resume/README.md"
   ],
   "harness_binary": "claude-code",
   "harness_version": "2.1.273",
-  "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+  "image_digest": "sha256:d9bb946510b69a80bf0b47049e2553d70f4bea7354630d1d63d95660f5314a5a",
   "legacy": false,
   "note": "R37-08 (#289) LIVE single-writer record \u2014 the FIRST live-provider evidence for gitlab-ce-v1: one bounded real task (slugify with a six-case independent oracle) executed by the REAL model (glm-5.3-flash through the customer's own gateway route) on a REAL runner through the published entry point, green end to end (Draft MR left for human review, merge never performed). Human approval on the promotion decision: PENDING (approvals are a separate human artifact \u2014 qualification/profile-approvals.json \u2014 and this record claims none). Honest posture: (1) the ONLY claimed capability is real-provider-e2e (the uninterrupted live flow, green); the R37-08 interruption arm is recorded as INFORMATIONAL evidence with outcome FAIL \u2014 mechanics live-proven (pause, verified checkpoint, honest blocked, exact-resume envelope dispatched, restored turn on a second lane), delivery failed (empty candidates twice, repair_no_effect) \u2014 and the refusal_resolution matrix names the follow-ups. The cross-runner FILE-preservation claim stays OPEN. (2) The lane ran the v0.36.0 template with ONE guarded-exit patch (MANUAL RESCUE, root-caused: the released template exits a SUCCESSFUL driver before candidate.diff is built) \u2014 the un-patched template is broken for the success path, so this record's template_defaults_digest is the PATCHED install, not the released bytes. (3) The deployed control plane is the working-tree build because the #288 dispatch envelope postdates the promoted release; the promoted image (d776da71...) does not carry it \u2014 the inventory's digest axis therefore stays honestly mismatched. NOTE the working tree MOVED during the execution: arm 1 ran on image sha256:e2a26c52... (built 12:14Z), and the 12:57Z consumer recreate (the worker-volume fix) rebuilt onto sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78 \u2014 a sibling's in-flight src changes landed between the two builds \u2014 so arm 2 (checkpoint/retry/resume) executed on the later build. Both digests are receipted in docs/evaluation/2026-09-24-live-single-writer/alignment-receipts.json; a moving tree is not a stable identity, which is exactly why the next promoted release must carry the envelope and re-anchor this record. (4) usage_receipts rows are EMPTY for harness-lane runs (0 rows); cost coverage comes from the lane meta usage receipts (SDK-reported USD, total $0.80 across four lane jobs) and run_budgets consumed_* counters \u2014 cost.coverage: partial. (5) The #298 trace-file join (derive_evidence_tier) has no committed live TraceRecord for these capabilities, so the supported-profiles manifest holds this profile pending until a live trace lands under qualification/traces/. Spend: $0.80 lane (SDK receipts) + planner/reviewer via the litellm gateway on the same price class \u2014 under the $2 cap.",
   "profile": "gitlab-ce-v1",
@@ -96,5 +96,5 @@
     "target_schema": "027"
   },
   "verification_contract": "one required job named smoke (FORGE_REQUIRED_JOBS=smoke) asserting six exact slugify cases against src/utils/text.py on the CURRENT candidate sha; committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/",
-  "wheel_sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6"
+  "wheel_sha256": "404a1fef0b81bf923b0c8abf5a7e32bdfc76bfa57ed2ad00c1a2bfa50de7f6b7"
 }
