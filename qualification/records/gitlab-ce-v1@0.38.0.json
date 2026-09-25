@@ -1,0 +1,100 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem'; the pause/checkpoint arm ran entirely on that authority \u2014 observed 2026-09-24)",
+  "capabilities": [
+    "real-provider-e2e"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer"
+  ],
+  "credential_route": "bot PAT for the control plane (Developer member of the disposable project \u2014 LIVE-found prerequisite: without membership the worker's start_run 404s); read-only PAT for the lane clone (proposal-only, ADR-0016); BYOK z.ai token for the harness model route through the Anthropic-compatible gateway https://api.z.ai/api/anthropic",
+  "evidence": [
+    {
+      "artifact_sha256": "e2a26c52dbd2802b8c684e9f6d7b5704bbcafcb0033610a3e5dd7fd8c72d0607",
+      "capability": "real-provider-e2e",
+      "class": "live-provider",
+      "covers": "R37-08 arm 1 (executed 2026-09-24, disposable project forge-live-qual-2026-09-24): native issue #3 -> approver @forge /implement -> evidence-backed plan (run 60b9de7f58094f2abe74dadad83565ba, harness claude-sdk-lane, model glm-5.3-flash) -> /go -> the REAL dispatch (pipeline 380, lane job 726, dispatched envelope digest 7f1fed630bc0) -> claude-code 2.1.273 driven by python -m forge.lane_driver (lane install git+...@4af6b331f703ac2b662edcedd9e1fc1dd80a5059) against glm-5.3-flash via the z.ai Anthropic-compatible gateway -> candidate artifacts (FORGE_CANDIDATE marker, candidate.diff + meta) -> trusted publisher -> Draft MR !1 on factory/3/60b9de7f -> the independent smoke oracle GREEN on the exact candidate sha e670d42ffbdd88f35b16db28dd9d874a7c924436 (verification pipeline 382), changed paths exactly src/utils/__init__.py + src/utils/text.py, oracle untouched. Run terminal state ready_for_human (Draft MR left unmerged by design). Trace: docs/evaluation/2026-09-24-live-single-writer/live-run-evidence.json",
+      "executed_at": "2026-09-24T12:31:11+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "3cb49a16540d08e146037d164190600961e43890e7493dc739e3fa3fb2f16d2d",
+      "capability": "interrupt-resume-delivery",
+      "class": "live-provider",
+      "covers": "INFORMATIONAL (not a claimed capability of this record \u2014 the delivery arm failed and is named in refusal_resolution): R37-08 arm 2 (executed 2026-09-24, run 905194f0e4314e9aa126325b37637d1b, issue #4): the MECHANICS are live-proven end to end \u2014 /pause mid-turn applied (lane steering journal: outcome applied, interrupt acknowledged, pause_status paused); verified WIP checkpoint 3cb49a16540d08e146037d164190600961e43890e7493dc739e3fa3fb2f16d2d (remote_ref 905194f0@3cb49a16..., verified=true, files=0, sequence 0); the run's honest blocked classification from the job event with ZERO LLM repair; /retry admitted with the #288 exact-resume envelope (worker journal 13:00:30Z: attempt 1 dispatched a required resume, checkpoint 3cb49a16540d, decision 89f5bc3d141d, envelope 2af524274422); a second lane (pipelines 385/386, jobs 731/732) restored the checkpoint and continued with the REAL model (32,344+140,544-cached and 19,163+119,936-cached tokens). DELIVERY FAILED: both resumed turns completed with an EMPTY candidate diff -> run-level repair_no_effect -> run stays blocked; no Draft MR 2. Root causes (diagnosed, in refusal_resolution): (1) the /pause landed ~5 s into turn 1 before any file edits existed (checkpoint files=0); (2) the resumed glm-5.3-flash turns on restored context completed without working-tree changes twice \u2014 model behavior, a product question, not an infra fault. Cross-runner preservation of new/modified/deleted FILES is NOT demonstrated by a delivered diff on this trace. Trace: docs/evaluation/2026-09-24-live-single-writer/live-run-evidence.json",
+      "executed_at": "2026-09-24T13:09:00+00:00",
+      "outcome": "fail"
+    },
+    {
+      "artifact_sha256": "e2a26c52dbd2802b8c684e9f6d7b5704bbcafcb0033610a3e5dd7fd8c72d0607",
+      "capability": "real-provider-e2e",
+      "class": "offline-operational",
+      "covers": "the alignment that made the paid run legal (executed 2026-09-24): scripts/align_lab.py rebuilt localhost/forge:dev from the repo (image sha256:e2a26c52...), migrated 026->027 BEFORE the consumers started, recreated forge-app + forge-worker via podman with the observed config plus numerical budget caps (FORGE_BUDGET_PROFILES trivial/standard/heavy, FORGE_LANE_BUDGET_SECONDS=1800), FORGE_HARNESS_PREFERENCE=claude-sdk-lane,claude-code and the runner-reachable FORGE_LANE_CONTROL_URL; every step receipted (deployment.receipt_id). Post-alignment inventory: version 0.36.0 MATCH, schema 027 MATCH, template v0.36.0 MATCH, caps MATCH (the image-digest axis intentionally stays mismatched \u2014 a working-tree build carrying the #288 envelope that the promoted image predates). Trace: docs/evaluation/2026-09-24-live-single-writer/alignment-receipts.json",
+      "executed_at": "2026-09-24T12:06:00+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-25-useful-wip-resume/README.md",
+    "qualification/profiles/supported-gitlab-ce-v1.json",
+    "qualification/profiles/gitlab-ce-v1.md"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+  "legacy": false,
+  "note": "R37-08 (#289) LIVE single-writer record \u2014 the FIRST live-provider evidence for gitlab-ce-v1: one bounded real task (slugify with a six-case independent oracle) executed by the REAL model (glm-5.3-flash through the customer's own gateway route) on a REAL runner through the published entry point, green end to end (Draft MR left for human review, merge never performed). Human approval on the promotion decision: PENDING (approvals are a separate human artifact \u2014 qualification/profile-approvals.json \u2014 and this record claims none). Honest posture: (1) the ONLY claimed capability is real-provider-e2e (the uninterrupted live flow, green); the R37-08 interruption arm is recorded as INFORMATIONAL evidence with outcome FAIL \u2014 mechanics live-proven (pause, verified checkpoint, honest blocked, exact-resume envelope dispatched, restored turn on a second lane), delivery failed (empty candidates twice, repair_no_effect) \u2014 and the refusal_resolution matrix names the follow-ups. The cross-runner FILE-preservation claim stays OPEN. (2) The lane ran the v0.36.0 template with ONE guarded-exit patch (MANUAL RESCUE, root-caused: the released template exits a SUCCESSFUL driver before candidate.diff is built) \u2014 the un-patched template is broken for the success path, so this record's template_defaults_digest is the PATCHED install, not the released bytes. (3) The deployed control plane is the working-tree build because the #288 dispatch envelope postdates the promoted release; the promoted image (d776da71...) does not carry it \u2014 the inventory's digest axis therefore stays honestly mismatched. NOTE the working tree MOVED during the execution: arm 1 ran on image sha256:e2a26c52... (built 12:14Z), and the 12:57Z consumer recreate (the worker-volume fix) rebuilt onto sha256:22fefd29562445151ff0bd535112be85079aeea5705ac9ac0ebdd0d9197ece78 \u2014 a sibling's in-flight src changes landed between the two builds \u2014 so arm 2 (checkpoint/retry/resume) executed on the later build. Both digests are receipted in docs/evaluation/2026-09-24-live-single-writer/alignment-receipts.json; a moving tree is not a stable identity, which is exactly why the next promoted release must carry the envelope and re-anchor this record. (4) usage_receipts rows are EMPTY for harness-lane runs (0 rows); cost coverage comes from the lane meta usage receipts (SDK-reported USD, total $0.80 across four lane jobs) and run_budgets consumed_* counters \u2014 cost.coverage: partial. (5) The #298 trace-file join (derive_evidence_tier) has no committed live TraceRecord for these capabilities, so the supported-profiles manifest holds this profile pending until a live trace lands under qualification/traces/. Spend: $0.80 lane (SDK receipts) + planner/reviewer via the litellm gateway on the same price class \u2014 under the $2 cap.",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-24",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) \u2014 observed live via GET /api/v4/version on 2026-09-24",
+  "record_id": "gitlab-ce-v1@0.38.0",
+  "refusal_resolution": [
+    {
+      "action": "fix the template upstream (guard the exit: only a nonzero driver rc ends the job); until then the disposable repo installs the pinned template with the one-line guarded-exit patch (the exact patch is in scripts/run_live_qualification.py::_patched_lane_override)",
+      "owner": "forge maintainers (ci/templates/claude-sdk-lane.gitlab-ci.yml)",
+      "refusal": "the v0.36.0 claude-sdk-lane template ends its script with an unconditional exit \"$_driver_rc\" \u2014 a SUCCESSFUL driver run (rc=0) exits the job before .forge/candidate.diff is built, so every green lane classifies harness_artifact_missing",
+      "status": "open"
+    },
+    {
+      "action": "re-run the drill with the pause AFTER observable edits exist (poll the checkpoint's files>0 or wait for a mid-turn file marker), and investigate whether a required-resume whose checkpoint holds no files should re-prompt the brief more forcefully",
+      "owner": "R37-08 follow-up / product",
+      "refusal": "the interruption arm delivered no second candidate: both resumed turns completed with an empty diff (repair_no_effect); the /pause landed before any file edits existed (checkpoint files=0)",
+      "status": "open"
+    },
+    {
+      "action": "wire the harness-lane usage receipt into the durable usage_receipts store (the profile's partial-enforcement honesty note already names this seam)",
+      "owner": "forge maintainers",
+      "refusal": "usage_receipts stayed empty for harness-lane runs \u2014 the durable usage-receipt write did not land, so cost coverage relies on the lane meta receipts and run_budgets counters",
+      "status": "open"
+    },
+    {
+      "action": "land live trace records (provenance 'live', provider gitlab, model_route glm-5.3-flash via the z.ai gateway) for real-provider-e2e and interrupt-resume",
+      "owner": "records owner",
+      "refusal": "no committed live TraceRecord under qualification/traces/ references this record's capabilities, so the #298 manifest cannot upgrade the trace-derived tier from none",
+      "status": "open"
+    },
+    {
+      "action": "cut the next release (the envelope plus the template exit fix ride it), then re-align the lab onto the promoted digest and re-run the trace",
+      "owner": "release process",
+      "refusal": "the deployed image digest (working-tree build e2a26c52...) does not match the promoted v0.36.0 digest (d776da71...) \u2014 deliberate: the #288 envelope postdates the promotion",
+      "status": "open"
+    }
+  ],
+  "release_version": "0.38.0",
+  "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@4af6b331f703ac2b662edcedd9e1fc1dd80a5059 (forge[interactive]; immutable sha pinned as the project CI variable FORGE_LANE_REF; claude-code CLI 2.1.273; uv python 3.13) \u2014 observed in lane job traces 2026-09-24",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "1fd7f8229609db70fa749ff78e5f93db0d115a017271e5a5467f36ad640e5d48",
+  "upgrade": {
+    "claim": "",
+    "evidence_ref": "docs/evaluation/2026-09-24-live-single-writer/alignment-receipts.json",
+    "preservation_checks": [],
+    "seeded_records": [],
+    "source_schema": "026",
+    "target_schema": "027"
+  },
+  "verification_contract": "one required job named smoke (FORGE_REQUIRED_JOBS=smoke) asserting six exact slugify cases against src/utils/text.py on the CURRENT candidate sha; committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/",
+  "wheel_sha256": "a44b884f48e76edc47dd8ca52c59a8b572ac7c7c19d5b492ffb9eaff4edf9db6"
+}

@@ -36,6 +36,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   driver-rc × collector-outcome matrix, restored generations and stale
   prior-attempt artifacts.
 
+## [0.38.0] - 2026-09-25
+
+### Added — the 59ba869 review: 16/18 items implemented (#302-#319)
+
+All 3 P1 + 13 P2 landed with LIVE proofs. Suite 7621 → 8283 (+662).
+The 2 remaining items (#311 blind review, #315 partner pilot) closed at
+their honest human-gated boundary — the packages/profiles are ready.
+
+**M0 — the three P1:**
+- **#302 R38-01**: the shipped GitLab SDK finalizer — the unconditional
+  exit that killed candidate collection (the live run's manual patch is
+  now the shipped recipe in all four SDK lanes) + the packaged
+  generation-aware collector; the regression executes the actual
+  shipped shell. Qualified live as a by-product (MR, zero patches).
+- **#303 R38-02**: the provider-safe credential delivery contract —
+  CredentialDeliveryPlan, the raw staged_env spreads removed from all
+  three dispatch legs, the redemption endpoint + the lane client, and
+  the consumer proof (the fake model endpoint received the
+  broker-selected sentinel, never the ambient key). Research basis:
+  6 docs with the official provider docs read in full.
+- **#304 R38-03**: the six operational DB dumps classified for real
+  (credentials NONE; sensitive operational text) → private storage,
+  sanitized receipts, the public-artifact gate; the history-cleanup
+  dry-run plan awaits maintainer authorization.
+
+**M1**: #305 (consumption/rotation at the runner boundary — the
+consumer receipt, the concurrent registry, the policy matrix); **#306
+THE useful-WIP cross-runner resume LIVE GREEN** (three file shapes
+through the exact checkpoint; oracle green on the candidate; $0.82);
+#307 (the supported profile frozen + cold-install fresh/upgrade
+proven); #308 (isolation claims match containment — the five-outcome
+taxonomy + the positive control); #317 (the conformance release gate —
+both mutation arms caught on every recipe).
+
+**M2/M3/M4**: #310 (real lane economics — coverage 0.8, three
+measures); #312 (the customer-scale discovery machinery — the
+observation cache with cross-scope isolation, 16/16 arms); **#313 the
+combined steering trace causal=true on all five arms** (mid-turn steer,
+the real activation CAS, the counterfactual); #314 (two-writer content
+safety — same-file window typed, blob-verified adoption); #316 (the
+operator recovery surface — empty-diff = FAILED); #318 (the versioned
+ExecutionSpec + the composition matrix + the forge CLI entry-points);
+#319 (deployment ops bound to the frozen profile — 9/9, the
+review-named arms measured); #309 (the .NET recipe executed REAL —
+pinned images, TRX reconciliation, migration preservation, RabbitMQ
+exactly-once).
+
+**Human-gated, closed honestly**: #311 (the blind package ready, 15
+live arms; the grading awaits real reviewers), #315 (the ladder +
+frozen profile + proven capability await the named partner).
+
 ## [0.37.0] - 2026-09-24
 
 ### Added — the 4af6b33 review COMPLETE: all 20 R37 items (#282-#301)

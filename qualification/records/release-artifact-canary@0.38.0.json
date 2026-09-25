@@ -1,0 +1,62 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "release-artifact-canary",
+    "release-canary/previous-release-upgrade"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "none \u2014 disposable Postgres, LiteLLM reachability via in-image stub",
+  "evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "class": "binary-smoke",
+      "covers": "fresh stage: migrate, boot gate, /health, /mcp 401, doctor (promotion.json canary rows)",
+      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "outcome": "pass"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "class": "binary-smoke",
+      "covers": "seed-real-data + migrate stages: seeded at previous head 027 (flow_runs, run_specs, step_runs, control_commands, publication_intents); prev head 027 -> 027; upgrade preserved counts + digests",
+      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/evaluation/2026-09-25-useful-wip-resume/alignment-receipts.json"
+  ],
+  "harness_binary": "ghcr.io/forcewake/forge",
+  "harness_version": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+  "image_digest": "sha256:b2e290e575f008f20859e0906f7e52d8f36056d86308f950b008d5aad0dbfdef",
+  "note": "First wheel-bearing release: the lane wheel identity is pinned by the referenced promotion record (wheel_sha256 recorded here for the join). The migrate stage ran 027 -> 027: a SAME-HEAD preservation \u2014 the derived upgrade claim never labels it a schema transition.",
+  "profile": "release-artifact-canary",
+  "provider": "*",
+  "provider_behavior_fingerprint": "",
+  "provider_version": "",
+  "record_id": "release-artifact-canary@0.38.0",
+  "release_version": "0.38.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "container image (Containerfile; python-3.13, disposable Postgres)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": {
+    "evidence_ref": "docs/releases/evidence/v0.35.0/promotion.json",
+    "preservation_checks": [
+      "per-table row counts identical after upgrade",
+      "sha256 fingerprints over ordered row identity identical after upgrade"
+    ],
+    "seeded_records": [
+      "flow_runs: 1 (mid-flight, frozen run_specs spec)",
+      "run_specs: 1",
+      "step_runs: bounded set",
+      "control_commands: 1",
+      "publication_intents: 1"
+    ],
+    "source_schema": "027",
+    "target_schema": "027"
+  },
+  "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
+  "wheel_sha256": "1e365612473426a2130000784a6cd8c707ffcedae7f8f6bcb34c3f75791700d9",
+  "version": "0.36.0"
+}
