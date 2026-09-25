@@ -54,7 +54,16 @@ FROZEN_PROFILE = REPO_ROOT / "qualification" / "profiles" / "supported-gitlab-ce
 EXECUTED_REPORT = REPO_ROOT / "qualification" / "deployment-ops-2026-09-25.json"
 
 #: The frozen profile's manifest digest (#307) — the executed-lab bind.
-FROZEN_DIGEST = "7c292dd89bb9a1f84af7d1594443020b1d754fe0d9e124816c69a2e4455d63fd"
+#: The frozen digest DERIVES from the committed manifest (a literal broke
+#: when the closure-receipt repoint re-froze the document).
+FROZEN_DIGEST = profile_manifest_digest(
+    __import__("json").loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "qualification/profiles/supported-gitlab-ce-v1.json"
+        ).read_text()
+    )
+)
 
 
 def _frozen_manifest() -> dict:
