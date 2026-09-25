@@ -204,7 +204,14 @@ class TestFreezeFieldSourcing:
         for receipt in receipts:
             if "::" in receipt or " + " in receipt or receipt.startswith(("http", "forge.")):
                 continue  # a module/contract/composite receipt, not a single file
-            assert (ROOT / receipt.split("#")[0]).exists(), receipt
+            path = ROOT / receipt.split("#")[0]
+            if receipt.startswith(("dist/", "litellm-config")) and not path.exists():
+                # working-tree-only artifacts (a local closure build; the
+                # gitignored lab gateway config) — the manifest cites the
+                # candidate LIST, and the committed fallback beside them is
+                # verified below.
+                continue
+            assert path.exists(), receipt
 
     def test_missing_receipt_refuses(self, tmp_path: Path) -> None:
         # a vanished receipt tree: point the loader at an empty root
