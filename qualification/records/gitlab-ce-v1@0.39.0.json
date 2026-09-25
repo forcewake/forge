@@ -1,0 +1,114 @@
+{
+  "authority_contract_version": "unmarked-filesystem (no data/checkpoints/migration/authority.json marker exists; the doctor observes the configured repository is 'filesystem'; the pause/checkpoint arm ran entirely on that authority — observed 2026-09-25, the v2 trace restored the exact content-addressed checkpoint f70244cc49d2 through it)",
+  "capabilities": [
+    "real-provider-e2e",
+    "useful-wip-cross-runner-resume",
+    "approved-revision-rebind",
+    "closing-review-within-reserve"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [
+    "interrupt",
+    "steer",
+    "approve-revision"
+  ],
+  "credential_route": "bot PAT for the control plane (Developer member of the disposable project); read-only PAT for the lane clone (proposal-only, ADR-0016); the model credential rode the gitlab-protected-variable route on the qualifying trace (no operation grant minted on THAT dispatch — the #320 grant machinery is exercised by its own offline suites and named here honestly)",
+  "evidence": [
+    {
+      "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+      "capability": "real-provider-e2e",
+      "class": "live-provider",
+      "covers": "the v2 trace (executed 2026-09-25, disposable project forge-wip-v2-2026-09-25 id 110, deleted after capture): native issue #1 -> /implement -> evidence-backed plan (run f0d559fdb7f14b98b32f1946cfa577c3, claude-sdk-lane, glm-5.3-flash) -> /go -> pipeline 490 job 836 -> adaptive ladder -> useful pause -> native /retry -> resumed pipeline 493 job 839 -> final candidate 52ddeb3f carrying the revision-2 marker -> Draft MR !1, oracle pipeline 495 GREEN, run terminal ready_for_human. $0.4032 lane SDK spend. Full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "f70244cc49d21f12c332377a17fe2ecb377e94fac549a5f723a89df17ec631ae",
+      "capability": "useful-wip-cross-runner-resume",
+      "class": "live-provider",
+      "covers": "the useful-WIP checkpoint (files=2, ALL THREE shapes with verified digests) restored EXACTLY on a second runner (required-resume envelope 11a7f7fda283, workspace generation .forge-workspace-gen-f70244cc49d2); rung-1 sampled the empty mode (files=0) and re-entered through the native /retry — the ladder measured both live. Full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "b8547d0d41330deebf0849acfc78797dc1764a79faf429b52e883123955b558b",
+      "capability": "approved-revision-rebind",
+      "class": "live-provider",
+      "covers": "the MATERIAL revision staged through stage_pending_revision INSIDE forge-app, approved NATIVELY (/approve-revision, decision dec-wipv2-f0d559fdb7f1; the activation CAS switched the durable plan digest to revision 2); the resumed dispatch carried the revision-2 TEXT (approved_input source=revision, executor_input_digest f34f5d62b8b0 persisted beside the intent) and the final candidate itself carries the marker — the executor obeyed the NEW brief with ZERO rescue steers. Full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "aed6942da56096eb1aa5a51a77ad9909631e03d53059715f2cfaf801a29ea4d6",
+      "capability": "closing-review-within-reserve",
+      "class": "live-provider",
+      "covers": "the closing review completed on the run's own budget under the configured closing reserve (FORGE_CLOSING_RESERVE_USD=0.50, FORGE_SPEND_CAP_USD=2.50 on BOTH consumers): verdict ok bound to the exact candidate sha — run terminal ready_for_human ('checks passed; merge is a human decision'); no review_budget_block was ever written. Full record: qualification/records/supported-composition-v2-2026-09-25.json",
+      "executed_at": "2026-09-25T09:53:57+00:00",
+      "outcome": "pass"
+    },
+    {
+      "artifact_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd",
+      "capability": "real-provider-e2e",
+      "class": "offline-operational",
+      "covers": "the composition qualification (executed 2026-09-25): the three cold-install modes on the re-frozen profile (fresh — preflight on the INSTALLED package, smoke pipeline 496 green, zero model calls; upgrade — the real 027->028 transition with five seeded tables preserved; verify — the live lab matched every axis), the 9/9 deployment-ops drills qualified-for-profile (limit 3, peak occupied 3, cmd latency 9.684 s, pause/cancel p95 0.0288/0.0521 s, restore 0.177 s), and the operating-limits record (one authorized operator surface, four separate ops.* measures, capped admission, eight negative drills — qualification/records/ops-limits-2026-09-25.json)",
+      "executed_at": "2026-09-25T09:58:00+00:00",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "qualification/records/supported-composition-v2-2026-09-25.json",
+    "qualification/records/ops-limits-2026-09-25.json",
+    "qualification/profiles/supported-gitlab-ce-v1.json",
+    "docs/evaluation/2026-09-25-supported-composition-v2/useful-wip-resume-v2.json"
+  ],
+  "harness_binary": "claude-code",
+  "harness_version": "2.1.273",
+  "image_digest": "sha256:33eb4622ae0b1de096c45134804563be8c0b19a2de94378419512bb443f63fbe",
+  "legacy": false,
+  "note": "Q39 cycle release record. The four claimed capabilities were proven LIVE by the supported-composition v2 trace on the EXACT composition this release ships: the control plane was the working-tree alignment build (image sha256:33eb4622, deployed schema head 028) and the lane wheel forge-0.38.0-py3-none-any.whl (sha256 37fb5b0a) — the v0.39.0 tag promotes that same tree, closing the moving-tree gap the v0.38.0 record named. Honest posture: (1) this dispatch's model credential rode the gitlab-protected-variable route — NO operation grant was minted on it; the #320 grant machinery is proven by its offline refusal-matrix suites, not by this trace. (2) The human approval on the promotion decision stays PENDING (approvals are a separate human artifact — qualification/profile-approvals.json — and this record claims none). (3) The follow-up release commit re-binds this record to the promoted image digest once release.yml records it; until then the pinned digest above is the EXECUTED lab composition, not the GHCR digest. (4) A real ~55-minute home-network outage occurred mid-cycle (TLS resets; gitlab.forcewake.me additionally lost its zone record): degradation was graceful (blocked classification, zero paid dispatches burned, no lost code), recovery by operator action — recorded as the excluded-failure-domains worked example in docs/operations/support-agreement.md. Spend: $0.4032 lane (SDK receipts) + planner/reviewer inside the run budget — under the $2.50 cap.",
+  "profile": "gitlab-ce-v1",
+  "provider": "gitlab",
+  "provider_behavior_fingerprint": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-25",
+  "provider_version": "GitLab CE 19.3.2 (revision 34042bf7d00, enterprise=False) — observed live via GET /api/v4/version on 2026-09-25",
+  "record_id": "gitlab-ce-v1@0.39.0",
+  "refusal_resolution": [
+    {
+      "action": "mint an operation grant on a live dispatch and redeem it through the lane endpoint (the refusal matrix + typed runner verification are offline-proven; a live redemption is the remaining proof class)",
+      "owner": "next live drill",
+      "refusal": "the qualifying trace's credential_delivery_mode was empty — the model credential rode the gitlab-protected-variable route, so no grant was minted on that dispatch",
+      "status": "open"
+    },
+    {
+      "action": "record the human approval decision in qualification/profile-approvals.json",
+      "owner": "maintainer (Pavel)",
+      "refusal": "profile approval is a separate human artifact this record deliberately does not claim",
+      "status": "open"
+    },
+    {
+      "action": "restore the gitlab.forcewake.me zone record (Cloudflare) or retire the hostname formally; the lab canonical URL (gitlab.forcewake.duckdns.org) is unaffected",
+      "owner": "maintainer (Pavel) — infrastructure",
+      "refusal": "the forcewake.me GitLab hostname returned NXDOMAIN from the authoritative Cloudflare NS during the cycle — an ops observation, not a forge fault",
+      "status": "open"
+    }
+  ],
+  "release_version": "0.39.0",
+  "runtime_dependency_fingerprint": "lane install git+https://github.com/forcewake/forge@6df4020f8f1ff233d65082788a3632c0e4cd38d3 (forge[interactive]; FORGE_LANE_REF immutable sha; claude-code CLI 2.1.273; uv python 3.13); control plane = the working-tree alignment build promoted by this tag",
+  "runtime_recipe": "python-3.13 (uv standalone in the lane job, venv at /tmp/forge-lane-venv) on the unraid docker-executor runner (GitLab runner id 4); control plane = podman containers forge-app/forge-worker",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "3d74be378bc70120e76ad05380944987e39b2beac96816afd44fa7e387aa9a7b",
+  "upgrade": {
+    "claim": "schema-transition",
+    "evidence_ref": "cold_install_check --mode upgrade receipt (2026-09-25): alembic downgrade 027 -> seed five tables -> upgrade head on a disposable postgres:17-alpine, counts + sha256 fingerprints preserved",
+    "preservation_checks": [
+      "per-table row counts",
+      "per-table sha256 fingerprints over ordered identity strings"
+    ],
+    "seeded_records": [
+      "the five tables seeded at 027, preserved exactly through the 028 upgrade"
+    ],
+    "source_schema": "027",
+    "target_schema": "028"
+  },
+  "verification_contract": "one required job named smoke asserting six exact slugify cases + app rewired + legacy deleted on the CURRENT candidate sha (committed before any run; the candidate diff may not touch .gitlab-ci.yml or tests/); PLUS the v2 revision marker (__all__ = [\"slugify\"] in src/utils/text.py) proving the resumed executor consumed the approved revision-2 brief",
+  "wheel_sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd"
+}

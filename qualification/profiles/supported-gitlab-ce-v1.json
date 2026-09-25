@@ -14,9 +14,9 @@
         "note": "the executed-lab section IS the qualification composition: the alignment image is the WORKING-TREE build and the wheel beside it is the uv build of the SAME tree — a cold install from this manifest installs THESE bytes, never a released artifact that predates them",
         "wheel": {
           "built_from": "the working tree (uncommitted-ahead state recorded in the manifest)",
-          "name": "forge-0.38.0-py3-none-any.whl",
-          "path": "dist/forge-0.38.0-py3-none-any.whl",
-          "sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd",
+          "name": "forge-0.39.0-py3-none-any.whl",
+          "path": "dist/forge-0.39.0-py3-none-any.whl",
+          "sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
           "source": "local-uv-build"
         }
       },
@@ -101,7 +101,7 @@
     "runtime_recipe": "gitlab-sdk-lane",
     "template_contract": "forge.execution.spec/1"
   },
-  "frozen_at": "2026-09-25T10:19:56+00:00",
+  "frozen_at": "2026-09-25T13:47:07+00:00",
   "harness": {
     "binary": "claude-code",
     "receipt": "qualification/records/gitlab-ce-v1@0.37.0.json",
@@ -135,16 +135,16 @@
       "version": "0.37.0"
     },
     "wheel": {
-      "name": "forge-0.38.0-py3-none-any.whl",
-      "path": "dist/forge-0.38.0-py3-none-any.whl",
+      "name": "forge-0.39.0-py3-none-any.whl",
+      "path": "dist/forge-0.39.0-py3-none-any.whl",
       "promotion_pending": "the fresh cold install installs THIS working-tree build by sha256 (the qualification composition); the promoted-wheel section names what is released and stays behind it",
       "receipt": "uv build of the working tree + docs/evaluation/2026-09-25-supported-composition-v2/alignment-receipts.json",
-      "sha256": "37fb5b0a9b4e2a1a52aa75fd22ec7aa15774677024cd699afb6b4851da86c2cd",
+      "sha256": "78711c2887510a22e9cc698ef37c766ddf1d07d0cddf8b87d462e7651fdb36de",
       "source": "local-uv-build",
-      "version": "0.38.0"
+      "version": "0.39.0"
     }
   },
-  "manifest_digest": "0a49ffe73575e3c5a3bd770e3fa33d28c780e2608de36cde24e3d5854cf11c86",
+  "manifest_digest": "e0177d5c903c0c65563facc4b31a8915ff4b0cbd3e0a1741c6232055c1ce7f8e",
   "model_route": {
     "gateway": "https://api.z.ai/api/anthropic",
     "lane_model": "glm-5.3-flash",

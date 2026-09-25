@@ -1073,10 +1073,13 @@ def test_the_ops_limits_record_loads_strict_with_live_references() -> None:
     for ref in record.evidence_refs:
         assert (ROOT / ref).exists(), f"dangling evidence ref {ref}"
     # the record sorts before the composition-v2 record and changes
-    # NOTHING about which record speaks for the profile (the @0.38.0
-    # machine record stays the latest, the v2 record stays `supported`)
+    # NOTHING about which record speaks for the profile (the per-release
+    # machine record at the tree version stays the latest, the v2 record
+    # stays `supported`)
+    from forge import __version__
+
     gitlab_ids = [r.record_id for r in load_profile_records(ROOT) if r.profile == "gitlab-ce-v1"]
-    assert gitlab_ids[-1] == "gitlab-ce-v1@0.38.0"
+    assert gitlab_ids[-1] == f"gitlab-ce-v1@{__version__}"
     assert gitlab_ids.index("gitlab-ce-v1-Q39-15-ops-limits-2026-09-25") < gitlab_ids.index(
         "gitlab-ce-v1-composition-v2-2026-09-25"
     )

@@ -7,34 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed — R38-01 (#302): the GitLab SDK lanes finish the job before declaring success
+## [0.39.0] - 2026-09-25
 
-- All four SDK lane templates (`claude-sdk-lane`, `codex-sdk-lane`,
-  `copilot-sdk-lane`, `opencode-sdk-lane`) ended their script with an
-  unconditional driver-rc exit — a SUCCESSFUL turn exited the job before
-  the meta floor, the collection and the markers ever ran (GitLab runs
-  `before_script` + `script` in ONE shell; the live single-writer run hit
-  `harness_artifact_missing` and needed a manual patch). The finalization
-  is now driver / collection / final-status phases in one shell with a
-  single guarded exit at the end: the driver rc wins, and a green driver
-  with a failed collector fails the job too.
-- Collection now runs the PACKAGED generation-aware collector
-  (`forge.harness_entry --collect-candidate`, trusted run/attempt/base/
-  checkpoint identity, `--require-generation` on required-resume
-  dispatches) instead of inline `git add -A` on the original checkout —
-  a resumed agent's generation ships as the candidate, the checkout is
-  never collected accidentally. Credentials stay read-only (no push
-  anywhere); a stale prior-attempt `candidate.diff` is removed and never
-  re-uploaded on collection failure. `FORGE_LANE_OUTCOME:{driver_exit,
-  collector_exit, candidate_state}` rides the trace as separate fields.
-- The batch recipes (`claude-code`, `grok`, `copilot`, `opencode`,
-  `dotnet-lane`) are documented as restore-incapable (no
-  `forge.lane_driver`, no workspace generation; #288).
-- Regression: `tests/test_gitlab_sdk_lane_finalization.py` executes the
-  EXTRACTED shipped shell (real Bash, real Git, a stub driver leg on the
-  `FORGE_LANE_PYTHON` seam, the real packaged collector) over the full
-  driver-rc × collector-outcome matrix, restored generations and stale
-  prior-attempt artifacts.
+### Added — the 6df4020 review: 12/17 items implemented (#320-#336)
+
+The credential-authority and execution-boundary cycle. Suite 8283 → 8593
+(+310). The 5 remaining items closed at their honest human/external
+boundaries (#328 blind review, #329 partner pilot, #331 real-neighbor
+discovery, #333 .NET customer profile, #335 two-writer) — packages,
+ladders and substrates ready, nothing weakened to force a close.
+
+**The two P1:**
+- **#320 Q39-01**: operation-scoped credential grants — redemption
+  authority comes from a grant PERSISTED at dispatch (subject, work,
+  attempt generation, route, exact ref+revision, operation, ABSOLUTE
+  deadline), never from the request; the refusal matrix
+  (grant_route_mismatch / grant_ref_mismatch / grant_absent_native_only /
+  grant_absent_legacy / grant_expired / attempt_terminal), the await-fence
+  re-validating authority after broker resolution, and typed runner
+  verification (work/route/ref/slot/generation/expiry equality) before
+  any vendor client exists. `grant_id` rides the versioned execution
+  spec; migration 028 persists grants.
+- **#321 Q39-02**: the executor brief renders from the ACTIVE revision
+  (`ApprovedInput`, `forge.revision.approved-input/1`), not the stale
+  `spec.plan_summary` — the live counterexample (a resumed model
+  reverting to the pre-revision approach) is gone; three-way digest
+  equality (evidence == server == consumed) pins the exact text the
+  executor consumed; `approved_input_digest` rides the execution spec.
+
+**Authority and accounting:**
+- **#322 Q39-03**: the credential audit is append-only — INSERT-only
+  redemption rows committed BEFORE any bytes release, a bounded CAS
+  projection for run summaries, retry counts on the same logical row,
+  retention holds and backfill; concurrent writes are never lost.
+- **#323 Q39-04**: collision-safe native secret locators
+  (`TEAMA_<sha256-12-of-full-ref>`, `_` separator because GitHub's API
+  refuses hyphens) + a concurrent registry with legacy migration — never
+  a silent rename.
+- **#324 Q39-05**: usage receipts reconcile partial→final through the
+  canonical 4-part identity (run, attempt, receipt, source namespace)
+  with a conditional `DO UPDATE ... WHERE final IS NOT TRUE` — a late
+  final never vanishes from budgets; caller attribution is authoritative
+  over payload; conflicting finals are explicit records.
+- **#325 Q39-06**: the closing budget separates known spend / unknown
+  lower bound / reserved liability (the P03 counterexample no longer
+  reserves an honest-unknown and refuses); the hard cap is known +
+  reserved + projection; `closing_reserve` yields the coder ceiling;
+  review-only continuation (zero coder dispatches) inside the reserve;
+  `review_shortcut_stale` on a moved head.
+- **#330 Q39-11**: the accepted-task economics ledger
+  (`forge.delivery.accepted-ledger/1`) — run → attempt → receipt →
+  native job → candidate → verification → human decision joined by
+  stable ids, unjoinable links surfacing as `identity_gaps`; three cost
+  columns (provider-reported / price-card / billing-reconciliation)
+  never blended, empty renders null not 0.0; two accepted measures;
+  seven separate time measures; `pending` is a real human-decision
+  state. Executed over the real captures: $0.815235 exact (coverage
+  1.0) on the primary population, $0.803749 lower bound (coverage 0.8)
+  on the SDK-receipt population — byte-deterministic on rerun.
+
+**Qualification and consolidation:**
+- **#326 Q39-07**: the supported composition v2 — the profile re-frozen
+  onto the exact composition that completed the trace (the working-tree
+  build + its uv wheel, receipts committed; the v0.37 composition
+  archived verbatim, never rewritten), cold-install proven in all three
+  modes (fresh: preflight on the INSTALLED package; upgrade: the real
+  027→028 transition with five seeded tables preserved; verify), and
+  the LIVE reviewed-ready trace: adaptive ladder measured on the empty
+  mode, material revision approved NATIVELY mid-run, the resumed
+  candidate itself carrying the revision-2 brief (zero rescue steers),
+  the closing review within reserve → run terminal `ready_for_human`.
+  $0.4032 lane spend. Two drill-side defects found and fixed live (a
+  sequence tie hiding the useful checkpoint; the reuse guard comparing
+  the wrong artifact's name).
+- **#327 Q39-08**: the conformance gate v2 — five checks (shipped
+  recipes as real Bash, dispatch-schema vs captures, secret-consumer
+  sentinels, native locators, consumer contracts) plus four mutation
+  arms (unconditional-exit, consumer-mapping-dropped,
+  DTO-preserved-caller-disconnected, comment-only-marker-spoof), each
+  proven to FAIL the gate on its seeded defect.
+- **#334 Q39-15**: operating limits — one authorized operator surface
+  exposing the six state quantities (current attempt, native occupancy,
+  exact checkpoint, unresolved effects, required checks, accounting
+  coverage); the four `ops.*` measures as structurally separate records
+  (unknown windows counted, never zero-filled); capped admission whose
+  verdict DERIVES from occupancy only — no parameter accepts an intake
+  count; eight negative drills (slow runner, vendor 429, control-plane
+  restart, unknown native start, concurrent commands, retention with a
+  paused checkpoint + investigation hold, out-of-scope bundle, admission
+  at cap); the support agreement with measured limits, response
+  ownership and excluded failure domains — the day's real ~55-minute
+  home-network outage (graceful degradation, zero paid dispatches,
+  recovery by operator action) recorded as the worked example.
+- **#336 Q39-17**: ADR-0033 (the six-owner execution map), the closure
+  matrix (capability × six evidence levels — 25/36 proven, gaps stay
+  pending as data) and three boundary rules with trap tests; the
+  execution spec carries the two new authority members.
+
+**Post-merge feedback:**
+- **#332 Q39-13**: `/fix` and `/ask` classify as clarification /
+  in-scope / material (fail-closed on ambiguity), note-id idempotency,
+  the head-binding fence (feedback binds the exact head it addressed),
+  and the required-discussion readiness gate before merge-side
+  progression.
 
 ## [0.38.0] - 2026-09-25
 

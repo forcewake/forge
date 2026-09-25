@@ -1360,8 +1360,15 @@ def test_the_committed_store_manifest_is_honest() -> None:
     assert gitlab.status == "pending-approval"
     assert any(UNMET_CAPABILITIES_OBSERVABILITY in limit for limit in gitlab.limitations)
     assert any("refusal-resolution" in limit for limit in gitlab.limitations)
-    (tier,) = gitlab.tiers
-    assert (tier.capability, tier.tier) == ("real-provider-e2e", "none")
+    # the per-release record claims every capability the qualifying trace
+    # proved live (four since v0.39.0); with no committed live TraceRecord
+    # the derived tier stays 'none' for each — the join stays owed.
+    assert {tier.capability: tier.tier for tier in gitlab.tiers} == {
+        "real-provider-e2e": "none",
+        "useful-wip-cross-runner-resume": "none",
+        "approved-revision-rebind": "none",
+        "closing-review-within-reserve": "none",
+    }
 
 
 def test_the_manifest_cli_prints_the_stamped_json(

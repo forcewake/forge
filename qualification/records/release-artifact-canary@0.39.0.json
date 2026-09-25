@@ -1,0 +1,61 @@
+{
+  "authority_contract_version": "",
+  "capabilities": [
+    "release-artifact-canary",
+    "release-canary/previous-release-upgrade"
+  ],
+  "closure_digest": "",
+  "control_capabilities": [],
+  "credential_route": "none — disposable Postgres, LiteLLM reachability via in-image stub",
+  "evidence": [
+    {
+      "capability": "release-artifact-canary",
+      "class": "binary-smoke",
+      "covers": "PRE-RELEASE WINDOW: the v0.38.0 canary stands as the current binary-smoke evidence (fresh + seed-real-data + migrate stages); the v0.39.0 canary runs in release.yml against this tag's digest and the follow-up release commit re-binds this record to it",
+      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "outcome": "pass"
+    },
+    {
+      "capability": "release-canary/previous-release-upgrade",
+      "class": "binary-smoke",
+      "covers": "PRE-RELEASE WINDOW: v0.38.0's seeded upgrade (027->027 same-head preservation) stands; the v0.39.0 canary is expected to exercise the REAL 027->028 transition (the promoted v0.38.0 image carries head 027, v0.39.0 carries 028) — matching the cold-install upgrade receipt (five seeded tables preserved)",
+      "executed_at": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+      "outcome": "pass"
+    }
+  ],
+  "evidence_refs": [
+    "docs/releases/evidence/v0.38.0/promotion.json"
+  ],
+  "harness_binary": "ghcr.io/forcewake/forge",
+  "harness_version": "sha256:237d105a4ef6578844eba73d120254757963d9292b04072123657d075be6bfc0",
+  "image_digest": "sha256:d9bb946510b69a80bf0b47049e2553d70f4bea7354630d1d63d95660f5314a5a",
+  "note": "Pre-release window record for the v0.39.0 tag: canary capabilities cite the promoted v0.38.0 evidence until release.yml records the v0.39.0 stages; the follow-up release commit re-binds every field to the new promotion record. The upgrade expectation is the real 027->028 schema transition (migration 028: credential grants, append-only redemptions, the usage 4-part identity).",
+  "profile": "release-artifact-canary",
+  "provider": "*",
+  "provider_behavior_fingerprint": "",
+  "provider_version": "",
+  "record_id": "release-artifact-canary@0.39.0",
+  "release_version": "0.39.0",
+  "runtime_dependency_fingerprint": "",
+  "runtime_recipe": "container image (Containerfile; python-3.13, disposable Postgres)",
+  "stamp": "forge.profile.qualification/1",
+  "template_defaults_digest": "",
+  "upgrade": {
+    "evidence_ref": "docs/releases/evidence/v0.38.0/promotion.json",
+    "preservation_checks": [
+      "per-table row counts identical after upgrade",
+      "sha256 fingerprints over ordered row identity identical after upgrade"
+    ],
+    "seeded_records": [
+      "flow_runs: 1 (mid-flight, frozen run_specs spec)",
+      "run_specs: 1",
+      "step_runs: bounded set",
+      "control_commands: 1",
+      "publication_intents: 1"
+    ],
+    "source_schema": "027",
+    "target_schema": "028"
+  },
+  "verification_contract": "canary stages: fresh + migrate with --seed-real-data fingerprints",
+  "wheel_sha256": "404a1fef0b81bf923b0c8abf5a7e32bdfc76bfa57ed2ad00c1a2bfa50de7f6b7"
+}
